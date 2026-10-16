@@ -82,6 +82,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class PlanDifferentialTest {
 
+    /**
+     * The tolerance for plans with {@code avg} over {@code BIGINT}: DuckDB
+     * divides the 128-bit sum in a {@code long double}, which is a double on
+     * Windows, as FyrQL divides, but has 80 bits on x86-64 Linux, where the
+     * result may differ in the last place.
+     */
+    private static final int AVG_ULPS = 1;
+
     private static final Schema T = Schema.of(
             new Schema.Field("i", DataType.INTEGER), new Schema.Field("l", DataType.BIGINT),
             new Schema.Field("d", DataType.DOUBLE), new Schema.Field("dec", DataType.decimal(10, 2)),
@@ -384,7 +392,7 @@ class PlanDifferentialTest {
                 new AggregateCall(AggregateFunction.MAX, 4, false, "max_s"),
                 new AggregateCall(AggregateFunction.MAX, 6, false, "max_dt"),
                 new AggregateCall(AggregateFunction.AVG, 1, false, "avg_l")));
-        differential.check(plan);
+        differential.check(plan, AVG_ULPS);
         differential.check(new PlanNode.Aggregate(u, List.of(), List.of(
                 new AggregateCall(AggregateFunction.SUM, 2, false, "sum_h"),
                 new AggregateCall(AggregateFunction.MIN, 3, false, "min_ts"),
@@ -435,10 +443,10 @@ class PlanDifferentialTest {
                 agg(AggregateFunction.AVG, 3, true),
                 agg(AggregateFunction.COUNT, 2, true),
                 agg(AggregateFunction.MIN, 2, true));
-        differential.check(new PlanNode.Aggregate(t, List.of(7), calls));
-        differential.check(new PlanNode.Aggregate(t, List.of(5), calls));
-        differential.check(new PlanNode.Aggregate(t, List.of(), calls));
-        differential.check(new PlanNode.Aggregate(new PlanNode.Filter(t, lit(false)), List.of(), calls));
+        differential.check(new PlanNode.Aggregate(t, List.of(7), calls), AVG_ULPS);
+        differential.check(new PlanNode.Aggregate(t, List.of(5), calls), AVG_ULPS);
+        differential.check(new PlanNode.Aggregate(t, List.of(), calls), AVG_ULPS);
+        differential.check(new PlanNode.Aggregate(new PlanNode.Filter(t, lit(false)), List.of(), calls), AVG_ULPS);
         // Doubles in text form, without the zeros, whose two signs compare equal but print differently.
         differential.check(new PlanNode.Aggregate(new PlanNode.Filter(t, ne(c(2), lit(0.0))), List.of(5), List.of(
                 agg(AggregateFunction.STRING_AGG, 2, false, SortKey.asc(2)),

@@ -623,7 +623,9 @@ Known differences from DuckDB:
 - `SELECT DISTINCT` cannot be ordered by a column that is not selected.
 - A string literal is not converted to the type of a function argument, as in
   `sqrt('4')`.
-- `avg` does not take a `DATE`.
+- `avg` does not take a `DATE`. Over `BIGINT`, it divides the sum in a double, as DuckDB
+  does on Windows; DuckDB on x86-64 Linux divides it in 80 bits, and its result may
+  differ in the last binary digit.
 - The name of an output column that is no plain column follows FyrQL's own text form of
   the expression, which is not always DuckDB's.
 - The empty list `[]`, a list of bare `NULL`s and `map()` have `INTEGER` elements; DuckDB
