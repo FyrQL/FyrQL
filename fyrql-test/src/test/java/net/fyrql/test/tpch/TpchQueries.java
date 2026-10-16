@@ -1,0 +1,157 @@
+/*
+ * Copyright 2026 the FyrQL authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package net.fyrql.test.tpch;
+
+import net.fyrql.core.expr.Expression;
+import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.plan.PlanNode.SortKey;
+import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.Order;
+import net.fyrql.test.ResultComparison;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+/**
+ * The 22 TPC-H queries, in the text of the specification
+ * with its validation parameters, and the comparison of their results.
+ */
+final class TpchQueries {
+
+    /** A query: its name, such as {@code q01}, and its text. */
+    record Query(String name, String sql) {
+
+        @Override
+        public String toString() {
+            return name;
+        }
+    }
+
+    /** The number of queries of the benchmark. */
+    private static final int COUNT = 22;
+
+    /** The queries, in the order of their numbers. */
+    static final List<Query> ALL = load();
+
+    private TpchQueries() {
+    }
+
+    private static List<Query> load() {
+        List<Query> queries = new ArrayList<>();
+        for (int n = 1; n <= COUNT; n++) {
+            String name = String.format("q%02d", n);
+            try (InputStream in = TpchQueries.class.getResourceAsStream("/tpch/" + name + ".sql")) {
+                if (in == null) {
+                    throw new IllegalStateException("No resource /tpch/" + name + ".sql");
+                }
+                String text = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                // The comment lines at the top are the license and the title.
+                String sql = text.lines().filter(l -> !l.startsWith("--")).collect(Collectors.joining("\n")).strip();
+                queries.add(new Query(name, sql));
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+        return List.copyOf(queries);
+    }
+
+    /**
+     * Compares the rows of FyrQL with the expected ones: as multisets, and,
+     * if the plan sorts its output, the rows of FyrQL must be in the order
+     * of the sort keys. Rows with equal keys may come in any order, as they
+     * may in DuckDB.
+     *
+     * @return the report of the differences, or empty if the results agree
+     */
+    static Optional<String> compare(PlanNode plan, List<Object[]> expected, List<Object[]> actual) {
+        Schema schema = plan.schema();
+        ResultComparison.Outcome rows = ResultComparison.compare(schema, expected, actual, false);
+        if (!rows.same()) {
+            return Optional.of(rows.report());
+        }
+        List<SortKey> keys = outputOrder(plan);
+        if (keys == null) {
+            return Optional.empty();
+        }
+        for (int r = 1; r < actual.size(); r++) {
+            if (compare(schema, keys, actual.get(r - 1), actual.get(r)) > 0) {
+                return Optional.of("row " + r + " is out of order: " + ResultComparison.canonical(schema,
+                        List.of(actual.get(r - 1), actual.get(r))));
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static int compare(Schema schema, List<SortKey> keys, Object[] a, Object[] b) {
+        for (SortKey k : keys) {
+            Object x = a[k.column()];
+            Object y = b[k.column()];
+            int c;
+            if (x == null || y == null) {
+                c = x == null ? y == null ? 0 : k.nullsFirst() ? -1 : 1 : k.nullsFirst() ? 1 : -1;
+            } else {
+                c = Order.compare(x, y, schema.type(k.column()));
+                c = k.ascending() ? c : -c;
+            }
+            if (c != 0) {
+                return c;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Returns the sort keys of a plan in terms of its output columns: the
+     * keys of the sort below limits, filters and projections, each through
+     * a projection that passes its column on; {@code null} if the plan does
+     * not sort or a key is not an output column.
+     */
+    static List<SortKey> outputOrder(PlanNode plan) {
+        return switch (plan) {
+            case PlanNode.Sort s -> s.keys();
+            case PlanNode.Limit l -> outputOrder(l.input());
+            case PlanNode.Filter f -> outputOrder(f.input());
+            case PlanNode.Project p -> {
+                List<SortKey> inner = outputOrder(p.input());
+                if (inner == null) {
+                    yield null;
+                }
+                List<SortKey> keys = new ArrayList<>();
+                for (SortKey k : inner) {
+                    int output = -1;
+                    for (int i = 0; i < p.columns().size() && output < 0; i++) {
+                        if (p.columns().get(i).expression() instanceof Expression.Column c && c.index() == k.column()) {
+                            output = i;
+                        }
+                    }
+                    if (output < 0) {
+                        yield null;
+                    }
+                    keys.add(new SortKey(output, k.ascending(), k.nullsFirst()));
+                }
+                yield keys;
+            }
+            default -> null;
+        };
+    }
+}

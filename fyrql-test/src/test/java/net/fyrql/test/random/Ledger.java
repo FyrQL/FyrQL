@@ -1,0 +1,350 @@
+/*
+ * Copyright 2026 the FyrQL authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package net.fyrql.test.random;
+
+import net.fyrql.core.expr.Expression;
+import net.fyrql.core.expr.Expressions;
+import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.plan.Plans;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * The known differences between FyrQL and DuckDB that FyrQL keeps on
+ * purpose: a random query whose outcome an entry explains is counted under
+ * the entry and named in the report, but is no failure. Each entry applies
+ * to the versions of DuckDB from {@code since} on and, if DuckDB fixes the
+ * difference, before {@code fixed}.
+ */
+final class Ledger {
+
+    /**
+     * A known difference.
+     *
+     * @param id a short name
+     * @param description what differs, and why FyrQL keeps it
+     * @param since the first version of DuckDB the entry applies to
+     * @param fixed the first version that no longer differs, {@code null} if none does yet
+     * @param matches whether an outcome is this difference
+     */
+    record Entry(String id, String description, String since, String fixed, Predicate<Outcome> matches) {
+    }
+
+    static final List<Entry> ENTRIES = List.of(
+            new Entry("duckdb-optimizer-errors", "An expression fails in one engine only, and DuckDB without its"
+                    + " optimizer agrees with FyrQL: DuckDB folds constant expressions while planning and fails where"
+                    + " no row reaches them, or prunes and pushes down expressions so that the rows which fail in"
+                    + " FyrQL never reach them. FyrQL evaluates every expression of a node for every row of its"
+                    + " input.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS && o.unoptimized() == Outcome.Kind.SAME
+                            || o.kind() == Outcome.Kind.FYRQL_FAILS && o.unoptimized() == Outcome.Kind.BOTH_FAIL),
+            new Entry("plan-null-folding", "DuckDB's binder folds an operator or a function with a constant NULL"
+                    + " argument to NULL without evaluating the other arguments, and types it like a bare NULL if it"
+                    + " is a decimal or a concatenation. FyrQL's binder does the same, but a plan built in Java runs"
+                    + " as it is: it evaluates every argument, and keeps the decimal type. Explained only where FyrQL"
+                    + " agrees with DuckDB on the same SQL.", "1.5.6", null,
+                    o -> (o.kind() == Outcome.Kind.FYRQL_FAILS || o.kind() == Outcome.Kind.TYPES_DIFFER)
+                            && o.bound() == Outcome.Kind.SAME && o.sql().contains("CAST(NULL AS ")),
+            new Entry("hugeint-sum-order", "DuckDB checks every addition of a HUGEINT sum, for sum and avg, so"
+                    + " that it fails when a partial sum leaves the range, depending on the order of the values,"
+                    + " which for DISTINCT is that of a hash table; FyrQL checks the final sum only.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS && o.duckError().contains("Overflow in HUGEINT addition")),
+            new Entry("round-overflow", "DuckDB wraps around when round with negative places takes an integer"
+                    + " beyond its maximum, as in round(9223372036854775807, -1) = -9223372036854775800; FyrQL reports"
+                    + " the overflow.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.sql().contains("round(")
+                            && o.fyrqlError().matches(".*Out of range for (TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT).*")
+                            || o.kind() == Outcome.Kind.ROWS_DIFFER && o.sql().contains("round(")
+                            && o.report().contains("170141183460469231731687303715884105")),
+            new Entry("join-key-cast", "FyrQL casts a join key to the type of the other side in a projection"
+                    + " below the join, for every row; DuckDB casts it inside the join and not at all where the other"
+                    + " side is empty. A value that does not convert fails in FyrQL only.", "1.5.6", null,
+                    Ledger::failsInJoinKeyCast),
+            new Entry("comparison-without-common-type", "DuckDB binds a comparison of two types without a common"
+                    + " type, such as DECIMAL and DATE, and fails only when a row reaches the cast; FyrQL rejects it"
+                    + " while binding.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().matches(
+                            ".*Cannot compare values of type (?!VARCHAR )\\S+ and type (?!VARCHAR )\\S+ - an explicit cast.*")),
+            new Entry("set-operation-without-common-type", "DuckDB unites two columns of types without a common"
+                    + " type, such as DATE and DECIMAL, with a cast that fails only when a row reaches it; FyrQL"
+                    + " rejects them while binding.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().matches(
+                            ".*Cannot combine types (?!VARCHAR)\\S+ and (?!VARCHAR)\\S+ in a set operation.*")),
+            new Entry("using-duplicate-alias", "DuckDB cannot resolve the merged column of a USING join of two tables"
+                    + " with the same name, as in q JOIN q USING (k); FyrQL resolves it.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS && o.duckError().contains("(duplicate alias")),
+            new Entry("null-argument-overload", "DuckDB binds ceil and floor of a NULL as a DOUBLE and repeat as a"
+                    + " BLOB, from its own overloads; FyrQL takes the cheapest of its overloads, a BIGINT or a VARCHAR.",
+                    "1.5.6", null,
+                    o -> (o.kind() == Outcome.Kind.TYPES_DIFFER || o.kind() == Outcome.Kind.DUCKDB_FAILS)
+                            && o.sql().matches("(?s).*\\b(ceil|ceiling|floor|repeat)\\(NULL\\b.*")),
+            new Entry("sum-distinct-hugeint-wraps", "DuckDB wraps around when sum(DISTINCT) of HUGEINTs leaves the"
+                    + " range, while sum without DISTINCT fails; FyrQL fails in both.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().contains("Out of range for HUGEINT")
+                            && o.sql().contains("sum(DISTINCT")),
+            new Entry("nan-sign", "DuckDB writes the NaN of an invalid operation such as 0 / 0, whose sign bit the"
+                    + " processor sets, as -nan; FyrQL writes every NaN as nan.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.report().contains("-nan")),
+            new Entry("join-condition-cast", "DuckDB casts a whole column for a join condition, also for rows that"
+                    + " no pair of the join reaches; FyrQL evaluates the condition on the pairs only.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS && o.duckError().contains("when casting from source column")
+                            && o.sql().contains(" JOIN ")),
+            new Entry("condition-pushed-down", "FyrQL moves a condition above a join, an aggregate, a set"
+                    + " operation or another condition, or one in the ON clause of a join, down to an input and"
+                    + " evaluates it for every row of that input, also for rows that the node it passed drops;"
+                    + " DuckDB without its optimizer evaluates it on the output or on the pairs, so a value that"
+                    + " fails there fails in FyrQL only.", "1.5.6", null, Ledger::failsBelowANode),
+            new Entry("condition-before-projection", "FyrQL moves a condition above a projection down below it"
+                    + " and computes the projection only for the rows that pass; DuckDB without its optimizer"
+                    + " computes it for every row first, so a value that fails there fails in DuckDB only.",
+                    "1.5.6", null, Ledger::failsAboveACondition),
+            new Entry("duckdb-short-circuit", "DuckDB evaluates the condition of a WHERE or a CASE as a selection,"
+                    + " which evaluates the upper bound of BETWEEN and the right side of AND only for the rows that"
+                    + " the lower bound and the left side keep; FyrQL evaluates both for every row, so a value that"
+                    + " fails there fails in FyrQL only.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.unoptimized() == Outcome.Kind.FYRQL_FAILS
+                            && o.sql().contains("CASE WHEN ")
+                            && (o.sql().contains(" BETWEEN ") || o.sql().contains(" AND "))),
+            new Entry("join-condition-side", "DuckDB evaluates the parts of a join condition that read one input"
+                    + " for every row of that input, also for rows that no pair reaches, as when the other input"
+                    + " is empty; FyrQL evaluates the condition on the pairs only.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS && o.unoptimized() == Outcome.Kind.DUCKDB_FAILS
+                            && o.plan() != null && Plans.nodes(o.plan()).stream().anyMatch(n ->
+                                    n instanceof PlanNode.Join j && j.condition() != null)),
+            new Entry("substring-constant-string", "DuckDB computes substring of a constant string with a start or"
+                    + " length from a column by an older rule, which cuts the start to the string first; FyrQL uses"
+                    + " the rule DuckDB has for columns and constants alike.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.sql().matches("(?s).*substr(ing)?\\('.*")),
+            new Entry("parser-if-after-division", "JSqlParser does not read a call of if right after //, which FyrQL"
+                    + " writes as DIV.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().contains("Syntax error at or near \"if\"")),
+            new Entry("null-argument-ambiguity", "DuckDB reports a call with a NULL argument as ambiguous when"
+                    + " overloads of different types fit it, as in date_trunc('day', NULL); FyrQL takes the first that"
+                    + " fits.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS
+                            && o.duckError().contains("Could not choose a best candidate function")),
+            new Entry("distinct-order-by", "FyrQL orders a SELECT DISTINCT only by its output columns, as"
+                    + " PostgreSQL does; DuckDB also takes other columns.", "1.5.6", null,
+                    fyrqlFails("For SELECT DISTINCT, ORDER BY expressions must appear in select list")),
+            new Entry("string-literal-argument", "DuckDB converts a string literal to the parameter type of a"
+                    + " function with a single candidate, as in sqrt('4'); FyrQL does not.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().contains("No function matches")
+                            && o.fyrqlError().contains("VARCHAR")),
+            new Entry("avg-temporal", "DuckDB averages dates and timestamps; FyrQL does not.", "1.5.6", null,
+                    fyrqlFails("No function matches avg(DATE)").or(fyrqlFails("No function matches avg(TIMESTAMP)"))),
+            new Entry("duckdb-constant-folding", "DuckDB evaluates an expression without columns while binding,"
+                    + " also without its optimizer, and fails where FyrQL never evaluates it: in a column no one"
+                    + " reads, where no row reaches it, or in the bounds of a constant NULL BETWEEN, which FyrQL's"
+                    + " binder drops as DuckDB's does.", "1.5.6", null, Ledger::failsAsAConstant),
+            new Entry("join-empty-build", "FyrQL reads the right input of a join first and does not read the left"
+                    + " input of an inner join or a semi join whose right input has no rows; DuckDB evaluates the"
+                    + " expressions of the left input, also without its optimizer, and may fail there.", "1.5.6",
+                    null, Ledger::skipsTheLeftInput),
+            new Entry("subquery-null-column", "DuckDB keeps a bare NULL that a subquery selects untyped, so that"
+                    + " an operator over it picks its overload as for a bare NULL, such as a BIGINT for %; FyrQL"
+                    + " types the column INTEGER.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.TYPES_DIFFER && o.sql().contains("NULL AS ")),
+            new Entry("duckdb-correlated-null", "DuckDB finds a row for a correlated EXISTS or IN in an"
+                    + " expression where a value of the outer query that the subquery compares other than by"
+                    + " equality is NULL, as in a OR EXISTS (SELECT * FROM u WHERE u.k = t.k AND u.d <> t.d) with"
+                    + " t.d NULL, unlike the same EXISTS as a condition of WHERE; FyrQL finds none.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.plan() != null
+                            && Plans.nodes(o.plan()).stream().anyMatch(n -> n instanceof PlanNode.Join j
+                                    && j.type() == PlanNode.JoinType.MARK && j.condition() != null)));
+
+    /** The node a QueryException names: its label, the type and the number of the node in the plan. */
+    private static final Pattern FAILED_NODE = Pattern.compile(".* in Project#(\\d+)$");
+    private static final Pattern FAILED_FILTER = Pattern.compile(".* in Filter#\\d+$");
+    /** A string that DuckDB fails to convert, and the type. */
+    private static final Pattern FAILED_STRING_CAST = Pattern.compile("Could not convert string [\"'](.*?)[\"'] to (\\S+)");
+
+    private final String version;
+    private final Map<String, Integer> hits = new LinkedHashMap<>();
+
+    /** A ledger for a version of DuckDB, such as {@code 1.5.6}. */
+    Ledger(String version) {
+        this.version = version.startsWith("v") ? version.substring(1) : version;
+    }
+
+    /** Tells whether FyrQL failed in a projection that casts a join key, which the binder names {@code #key}. */
+    private static boolean failsInJoinKeyCast(Outcome o) {
+        if (o.kind() != Outcome.Kind.FYRQL_FAILS || o.optimized() == null) {
+            return false;
+        }
+        Matcher m = FAILED_NODE.matcher(o.fyrqlError());
+        if (!m.matches()) {
+            return false;
+        }
+        // The error numbers the nodes of the plan that ran, the optimized one.
+        int id = Integer.parseInt(m.group(1));
+        for (Map.Entry<PlanNode, Integer> node : Plans.ids(o.optimized()).entrySet()) {
+            if (node.getValue() == id && node.getKey() instanceof PlanNode.Project p) {
+                return p.columns().stream().anyMatch(c -> c.name().startsWith("#key")
+                        && c.expression() instanceof Expression.Cast);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Tells whether FyrQL failed in a filter where DuckDB without its
+     * optimizer does not, and the plan has a condition that predicate
+     * pushdown moves below a node that drops rows: one above a join, an
+     * aggregate, a set operation or another filter, or one of a join.
+     */
+    private static boolean failsBelowANode(Outcome o) {
+        if (o.kind() != Outcome.Kind.FYRQL_FAILS || o.unoptimized() != Outcome.Kind.FYRQL_FAILS || o.plan() == null
+                || !FAILED_FILTER.matcher(o.fyrqlError()).matches()) {
+            return false;
+        }
+        for (PlanNode node : Plans.nodes(o.plan())) {
+            if (node instanceof PlanNode.Join j && j.condition() != null || node instanceof PlanNode.Filter f
+                    && Plans.nodes(f.input()).stream().anyMatch(n -> n instanceof PlanNode.Join
+                            || n instanceof PlanNode.Aggregate || n instanceof PlanNode.SetOperation
+                            || n instanceof PlanNode.Filter)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Tells whether DuckDB failed, also without its optimizer, and the plan
+     * has a filter above a projection that computes a value.
+     */
+    private static boolean failsAboveACondition(Outcome o) {
+        if (o.kind() != Outcome.Kind.DUCKDB_FAILS || o.unoptimized() != Outcome.Kind.DUCKDB_FAILS || o.plan() == null) {
+            return false;
+        }
+        for (PlanNode node : Plans.nodes(o.plan())) {
+            if (node instanceof PlanNode.Filter f && Plans.nodes(f.input()).stream().anyMatch(n ->
+                    n instanceof PlanNode.Project p && p.columns().stream().anyMatch(c ->
+                            !(c.expression() instanceof Expression.Column)
+                                    && !(c.expression() instanceof Expression.Literal)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Tells whether DuckDB failed, and differs from FyrQL also without its
+     * optimizer, and the plan FyrQL bound has an expression without columns
+     * that fails, or the query casts the string that DuckDB fails to convert.
+     */
+    private static boolean failsAsAConstant(Outcome o) {
+        if (o.kind() != Outcome.Kind.DUCKDB_FAILS || o.unoptimized() == Outcome.Kind.SAME || o.plan() == null) {
+            return false;
+        }
+        Matcher cast = FAILED_STRING_CAST.matcher(o.duckError());
+        if (cast.find() && o.sql().contains("CAST('" + cast.group(1) + "' AS " + cast.group(2) + ")")) {
+            return true;
+        }
+        for (PlanNode node : Plans.nodes(o.plan())) {
+            for (Expression e : Plans.expressions(node)) {
+                if (!Expressions.allMatch(e, x -> !Expressions.isConstant(x) || !fails(x))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean fails(Expression constant) {
+        try {
+            Expressions.constantValue(constant);
+            return false;
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Tells whether DuckDB failed, also without its optimizer, and the plan
+     * FyrQL ran has an inner or a semi join that computes expressions in its
+     * left input.
+     */
+    private static boolean skipsTheLeftInput(Outcome o) {
+        if (o.kind() != Outcome.Kind.DUCKDB_FAILS || o.unoptimized() != Outcome.Kind.DUCKDB_FAILS
+                || o.optimized() == null) {
+            return false;
+        }
+        for (PlanNode node : Plans.nodes(o.optimized())) {
+            if (node instanceof PlanNode.Join j && (j.type() == PlanNode.JoinType.INNER
+                    || j.type() == PlanNode.JoinType.SEMI) && Plans.nodes(j.left()).stream().anyMatch(n ->
+                    Plans.expressions(n).stream().anyMatch(e -> !(e instanceof Expression.Column)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Predicate<Outcome> fyrqlFails(String message) {
+        return o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().contains(message);
+    }
+
+    /** Returns the entry that explains a differing outcome, or {@code null} if none does. */
+    Entry explain(Outcome outcome) {
+        if (!outcome.kind().differs()) {
+            return null;
+        }
+        for (Entry e : ENTRIES) {
+            if (applies(e) && e.matches().test(outcome)) {
+                return e;
+            }
+        }
+        return null;
+    }
+
+    /** Counts a hit of an entry. */
+    void count(Entry entry) {
+        hits.merge(entry.id(), 1, Integer::sum);
+    }
+
+    /** Returns the hits per entry, for the report. */
+    Map<String, Integer> hits() {
+        return hits;
+    }
+
+    private boolean applies(Entry e) {
+        return compare(version, e.since()) >= 0 && (e.fixed() == null || compare(version, e.fixed()) < 0);
+    }
+
+    /** Compares two versions of dotted numbers. */
+    static int compare(String a, String b) {
+        String[] x = a.split("[.-]");
+        String[] y = b.split("[.-]");
+        for (int i = 0; i < Math.max(x.length, y.length); i++) {
+            int p = i < x.length ? number(x[i]) : 0;
+            int q = i < y.length ? number(y[i]) : 0;
+            if (p != q) {
+                return Integer.compare(p, q);
+            }
+        }
+        return 0;
+    }
+
+    private static int number(String part) {
+        String digits = part.replaceAll("\\D.*", "");
+        return digits.isEmpty() ? 0 : Integer.parseInt(digits);
+    }
+}

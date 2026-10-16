@@ -1,0 +1,11 @@
+target/
+spikes/
+.mvn/wrapper/maven-wrapper.jar
+*.log
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+*.swp

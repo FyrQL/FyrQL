@@ -6,22 +6,24 @@ provides a lightweight execution layer that implements three core design princip
 
  - **Serverless Data Product Consumption**: The engine embeds as a standard Java library directly
    inside the application process. It processes data using columnar batches and a vectorized
-   interpreter, utilizing Janino for runtime code generation of expressions, filters, and keys.
+   interpreter, utilizing Janino for runtime code generation of expressions, keys, and whole
+   pipelines of filters, projections, and joins.
    Its query execution is verified by running all 22 TPC-H queries across federated sources.
- - **Polyglot Storage Abstraction**: FyrQL unifies heterogeneous data sources—including relational
+ - **Polyglot Storage Abstraction**: FyrQL unifies heterogeneous data sources - including relational
    databases (via JDBC), local flat files (CSV, JSON/gzip), and live JSON HTTP endpoints into
    a single logical mesh. It infers column types from data samples like DuckDB and handles
    nested STRUCT, LIST, and MAP types natively, allowing cross-source subqueries and joins via
    the same SQL dialect that is used by [DuckDB](https://duckdb.org).
  - **Zero-ETL / In-Place Analytics**: FyrQL queries decentralized data directly at the source.
    The optimizer moves conditions toward the tables, orders joins by table size, and pushes
-   down filters, orders, limits, and aggregations into the connectors—running joins of tables
+   down filters, orders, limits, and aggregations into the connectors - running joins of tables
    from the same database natively within that database.
 
 
-FyrQL is in an early stage. There are data types with nested `STRUCT`, `LIST` and `MAP`,
-columnar batches, a vectorized interpreter, code generation for expressions, filters and
-keys with Janino, connectors for Java collections, CSV and JSON files, JSON from HTTP
+FyrQL is in an *early stage*. There are data types with nested `STRUCT`, `LIST` and `MAP`,
+columnar batches, a vectorized interpreter, code generation with Janino for expressions,
+keys and pipelines of filters, projections and joins, connectors for Java collections, CSV
+and JSON files, JSON from HTTP
 endpoints and databases over JDBC, an optimizer that moves conditions toward the
 tables, orders joins by the sizes of the tables and runs the joins of tables of one
 database in that database, a pushdown of filters, orders, limits and aggregations into
@@ -29,68 +31,6 @@ the sources, an SQL front end with the names, types and forms of DuckDB, subquer
 also correlated ones, that become joins, and a differential test harness that compares
 the results with DuckDB. All 22 TPC-H queries run at scale factor 1 over tables spread
 across CSV, JSON, PostgreSQL and Java collections.
-
-## Building
-
-Java 21 or later is required; the Maven wrapper fetches Maven itself.
-
-```
-./mvnw -B -ntp verify
-```
-
-The tests of `fyrql-test` run DuckDB through its JDBC driver, which is a test dependency only.
-
-Besides a corpus of SQL texts, two generators of random queries compare FyrQL with DuckDB:
-random plans, which FyrQL runs as they are and as it binds them from their SQL, and random
-SQL text with names, aliases, joins, subqueries in `FROM`, `WHERE`, `HAVING` and the select
-list, correlated or not, grouping and set operations. Each runs 200
-queries with a fixed seed in `verify`; more queries or another seed are a property away:
-
-```
-./mvnw -B -ntp verify -Dfyrql.random.queries=2000 -Dfyrql.random.seed=7
-```
-
-A difference fails the test unless the ledger of known differences explains it
-(`fyrql-test`, `net.fyrql.test.random.Ledger`); the report shows each other difference
-shrunk to a small query. Every random query also runs with compiled code from the first
-row on, which must give exactly the results of the interpreter, and the other tests of
-`fyrql-test` run a second time with `-Dfyrql.codegen=always`.
-
-The JDBC connector is tested against H2, SQLite and PostgreSQL in every build; PostgreSQL
-comes as binaries that the build unpacks and starts in a temporary directory, without
-Docker (`-Dfyrql.test.postgres=off` leaves it out). MySQL runs in Docker through
-Testcontainers, in the profile `containers`; without Docker its tests are skipped:
-
-```
-./mvnw -B -ntp verify -P containers
-```
-
-A server of one's own takes the place of either with
-`-Dfyrql.test.postgres.url=jdbc:postgresql://...` or `-Dfyrql.test.mysql.url=jdbc:mysql://...`,
-and `.user` and `.password` alike; the tests replace their tables in its database. The tests
-of the connectors run once more with `-Dfyrql.pushdown=off`, where every source only reads
-the columns a query needs, and must give the same results.
-
-The 22 TPC-H queries, in the text of the specification with its parameters of
-validation, run over the tables of TPC-H spread across the connectors: `lineitem` and
-`partsupp` as CSV files, `orders` and `customer` in PostgreSQL, `part` and `supplier` as
-JSON lines, `nation` and `region` as Java collections. The data comes from
-`io.trino.tpch`, a Java port of the TPC-H generator, and DuckDB reads the same files for
-the comparison. In `verify` the queries run at scale factor 0.01; the profile `tpch` runs
-them at scale factor 1 in the interpreter with a heap of 8 GB and writes the time and the
-peak of the heap of every query, and the plans, into `fyrql-test/target/tpch-report.md`:
-
-```
-./mvnw -B -ntp verify -P tpch -Dtest=TpchScale1Test -Dsurefire.failIfNoSpecifiedTests=false
-```
-
-The files take about 1.1 GB in `fyrql-test/target/tpch` and are written once; loading
-PostgreSQL takes about 25 s. On a laptop with an AMD Ryzen 5 5600H and JDK 21, all 22
-queries give the rows of DuckDB and take 287 s together, from 1.2 s (Q22) to 30 s (Q21),
-with a peak of the heap between 0.5 and 2.3 GB; DuckDB takes 0.3 to 4.2 s per query. Most
-of the time goes into parsing the CSV files and into the values that the operators take
-as Java objects, which compiling whole pipelines is to remove; Q15, Q17 and Q18 read
-`lineitem` twice, once for the subquery.
 
 ## Using the engine
 
@@ -139,8 +79,9 @@ Sort #2 DESC
 
 The plan is the one the engine runs: the scan of the orders reads only the two columns
 the query uses. With the module `fyrql-codegen` on the class path, as here, `[codegen]`
-marks the nodes whose expressions or keys the engine compiles once enough rows pass; see
-[Code generation](#code-generation). `engine.plan(sql)` returns the plan itself,
+marks the nodes whose expressions or keys the engine compiles once enough rows pass; over
+larger tables, `[codegen pipeline]` marks a chain of nodes that runs as one compiled loop;
+see [Code generation](#code-generation). `engine.plan(sql)` returns the plan itself,
 `engine.rows(sql)` all rows at once. A query
 that does not parse or bind throws an `SqlException` with the position in the text, for
 example `Referenced column "x" not found in FROM clause! at line 1, column 33`.
@@ -168,7 +109,10 @@ tables in the schema `main` unless it says otherwise.
 - `fyrql-connector-memory`: Java collections of records, beans or rows; records and
   nested collections become `STRUCT`, `LIST` and `MAP` values.
 - `fyrql-connector-csv`: CSV and TSV files of a directory or one by one, with the types
-  inferred from a sample as DuckDB's `read_csv` infers them.
+  inferred from a sample as DuckDB's `read_csv` infers them. A scan reads integers,
+  decimals of up to 18 digits, dates, booleans and ASCII strings straight from the
+  characters of the file into the columns; a field of another type, or in a form such as
+  `+1`, `1e3` or ` 1`, is read as a string is cast, with the same value and error.
 - `fyrql-connector-json`: JSON files (`.json`, `.jsonl`, `.ndjson`, also with `.gz`) that
   hold an array of records or a sequence of them. The columns are inferred from a sample
   as DuckDB's `read_json` infers them; objects and arrays become `STRUCT`, `MAP` and `LIST`
@@ -183,7 +127,7 @@ tables in the schema `main` unless it says otherwise.
   columns with a first request, which it keeps until `refresh()`. Every scan is a request
   of its own; nothing but the choice of columns and fields is pushed to the endpoint. A status other
   than 2xx is an `HttpSourceException` with the URL and the status.
-- `fyrql-connector-jdbc`: the tables of H2, SQLite, PostgreSQL and MySQL. The default
+- `fyrql-connector-jdbc`: the tables of PostgreSQL, SQLite, H2 and MySQL. The default
   schema of the database is `main`, the others keep their names. A scan becomes one
   statement in the dialect of the database, which selects the columns the query needs
   and takes over the filters, the order and the limit, or the grouping and the
@@ -318,17 +262,18 @@ Steps 4 for fields, 5 and 6 change what a source does and are left out with
 `pushdown(false)`. At scale factor 1, the plan of TPC-H Q3 reads the orders and
 customers of PostgreSQL in one statement, which filters and joins them; the filter on
 the CSV file of `lineitem` stays in the engine, which builds its hash table on the
-smaller result of the database:
+smaller result of the database. The filter, the join and the two projections above it
+run as one compiled [pipeline](#code-generation):
 
 ```
 Limit 10
   Sort #1 DESC, #2
     Project #0 AS l_orderkey, #3 AS revenue, #1 AS o_orderdate, #2 AS o_shippriority
-      Aggregate GROUP BY #0, #1, #2: sum(#3) AS "sum((l_extendedprice * (1 - l_discount)))"
-        Project #2 AS "#group0", #0 AS "#group1", #1 AS "#group2", (#3 * (CAST(1 AS INTEGER) - #4)) AS "#argument0"
-          Project #6 AS o_orderdate, #7 AS o_shippriority, #0 AS l_orderkey, #1 AS l_extendedprice, #2 AS l_discount
-            Join INNER ON l#0 = r#0
-              Filter (#3 > DATE '1995-03-15')
+      Aggregate GROUP BY #0, #1, #2: sum(#3) AS "sum((l_extendedprice * (1 - l_discount)))" [codegen]
+        Project #2 AS "#group0", #0 AS "#group1", #1 AS "#group2", (#3 * (CAST(1 AS INTEGER) - #4)) AS "#argument0" [codegen pipeline]
+          Project #6 AS o_orderdate, #7 AS o_shippriority, #0 AS l_orderkey, #1 AS l_extendedprice, #2 AS l_discount [codegen]
+            Join INNER ON l#0 = r#0 [codegen]
+              Filter (#3 > DATE '1995-03-15') [codegen]
                 Scan files.main.lineitem (l_orderkey INTEGER, l_extendedprice DECIMAL(15,2), l_discount DECIMAL(15,2), l_shipdate DATE)
               Remote db [SELECT t0.c0 AS c0, t0.c1 AS c1, t0.c2 AS c2, t0.c3 AS c3, t1.c0 AS c4, t1.c1 AS c5 FROM (SELECT * FROM (SELECT "o_orderkey" AS c0, "o_custkey" AS c1, "o_orderdate" AS c2, "o_shippriority" AS c3 FROM "public"."orders") t2 WHERE (t2.c2 < DATE '1995-03-15')) t0 INNER JOIN (SELECT * FROM (SELECT "c_custkey" AS c0, "c_mktsegment" AS c1 FROM "public"."customer") t3 WHERE (t3.c1 = 'BUILDING')) t1 ON t0.c1 = t1.c0]
                 | Join INNER ON l#1 = r#0
@@ -350,12 +295,12 @@ over one row, and the filter on `substring` stays in the engine:
 ```
 Sort #0
   Project #0 AS cntrycode, #1 AS numcust, #2 AS totacctbal
-    Aggregate GROUP BY #0: count(*) AS "count_star()", sum(#1) AS "sum(c_acctbal)"
-      Project #0 AS "#group0", #1 AS "#argument0"
-        Project substring(#1, CAST(1 AS INTEGER), CAST(2 AS INTEGER)) AS cntrycode, #2 AS c_acctbal
-          Filter (#2 > #3)
-            Join SINGLE
-              Filter (substring(#1, CAST(1 AS INTEGER), CAST(2 AS INTEGER)) IN ('13', '31', '23', '29', '30', '18', '17'))
+    Aggregate GROUP BY #0: count(*) AS "count_star()", sum(#1) AS "sum(c_acctbal)" [codegen]
+      Project #0 AS "#group0", #1 AS "#argument0" [codegen pipeline]
+        Project substring(#1, CAST(1 AS INTEGER), CAST(2 AS INTEGER)) AS cntrycode, #2 AS c_acctbal [codegen]
+          Filter (#2 > #3) [codegen]
+            Join SINGLE [codegen]
+              Filter (substring(#1, CAST(1 AS INTEGER), CAST(2 AS INTEGER)) IN ('13', '31', '23', '29', '30', '18', '17')) [codegen]
                 Remote db [SELECT t0.c0 AS c0, t0.c1 AS c1, t0.c2 AS c2 FROM (SELECT "c_custkey" AS c0, "c_phone" AS c1, "c_acctbal" AS c2 FROM "public"."customer") t0 WHERE NOT EXISTS (SELECT 1 FROM (SELECT t2.c0 AS c0 FROM (SELECT "o_custkey" AS c0 FROM "public"."orders") t2) t1 WHERE t0.c0 = t1.c0)]
                   | Join ANTI ON l#0 = r#0
                   |   Scan db.main.customer (c_custkey INTEGER, c_phone VARCHAR, c_acctbal DECIMAL(15,2))
@@ -364,7 +309,7 @@ Sort #0
               Project #0 AS "avg(c_acctbal)"
                 Aggregate avg(#0) AS "avg(c_acctbal)"
                   Project #1 AS "#argument0"
-                    Filter (substring(#0, CAST(1 AS INTEGER), CAST(2 AS INTEGER)) IN ('13', '31', '23', '29', '30', '18', '17'))
+                    Filter (substring(#0, CAST(1 AS INTEGER), CAST(2 AS INTEGER)) IN ('13', '31', '23', '29', '30', '18', '17')) [codegen]
                       Scan db.main.customer (c_phone VARCHAR, c_acctbal DECIMAL(15,2)) [pushed: WHERE (#1 > CAST('0.00' AS DECIMAL(3,2)))]
 ```
 
@@ -416,22 +361,40 @@ instead, so that an application can add sources of its own, such as tables in me
 ## Code generation
 
 With the module `fyrql-codegen` on the class path, the engine compiles expressions,
-filters and the keys of joins and aggregations into Java bytecode with
+filters, the keys of joins and aggregations, and whole pipelines into Java bytecode with
 Janino (janino-lts 3.1.20). The JAR of the module
 carries Janino renamed to `net.fyrql.internal.janino`, so that an application may use a
 Janino of its own. Without the module everything runs in the interpreter; the results are
-the same either way, which the tests check for every random query.
+the same either way, which the tests check for every random query, and so is whether a
+query fails (see the known differences under [Supported SQL](#supported-sql)).
 
-- `FyrQL.builder().codegen(CodegenMode.AUTO)`, the default: an operator interprets its
-  first rows and compiles once it has processed 10,000 of them (`codegenThreshold`).
-  `ALWAYS` compiles from the first row on, `OFF` never. The system property
-  `fyrql.codegen` (`off`, `auto` or `always`) sets the default of the builder.
+- A pipeline is a chain of filters, projections and joins above one source, such as a
+  scan, an aggregation or a sort; the chain goes through the side of each join that
+  probes its hash table. It becomes one class
+  with one loop over the rows of a batch, which tests the filters, computes the
+  projected values and looks up the keys of the joins row by row, and writes only the
+  rows that leave the chain. The build sides of the joins are read into their hash
+  tables before the source, as the interpreter reads them, and may be pipelines of their
+  own. A chain is compiled when it holds a join or at least two nodes that compute
+  something; a node that the compiler does not take ends it and runs as an operator.
+  `explain` marks the top node of a pipeline with `[codegen pipeline]` and its other
+  nodes with `[codegen]`.
+- `FyrQL.builder().codegen(CodegenMode.AUTO)`, the default: a pipeline is compiled when
+  the query starts if the estimated row count of its source reaches 10,000
+  (`codegenThreshold`); a source that does not tell its size, such as an HTTP endpoint or
+  a gzipped JSON file, counts 1,000 rows and stays in the interpreter. An operator
+  outside a pipeline interprets its first rows and compiles its expressions or keys once
+  it has processed 10,000 of them. `ALWAYS` compiles every pipeline and every operator
+  from the first row on, `OFF` nothing. The system property `fyrql.codegen` (`off`,
+  `auto` or `always`) sets the default of the builder.
 - Compiled classes are cached by their source, which does not contain the values of
-  literals: `quantity < 24` and `quantity < 30` share a class. `engine.codegenStatistics()`
-  tells how many classes were compiled, how many requests the cache answered, and the time
-  spent.
+  literals: `quantity < 24` and `quantity < 30` share a class, as do the pipelines of
+  queries of the same shape. `engine.codegenStatistics()` tells how many classes were
+  compiled, how many requests the cache answered, and the time spent.
 - Expressions over nested types and expressions of more than 400 nodes stay in the
-  interpreter, as does an expression whose compilation fails.
+  interpreter, as does an expression whose compilation fails. The code of a long
+  expression becomes a method of its own, and a class with a method of more than 8,000
+  bytes of bytecode, which the JIT compiler of HotSpot leaves alone, is not used.
 - `-Dfyrql.codegen.dump=<directory>` writes every compiled source into the directory. The
   filter `quantity < 24 AND discount > 0.05` over an `INTEGER` and a `DECIMAL(4,2)` column
   becomes a loop over the rows of a batch, with a variable for `NULL` and one for the value
@@ -478,24 +441,104 @@ public int[] select(Batch in) {
 }
 ```
 
+The filter and the projection of TPC-H Q6 over the four columns of `lineitem` it reads
+form a pipeline, which is the method `consume` of its class. The loop calls the filter,
+which is long enough for a method `s0` of its own and reads like the one above,
+computes `l_extendedprice * l_discount` only for the rows that pass, and writes the
+products into an array that becomes the column of the output batch. The fields `f0` to
+`f6` hold the literals, a type and the schema; `stage` tells which node of the chain a
+failure comes from, so that the error names that node as the interpreter would:
+
+```java
+public Batch consume(Batch in, JoinTable[] tables) {
+    int n = in.rowCount();
+    DecimalVector c0 = (DecimalVector) in.column(0);
+    DecimalVector c1 = (DecimalVector) in.column(1);
+    DecimalVector c2 = (DecimalVector) in.column(2);
+    IntVector c3 = (IntVector) in.column(3);
+    int cap = n;
+    long[] out0 = new long[cap];
+    boolean[] nulls0 = null;
+    int m = 0;
+    int stage = 0;
+    try {
+        for (int i = 0; i < n; i++) {
+            stage = 0;
+            if (!s0(i, c3, c2, c0)) {
+                continue;
+            }
+            stage = 1;
+            boolean n29 = c1.isNull(i);
+            long v30 = c1.getUnscaledLong(i);
+            boolean n31 = c2.isNull(i);
+            long v32 = c2.getUnscaledLong(i);
+            boolean n33 = false;
+            long v34 = 0L;
+            if (n29 || n31) {
+                n33 = true;
+            } else {
+                v34 = ScalarOps.decimal(Expression.ArithmeticOp.MULTIPLY, v30, v32, f5);
+            }
+            if (n33) {
+                if (nulls0 == null) {
+                    nulls0 = new boolean[cap];
+                }
+                nulls0[m] = true;
+            } else {
+                out0[m] = v34;
+            }
+            m++;
+        }
+    } catch (RuntimeException e) {
+        failed = stage;
+        throw e;
+    }
+    if (m == 0) {
+        return null;
+    }
+    Vector[] columns = new Vector[1];
+    if (m < cap) {
+        out0 = java.util.Arrays.copyOf(out0, m);
+        if (nulls0 != null) {
+            nulls0 = java.util.Arrays.copyOf(nulls0, m);
+        }
+    }
+    columns[0] = DecimalVector.wrap(f5, out0, nulls0);
+    return new Batch(f6, m, java.util.Arrays.asList(columns));
+}
+```
+
+A join adds the hash of its keys to the loop, and a loop over the rows of its hash
+table with these keys, inside which the nodes above the join run.
+
 The module `fyrql-bench` measures the operators with [JMH](https://github.com/openjdk/jmh)
 over four million rows in the shape of TPC-H `lineitem`, held in memory as batches of
 2048 rows (`java -jar fyrql-bench/target/benchmarks.jar`). On a laptop with an AMD
-Ryzen 5 5600H and JDK 21, in milliseconds per run (two forks, five measurements each):
+Ryzen 5 5600H and JDK 21, in milliseconds per run (two forks, five measurements each),
+with compiled code from the first row on:
 
-| Operator | Interpreted | Compiled |
+| Benchmark | Interpreted | Compiled |
 | --- | ---: | ---: |
-| Filter of TPC-H Q6 | 220 | 27 |
-| Projection of four computed columns | 846 | 34 |
-| Hash join with 100,000 keys | 273 | 229 |
-| Aggregation in 100,000 groups | 518 | 517 |
-| Scan only, the control | 0.3 | 0.4 |
+| Filter of TPC-H Q6 | 190 | 26 |
+| Projection of four computed columns | 528 | 30 |
+| A filter and the four columns, one pipeline | 595 | 41 |
+| The same as two compiled operators | 483 | 100 |
+| Hash join with 100,000 keys, one pipeline | 282 | 167 |
+| Left join with 50,000 keys, one pipeline | 330 | 234 |
+| Aggregation in 100,000 groups | 231 | 187 |
+| Aggregation in the shape of TPC-H Q1 | 207 | 178 |
+| Filter, projection, join and aggregation | 527 | 138 |
+| The same with compiled operators, no pipeline | 569 | 198 |
+| Scan only, the control | 0.4 | 0.3 |
 
-Compiling the filter of Q6 takes about 1.6 ms; with the class in the cache, generating
-the source and creating an instance takes about 11 microseconds. Joins and aggregations gain little
-so far, since compiled keys leave the work per row of the interpreter in place: the
-joined columns are copied, and the aggregate functions take every value as a Java object.
-Compiling whole pipelines is a later step.
+Joins and aggregations keep their values in primitive arrays in both modes, and the
+aggregation is not compiled: it takes the batches of the pipeline below it. A pipeline
+gains over compiled operators since it writes only the rows that leave it, where each
+operator copies the rows it passes on. Compiling the filter of Q6 takes about 1.8 ms, a
+pipeline of a filter, a projection and a join about 3.3 ms; with the class in the cache,
+generating the source and creating an instance takes about 12 and 24 microseconds.
+Reading a CSV file of one million rows in the shape of `lineitem` takes 349 ms for four
+of its columns and 643 ms for all 16.
 
 ## Supported SQL
 
@@ -558,7 +601,7 @@ DuckDB 1.5.6.
 - Aggregates: `count`, `sum`, `avg`, `min`, `max`, `string_agg`, `list`, `first`, `last`,
   `any_value`, `bool_and`, `bool_or`, with `DISTINCT` and `ORDER BY` in the call.
 
-Not yet supported: window functions, the type `INTERVAL`, `QUALIFY`, `PIVOT`, `SEMI
+*Not yet supported*: window functions, the type `INTERVAL`, `QUALIFY`, `PIVOT`, `SEMI
 JOIN` and `ANTI JOIN` in SQL, lambdas, slices such as `l[1:2]`, structs without names
 (`row(1, 'a')`), arrays of a fixed size (`INTEGER[3]`), and `WITH RECURSIVE`. Of the
 subqueries: those in `ORDER BY`, `GROUP BY`, `ON` and the arguments of aggregates;
@@ -592,7 +635,11 @@ Known differences from DuckDB:
 - An expression that fails for some values, such as a cast of a string or a division of
   integers by zero, may fail in one of the two engines and not in the other: each moves
   conditions to other places, such as below a join or into a source, and evaluates
-  them on other rows, or folds constants at another time.
+  them on other rows, or folds constants at another time. Within FyrQL, a compiled
+  pipeline runs all its nodes for one row before the next row, where the interpreter
+  runs each node over a whole batch: when rows of one batch fail in different nodes, the
+  two may report the failure of another node first, with another error; whether a query
+  fails is the same.
 - DuckDB 1.5.6 finds a row for a correlated `EXISTS` or `IN` inside an expression, such
   as `a OR EXISTS (SELECT * FROM u WHERE u.k = t.k AND u.d <> t.d)`, where `t.d` is
   `NULL`, unlike for the same `EXISTS` as a condition of `WHERE`; FyrQL finds none.
@@ -606,7 +653,7 @@ Known differences from DuckDB:
 | --- | --- |
 | `fyrql-core` | data types, values, vectors and batches, expressions, functions, logical plan |
 | `fyrql-connector-spi` | the interfaces that connectors implement |
-| `fyrql-exec` | the vectorized interpreter, and the interfaces of code generation |
+| `fyrql-exec` | the vectorized interpreter, the choice of pipelines, and the interfaces of code generation |
 | `fyrql-codegen` | code generation with Janino, which it carries renamed; optional |
 | `fyrql-sql` | the SQL parser, the binder, which turns subqueries into joins, and the rendering of plans as SQL per dialect |
 | `fyrql-optimizer` | the folding of constants, the moving of conditions toward the tables and into join keys, the order of inner joins by the row counts of the catalogs, the narrowing of scans to the columns and fields in use, joins in a database and the pushdown into sources |
@@ -619,6 +666,101 @@ Known differences from DuckDB:
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
 | `fyrql-bench` | JMH benchmarks of the interpreter against compiled code; not published |
+
+## Building
+
+Java 21 or later is required; the Maven wrapper fetches Maven itself.
+
+```
+./mvnw -B -ntp verify
+```
+
+The tests of `fyrql-test` run DuckDB through its JDBC driver, which is a test dependency only.
+
+Besides a corpus of SQL texts, two generators of random queries compare FyrQL with DuckDB:
+random plans, which FyrQL runs as they are and as it binds them from their SQL, and random
+SQL text with names, aliases, joins, subqueries in `FROM`, `WHERE`, `HAVING` and the select
+list, correlated or not, grouping and set operations. Each runs 200
+queries with a fixed seed in `verify`; more queries or another seed are a property away:
+
+```
+./mvnw -B -ntp verify -Dfyrql.random.queries=2000 -Dfyrql.random.seed=7
+```
+
+A difference fails the test unless the ledger of known differences explains it
+(`fyrql-test`, `net.fyrql.test.random.Ledger`); the report shows each other difference
+shrunk to a small query. Every random query also runs with compiled code from the first
+row on, which must give exactly the results of the interpreter, and the other tests of
+`fyrql-test` run a second time with `-Dfyrql.codegen=always`.
+
+The JDBC connector is tested against H2, SQLite and PostgreSQL in every build; PostgreSQL
+comes as binaries that the build unpacks and starts in a temporary directory, without
+Docker (`-Dfyrql.test.postgres=off` leaves it out). MySQL runs in Docker through
+Testcontainers, in the profile `containers`; without Docker its tests are skipped:
+
+```
+./mvnw -B -ntp verify -P containers
+```
+
+A server of one's own takes the place of either with
+`-Dfyrql.test.postgres.url=jdbc:postgresql://...` or `-Dfyrql.test.mysql.url=jdbc:mysql://...`,
+and `.user` and `.password` alike; the tests replace their tables in its database. The tests
+of the connectors run once more with `-Dfyrql.pushdown=off`, where every source only reads
+the columns a query needs, and must give the same results.
+
+The 22 TPC-H queries, in the text of the specification with its parameters of
+validation, run over the tables of TPC-H spread across the connectors: `lineitem` and
+`partsupp` as CSV files, `orders` and `customer` in PostgreSQL, `part` and `supplier` as
+JSON lines, `nation` and `region` as Java collections. The data comes from
+`io.trino.tpch`, a Java port of the TPC-H generator, and DuckDB reads the same files for
+the comparison. In `verify` the queries run at scale factor 0.01; the profile `tpch` runs
+them at scale factor 1 with a heap of 8 GB, once in the interpreter (`OFF`) and once with
+code generation (`AUTO`), and writes the time and the peak of the heap of every query in
+both modes, a scan of `lineitem` for reference, and the plans with code generation into
+`fyrql-test/target/tpch-report.md`:
+
+```
+./mvnw -B -ntp verify -P tpch -Dtest=TpchScale1Test -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+The files take about 1.1 GB in `fyrql-test/target/tpch` and are written once; loading
+PostgreSQL takes about 25 s. On a laptop with an AMD Ryzen 5 5600H and JDK 21, all 22
+queries give the rows of DuckDB in both modes, with a peak of the heap between 0.4 and
+1.6 GB; in seconds:
+
+| Query | Interpreted | Compiled | DuckDB |
+| --- | ---: | ---: | ---: |
+| Scan of `lineitem` | 2.5 | 2.4 | 1.6 |
+| Q1 | 4.5 | 3.4 | 2.0 |
+| Q2 | 1.1 | 1.0 | 0.5 |
+| Q3 | 3.6 | 3.3 | 2.2 |
+| Q4 | 2.9 | 2.8 | 2.0 |
+| Q5 | 3.1 | 3.0 | 4.0 |
+| Q6 | 2.5 | 2.4 | 1.7 |
+| Q7 | 5.1 | 4.7 | 2.2 |
+| Q8 | 3.5 | 3.8 | 2.3 |
+| Q9 | 4.7 | 4.4 | 2.5 |
+| Q10 | 3.6 | 3.4 | 2.3 |
+| Q11 | 0.5 | 0.6 | 0.4 |
+| Q12 | 4.0 | 4.1 | 2.1 |
+| Q13 | 2.7 | 2.5 | 0.5 |
+| Q14 | 3.0 | 2.7 | 1.7 |
+| Q15 | 5.0 | 4.8 | 1.6 |
+| Q16 | 0.8 | 0.7 | 0.4 |
+| Q17 | 5.2 | 5.0 | 3.3 |
+| Q18 | 6.2 | 6.1 | 3.7 |
+| Q19 | 3.4 | 3.7 | 2.1 |
+| Q20 | 3.6 | 3.0 | 2.0 |
+| Q21 | 9.4 | 8.0 | 5.5 |
+| Q22 | 1.1 | 1.3 | 0.4 |
+| All 22 queries | 79.4 | 74.7 | 45.4 |
+
+Before the CSV files were read into typed columns, joins and aggregations kept their
+values in primitive arrays and pipelines were compiled, the interpreter took 287 s for
+the 22 queries. Most of the time left goes into reading `lineitem`, which DuckDB reads
+in parallel, and into building the hash tables of the joins; compiled code gains about
+6 % over the interpreter. Q15, Q17 and Q18 read `lineitem` twice, once for the
+subquery, and Q21 three times.
 
 ## License
 

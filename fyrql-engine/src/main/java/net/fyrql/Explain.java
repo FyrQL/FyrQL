@@ -1,0 +1,231 @@
+/*
+ * Copyright 2026 the FyrQL authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package net.fyrql;
+
+import net.fyrql.core.expr.Expression;
+import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.type.DataType;
+import net.fyrql.core.type.Schema;
+import net.fyrql.exec.Codegen;
+import net.fyrql.exec.PipelinePlanner;
+import net.fyrql.sql.render.DuckDbDialect;
+import net.fyrql.sql.render.SqlRenderer;
+
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.IntFunction;
+import java.util.function.ToDoubleFunction;
+import java.util.regex.Pattern;
+
+/**
+ * Prints a plan for {@link FyrQL#explain}: one node per line, the inputs of
+ * a node indented below it. A column is written as {@code #index}, the
+ * position in the output of the node's input; the keys of a join name the
+ * left input with {@code l} and the right one with {@code r}. A filter,
+ * projection, join or aggregation whose expressions or keys the engine
+ * compiles is marked {@code [codegen]}; a chain that runs as one compiled
+ * pipeline, see {@link PipelinePlanner}, is marked
+ * {@code [codegen pipeline]} at its top node and {@code [codegen]} at the
+ * nodes below it. A part of the plan that a source
+ * runs is a line {@code Remote source [what it runs]}, with the part below
+ * it, each line after a {@code |}.
+ */
+final class Explain {
+
+    private static final SqlRenderer RENDERER = new SqlRenderer(DuckDbDialect.INSTANCE, Object::toString);
+    private static final Pattern PLAIN = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+
+    private Explain() {
+    }
+
+    static String print(PlanNode plan, Codegen codegen, ToDoubleFunction<PlanNode> estimate) {
+        StringBuilder sb = new StringBuilder();
+        print(plan, codegen, estimate, new IdentityHashMap<>(), 0, sb);
+        return sb.toString();
+    }
+
+    /**
+     * Prints a node and its inputs; the marks of the nodes of the pipelines
+     * found so far, by node, tell the nodes inside a pipeline.
+     */
+    private static void print(PlanNode node, Codegen codegen, ToDoubleFunction<PlanNode> estimate,
+            Map<PlanNode, String> marks, int depth, StringBuilder sb) {
+        if (!marks.containsKey(node)) {
+            PipelinePlanner.Pipeline pipeline = PipelinePlanner.plan(node, codegen, estimate);
+            if (pipeline != null) {
+                for (PlanNode stage : pipeline.spec().stages()) {
+                    marks.put(stage, stage == node ? " [codegen pipeline]" : " [codegen]");
+                }
+            }
+        }
+        sb.append("  ".repeat(depth)).append(line(node));
+        String mark = marks.get(node);
+        if (mark != null) {
+            sb.append(mark);
+        } else if (compiled(node, codegen)) {
+            sb.append(" [codegen]");
+        }
+        sb.append('\n');
+        for (PlanNode child : node.children()) {
+            print(child, codegen, estimate, marks, depth + 1, sb);
+        }
+        if (node instanceof PlanNode.Remote r) {
+            remote(r.logical(), "  ".repeat(depth + 1) + "| ", 0, sb);
+        }
+    }
+
+    /** The part of the plan that a source runs, each line after a prefix; nothing of it is compiled. */
+    private static void remote(PlanNode node, String prefix, int depth, StringBuilder sb) {
+        sb.append(prefix).append("  ".repeat(depth)).append(line(node)).append('\n');
+        for (PlanNode child : node.children()) {
+            remote(child, prefix, depth + 1, sb);
+        }
+    }
+
+    /** Tells whether the engine compiles the expressions or keys of a node. */
+    private static boolean compiled(PlanNode node, Codegen codegen) {
+        return switch (node) {
+            case PlanNode.Filter f -> codegen.compiles(f.condition());
+            case PlanNode.Project p -> p.columns().stream().map(PlanNode.NamedExpression::expression)
+                    .anyMatch(e -> !(e instanceof Expression.Column) && codegen.compiles(e));
+            case PlanNode.Join j -> codegen.compilesKeys(j.leftKeys().stream().map(k -> j.left().schema().type(k))
+                    .toList()) || j.condition() != null && codegen.compiles(j.condition());
+            case PlanNode.Aggregate a -> codegen.compilesKeys(a.groupColumns().stream()
+                    .map(c -> a.input().schema().type(c)).toList());
+            default -> false;
+        };
+    }
+
+    private static String line(PlanNode node) {
+        return switch (node) {
+            case PlanNode.Scan s -> {
+                List<String> columns = new ArrayList<>();
+                Schema read = s.columnSchema();
+                for (int i = 0; i < read.size(); i++) {
+                    List<String> parts = new ArrayList<>();
+                    parts.add(name(s.tableSchema().name(s.columns().get(i))));
+                    for (String field : s.fields().get(i)) {
+                        parts.add(name(field));
+                    }
+                    columns.add(String.join(".", parts) + " " + read.type(i).sqlName());
+                }
+                yield "Scan " + s.table() + " (" + String.join(", ", columns) + ")"
+                        + (s.pushed().isEmpty() ? "" : " [pushed: " + pushed(s.pushed()) + "]");
+            }
+            case PlanNode.Remote r -> "Remote " + r.source() + " [" + r.description() + "]";
+            case PlanNode.Filter f -> "Filter " + expression(f.condition());
+            case PlanNode.Project p -> {
+                List<String> columns = new ArrayList<>();
+                for (PlanNode.NamedExpression c : p.columns()) {
+                    columns.add(expression(c.expression()) + " AS " + name(c.name()));
+                }
+                yield "Project " + String.join(", ", columns);
+            }
+            case PlanNode.Join j -> {
+                List<String> keys = new ArrayList<>();
+                for (int i = 0; i < j.leftKeys().size(); i++) {
+                    keys.add("l#" + j.leftKeys().get(i) + " = r#" + j.rightKeys().get(i));
+                }
+                if (j.condition() != null) {
+                    int width = j.left().schema().size();
+                    keys.add(RENDERER.expression(j.condition(), (IntFunction<String>) i -> i < width ? "l#" + i
+                            : "r#" + (i - width)));
+                }
+                yield "Join " + j.type() + (keys.isEmpty() ? "" : " ON " + String.join(" AND ", keys));
+            }
+            case PlanNode.Aggregate a -> "Aggregate" + aggregation(a.groupColumns(), a.aggregates());
+            case PlanNode.Sort s -> "Sort " + keys(s.keys());
+            case PlanNode.Limit l -> "Limit " + l.count() + (l.offset() == 0 ? "" : " OFFSET " + l.offset());
+            case PlanNode.Unnest u -> "Unnest " + expression(u.list()) + " AS " + name(u.name());
+            case PlanNode.Union u -> "Union ALL";
+            case PlanNode.Values v -> {
+                List<String> columns = new ArrayList<>();
+                for (Schema.Field f : v.schema().fields()) {
+                    columns.add(name(f.name()) + " " + f.type().sqlName());
+                }
+                yield "Values " + v.rows().size() + (v.rows().size() == 1 ? " row" : " rows") + " ("
+                        + String.join(", ", columns) + ")";
+            }
+            case PlanNode.SetOperation s -> s.kind() + (s.all() ? " ALL" : "");
+        };
+    }
+
+    /** The groups and calls of an aggregation, after a leading word. */
+    private static String aggregation(List<Integer> groupColumns, List<PlanNode.AggregateCall> aggregates) {
+        List<String> groups = new ArrayList<>();
+        for (int c : groupColumns) {
+            groups.add("#" + c);
+        }
+        List<String> calls = new ArrayList<>();
+        for (PlanNode.AggregateCall call : aggregates) {
+            calls.add(call(call));
+        }
+        return (groups.isEmpty() ? "" : " GROUP BY " + String.join(", ", groups))
+                + (calls.isEmpty() ? "" : (groups.isEmpty() ? " " : ": ") + String.join(", ", calls));
+    }
+
+    /** What a connector took over of the plan above a scan, in the order it applies. */
+    private static String pushed(PlanNode.Pushed pushed) {
+        List<String> parts = new ArrayList<>();
+        if (!pushed.filters().isEmpty()) {
+            parts.add("WHERE " + expression(pushed.condition()));
+        }
+        pushed.aggregation().ifPresent(a -> parts.add(aggregation(a.groupColumns(), a.calls()).strip()));
+        if (!pushed.order().isEmpty()) {
+            parts.add("ORDER BY " + keys(pushed.order()));
+        }
+        pushed.limit().ifPresent(n -> parts.add("LIMIT " + n));
+        return String.join(" ", parts);
+    }
+
+    private static String call(PlanNode.AggregateCall call) {
+        if (call.function() == PlanNode.AggregateFunction.COUNT_STAR) {
+            return "count(*) AS " + name(call.name());
+        }
+        StringBuilder sb = new StringBuilder(call.function().sqlName()).append('(');
+        if (call.distinct()) {
+            sb.append("DISTINCT ");
+        }
+        sb.append('#').append(call.column());
+        if (call.function() == PlanNode.AggregateFunction.STRING_AGG) {
+            sb.append(", ").append(call.separator() == null ? "NULL"
+                    : DuckDbDialect.INSTANCE.literal(call.separator(), DataType.VARCHAR));
+        }
+        if (!call.orderBy().isEmpty()) {
+            sb.append(" ORDER BY ").append(keys(call.orderBy()));
+        }
+        return sb.append(") AS ").append(name(call.name())).toString();
+    }
+
+    private static String keys(List<PlanNode.SortKey> keys) {
+        List<String> result = new ArrayList<>();
+        for (PlanNode.SortKey k : keys) {
+            result.add("#" + k.column() + (k.ascending() ? "" : " DESC") + (k.nullsFirst() ? " NULLS FIRST" : ""));
+        }
+        return String.join(", ", result);
+    }
+
+    private static String expression(Expression e) {
+        return RENDERER.expression(e, (String) null);
+    }
+
+    private static String name(String name) {
+        return PLAIN.matcher(name).matches() ? name : DuckDbDialect.INSTANCE.quoteIdentifier(name);
+    }
+}
