@@ -19,7 +19,6 @@ package net.fyrql.optimizer;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expressions;
-import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
 import net.fyrql.core.plan.PlanNode.AggregateFunction;
