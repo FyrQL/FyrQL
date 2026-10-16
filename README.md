@@ -384,7 +384,7 @@ instead, so that an application can add sources of its own, such as tables in me
 
 With the module `fyrql-codegen` on the class path, the engine compiles expressions,
 filters, the keys of joins and aggregations, and whole pipelines into Java bytecode with
-Janino (janino-lts 3.1.20). The JAR of the module
+[Janino](https://github.com/janino-lts/janino) (janino-lts 3.1.20). The JAR of the module
 carries Janino renamed to `net.fyrql.internal.janino`, so that an application may use a
 Janino of its own. Without the module everything runs in the interpreter; the results are
 the same either way, which the tests check for every random query, and so is whether a
@@ -713,6 +713,7 @@ Known differences from DuckDB:
 | `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
+| `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application; read only |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
 | `fyrql-bench` | JMH benchmarks of the interpreter against compiled code and of the scans of CSV and Parquet files; not published |
 

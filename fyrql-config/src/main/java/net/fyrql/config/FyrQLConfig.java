@@ -61,7 +61,7 @@ public final class FyrQLConfig {
      *         source cannot be created; the sources created until then are closed
      */
     public static FyrQL open(Path file) {
-        return open(EngineConfig.read(file), file.toString());
+        return open(EngineConfig.read(file), Connectors.factories(), file.toString());
     }
 
     /**
@@ -71,7 +71,21 @@ public final class FyrQLConfig {
      *         created; the sources created until then are closed
      */
     public static FyrQL open(EngineConfig config) {
-        return open(config, null);
+        return open(config, Connectors.factories(), null);
+    }
+
+    /**
+     * Builds an engine from a configuration with the given factories of
+     * connectors, such as those {@link Connectors#factories(ClassLoader)}
+     * finds with the class loader of a plugin, where the class loader of
+     * the current thread does not see them.
+     *
+     * @throws ConfigException if a setting is invalid, no factory has the
+     *         type of a source, or a source cannot be created; the sources
+     *         created until then are closed
+     */
+    public static FyrQL open(EngineConfig config, Map<String, ConnectorFactory> factories) {
+        return open(config, factories, null);
     }
 
     /**
@@ -83,7 +97,7 @@ public final class FyrQLConfig {
      *         source cannot be created; the sources created until then are closed
      */
     public static FyrQL.Builder builder(Path file) {
-        return prepare(EngineConfig.read(file), file.toString()).builder();
+        return prepare(EngineConfig.read(file), Connectors.factories(), file.toString()).builder();
     }
 
     /**
@@ -93,11 +107,24 @@ public final class FyrQLConfig {
      *         created; the sources created until then are closed
      */
     public static FyrQL.Builder builder(EngineConfig config) {
-        return prepare(config, null).builder();
+        return prepare(config, Connectors.factories(), null).builder();
     }
 
-    private static FyrQL open(EngineConfig config, String origin) {
-        Prepared prepared = prepare(config, origin);
+    /**
+     * Returns a builder with the sources and settings of a configuration,
+     * whose connectors come from the given factories.
+     *
+     * @throws ConfigException if a setting is invalid, no factory has the
+     *         type of a source, or a source cannot be created; the sources
+     *         created until then are closed
+     * @see #open(EngineConfig, Map)
+     */
+    public static FyrQL.Builder builder(EngineConfig config, Map<String, ConnectorFactory> factories) {
+        return prepare(config, factories, null).builder();
+    }
+
+    private static FyrQL open(EngineConfig config, Map<String, ConnectorFactory> factories, String origin) {
+        Prepared prepared = prepare(config, factories, origin);
         try {
             return prepared.builder().build();
         } catch (RuntimeException e) {
@@ -110,14 +137,13 @@ public final class FyrQLConfig {
     private record Prepared(FyrQL.Builder builder, List<Connector> connectors) {
     }
 
-    private static Prepared prepare(EngineConfig config, String origin) {
+    private static Prepared prepare(EngineConfig config, Map<String, ConnectorFactory> factories, String origin) {
         FyrQL.Builder builder = FyrQL.builder();
         try {
             settings(config, builder);
         } catch (IllegalArgumentException e) {
             throw new ConfigException(prefix(origin) + e.getMessage(), e);
         }
-        Map<String, ConnectorFactory> factories = Connectors.factories();
         List<Connector> connectors = new ArrayList<>();
         for (SourceConfig source : config.sources()) {
             try {

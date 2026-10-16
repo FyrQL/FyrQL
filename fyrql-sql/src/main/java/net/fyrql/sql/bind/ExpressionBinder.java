@@ -998,7 +998,15 @@ final class ExpressionBinder {
                 "Cannot mix values of type " + a + " and " + b + " in " + what + " - an explicit cast is required");
     }
 
+    /**
+     * {@code CAST(x AS T)}. The empty list {@code []} casts to every list
+     * type, as in DuckDB, though on its own it is an {@code INTEGER[]}.
+     */
     private Bound cast(SqlExpr.Cast c) {
+        if (c.type() instanceof DataType.ListType && c.operand() instanceof SqlExpr.FunctionCall f
+                && SqlTrees.key(f.name()).equals("list_value") && f.arguments().isEmpty()) {
+            return Bound.typed(new Expression.Literal(c.type(), List.of()));
+        }
         Bound operand = bound(c.operand());
         if (operand.isNull()) {
             return Bound.typed(new Expression.Literal(c.type(), null));

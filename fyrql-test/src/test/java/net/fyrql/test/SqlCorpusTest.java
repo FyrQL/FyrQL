@@ -422,6 +422,7 @@ class SqlCorpusTest {
             "SELECT id, CAST(l AS BIGINT[]), l::VARCHAR[], CAST(s AS STRUCT(a BIGINT, b VARCHAR)),"
                     + " CAST(s.c AS STRUCT(TAGS VARCHAR[], z INTEGER)), TRY_CAST(['1', 'x'] AS INTEGER[]),"
                     + " CAST([1.5] AS INTEGER[]), CAST(s AS VARCHAR) FROM n",
+            "SELECT CAST([] AS DATE[]), TRY_CAST([] AS VARCHAR[][]), CAST([] AS STRUCT(a INTEGER, b DATE)[]), [] AS e",
             "SELECT id, coalesce(l, [0]), CASE WHEN id > 2 THEN l ELSE [1.5] END, if(id = 1, s.c, NULL),"
                     + " coalesce(s.c, {'x': 1, 'tags': ['z']}) FROM n",
             "SELECT CASE WHEN true THEN {'a': 1} ELSE {'b': 2} END, coalesce({'a': 1}, {'A': 2.5}),"
