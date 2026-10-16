@@ -22,12 +22,12 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.3.0</version>
+		<version>0.3.5</version>
 	</parent>
 
 	<artifactId>fyrql-bench</artifactId>
 	<name>FyrQL benchmarks</name>
-	<description>JMH benchmarks of the interpreter against compiled code and of the CSV scan; never published.</description>
+	<description>JMH benchmarks of the interpreter against compiled code and of the CSV and Parquet scans; never published.</description>
 
 	<properties>
 		<fyrql.module.name>net.fyrql.bench</fyrql.module.name>
@@ -47,6 +47,22 @@
 		<dependency>
 			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-connector-csv</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-parquet</artifactId>
+			<!-- In the reactor the dependencies the connector renames into its own JAR would come along. -->
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<!-- Writes the Parquet file of ParquetScanBenchmark, as it writes the files of the TPC-H tests. -->
+		<dependency>
+			<groupId>org.duckdb</groupId>
+			<artifactId>duckdb_jdbc</artifactId>
 		</dependency>
 		<dependency>
 			<groupId>org.openjdk.jmh</groupId>

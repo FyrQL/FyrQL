@@ -35,6 +35,8 @@ import net.fyrql.exec.Executor;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
+import java.util.OptionalLong;
 
 import static net.fyrql.core.expr.Expressions.add;
 import static net.fyrql.core.expr.Expressions.and;
@@ -272,8 +274,11 @@ class PredicatePushdownTest {
         assertEquals(Tables.sorted(Tables.rows(EXECUTOR, plan)), Tables.sorted(Tables.rows(EXECUTOR, once)));
         Join join = (Join) ((PlanNode.Project) once).input();
         assertEquals(JoinType.INNER, join.type());
-        // The memory source here takes over no filter: it stays right above the scan of t, narrowed to a, b and c.
-        assertEquals(new Filter(new Scan(Tables.T_REF, Tables.T, List.of(0, 1, 2)), gt(C, lit(0.0))), join.left());
+        // The memory source here takes over no filter: it stays right above the scan of t, narrowed to a, b and c,
+        // which carries it as a hint.
+        assertEquals(new Filter(new Scan(Tables.T_REF, Tables.T, List.of(0, 1, 2), new PlanNode.Pushed(List.of(),
+                OptionalLong.empty(), List.of(), Optional.empty(), List.of(gt(C, lit(0.0))))), gt(C, lit(0.0))),
+                join.left());
         Optimizer without = new Optimizer(name -> MEMORY,
                 new Optimizer.Options(true, true, true, false, false, true, true));
         assertEquals(JoinType.CROSS, ((Join) ((Filter) ((PlanNode.Project) without.optimize(plan)).input())

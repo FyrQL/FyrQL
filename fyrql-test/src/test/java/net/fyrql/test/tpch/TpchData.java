@@ -18,6 +18,8 @@ package net.fyrql.test.tpch;
 
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.sql.render.DuckDbDialect;
+import net.fyrql.test.DuckDbReference;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -31,9 +33,11 @@ import java.time.LocalDate;
 /**
  * Writes the files of the TPC-H tables at a scale factor into a
  * directory, once: a CSV file with a header for every table in a CSV file
- * or a database, a file of JSON lines for every table in JSON. The tables
- * of the memory connector are not written. A marker file records the
- * scale factor; while it is there and says the same, the files are kept.
+ * or a database, a file of JSON lines for every table in JSON, and a
+ * Parquet file for every table in Parquet, which DuckDB writes from a CSV
+ * file that is deleted afterwards. The tables of the memory connector are
+ * not written. A marker file records the scale factor; while it is there
+ * and says the same, the files are kept.
  */
 final class TpchData {
 
@@ -44,14 +48,50 @@ final class TpchData {
     private static final String MARKER = "scale-factor";
 
     /** The version of the file format; a change makes old files be written again. */
-    private static final String FORMAT = "1";
+    private static final String FORMAT = "2";
+
+    /**
+     * The rows of a row group of the Parquet files: those of DuckDB's
+     * default, and fewer at the small scale factor, so that a scan reads
+     * several row groups there as well.
+     */
+    private static final long ROW_GROUP_ROWS = 122_880;
+    private static final long SMALL_ROW_GROUP_ROWS = 16_384;
 
     private TpchData() {
     }
 
     /** Returns the file of a table in a directory. */
     static Path file(Path dir, TpchTable table) {
-        return dir.resolve(table.tableName() + (table.store() == TpchTable.Store.JSON ? ".jsonl" : ".csv"));
+        return dir.resolve(table.tableName() + switch (table.store()) {
+            case JSON -> ".jsonl";
+            case PARQUET -> ".parquet";
+            case CSV, DATABASE, MEMORY -> ".csv";
+        });
+    }
+
+    /**
+     * Returns a call of DuckDB's {@code read_csv} that reads a CSV file of
+     * a table as it is written here, with the types of the table.
+     */
+    static String readCsv(TpchTable table, Path file) {
+        return "read_csv('" + path(file) + "', delim = '" + DELIMITER + "', header = true, quote = '\"', columns = "
+                + columns(table.schema()) + ")";
+    }
+
+    /** Returns the absolute path of a file with forward slashes, for a string literal of DuckDB. */
+    static String path(Path file) {
+        return file.toAbsolutePath().toString().replace('\\', '/');
+    }
+
+    /** The columns of a schema as a struct literal of DuckDB: names to types. */
+    static String columns(Schema schema) {
+        StringBuilder b = new StringBuilder("{");
+        for (int c = 0; c < schema.size(); c++) {
+            b.append(c > 0 ? ", " : "").append('\'').append(schema.name(c)).append("': '")
+                    .append(DuckDbDialect.INSTANCE.typeName(schema.type(c))).append('\'');
+        }
+        return b.append('}').toString();
     }
 
     /** Writes the files of a scale factor into a directory, unless they are there already. */
@@ -68,6 +108,7 @@ final class TpchData {
                 switch (table.store()) {
                     case CSV, DATABASE -> writeCsv(table, scaleFactor, file(dir, table));
                     case JSON -> writeJson(table, scaleFactor, file(dir, table));
+                    case PARQUET -> writeParquet(table, scaleFactor, file(dir, table));
                     case MEMORY -> {
                     }
                 }
@@ -76,6 +117,18 @@ final class TpchData {
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot write the TPC-H files into " + dir, e);
         }
+    }
+
+    /** Writes a CSV file next to the Parquet file, lets DuckDB turn it into the Parquet file and deletes it. */
+    private static void writeParquet(TpchTable table, double scaleFactor, Path file) throws IOException {
+        Path csv = file.resolveSibling(table.tableName() + ".csv");
+        writeCsv(table, scaleFactor, csv);
+        long rowGroup = scaleFactor <= TpchEngine.SMALL ? SMALL_ROW_GROUP_ROWS : ROW_GROUP_ROWS;
+        try (DuckDbReference duck = new DuckDbReference()) {
+            duck.execute("COPY (SELECT * FROM " + readCsv(table, csv) + ") TO '" + path(file)
+                    + "' (FORMAT parquet, ROW_GROUP_SIZE " + rowGroup + ")");
+        }
+        Files.delete(csv);
     }
 
     private static void writeCsv(TpchTable table, double scaleFactor, Path file) throws IOException {

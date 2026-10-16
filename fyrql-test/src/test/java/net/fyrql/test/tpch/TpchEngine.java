@@ -21,10 +21,10 @@ import net.fyrql.connector.csv.CsvConnector;
 import net.fyrql.connector.json.JsonConnector;
 import net.fyrql.connector.json.JsonFormat;
 import net.fyrql.connector.memory.MemoryConnector;
-import net.fyrql.core.type.Schema;
+import net.fyrql.connector.parquet.ParquetConnector;
+import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.CodegenMode;
-import net.fyrql.sql.render.DuckDbDialect;
 import net.fyrql.test.DuckDbReference;
 import net.fyrql.test.db.TestDatabase;
 import net.fyrql.test.db.TestDatabases;
@@ -39,11 +39,12 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * The TPC-H tables at a scale factor, spread over four sources: the large
- * tables {@code lineitem} and {@code partsupp} in CSV files (source
- * {@code files}), {@code orders} and {@code customer} in a database (source
- * {@code db}: PostgreSQL, or H2 at the small scale factor if PostgreSQL is
- * off), {@code part} and {@code supplier} in files of JSON lines (source
+ * The TPC-H tables at a scale factor, spread over five sources: the
+ * largest table {@code lineitem} in a Parquet file (source
+ * {@code parquet}), {@code partsupp} in a CSV file (source {@code files}),
+ * {@code orders} and {@code customer} in a database (source {@code db}:
+ * PostgreSQL, or H2 at the small scale factor if PostgreSQL is off),
+ * {@code part} and {@code supplier} in files of JSON lines (source
  * {@code json}), and {@code nation} and {@code region} in the memory
  * connector (source {@code mem}). The queries name the tables without a
  * source; each name is found in exactly one. DuckDB reads the same files
@@ -113,7 +114,8 @@ final class TpchEngine {
     }
 
     /**
-     * Opens an engine over the four sources.
+     * Opens an engine over the five sources. The columns of a Parquet file
+     * come from its footer; they must be those of the table.
      *
      * @param pushdown whether scans are negotiated, or {@code null} for the system property
      * @param codegen when to compile, or {@code null} for the system property
@@ -122,18 +124,28 @@ final class TpchEngine {
         CsvConnector.Builder csv = CsvConnector.builder("files").delimiter(TpchData.DELIMITER).header(true);
         JsonConnector.Builder json = JsonConnector.builder("json").format(JsonFormat.NEWLINE_DELIMITED);
         MemoryConnector.Builder memory = MemoryConnector.builder("mem");
+        ParquetConnector.Builder parquet = ParquetConnector.builder("parquet");
         for (TpchTable table : TpchTable.values()) {
             String name = table.tableName();
             switch (table.store()) {
                 case CSV -> csv.schema(name, table.schema()).file(name, TpchData.file(dir, table));
                 case JSON -> json.schema(name, table.schema()).file(name, TpchData.file(dir, table));
                 case MEMORY -> memory.table(name, table.schema(), memoryRows.get(table));
+                case PARQUET -> parquet.path(name, TpchData.file(dir, table));
                 case DATABASE -> {
                 }
             }
         }
+        ParquetConnector files = parquet.build();
+        for (TpchTable table : TpchTable.values()) {
+            if (table.store() == TpchTable.Store.PARQUET
+                    && !files.catalog().schema(TableRef.of("parquet", table.tableName())).equals(table.schema())) {
+                throw new IllegalStateException("The Parquet file of " + table.tableName() + " has the columns "
+                        + files.catalog().schema(TableRef.of("parquet", table.tableName())));
+            }
+        }
         FyrQL.Builder b = FyrQL.builder().register(csv.build()).register(json.build()).register(memory.build())
-                .register(database.connector("db"));
+                .register(files).register(database.connector("db"));
         if (pushdown != null) {
             b.pushdown(pushdown);
         }
@@ -147,26 +159,18 @@ final class TpchEngine {
     void views(DuckDbReference duck) {
         for (TpchTable table : TpchTable.values()) {
             String name = table.tableName();
-            String file = TpchData.file(dir, table).toAbsolutePath().toString().replace('\\', '/');
+            Path file = TpchData.file(dir, table);
             switch (table.store()) {
-                case CSV, DATABASE -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM read_csv('"
-                        + file + "', delim = '" + TpchData.DELIMITER + "', header = true, quote = '\"', columns = "
-                        + columns(table.schema()) + ")");
-                case JSON -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM read_json('" + file
-                        + "', format = 'newline_delimited', columns = " + columns(table.schema()) + ")");
+                case CSV, DATABASE -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM "
+                        + TpchData.readCsv(table, file));
+                case JSON -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM read_json('"
+                        + TpchData.path(file) + "', format = 'newline_delimited', columns = "
+                        + TpchData.columns(table.schema()) + ")");
+                case PARQUET -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM read_parquet('"
+                        + TpchData.path(file) + "')");
                 case MEMORY -> duck.load(name, table.schema(), List.of(Batch.ofRows(table.schema(),
                         memoryRows.get(table))));
             }
         }
-    }
-
-    /** The columns of a schema as a struct literal of DuckDB: names to types. */
-    private static String columns(Schema schema) {
-        StringBuilder b = new StringBuilder("{");
-        for (int c = 0; c < schema.size(); c++) {
-            b.append(c > 0 ? ", " : "").append('\'').append(schema.name(c)).append("': '")
-                    .append(DuckDbDialect.INSTANCE.typeName(schema.type(c))).append('\'');
-        }
-        return b.append('}').toString();
     }
 }

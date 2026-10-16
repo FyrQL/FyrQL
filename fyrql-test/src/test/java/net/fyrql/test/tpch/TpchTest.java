@@ -42,12 +42,12 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The TPC-H queries of {@link TpchQueries} at scale factor 0.01, over
- * CSV, JSON, a database and the memory connector: each gives the rows of
- * DuckDB over the same files, the same rows with and without pushdown, and
- * a plan without cross products; with pushdown, the database joins the
- * customers and orders of Q3, Q5, Q7, Q8 and Q10 itself and keeps the
- * customers without orders of Q22. The semi join of Q18 filters the
- * orders before they are joined with the customers. The files are
+ * Parquet, CSV, JSON, a database and the memory connector: each gives the
+ * rows of DuckDB over the same files, the same rows with and without
+ * pushdown, and a plan without cross products; with pushdown, the
+ * database joins the customers and orders of Q3, Q5, Q7, Q8 and Q10 itself
+ * and keeps the customers without orders of Q22. The semi join of Q18
+ * filters the orders before they are joined with the customers. The files are
  * written into {@code target/tpch} once, or into the directory of the
  * system property {@code fyrql.tpch.dir}.
  */

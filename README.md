@@ -10,7 +10,7 @@ provides a lightweight execution layer that implements three core design princip
    pipelines of filters, projections, and joins.
    Its query execution is verified by running all 22 TPC-H queries across federated sources.
  - **Polyglot Storage Abstraction**: FyrQL unifies heterogeneous data sources - including relational
-   databases (via JDBC), local flat files (CSV, JSON/gzip), and live JSON HTTP endpoints into
+   databases (via JDBC), local files (CSV, JSON/gzip, Parquet), and live JSON HTTP endpoints into
    a single logical mesh. It infers column types from data samples like DuckDB and handles
    nested STRUCT, LIST, and MAP types natively, allowing cross-source subqueries and joins via
    the same SQL dialect that is used by [DuckDB](https://duckdb.org).
@@ -22,15 +22,15 @@ provides a lightweight execution layer that implements three core design princip
 
 FyrQL is in an *early stage*. There are data types with nested `STRUCT`, `LIST` and `MAP`,
 columnar batches, a vectorized interpreter, code generation with Janino for expressions,
-keys and pipelines of filters, projections and joins, connectors for Java collections, CSV
-and JSON files, JSON from HTTP
+keys and pipelines of filters, projections and joins, connectors for Java collections, CSV,
+JSON and Parquet files, JSON from HTTP
 endpoints and databases over JDBC, an optimizer that moves conditions toward the
 tables, orders joins by the sizes of the tables and runs the joins of tables of one
 database in that database, a pushdown of filters, orders, limits and aggregations into
 the sources, an SQL front end with the names, types and forms of DuckDB, subqueries,
 also correlated ones, that become joins, and a differential test harness that compares
 the results with DuckDB. All 22 TPC-H queries run at scale factor 1 over tables spread
-across CSV, JSON, PostgreSQL and Java collections.
+across Parquet, CSV, JSON, PostgreSQL and Java collections.
 
 ## Using the engine
 
@@ -121,6 +121,23 @@ tables in the schema `main` unless it says otherwise.
   that it does not need. The table
   functions take `format`, `sample_size`, `ignore_errors`, `map_inference_threshold`,
   `field_appearance_threshold`, `dateformat` and `timestampformat`.
+- `fyrql-connector-parquet`: Parquet files, read in pure Java with parquet-java without
+  Hadoop and with codecs in pure Java (`SNAPPY`, `GZIP`, `ZSTD`, `LZ4_RAW` and none); the
+  JAR of the module carries parquet-java renamed to `net.fyrql.internal`, so that an
+  application may use a parquet-java or Hadoop of its own. A table is a file, a directory
+  of `.parquet` files or a pattern such as `data/orders-*.parquet`, whose files have the
+  same columns. The columns have the types that DuckDB's `read_parquet` gives them,
+  `STRUCT`, `LIST` and `MAP` to any depth, and the number of rows comes from the footers.
+  A scan reads each row group on its own, and only the columns and the fields of structs
+  in use; it takes over a limit without filters, reading only the row groups the limit
+  needs, and `count(*)` without groups and filters, which the footers answer. It takes over
+  no filter, but uses the filters to skip the row groups in which no row can pass, by their
+  statistics, dictionaries and Bloom filters, and the pages of a row group, by its column
+  index: comparisons, `BETWEEN`, `IN` and `IS NULL` on integers, decimals, dates,
+  timestamps, strings and booleans, also on fields of structs, under `AND`, `OR` and
+  `NOT`. `explain` does not show these filters; `recordReads(true)` keeps the row groups
+  and columns each scan read. parquet-java holds the column chunks of a row group in
+  memory, compressed, outside the memory budget of the engine.
 - `fyrql-connector-http`: the JSON an endpoint answers to a `GET`, read as a JSON file,
   or the array that a JSON pointer such as `/data` points to inside the answer. The
   connector sends its headers, such as `Authorization`, accepts gzip and infers the
@@ -238,16 +255,17 @@ keeps the rows of the plan, and a second run changes nothing:
    becomes a key of the join, so that `FROM a, b WHERE a.id = b.id` is a hash join and
    not a cross product.
 3. Inner joins are ordered by their estimated sizes. The row counts of the tables come
-   from the catalogs of the sources: exact for Java collections, from one `count(*)` per
-   table for a database, estimated from the sample and the size of the file for CSV and
-   JSON, and 1,000 where a source does not know. A condition keeps a fixed share of the
+   from the catalogs of the sources: exact for Java collections and Parquet files, from
+   one `count(*)` per table for a database, estimated from the sample and the size of the
+   file for CSV and JSON, and 1,000 where a source does not know. A condition keeps a fixed share of the
    rows, such as a tenth for `=` and 0.3 for `<`. Up to ten tables are ordered by
    dynamic programming over the connected subsets, more of them one join at a time; the
    smaller input of each join becomes its right one, on which the hash table is built.
    A semi or anti join above inner joins goes onto the table whose columns it reads,
    before that table is joined with the others.
 4. Every scan reads only the columns in use, and of a struct only the fields in use
-   where its source reads fields (JSON files, HTTP endpoints and Java collections);
+   where its source reads fields (Parquet and JSON files, HTTP endpoints and Java
+   collections);
    `explain` shows such a field as `s.a VARCHAR`.
 5. The largest part of the plan that reads only tables of one database and holds a
    join is offered to that database, which takes it as one statement if it evaluates
@@ -261,7 +279,7 @@ keeps the rows of the plan, and a second run changes nothing:
 Steps 4 for fields, 5 and 6 change what a source does and are left out with
 `pushdown(false)`. At scale factor 1, the plan of TPC-H Q3 reads the orders and
 customers of PostgreSQL in one statement, which filters and joins them; the filter on
-the CSV file of `lineitem` stays in the engine, which builds its hash table on the
+the Parquet file of `lineitem` stays in the engine, which builds its hash table on the
 smaller result of the database. The filter, the join and the two projections above it
 run as one compiled [pipeline](#code-generation):
 
@@ -274,7 +292,7 @@ Limit 10
           Project #6 AS o_orderdate, #7 AS o_shippriority, #0 AS l_orderkey, #1 AS l_extendedprice, #2 AS l_discount [codegen]
             Join INNER ON l#0 = r#0 [codegen]
               Filter (#3 > DATE '1995-03-15') [codegen]
-                Scan files.main.lineitem (l_orderkey INTEGER, l_extendedprice DECIMAL(15,2), l_discount DECIMAL(15,2), l_shipdate DATE)
+                Scan parquet.main.lineitem (l_orderkey INTEGER, l_extendedprice DECIMAL(15,2), l_discount DECIMAL(15,2), l_shipdate DATE)
               Remote db [SELECT t0.c0 AS c0, t0.c1 AS c1, t0.c2 AS c2, t0.c3 AS c3, t1.c0 AS c4, t1.c1 AS c5 FROM (SELECT * FROM (SELECT "o_orderkey" AS c0, "o_custkey" AS c1, "o_orderdate" AS c2, "o_shippriority" AS c3 FROM "public"."orders") t2 WHERE (t2.c2 < DATE '1995-03-15')) t0 INNER JOIN (SELECT * FROM (SELECT "c_custkey" AS c0, "c_mktsegment" AS c1 FROM "public"."customer") t3 WHERE (t3.c1 = 'BUILDING')) t1 ON t0.c1 = t1.c0]
                 | Join INNER ON l#1 = r#0
                 |   Filter (#2 < DATE '1995-03-15')
@@ -334,6 +352,10 @@ sources:
   - name: files
     type: csv
     directory: data
+  - name: lake
+    type: parquet
+    tables:
+      events: lake/events/*.parquet
   - name: api
     type: http
     tables:
@@ -346,7 +368,7 @@ engine:
 ```
 
 The `type` of a source picks its connector, which must be on the class path: `csv`,
-`json`, `http` or `jdbc`; a connector of an application joins them through a
+`json`, `parquet`, `http` or `jdbc`; a connector of an application joins them through a
 `ConnectorFactory` listed in `META-INF/services`. The other keys of a source are the
 options of its type, read as text with nested keys joined by dots (`tables.products.url`);
 an unknown or misspelled option is an error that lists the known ones. Relative paths
@@ -537,8 +559,18 @@ gains over compiled operators since it writes only the rows that leave it, where
 operator copies the rows it passes on. Compiling the filter of Q6 takes about 1.8 ms, a
 pipeline of a filter, a projection and a join about 3.3 ms; with the class in the cache,
 generating the source and creating an instance takes about 12 and 24 microseconds.
-Reading a CSV file of one million rows in the shape of `lineitem` takes 349 ms for four
-of its columns and 643 ms for all 16.
+A scan of one million rows in the shape of `lineitem` reads a file into batches, from a
+CSV file and from a Parquet file that DuckDB writes with its defaults (Snappy, row groups
+of 122,880 rows), in milliseconds per run:
+
+| Scan | CSV | Parquet |
+| --- | ---: | ---: |
+| The four columns of TPC-H Q6 | 339 | 75 |
+| All 16 columns | 598 | 570 |
+
+parquet-java decodes a Parquet file value by value, with several calls for each value
+of each column; over all columns of a file, that takes about as long as reading the CSV
+file.
 
 ## Supported SQL
 
@@ -549,8 +581,9 @@ DuckDB 1.5.6.
   of the select list can be used by later items, in `WHERE`, `GROUP BY`, `HAVING` and
   `ORDER BY`.
 - `FROM` with tables, subqueries, `VALUES`, the table functions `read_csv`,
-  `read_csv_auto`, `read_json`, `read_json_auto`, `read_ndjson` and `read_ndjson_auto`,
-  and file names such as `FROM 'data/orders.csv'` or `FROM 'events.jsonl'`; `INNER`, `LEFT`,
+  `read_csv_auto`, `read_json`, `read_json_auto`, `read_ndjson`, `read_ndjson_auto`,
+  `read_parquet` and `parquet_scan`, and file names such as `FROM 'data/orders.csv'`,
+  `FROM 'events.jsonl'` or `FROM 'lake/*.parquet'`; `INNER`, `LEFT`,
   `RIGHT`, `FULL` and `CROSS JOIN` with `ON` and any condition without a subquery,
   `USING` or `NATURAL`; `SELECT` without `FROM`.
 - `WHERE`, `GROUP BY` with expressions, positions, aliases and `ALL`, `HAVING`, `ORDER BY`
@@ -637,7 +670,9 @@ Known differences from DuckDB:
 - An expression that fails for some values, such as a cast of a string or a division of
   integers by zero, may fail in one of the two engines and not in the other: each moves
   conditions to other places, such as below a join or into a source, and evaluates
-  them on other rows, or folds constants at another time. Within FyrQL, a compiled
+  them on other rows, or folds constants at another time. A Parquet source skips the row
+  groups and pages in which no row passes the filters, so that their rows are not
+  evaluated at all; without pushdown they are. Within FyrQL, a compiled
   pipeline runs all its nodes for one row before the next row, where the interpreter
   runs each node over a whole batch: when rows of one batch fail in different nodes, the
   two may report the failure of another node first, with another error; whether a query
@@ -645,6 +680,17 @@ Known differences from DuckDB:
 - DuckDB 1.5.6 finds a row for a correlated `EXISTS` or `IN` inside an expression, such
   as `a OR EXISTS (SELECT * FROM u WHERE u.k = t.k AND u.d <> t.d)`, where `t.d` is
   `NULL`, unlike for the same `EXISTS` as a condition of `WHERE`; FyrQL finds none.
+- Of a Parquet file, FyrQL reads the types it does not have as others: an unsigned
+  integer as the next wider type with a sign, up to `HUGEINT` for a `UBIGINT`; a `TIME`
+  as a `VARCHAR` with the text DuckDB gives it; a timestamp in nanoseconds as a
+  `TIMESTAMP` in microseconds, cut toward zero as DuckDB casts it, and a timestamp
+  adjusted to UTC as its instant in UTC, where DuckDB gives a `TIMESTAMPTZ`. A list in
+  one of the older forms whose repeated group has one field and is named `array` or ends
+  in `_tuple` is a list of that group, such as `STRUCT(x INTEGER)[]`, as the specification
+  of Parquet has it; DuckDB takes the field as the element, `INTEGER[]`. A string is not
+  checked for valid UTF-8, a `BSON` column is a `BLOB` that DuckDB does not read, and
+  files compressed with `LZ4` (the older framing of Hadoop), `BROTLI` or `LZO` are an
+  error that names the codec and the file.
 - A select list unnests one list, which may appear in several items; DuckDB unnests
   several lists side by side. `unnest` in a `LEFT JOIN`, with named arguments such as
   `recursive := true`, and of a struct that only an aggregate gives are not taken.
@@ -662,12 +708,13 @@ Known differences from DuckDB:
 | `fyrql-connector-memory` | Java collections, records and POJOs as tables |
 | `fyrql-connector-csv` | CSV and TSV files as tables |
 | `fyrql-connector-json` | JSON files as tables, with the columns inferred as DuckDB infers them |
+| `fyrql-connector-parquet` | Parquet files as tables, read with parquet-java without Hadoop, which it carries renamed |
 | `fyrql-connector-http` | JSON from HTTP endpoints as tables |
 | `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
-| `fyrql-bench` | JMH benchmarks of the interpreter against compiled code; not published |
+| `fyrql-bench` | JMH benchmarks of the interpreter against compiled code and of the scans of CSV and Parquet files; not published |
 
 ## Building
 
@@ -677,7 +724,8 @@ Java 21 or later is required; the Maven wrapper fetches Maven itself.
 ./mvnw -B -ntp verify
 ```
 
-The tests of `fyrql-test` run DuckDB through its JDBC driver, which is a test dependency only.
+The tests of `fyrql-test` run DuckDB through its JDBC driver, which is a test dependency only;
+`fyrql-bench` uses it to write its Parquet file.
 
 Besides a corpus of SQL texts, two generators of random queries compare FyrQL with DuckDB:
 random plans, which FyrQL runs as they are and as it binds them from their SQL, and random
@@ -711,58 +759,61 @@ of the connectors run once more with `-Dfyrql.pushdown=off`, where every source 
 the columns a query needs, and must give the same results.
 
 The 22 TPC-H queries, in the text of the specification with its parameters of
-validation, run over the tables of TPC-H spread across the connectors: `lineitem` and
-`partsupp` as CSV files, `orders` and `customer` in PostgreSQL, `part` and `supplier` as
-JSON lines, `nation` and `region` as Java collections. The data comes from
+validation, run over the tables of TPC-H spread across the connectors: `lineitem` as a
+Parquet file, `partsupp` as a CSV file, `orders` and `customer` in PostgreSQL, `part` and
+`supplier` as JSON lines, `nation` and `region` as Java collections. The data comes from
 `io.trino.tpch`, a Java port of the TPC-H generator, and DuckDB reads the same files for
-the comparison. In `verify` the queries run at scale factor 0.01; the profile `tpch` runs
-them at scale factor 1 with a heap of 8 GB, once in the interpreter (`OFF`) and once with
-code generation (`AUTO`), and writes the time and the peak of the heap of every query in
-both modes, a scan of `lineitem` for reference, and the plans with code generation into
-`fyrql-test/target/tpch-report.md`:
+the comparison; it also writes the Parquet file from a CSV file of the generator, in row
+groups of 122,880 rows. In `verify` the queries run at scale factor 0.01; the profile
+`tpch` runs them at scale factor 1 with a heap of 8 GB, once in the interpreter (`OFF`)
+and once with code generation (`AUTO`), and writes the time and the peak of the heap of
+every query in both modes, a scan of `lineitem` for reference, and the plans with code
+generation into `fyrql-test/target/tpch-report.md`:
 
 ```
 ./mvnw -B -ntp verify -P tpch -Dtest=TpchScale1Test -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
-The files take about 1.1 GB in `fyrql-test/target/tpch` and are written once; loading
-PostgreSQL takes about 25 s. On a laptop with an AMD Ryzen 5 5600H and JDK 21, all 22
+The files take about 0.6 GB in `fyrql-test/target/tpch` and are written once; loading
+PostgreSQL takes about 30 s. On a laptop with an AMD Ryzen 5 5600H and JDK 21, all 22
 queries give the rows of DuckDB in both modes, with a peak of the heap between 0.4 and
-1.6 GB; in seconds:
+1.7 GB; in seconds:
 
 | Query | Interpreted | Compiled | DuckDB |
 | --- | ---: | ---: | ---: |
-| Scan of `lineitem` | 2.5 | 2.4 | 1.6 |
-| Q1 | 4.5 | 3.4 | 2.0 |
-| Q2 | 1.1 | 1.0 | 0.5 |
-| Q3 | 3.6 | 3.3 | 2.2 |
-| Q4 | 2.9 | 2.8 | 2.0 |
-| Q5 | 3.1 | 3.0 | 4.0 |
-| Q6 | 2.5 | 2.4 | 1.7 |
-| Q7 | 5.1 | 4.7 | 2.2 |
-| Q8 | 3.5 | 3.8 | 2.3 |
-| Q9 | 4.7 | 4.4 | 2.5 |
-| Q10 | 3.6 | 3.4 | 2.3 |
-| Q11 | 0.5 | 0.6 | 0.4 |
-| Q12 | 4.0 | 4.1 | 2.1 |
-| Q13 | 2.7 | 2.5 | 0.5 |
-| Q14 | 3.0 | 2.7 | 1.7 |
-| Q15 | 5.0 | 4.8 | 1.6 |
-| Q16 | 0.8 | 0.7 | 0.4 |
-| Q17 | 5.2 | 5.0 | 3.3 |
-| Q18 | 6.2 | 6.1 | 3.7 |
-| Q19 | 3.4 | 3.7 | 2.1 |
-| Q20 | 3.6 | 3.0 | 2.0 |
-| Q21 | 9.4 | 8.0 | 5.5 |
-| Q22 | 1.1 | 1.3 | 0.4 |
-| All 22 queries | 79.4 | 74.7 | 45.4 |
+| Scan of `lineitem` | 0.6 | 0.3 | 0.0 |
+| Q1 | 3.5 | 2.4 | 0.2 |
+| Q2 | 1.1 | 0.9 | 0.4 |
+| Q3 | 2.3 | 2.0 | 0.5 |
+| Q4 | 1.0 | 0.8 | 0.3 |
+| Q5 | 1.5 | 1.3 | 2.3 |
+| Q6 | 1.6 | 1.5 | 0.1 |
+| Q7 | 4.2 | 4.2 | 0.4 |
+| Q8 | 2.0 | 2.0 | 0.5 |
+| Q9 | 2.7 | 2.4 | 0.7 |
+| Q10 | 1.8 | 1.6 | 0.5 |
+| Q11 | 0.5 | 0.6 | 0.3 |
+| Q12 | 3.4 | 2.9 | 0.3 |
+| Q13 | 2.8 | 2.4 | 0.5 |
+| Q14 | 1.8 | 1.5 | 0.1 |
+| Q15 | 3.1 | 2.6 | 0.1 |
+| Q16 | 0.7 | 0.6 | 0.4 |
+| Q17 | 1.8 | 1.4 | 0.2 |
+| Q18 | 2.4 | 2.3 | 0.6 |
+| Q19 | 2.2 | 2.0 | 0.2 |
+| Q20 | 2.1 | 1.9 | 0.3 |
+| Q21 | 4.1 | 3.1 | 0.6 |
+| Q22 | 1.2 | 1.0 | 0.4 |
+| All 22 queries | 47.7 | 41.4 | 9.9 |
 
-Before the CSV files were read into typed columns, joins and aggregations kept their
-values in primitive arrays and pipelines were compiled, the interpreter took 287 s for
-the 22 queries. Most of the time left goes into reading `lineitem`, which DuckDB reads
-in parallel, and into building the hash tables of the joins; compiled code gains about
-6 % over the interpreter. Q15, Q17 and Q18 read `lineitem` twice, once for the
-subquery, and Q21 three times.
+With `lineitem` as a CSV file, the 22 queries took 79.4 s in the interpreter, 74.7 s
+compiled and 45.4 s in DuckDB, and the scan of `lineitem` 2.5, 2.4 and 1.6 s; before the
+CSV files were read into typed columns, joins and aggregations kept their values in
+primitive arrays and pipelines were compiled, the interpreter took 287 s. The scan reads
+four of the 16 columns, which a Parquet file keeps apart. The time left goes mostly into
+the joins and aggregations, which run in one thread, where DuckDB runs on all cores;
+compiled code gains about 13 % over the interpreter. Q15, Q17 and Q18 read `lineitem`
+twice, once for the subquery, and Q21 three times.
 
 ## License
 

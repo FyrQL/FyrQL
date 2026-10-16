@@ -1,0 +1,42 @@
+Apache Parquet Common
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Apache Parquet Encodings
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Apache Parquet Column
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Apache Parquet Format Structures
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Apache Parquet Jackson
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Apache Parquet Hadoop
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+

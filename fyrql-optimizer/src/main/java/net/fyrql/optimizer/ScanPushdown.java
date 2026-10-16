@@ -48,8 +48,10 @@ import java.util.function.Function;
  * no sort or the sort is asked for too.</li>
  * </ul>
  * What the connector accepts moves into the scan as {@link Pushed}; the
- * rest of the nodes stay above it. A connector's answer is checked against
- * the rules of the negotiation.
+ * rest of the nodes stay above it, and the conjuncts it does not accept go
+ * into the scan as hints as well, which the connector sees again when the
+ * scan is opened. A connector's answer is checked against the rules of the
+ * negotiation.
  */
 final class ScanPushdown {
 
@@ -193,7 +195,7 @@ final class ScanPushdown {
             }
             Pushed pushed = new Pushed(accepted, plan.limitAccepted() ? limitRows : OptionalLong.empty(),
                     plan.orderAccepted() ? order : List.of(),
-                    plan.aggregationAccepted() ? aggregation : Optional.empty());
+                    plan.aggregationAccepted() ? aggregation : Optional.empty(), remaining);
             return rebuild(new PlanNode.Scan(scan.table(), scan.tableSchema(), scan.columns(), scan.fields(), pushed),
                     remaining, plan.aggregationAccepted(), order, plan.orderAccepted(), plan.limitAccepted());
         }

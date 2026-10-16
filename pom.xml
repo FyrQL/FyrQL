@@ -21,7 +21,7 @@
 
 	<groupId>io.github.stefan-zobel</groupId>
 	<artifactId>fyrql</artifactId>
-	<version>0.3.0</version>
+	<version>0.3.5</version>
 	<packaging>pom</packaging>
 
 	<name>FyrQL</name>
@@ -44,6 +44,7 @@
 		<module>fyrql-connector-memory</module>
 		<module>fyrql-connector-csv</module>
 		<module>fyrql-connector-json</module>
+		<module>fyrql-connector-parquet</module>
 		<module>fyrql-connector-http</module>
 		<module>fyrql-connector-jdbc</module>
 		<module>fyrql-optimizer</module>
@@ -65,6 +66,13 @@
 		<!-- The streaming parser of the JSON connector, and the YAML parser of the configuration file. -->
 		<jackson.version>2.22.3</jackson.version>
 		<jsqlparser.version>5.4</jsqlparser.version>
+		<!--
+		  Parquet in pure Java without Hadoop: parquet-java with the Hadoop stubs of parquet-floor; hadoop-common is only
+		  needed by javac. All three are renamed into the JAR of the Parquet connector.
+		-->
+		<parquet.version>1.18.1</parquet.version>
+		<parquet-floor.version>2.4</parquet-floor.version>
+		<hadoop.version>3.5.0</hadoop.version>
 		<!-- janino-lts: the latest release on Maven Central; every release of FyrQL names a fixed version. -->
 		<janino.version>3.1.20</janino.version>
 		<!-- The test oracle; only ever a test dependency. -->
@@ -129,6 +137,11 @@
 			</dependency>
 			<dependency>
 				<groupId>io.github.stefan-zobel</groupId>
+				<artifactId>fyrql-connector-parquet</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>io.github.stefan-zobel</groupId>
 				<artifactId>fyrql-connector-http</artifactId>
 				<version>${project.version}</version>
 			</dependency>
@@ -171,6 +184,26 @@
 				<groupId>io.github.janino-lts</groupId>
 				<artifactId>janino</artifactId>
 				<version>${janino.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.parquet</groupId>
+				<artifactId>parquet-hadoop</artifactId>
+				<version>${parquet.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.parquet</groupId>
+				<artifactId>parquet-column</artifactId>
+				<version>${parquet.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>blue.strategic.parquet</groupId>
+				<artifactId>parquet-floor</artifactId>
+				<version>${parquet-floor.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.hadoop</groupId>
+				<artifactId>hadoop-common</artifactId>
+				<version>${hadoop.version}</version>
 			</dependency>
 			<dependency>
 				<groupId>com.github.jsqlparser</groupId>

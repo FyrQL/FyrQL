@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.github.stefan-zobel</groupId>
+		<artifactId>fyrql</artifactId>
+		<version>0.3.5</version>
+	</parent>
+
+	<artifactId>fyrql-connector-parquet</artifactId>
+	<name>FyrQL Parquet connector</name>
+	<description>Parquet files as tables, in pure Java and without Hadoop.</description>
+
+	<properties>
+		<fyrql.module.name>net.fyrql.connector.parquet</fyrql.module.name>
+	</properties>
+
+	<!--
+	  parquet-java, the Hadoop stubs of parquet-floor, aircompressor and slf4j go into the JAR of this module under
+	  net.fyrql.internal, so that an application may have its own Hadoop, parquet-java or slf4j: the stubs live in
+	  Hadoop packages and would otherwise split them. Optional, so that modules that depend on this one do not get
+	  the original classes as well.
+	-->
+	<dependencies>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-spi</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.parquet</groupId>
+			<artifactId>parquet-hadoop</artifactId>
+			<optional>true</optional>
+			<exclusions>
+				<!-- The codecs are pure Java: aircompressor and java.util.zip, no JNI. -->
+				<exclusion>
+					<groupId>org.apache.hadoop</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.xerial.snappy</groupId>
+					<artifactId>snappy-java</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>com.github.luben</groupId>
+					<artifactId>zstd-jni</artifactId>
+				</exclusion>
+				<!-- Source-level annotations of the Thrift classes. -->
+				<exclusion>
+					<groupId>javax.annotation</groupId>
+					<artifactId>javax.annotation-api</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<!-- The stub classes of the Hadoop types that parquet-java touches when it loads. -->
+		<dependency>
+			<groupId>blue.strategic.parquet</groupId>
+			<artifactId>parquet-floor</artifactId>
+			<optional>true</optional>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-api</artifactId>
+			<version>${slf4j.version}</version>
+			<optional>true</optional>
+		</dependency>
+		<!-- parquet-java logs nothing a user needs; without a binding slf4j would print a warning. -->
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-nop</artifactId>
+			<version>${slf4j.version}</version>
+			<optional>true</optional>
+		</dependency>
+		<!--
+		  javac needs the Hadoop types to resolve the overloads of the builders of parquet-java, so hadoop-common is
+		  on the compile class path only; surefire drops it from the test class path.
+		-->
+		<dependency>
+			<groupId>org.apache.hadoop</groupId>
+			<artifactId>hadoop-common</artifactId>
+			<scope>provided</scope>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<!-- The tests check the files of DuckDB and the types it reads. -->
+		<dependency>
+			<groupId>org.duckdb</groupId>
+			<artifactId>duckdb_jdbc</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<classpathDependencyExcludes>
+						<classpathDependencyExclude>org.apache.hadoop:hadoop-common</classpathDependencyExclude>
+					</classpathDependencyExcludes>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-shade-plugin</artifactId>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<createDependencyReducedPom>false</createDependencyReducedPom>
+							<artifactSet>
+								<includes>
+									<include>org.apache.parquet:*</include>
+									<include>blue.strategic.parquet:parquet-floor</include>
+									<include>io.airlift:aircompressor</include>
+									<!-- Geometry types; parquet-java loads a class that refers to it with every schema. -->
+									<include>org.locationtech.jts:jts-core</include>
+									<include>org.slf4j:slf4j-api</include>
+									<include>org.slf4j:slf4j-nop</include>
+								</includes>
+							</artifactSet>
+							<relocations>
+								<relocation>
+									<pattern>org.apache.parquet</pattern>
+									<shadedPattern>net.fyrql.internal.parquet</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.apache.hadoop</pattern>
+									<shadedPattern>net.fyrql.internal.hadoop</shadedPattern>
+								</relocation>
+								<relocation>
+									<!-- Thrift and Jackson, which parquet-java already renamed. -->
+									<pattern>shaded.parquet</pattern>
+									<shadedPattern>net.fyrql.internal.parquet.shaded</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>io.airlift.compress</pattern>
+									<shadedPattern>net.fyrql.internal.aircompressor</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.locationtech.jts</pattern>
+									<shadedPattern>net.fyrql.internal.jts</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.slf4j</pattern>
+									<shadedPattern>net.fyrql.internal.slf4j</shadedPattern>
+								</relocation>
+							</relocations>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+										<exclude>META-INF/maven/**</exclude>
+										<exclude>META-INF/LICENSE*</exclude>
+										<exclude>META-INF/NOTICE*</exclude>
+										<exclude>META-INF/DEPENDENCIES*</exclude>
+										<exclude>module-info.class</exclude>
+										<exclude>META-INF/versions/*/module-info.class</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The same classes of fastutil as in parquet-column. -->
+									<artifact>org.apache.parquet:parquet-hadoop</artifact>
+									<excludes>
+										<exclude>shaded/parquet/it/unimi/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- Versions of Jackson classes for newer JDKs, which the shade plugin would not rename. -->
+									<artifact>org.apache.parquet:parquet-jackson</artifact>
+									<excludes>
+										<exclude>META-INF/versions/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- Only the Hadoop stubs, not the reader and writer of parquet-floor. -->
+									<artifact>blue.strategic.parquet:parquet-floor</artifact>
+									<includes>
+										<include>org/apache/hadoop/**</include>
+									</includes>
+								</filter>
+							</filters>
+							<transformers>
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+							</transformers>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
+</project>

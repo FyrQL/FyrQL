@@ -43,7 +43,13 @@ public interface Connector extends AutoCloseable {
     /** Returns the catalog of the source. */
     Catalog catalog();
 
-    /** Decides which parts of a scan request the source takes over. */
+    /**
+     * Decides which parts of a scan request the source takes over. When the
+     * scan is opened, the engine asks once more with the same filters, those
+     * not taken over included, and expects the same answer; a source may use
+     * the filters it does not take over to skip data in which no row can
+     * satisfy them, never to drop a row that does.
+     */
     ScanPlan plan(TableRef table, ScanRequest request);
 
     /** Returns the parts of a scan that can be read independently; at least one. */

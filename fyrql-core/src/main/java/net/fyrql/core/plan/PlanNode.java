@@ -91,10 +91,14 @@ public sealed interface PlanNode {
      * columns the scan reads: the filters are conjuncts that the connector
      * evaluates, the limit is the number of rows after which it stops, the
      * order is the order of its batches, and the aggregation makes it
-     * deliver groups and aggregates instead of rows.
+     * deliver groups and aggregates instead of rows. The hints are the
+     * conjuncts it did not take over, which the engine evaluates above the
+     * scan; the connector sees them again when the scan is opened and may
+     * use them to skip data in which no row can satisfy them, but they are
+     * not taken over.
      */
     record Pushed(List<Expression> filters, OptionalLong limit, List<SortKey> order,
-            Optional<Aggregation> aggregation) {
+            Optional<Aggregation> aggregation, List<Expression> hints) {
 
         /** Nothing taken over. */
         public static final Pushed NONE = new Pushed(List.of(), OptionalLong.empty(), List.of(), Optional.empty());
@@ -104,9 +108,16 @@ public sealed interface PlanNode {
             Objects.requireNonNull(limit, "limit");
             order = List.copyOf(order);
             Objects.requireNonNull(aggregation, "aggregation");
+            hints = List.copyOf(hints);
         }
 
-        /** Tells whether nothing was taken over. */
+        /** The parts taken over, without hints. */
+        public Pushed(List<Expression> filters, OptionalLong limit, List<SortKey> order,
+                Optional<Aggregation> aggregation) {
+            this(filters, limit, order, aggregation, List.of());
+        }
+
+        /** Tells whether nothing was taken over; the hints do not count. */
         public boolean isEmpty() {
             return filters.isEmpty() && limit.isEmpty() && order.isEmpty() && aggregation.isEmpty();
         }
@@ -127,6 +138,10 @@ public sealed interface PlanNode {
             for (Expression f : filters) {
                 TypeRules.require(DataType.BOOLEAN, f.type(), "A filter of a scan");
                 Expressions.check(columns, f);
+            }
+            for (Expression h : hints) {
+                TypeRules.require(DataType.BOOLEAN, h.type(), "A hint of a scan");
+                Expressions.check(columns, h);
             }
             for (SortKey k : order) {
                 checkColumn(columns, k.column());

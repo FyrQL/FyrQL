@@ -25,6 +25,7 @@ import net.fyrql.connector.RemotePlan;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Split;
+import net.fyrql.core.expr.Expression;
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
@@ -257,14 +258,17 @@ public final class FyrQL implements AutoCloseable {
     }
 
     /**
-     * Opens the reader of a scan: the connector plans it once more, which
-     * must give what the scan carries as taken over, and its splits are
-     * read one after the other.
+     * Opens the reader of a scan: the connector plans it once more, with the
+     * filters it took over and the hints, the same filters as when the scan
+     * was negotiated, which must give what the scan carries as taken over,
+     * and its splits are read one after the other.
      */
     private BatchReader open(PlanNode.Scan scan) {
         Connector connector = connector(scan.table().source());
         PlanNode.Pushed pushed = scan.pushed();
-        ScanRequest request = new ScanRequest(ColumnPath.of(scan), pushed.filters(), pushed.limit(), pushed.order(),
+        List<Expression> filters = new ArrayList<>(pushed.filters());
+        filters.addAll(pushed.hints());
+        ScanRequest request = new ScanRequest(ColumnPath.of(scan), filters, pushed.limit(), pushed.order(),
                 pushed.aggregation());
         ScanPlan plan = connector.plan(scan.table(), request);
         if (!plan.columns().equals(request.columns())) {

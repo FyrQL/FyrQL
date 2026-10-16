@@ -17,9 +17,11 @@
 package net.fyrql.test;
 
 import net.fyrql.FyrQL;
+import net.fyrql.connector.parquet.ParquetConnector;
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
+import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.SqlException;
@@ -28,7 +30,9 @@ import net.fyrql.sql.parse.SqlParser;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -36,7 +40,9 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -719,6 +725,45 @@ class SqlCorpusTest {
                 }
             } catch (RuntimeException | SQLException e) {
                 failures.add(sql + "\n  " + e);
+            }
+        }
+        if (!failures.isEmpty()) {
+            fail(failures.size() + " of " + queries.size() + " queries differ:\n\n" + String.join("\n\n", failures));
+        }
+    }
+
+    /**
+     * Runs the texts over the table {@code n} again, with {@code n} a
+     * Parquet file that DuckDB writes, in a Parquet source named
+     * {@code memory} next to the other tables in a memory source.
+     */
+    @Test
+    void textsOverNestedColumnsAgreeWithDuckDbWhenTheyAreReadFromParquet(@TempDir Path dir) {
+        Path file = dir.resolve("n.parquet");
+        duck.execute("COPY n TO '" + file.toAbsolutePath().toString().replace('\\', '/') + "' (FORMAT parquet)");
+        Pattern overN = Pattern.compile("\\b(FROM|JOIN) n\\b");
+        List<String> queries = new ArrayList<>(QUERIES);
+        queries.addAll(ParserMeaningTest.QUERIES);
+        queries.removeIf(sql -> !overN.matcher(sql).find());
+        assertTrue(queries.size() > 50, queries::toString);
+        List<String> failures = new ArrayList<>();
+        try (FyrQL parquet = FyrQL.builder()
+                .register(ParquetConnector.builder(CorpusTables.SOURCE).path("n", file).batchSize(2).build())
+                .register(CorpusTables.builder("other", false).build()).build()) {
+            TableRef n = TableRef.of(CorpusTables.SOURCE, "n");
+            assertEquals(engine.scan(n).schema().types(), parquet.scan(n).schema().types());
+            for (String sql : queries) {
+                try {
+                    PlanNode plan = parquet.plan(sql);
+                    Schema schema = plan.schema();
+                    ResultComparison.Outcome outcome = ResultComparison.compare(schema, duck.query(sql, schema),
+                            parquet.rows(plan), Plans.ordered(plan));
+                    if (!outcome.same()) {
+                        failures.add(sql + "\n" + outcome.report() + "\n" + parquet.explain(plan));
+                    }
+                } catch (RuntimeException e) {
+                    failures.add(sql + "\n  " + e);
+                }
             }
         }
         if (!failures.isEmpty()) {

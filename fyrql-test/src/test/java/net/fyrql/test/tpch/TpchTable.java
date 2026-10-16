@@ -73,7 +73,7 @@ enum TpchTable {
             "o_orderkey", DataType.INTEGER, "o_custkey", DataType.INTEGER, "o_orderstatus", DataType.VARCHAR,
             "o_totalprice", money(), "o_orderdate", DataType.DATE, "o_orderpriority", DataType.VARCHAR,
             "o_clerk", DataType.VARCHAR, "o_shippriority", DataType.INTEGER, "o_comment", DataType.VARCHAR)),
-    LINEITEM(Store.CSV, fields(
+    LINEITEM(Store.PARQUET, fields(
             "l_orderkey", DataType.INTEGER, "l_partkey", DataType.INTEGER, "l_suppkey", DataType.INTEGER,
             "l_linenumber", DataType.INTEGER, "l_quantity", money(), "l_extendedprice", money(),
             "l_discount", money(), "l_tax", money(), "l_returnflag", DataType.VARCHAR,
@@ -90,7 +90,9 @@ enum TpchTable {
         /** A CSV file with a header and {@link TpchData#DELIMITER} between the fields. */
         CSV,
         /** A table of a database, loaded from a CSV file as the CSV tables are written. */
-        DATABASE
+        DATABASE,
+        /** A Parquet file, which DuckDB writes from a CSV file as the CSV tables are written. */
+        PARQUET
     }
 
     private final Store store;

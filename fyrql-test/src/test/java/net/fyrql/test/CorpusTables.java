@@ -47,6 +47,11 @@ final class CorpusTables {
 
     /** The source with the four tables; the caller may add settings before building it. */
     static MemoryConnector.Builder builder() {
+        return builder(SOURCE, true);
+    }
+
+    /** A source of a name with the tables, {@code n} only if asked for. */
+    static MemoryConnector.Builder builder(String source, boolean nested) {
         Schema t = Schema.of(new Schema.Field("a", DataType.INTEGER), new Schema.Field("b", DataType.VARCHAR),
                 new Schema.Field("c", DataType.DOUBLE), new Schema.Field("d", DataType.DATE),
                 new Schema.Field("e", DataType.TINYINT), new Schema.Field("k", DataType.INTEGER));
@@ -86,8 +91,9 @@ final class CorpusTables {
                 row(4, list(4, null, "Bob", null), list(null, 5, 5), map("a", null, "c", 3),
                         list(null, list(4, null))),
                 row(5, list(-2, "p", "Cid", list(-0.5, list())), list(7), map("b", 9), list(list(7, 8, 9))));
-        return MemoryConnector.builder(SOURCE).table("t", t, tRows).table("u", u, uRows).table("w", w, wRows)
-                .table("n", n, nRows);
+        MemoryConnector.Builder builder = MemoryConnector.builder(source).table("t", t, tRows).table("u", u, uRows)
+                .table("w", w, wRows);
+        return nested ? builder.table("n", n, nRows) : builder;
     }
 
     private static List<Object> list(Object... values) {

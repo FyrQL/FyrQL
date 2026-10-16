@@ -22,7 +22,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.3.0</version>
+		<version>0.3.5</version>
 	</parent>
 
 	<artifactId>fyrql-test</artifactId>
@@ -60,6 +60,10 @@
 		</dependency>
 		<dependency>
 			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-parquet</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-connector-http</artifactId>
 		</dependency>
 		<dependency>
@@ -70,6 +74,19 @@
 			<groupId>org.duckdb</groupId>
 			<artifactId>duckdb_jdbc</artifactId>
 			<scope>test</scope>
+		</dependency>
+		<!-- An unrenamed parquet-java next to the one inside the Parquet connector, for ShadedParquetTest. -->
+		<dependency>
+			<groupId>org.apache.parquet</groupId>
+			<artifactId>parquet-column</artifactId>
+			<scope>test</scope>
+			<exclusions>
+				<!-- The tests already have slf4j, in the version of the other test dependencies. -->
+				<exclusion>
+					<groupId>org.slf4j</groupId>
+					<artifactId>slf4j-api</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 		<dependency>
 			<groupId>com.h2database</groupId>

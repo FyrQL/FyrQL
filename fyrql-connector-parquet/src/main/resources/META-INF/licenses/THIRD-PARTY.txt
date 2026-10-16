@@ -1,0 +1,26 @@
+This JAR includes the following software, renamed into packages under
+net.fyrql.internal:
+
+- Apache Parquet Java 1.18.1 (parquet-hadoop, parquet-column, parquet-common,
+  parquet-encoding, parquet-format-structures, parquet-jackson)
+  https://parquet.apache.org/
+  Apache License 2.0, see parquet-java-LICENSE.txt and parquet-java-NOTICE.txt.
+  parquet-jackson includes FastDoubleParser and Schubfach, see
+  META-INF/FastDoubleParser-LICENSE, META-INF/FastDoubleParser-ThirdParty-LICENSE
+  and META-INF/Schubfach-LICENSE.
+
+- parquet-floor 2.4, only its stub classes of Hadoop types
+  https://github.com/strategicblue/parquet-floor
+  Apache License 2.0, see the license text in parquet-java-LICENSE.txt.
+
+- aircompressor 2.0.3
+  https://github.com/airlift/aircompressor
+  Apache License 2.0, see the license text in parquet-java-LICENSE.txt.
+
+- JTS Topology Suite 1.20.0, which parquet-java needs for geometry types
+  https://github.com/locationtech/jts
+  Eclipse Distribution License 1.0, see jts-LICENSE.txt.
+
+- SLF4J API and SLF4J NOP binding 1.7.36
+  https://www.slf4j.org/
+  MIT License, see slf4j-LICENSE.txt.
