@@ -29,6 +29,7 @@ import net.fyrql.sql.ast.SelectItem;
 import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlExpr.LiteralKind;
 import net.fyrql.sql.ast.SqlPrinter;
+import net.fyrql.sql.ast.WindowSpec;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -50,6 +51,11 @@ import java.util.SplittableRandom;
  * {@code GROUP BY} with expressions, positions, aliases and {@code ALL},
  * {@code HAVING}, {@code ORDER BY} with positions and {@code ALL},
  * {@code LIMIT}, set operations, and literals in all their forms.
+ * <p>
+ * The select list may hold window functions, over windows of their own or
+ * of the {@code WINDOW} clause, with {@code QUALIFY}; that of an
+ * aggregation one over its groups and aggregates. A window either orders by
+ * all columns in scope, or its calls give the same result to peers.
  * <p>
  * The {@code WHERE} clause may hold a subquery over a table: {@code EXISTS},
  * {@code IN}, or a comparison with an aggregate or with the first value in
@@ -415,6 +421,25 @@ final class SqlGenerator {
                 width++;
             }
         }
+        List<QueryBody.NamedWindow> windowClause = new ArrayList<>();
+        SqlExpr qualify = null;
+        if (from != null && chance(15)) {
+            Map<String, Spec> specs = new LinkedHashMap<>();
+            List<SqlExpr> windows = new ArrayList<>();
+            for (int i = random.nextInt(1, 3); i > 0; i--) {
+                SqlExpr w = window(scope, g, text, windowClause, specs);
+                windows.add(w);
+                String alias = named || chance(30) ? pick(ALIASES) : null;
+                items.add(new SelectItem.ExpressionItem(w, alias));
+                aliases.add(alias);
+                if (width >= 0) {
+                    width++;
+                }
+            }
+            if (chance(25)) {
+                qualify = new SqlExpr.Binary(comparison(), pick(windows), number(random.nextInt(0, 4)), P);
+            }
+        }
         if (from != null && chance(10)) {
             Relation inner = inner();
             SqlExpr x = new SqlExpr.ScalarSubquery(aggregating(inner, innerAggregate(inner),
@@ -427,8 +452,8 @@ final class SqlGenerator {
             }
         }
         boolean distinct = chance(10);
-        return new Select(new QueryBody.Select(distinct, items, from == null ? null : from.item(), where, null, null, P),
-                width, aliases);
+        return new Select(new QueryBody.Select(distinct, items, from == null ? null : from.item(), where, null, null,
+                windowClause, qualify, P), width, aliases);
     }
 
     private SelectItem star(Relation from) {
@@ -513,11 +538,18 @@ final class SqlGenerator {
                     c, innerWhere(inner, List.of(), true)), P), P);
             having = having == null ? compared : new SqlExpr.Binary(SqlExpr.BinaryOp.AND, having, compared, P);
         }
+        if (chance(15) && (groupBy == null || !groupBy.all())) {
+            List<SqlExpr> keys = new ArrayList<>(groups);
+            keys.addAll(calls);
+            items.add(new SelectItem.ExpressionItem(windowOverGroups(keys, groups), named || chance(30)
+                    ? "r" + names++ : null));
+            aliases.add(null);
+        }
         QueryBody.Select body = new QueryBody.Select(chance(5), items, from.item(), where, groupBy, having, P);
         return new Select(body, items.size(), aliases);
     }
 
-    private static SqlExpr countStar() {
+    private static SqlExpr.FunctionCall countStar() {
         return new SqlExpr.FunctionCall("count", List.of(), false, true, List.of(), P);
     }
 
@@ -577,6 +609,258 @@ final class SqlGenerator {
             }
         }
         return countStar();
+    }
+
+    // ------------------------------------------------------------- windows
+
+    /**
+     * A window in the making: the spec written after {@code OVER}, whether
+     * its order is total, and the type of its only order key, {@code null}
+     * if it has none or several.
+     */
+    private record Spec(WindowSpec over, boolean total, DataType key) {
+    }
+
+    /**
+     * A call of a window function over the columns in scope, over a window
+     * of its own, one of the {@code WINDOW} clause, or a new one there.
+     * Either the order of the window is total, by all columns in scope, so
+     * that every function and frame has one result, or it has one key at
+     * most, whose peers the call takes together: a ranking with peers, or
+     * an aggregate over a {@code RANGE} or {@code GROUPS} frame, which takes
+     * or leaves out whole groups of peers.
+     *
+     * @param named the windows of the {@code WINDOW} clause, to which this one may add
+     * @param specs the specs of those windows, by name
+     */
+    private SqlExpr.Window window(List<Column> scope, ExpressionGenerator g, SqlText text,
+            List<QueryBody.NamedWindow> named, Map<String, Spec> specs) {
+        Spec spec;
+        WindowSpec over;
+        if (!specs.isEmpty() && chance(40)) {
+            String name = pick(new ArrayList<>(specs.keySet()));
+            spec = specs.get(name);
+            over = WindowSpec.named(name);
+        } else {
+            spec = spec(scope, g, text);
+            over = spec.over();
+            if (chance(25)) {
+                String name = "win" + names++;
+                named.add(new QueryBody.NamedWindow(name, spec.over(), P));
+                specs.put(name, spec);
+                over = WindowSpec.named(name);
+            }
+        }
+        if (!spec.total()) {
+            if (chance(30)) {
+                String f = pick(List.of("rank", "dense_rank", "percent_rank", "cume_dist"));
+                return new SqlExpr.Window(call(f, List.of()), over, false, null, P);
+            }
+            return windowAggregate(g, text, over, false);
+        }
+        Expression value = chance(60) && !scope.isEmpty() ? g.leaf() : g.any(2);
+        SqlExpr x = text.of(value);
+        boolean ignoreNulls = chance(20);
+        return switch (random.nextInt(9)) {
+            case 0 -> new SqlExpr.Window(call(pick(List.of("row_number", "rank", "dense_rank", "percent_rank",
+                    "cume_dist")), List.of()), over, false, null, P);
+            case 1 -> new SqlExpr.Window(call("ntile", List.of(count(g, text, 1))), over, false, null, P);
+            case 2, 3 -> {
+                List<SqlExpr> arguments = new ArrayList<>(List.of(x));
+                if (chance(70)) {
+                    arguments.add(count(g, text, 0));
+                    if (chance(50)) {
+                        arguments.add(text.of(g.like(value.type(), 1)));
+                    }
+                }
+                yield new SqlExpr.Window(call(chance(50) ? "lag" : "lead", arguments), over, ignoreNulls, null, P);
+            }
+            case 4 -> new SqlExpr.Window(call(chance(50) ? "first_value" : "last_value", List.of(x)), over,
+                    ignoreNulls, null, P);
+            case 5 -> new SqlExpr.Window(call("nth_value", List.of(x, count(g, text, 1))), over, ignoreNulls, null,
+                    P);
+            default -> windowAggregate(g, text, over, true);
+        };
+    }
+
+    private static SqlExpr.FunctionCall call(String name, List<SqlExpr> arguments) {
+        return new SqlExpr.FunctionCall(name, arguments, false, false, List.of(), P);
+    }
+
+    /** A count, an offset or a position: mostly a small number from the least on, else an expression. */
+    private SqlExpr count(ExpressionGenerator g, SqlText text, int least) {
+        if (chance(75)) {
+            return number(random.nextInt(least, 4));
+        }
+        return text.of(g.like(chance(50) ? DataType.INTEGER : DataType.BIGINT, 1));
+    }
+
+    /** A window over the columns in scope, with a partition, an order and a frame, each of which may be absent. */
+    private Spec spec(List<Column> scope, ExpressionGenerator g, SqlText text) {
+        List<SqlExpr> partition = new ArrayList<>();
+        for (int i = random.nextInt(0, 3); i > 0 && !scope.isEmpty(); i--) {
+            partition.add(text.of(chance(70) ? g.leaf() : g.any(1)));
+        }
+        boolean total = chance(60);
+        List<OrderItem> order = new ArrayList<>();
+        DataType key = null;
+        if (total) {
+            List<Column> columns = new ArrayList<>(scope);
+            Collections.shuffle(columns, new java.util.Random(random.nextLong()));
+            for (Column c : columns) {
+                order.add(new OrderItem(reference(c, scope), chance(60), chance(30)));
+            }
+            key = columns.size() == 1 ? columns.get(0).type() : null;
+        } else if (chance(85)) {
+            Expression e = chance(70) && !scope.isEmpty() ? g.leaf() : g.any(1);
+            if (ExpressionGenerator.plain(e.type())) {
+                order.add(new OrderItem(text.of(e), chance(60), chance(30)));
+                key = e.type();
+            }
+        }
+        return new Spec(new WindowSpec(null, partition, order, frame(total, key)), total, key);
+    }
+
+    /**
+     * A frame, or {@code null} for the default one: rows, groups of peers or
+     * a range of values of the only order key, with offsets mostly small and
+     * positive, and sometimes rows left out. Without a total order, there
+     * are no frames of rows.
+     */
+    private WindowSpec.Frame frame(boolean total, DataType key) {
+        if (chance(25)) {
+            return null;
+        }
+        WindowSpec.FrameUnit unit = total ? pick(List.of(WindowSpec.FrameUnit.values()))
+                : pick(List.of(WindowSpec.FrameUnit.RANGE, WindowSpec.FrameUnit.GROUPS));
+        boolean offsets = unit != WindowSpec.FrameUnit.RANGE
+                || key != null && (key.isNumeric() || key == DataType.DATE || key == DataType.TIMESTAMP);
+        for (int attempt = 0; attempt < 10; attempt++) {
+            WindowSpec.BoundKind start = pick(List.of(WindowSpec.BoundKind.UNBOUNDED_PRECEDING,
+                    WindowSpec.BoundKind.PRECEDING, WindowSpec.BoundKind.CURRENT_ROW, WindowSpec.BoundKind.FOLLOWING));
+            WindowSpec.BoundKind end = pick(List.of(WindowSpec.BoundKind.PRECEDING, WindowSpec.BoundKind.CURRENT_ROW,
+                    WindowSpec.BoundKind.FOLLOWING, WindowSpec.BoundKind.UNBOUNDED_FOLLOWING));
+            if (start.ordinal() > end.ordinal() || !offsets && (start.hasOffset() || end.hasOffset())) {
+                continue;
+            }
+            WindowSpec.Exclusion exclusion = chance(70) ? WindowSpec.Exclusion.NO_OTHERS
+                    : pick(List.of(WindowSpec.Exclusion.values()));
+            return new WindowSpec.Frame(unit, bound(start, unit, key), bound(end, unit, key), exclusion);
+        }
+        return null;
+    }
+
+    /** A bound with an offset where its kind has one: a number, or an interval over a date or a timestamp. */
+    private WindowSpec.Bound bound(WindowSpec.BoundKind kind, WindowSpec.FrameUnit unit, DataType key) {
+        if (!kind.hasOffset()) {
+            return WindowSpec.Bound.of(kind);
+        }
+        int n = chance(5) ? -1 : random.nextInt(0, 4);
+        SqlExpr offset;
+        if (unit != WindowSpec.FrameUnit.RANGE) {
+            offset = chance(10) ? new SqlExpr.Literal(LiteralKind.NUMBER, n + ".5", P) : number(n);
+        } else if (key == DataType.DATE && chance(50)) {
+            offset = number(n * random.nextInt(1, 40));
+        } else if (key == DataType.DATE || key == DataType.TIMESTAMP) {
+            String u = key == DataType.DATE ? pick(List.of("DAY", "MONTH", "YEAR", "HOUR"))
+                    : pick(List.of("YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND"));
+            long count = u.equals("YEAR") || u.equals("MONTH") ? n : n * random.nextLong(1, 100);
+            offset = new SqlExpr.Interval(Long.toString(count), u, P);
+        } else if (!key.isIntegral() && chance(50)) {
+            offset = new SqlExpr.Literal(LiteralKind.NUMBER, n + "." + random.nextInt(1, 10), P);
+        } else {
+            offset = number(n);
+        }
+        return new WindowSpec.Bound(kind, offset);
+    }
+
+    /**
+     * An aggregate over a window, sometimes with a filter. The aggregates
+     * whose result depends on the order of their values are ordered by
+     * them, but for {@code first} and {@code last} over a total order,
+     * which DuckDB takes as {@code first_value} and {@code last_value}.
+     */
+    private SqlExpr.Window windowAggregate(ExpressionGenerator g, SqlText text, WindowSpec over, boolean total) {
+        SqlExpr.FunctionCall call = null;
+        for (int attempt = 0; attempt < 20 && call == null; attempt++) {
+            Expression argument = chance(60) ? g.leaf() : g.any(2);
+            DataType t = argument.type();
+            boolean floating = t == DataType.FLOAT || t == DataType.DOUBLE;
+            boolean plain = ExpressionGenerator.plain(t);
+            boolean distinct = chance(20);
+            SqlExpr x = text.of(argument);
+            List<OrderItem> own = List.of(new OrderItem(x, chance(60), chance(30)));
+            switch (random.nextInt(11)) {
+                case 0 -> call = countStar();
+                case 1 -> call = new SqlExpr.FunctionCall("count", List.of(x), distinct, false, List.of(), P);
+                case 2, 3 -> {
+                    if (t.isIntegral() || t instanceof DataType.Decimal) {
+                        call = new SqlExpr.FunctionCall(chance(50) ? "sum" : "avg", List.of(x), distinct, false,
+                                List.of(), P);
+                    }
+                }
+                case 4, 5 -> {
+                    if (plain) {
+                        call = new SqlExpr.FunctionCall(chance(50) ? "min" : "max", List.of(x), distinct, false,
+                                List.of(), P);
+                    }
+                }
+                case 6 -> {
+                    if (t == DataType.BOOLEAN) {
+                        call = call(chance(50) ? "bool_and" : "bool_or", List.of(x));
+                    }
+                }
+                case 7 -> {
+                    if (plain && !floating) {
+                        SqlExpr separator = SqlText.string(pick(List.of(",", "", "-")));
+                        call = new SqlExpr.FunctionCall(chance(70) ? "string_agg" : "listagg", List.of(x, separator),
+                                distinct, false, own, P);
+                    }
+                }
+                case 8 -> {
+                    if (plain && !floating) {
+                        call = new SqlExpr.FunctionCall("list", List.of(x), distinct, false, own, P);
+                    }
+                }
+                case 9 -> {
+                    if (plain && !floating) {
+                        call = new SqlExpr.FunctionCall(chance(50) ? "any_value" : "arbitrary", List.of(x), false,
+                                false, own, P);
+                    }
+                }
+                default -> {
+                    if (total) {
+                        call = call(chance(50) ? "first" : "last", List.of(x));
+                    }
+                }
+            }
+        }
+        if (call == null) {
+            call = countStar();
+        }
+        SqlExpr filter = chance(20) ? text.of(g.condition(1)) : null;
+        return new SqlExpr.Window(call, over, false, filter, P);
+    }
+
+    /**
+     * A window function over the groups and aggregates of an aggregation,
+     * which the order of peers does not change: a ranking ordered by one of
+     * them, or an aggregate of one over the default frame.
+     *
+     * @param keys the groups and aggregates
+     * @param groups the groups, by which it may be partitioned
+     */
+    private SqlExpr.Window windowOverGroups(List<SqlExpr> keys, List<SqlExpr> groups) {
+        List<SqlExpr> partition = !groups.isEmpty() && chance(40) ? List.of(pick(groups)) : List.of();
+        List<OrderItem> order = chance(70) ? List.of(new OrderItem(pick(keys), chance(60), chance(30))) : List.of();
+        WindowSpec over = new WindowSpec(null, partition, order, null);
+        if (!order.isEmpty() && chance(50)) {
+            String f = pick(List.of("rank", "dense_rank", "percent_rank", "cume_dist"));
+            return new SqlExpr.Window(call(f, List.of()), over, false, null, P);
+        }
+        SqlExpr.FunctionCall call = chance(50) ? call(chance(50) ? "sum" : "count", List.of(countStar()))
+                : call(chance(50) ? "min" : "max", List.of(pick(keys)));
+        return new SqlExpr.Window(call, over, false, null, P);
     }
 
     // ---------------------------------------------------------- subqueries

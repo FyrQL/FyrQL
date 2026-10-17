@@ -80,6 +80,7 @@ final class Statistics {
             case PlanNode.SetOperation s -> s.kind() == PlanNode.SetOperationKind.EXCEPT ? rows(s.left())
                     : Math.min(rows(s.left()), rows(s.right()));
             case PlanNode.Unnest u -> rows(u.input()) * UNNEST_FACTOR;
+            case PlanNode.Window w -> rows(w.input());
             case PlanNode.Values v -> v.rows().size();
         };
     }

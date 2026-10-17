@@ -28,7 +28,8 @@ endpoints and databases over JDBC, an optimizer that moves conditions toward the
 tables, orders joins by the sizes of the tables and runs the joins of tables of one
 database in that database, a pushdown of filters, orders, limits and aggregations into
 the sources, an SQL front end with the names, types and forms of DuckDB, subqueries,
-also correlated ones, that become joins, a JDBC driver, also as one JAR for tools such as
+also correlated ones, that become joins, window functions with all frames of DuckDB, a
+JDBC driver, also as one JAR for tools such as
 DBeaver, and a differential test harness that compares the results with DuckDB. All 22
 TPC-H queries run at scale factor 1 over tables spread across Parquet, CSV, JSON,
 PostgreSQL and Java collections.
@@ -225,6 +226,7 @@ them by their bytes; MySQL compares strings without regard to case. A filter is 
 over in parts, conjunct by conjunct; the order only as a whole, and the limit only with
 all filters and the order. An aggregation is taken over as a whole, only with all
 filters, and becomes `SELECT groups, aggregates FROM table WHERE ... GROUP BY groups`.
+Window functions are never taken over; they run in the engine.
 A sum is cast to `NUMERIC(39)`, in MySQL `DECIMAL(39,0)`, and read as `HUGEINT`, the type
 FyrQL gives it, so that the database neither overflows nor answers in a type of its own;
 SQLite has no such type and leaves sums to the engine. The connector of an application
@@ -250,7 +252,7 @@ keeps the rows of the plan, and a second run changes nothing:
    condition that every branch of an `OR` contains is taken out in front of it, such as
    `p_partkey = l_partkey` in TPC-H Q19, which so becomes the key of a join.
 2. Conditions move toward the tables: through projections, inner joins, the groups of
-   an aggregation, orders and unions, and through an outer join only to the side whose
+   an aggregation, the partitions of window functions, orders and unions, and through an outer join only to the side whose
    rows it keeps, as through a semi, anti, mark and single join to the left one. An
    equality between the two sides of a join, in a condition above it or in its own,
    becomes a key of the join, so that `FROM a, b WHERE a.id = b.id` is a hash join and
@@ -267,7 +269,8 @@ keeps the rows of the plan, and a second run changes nothing:
 4. Every scan reads only the columns in use, and of a struct only the fields in use
    where its source reads fields (Parquet and JSON files, HTTP endpoints and Java
    collections);
-   `explain` shows such a field as `s.a VARCHAR`.
+   `explain` shows such a field as `s.a VARCHAR`. A window function whose value is not
+   used is not computed.
 5. The largest part of the plan that reads only tables of one database and holds a
    join is offered to that database, which takes it as one statement if it evaluates
    all of it exactly as FyrQL, and otherwise is offered the parts below. The join
@@ -780,9 +783,65 @@ DuckDB 1.5.6.
   `struct_pack`; and DuckDB's aliases of these names.
 - Aggregates: `count`, `sum`, `avg`, `min`, `max`, `string_agg`, `list`, `first`, `last`,
   `any_value`, `bool_and`, `bool_or`, with `DISTINCT` and `ORDER BY` in the call.
+- Window functions: `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`,
+  `ntile`, `lag` and `lead` with an offset and a default, `first_value`, `last_value`,
+  `nth_value`, and the aggregates above, also with `DISTINCT`, `ORDER BY` and
+  `FILTER (WHERE ...)` in the call, over `OVER (PARTITION BY ... ORDER BY ...)` with a
+  frame of `ROWS`, `RANGE` or `GROUPS`, `BETWEEN` any two of `UNBOUNDED PRECEDING`,
+  `n PRECEDING`, `CURRENT ROW`, `n FOLLOWING` and `UNBOUNDED FOLLOWING`, and
+  `EXCLUDE CURRENT ROW`, `GROUP`, `TIES` or `NO OTHERS`. The offset of a `RANGE` frame is
+  a number for a numeric order, and a number of days or an interval such as
+  `INTERVAL 1 MONTH` for a `DATE` or `TIMESTAMP`. `IGNORE NULLS` goes with `lag`, `lead`,
+  `first_value`, `last_value` and `nth_value`. A window may be named in the `WINDOW`
+  clause and used as `OVER w`; `QUALIFY` filters the rows by the values of window
+  functions. Over an aggregation, a window function reads the groups and aggregates, as
+  in `sum(count(*)) OVER ()`.
 
-*Not yet supported*: window functions, the type `INTERVAL`, `QUALIFY`, `PIVOT`, `SEMI
-JOIN` and `ANTI JOIN` in SQL, lambdas, slices such as `l[1:2]`, structs without names
+Over the data of the [first example](#using-the-engine), window functions rank the
+orders of each region and add up their amounts:
+
+```sql
+SELECT c.region, o.id, o.amount,
+       rank() OVER (PARTITION BY c.region ORDER BY o.amount DESC) AS place,
+       sum(o.amount) OVER (PARTITION BY c.region) AS total
+FROM orders AS o JOIN customers AS c ON o.customerId = c.id
+ORDER BY c.region, place
+```
+
+```
+[north, 1, 10.50, 1, 15.75]
+[north, 3, 5.25, 2, 15.75]
+[north, 4, null, 3, 15.75]
+[south, 2, 20.00, 1, 20.00]
+Sort #0, #3
+  Project #4 AS region, #0 AS id, #1 AS amount, #5 AS place, #6 AS total
+    Window PARTITION BY #4: sum(#1) AS "sum(o.amount) OVER (PARTITION BY c.region)"
+      Window PARTITION BY #4 ORDER BY #1 DESC: rank() AS "rank() OVER (PARTITION BY c.region ORDER BY o.amount DESC NULLS LAST)"
+        Join INNER ON l#2 = r#0 [codegen]
+          Project #0 AS id, #2 AS amount, CAST(#1 AS BIGINT) AS "#key0" [codegen]
+            Scan mem.main.orders (id BIGINT, customerId INTEGER, amount DECIMAL(10,2))
+          Scan csv.main.customers (id BIGINT, region VARCHAR)
+```
+
+A `Window` node appends one column per call to the rows of its input, for all calls with
+the same partition and order; `NULL`s come last in both directions, as in DuckDB. It reads
+its whole input and sorts it, gives each row its frame, and computes an aggregate over a
+moving frame from a segment tree, in logarithmic time per row; `string_agg`, `list`, and
+aggregates with `DISTINCT` or `ORDER BY` in the call go over each frame anew. With
+`QUALIFY`, the largest order of each region is
+
+```sql
+SELECT c.region, o.id
+FROM orders AS o JOIN customers AS c ON o.customerId = c.id
+WINDOW w AS (PARTITION BY c.region ORDER BY o.amount DESC)
+QUALIFY row_number() OVER w = 1
+ORDER BY c.region
+```
+
+with the rows `[north, 1]` and `[south, 2]`.
+
+*Not yet supported*: the type `INTERVAL`, `PIVOT`, `SEMI JOIN` and `ANTI JOIN` in SQL,
+lambdas, slices such as `l[1:2]`, structs without names
 (`row(1, 'a')`), arrays of a fixed size (`INTEGER[3]`), and `WITH RECURSIVE`. Of the
 subqueries: those in `ORDER BY`, `GROUP BY`, `ON` and the arguments of aggregates;
 `ANY` and `ALL`; `IN` over more than one column. Of the correlated ones: a reference
@@ -790,7 +849,11 @@ to the outer query outside the `WHERE` of the subquery or more than one level ou
 condition that references the outer query and holds a subquery, or an `IN` whose value
 does; a correlated condition of an aggregating subquery that is not an equality;
 `EXISTS` and `IN` over a subquery that aggregates without `GROUP BY`; `LIMIT`, `OFFSET`,
-and `HAVING` without `GROUP BY`; `DISTINCT` in a scalar subquery.
+and `HAVING` without `GROUP BY`; `DISTINCT` in a scalar subquery. Of the window
+functions: `FILTER` without `OVER`, `WITHIN GROUP`, a window that adds to a named one,
+as in `OVER (w ORDER BY a)`, offsets of a frame that are no constants or `NULL`, an order
+in the arguments of a function that is no aggregate, as in `lag(a ORDER BY b)`, window
+functions in a correlated subquery, and subqueries or `unnest` inside window functions.
 
 Known differences from DuckDB:
 
@@ -841,6 +904,20 @@ Known differences from DuckDB:
 - A select list unnests one list, which may appear in several items; DuckDB unnests
   several lists side by side. `unnest` in a `LEFT JOIN`, with named arguments such as
   `recursive := true`, and of a struct that only an aggregate gives are not taken.
+- A window whose first expression of `PARTITION BY` is in parentheses and followed by
+  others, as in `PARTITION BY (a % 2), k`, does not parse; `PARTITION BY ((a % 2)), k`
+  does.
+- A window function whose value is not used is not computed, and so does not fail, as it
+  does in DuckDB on a negative offset of a `RANGE` frame.
+- `lag` and `lead` give their default where the offset reaches beyond the range of
+  `BIGINT`; DuckDB fails with an overflow. A default whose type does not cast to the
+  type of the value, such as a `BIGINT` for a `DATE`, is an error when the query is
+  bound; DuckDB fails only at a row that takes a default that is not `NULL`.
+- A `-0.0` by which a window partitions or orders keeps its sign; DuckDB passes such
+  columns on as `0.0`.
+- DuckDB 1.5.6 takes rows into a frame whose start lies after its end when the frame has
+  an `EXCLUDE`, as in `GROUPS BETWEEN 0 PRECEDING AND 3 PRECEDING EXCLUDE TIES`, where it
+  takes earlier groups; FyrQL keeps such a frame empty.
 
 ## Modules
 
@@ -879,7 +956,8 @@ The tests of `fyrql-test` run DuckDB through its JDBC driver, which is a test de
 Besides a corpus of SQL texts, two generators of random queries compare FyrQL with DuckDB:
 random plans, which FyrQL runs as they are and as it binds them from their SQL, and random
 SQL text with names, aliases, joins, subqueries in `FROM`, `WHERE`, `HAVING` and the select
-list, correlated or not, grouping and set operations. Each runs 200
+list, correlated or not, grouping, window functions with `WINDOW` and `QUALIFY`, and set
+operations. Each runs 200
 queries with a fixed seed in `verify`; more queries or another seed are a property away:
 
 ```

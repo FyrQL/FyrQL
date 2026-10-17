@@ -20,6 +20,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
+import net.fyrql.core.type.Schema;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -76,7 +77,8 @@ final class Minimizer {
      * The smaller variants of a plan: a subtree in place of the whole plan,
      * a node replaced by an input of the same column types, fewer columns
      * or aggregates at the top, smaller expressions, an unnest replaced by
-     * its input with {@code NULL} elements, a scan replaced by the rows it
+     * its input with {@code NULL} elements, a call of a window or the whole
+     * window replaced by {@code NULL}s, a scan replaced by the rows it
      * reads, and fewer rows of {@code VALUES}.
      *
      * @param rows the rows a scan reads
@@ -155,6 +157,11 @@ final class Minimizer {
                 for (Expression e : smaller(u.list())) {
                     add(result, () -> Plans.replace(plan, n, new PlanNode.Unnest(u.input(), e, u.name())));
                 }
+            } else if (n instanceof PlanNode.Window w) {
+                for (int i = -1; i < w.calls().size(); i++) {
+                    int dropped = i;
+                    add(result, () -> Plans.replace(plan, n, withoutCall(w, dropped)));
+                }
             }
         }
         for (PlanNode n : nodes) {
@@ -174,6 +181,32 @@ final class Minimizer {
             }
         }
         return result;
+    }
+
+    /**
+     * A window with {@code NULL} in place of the column of one call, or of
+     * all calls without the window, as columns of the same types.
+     *
+     * @param dropped the call that goes, or -1 for all
+     */
+    private static PlanNode withoutCall(PlanNode.Window w, int dropped) {
+        Schema in = w.input().schema();
+        Schema out = w.schema();
+        PlanNode base = w.input();
+        if (dropped >= 0) {
+            List<PlanNode.WindowCall> calls = new ArrayList<>(w.calls());
+            calls.remove(dropped);
+            base = new PlanNode.Window(w.input(), w.partition(), w.order(), calls);
+        }
+        List<PlanNode.NamedExpression> columns = new ArrayList<>();
+        for (int i = 0; i < out.size(); i++) {
+            int call = i - in.size();
+            Expression e = call < 0 ? new Expression.Column(i, in.type(i))
+                    : dropped < 0 || call == dropped ? Expressions.nullOf(out.type(i))
+                    : new Expression.Column(call < dropped ? i : i - 1, out.type(i));
+            columns.add(new PlanNode.NamedExpression(out.name(i), e));
+        }
+        return new PlanNode.Project(base, columns);
     }
 
     /** The smaller variants of an expression of the same type: an operand in its place, or a scalar {@code NULL}. */

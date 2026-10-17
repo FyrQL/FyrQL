@@ -26,6 +26,7 @@ import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
 import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.PlanNode.SortKey;
+import net.fyrql.core.plan.PlanNode.WindowCall;
 import net.fyrql.core.type.Schema;
 
 import java.util.ArrayList;
@@ -43,10 +44,11 @@ import java.util.function.Function;
 
 /**
  * Narrows every scan to the columns the nodes above it use, and drops the
- * columns of projections and the aggregates that nothing reads. The pass
- * goes down the plan with what a node must keep of its output columns, and
- * every node keeps that and whatever its own keys and expressions need; on
- * the way up, column references are renumbered. The root keeps all its
+ * columns of projections, the aggregates and the window calls that nothing
+ * reads, and a window without a call in use. The pass goes down the plan
+ * with what a node must keep of its output columns, and every node keeps
+ * that and whatever its own keys and expressions need; on the way up,
+ * column references are renumbered. The root keeps all its
  * columns, so the output of the plan is unchanged; the inputs of
  * {@code EXCEPT} and {@code INTERSECT} keep all of theirs, since the rows
  * are compared whole. A node keeps at least one column, so that no batch
@@ -270,10 +272,7 @@ final class ColumnPruning {
                     Pruned in = prune(a.input(), Need.whole(need));
                     List<AggregateCall> calls = new ArrayList<>();
                     for (int i = kept.nextSetBit(groups); i >= 0; i = kept.nextSetBit(i + 1)) {
-                        AggregateCall call = a.aggregates().get(i - groups);
-                        calls.add(new AggregateCall(call.function(),
-                                call.column() < 0 ? -1 : in.mapping()[call.column()], call.distinct(), call.name(),
-                                call.separator(), remapKeys(call.orderBy(), in.mapping())));
+                        calls.add(remap(a.aggregates().get(i - groups), in.mapping()));
                     }
                     yield new Pruned(new PlanNode.Aggregate(in.node(), remap(a.groupColumns(), in.mapping()), calls),
                             mapping(kept, width));
@@ -320,9 +319,72 @@ final class ColumnPruning {
                     yield new Pruned(new PlanNode.Unnest(in.node(), in.rewrite(u.list()), u.name()), mapping,
                             in.fields());
                 }
+                case PlanNode.Window w -> window(w, required);
                 case PlanNode.Values v -> new Pruned(v, identity(v.schema().size()));
                 case PlanNode.Remote r -> new Pruned(r, identity(r.schema().size()));
             };
+        }
+
+        /**
+         * A window keeps the calls in use, and of its input what is required
+         * and what those calls read. Without a call in use, the window goes
+         * away, as it neither adds nor drops rows.
+         */
+        private Pruned window(PlanNode.Window w, Need required) {
+            int width = w.input().schema().size();
+            Need need = required.slice(0, width);
+            BitSet used = required.used();
+            int[] mapping = new int[w.schema().size()];
+            Arrays.fill(mapping, -1);
+            List<WindowCall> kept = new ArrayList<>();
+            for (int i = 0; i < w.calls().size(); i++) {
+                if (used.get(width + i)) {
+                    mapping[width + i] = kept.size();
+                    kept.add(w.calls().get(i));
+                }
+            }
+            if (kept.isEmpty()) {
+                Pruned in = prune(w.input(), need);
+                System.arraycopy(in.mapping(), 0, mapping, 0, width);
+                return new Pruned(in.node(), mapping, in.fields());
+            }
+            for (int c : w.partition()) {
+                need.whole(c);
+            }
+            for (SortKey k : w.order()) {
+                need.whole(k.column());
+            }
+            for (WindowCall call : kept) {
+                for (int c : call.arguments()) {
+                    need.whole(c);
+                }
+                if (call.filter() >= 0) {
+                    need.whole(call.filter());
+                }
+                AggregateCall a = call.aggregate();
+                if (a != null && a.column() >= 0) {
+                    need.whole(a.column());
+                }
+                for (SortKey k : a == null ? List.<SortKey>of() : a.orderBy()) {
+                    need.whole(k.column());
+                }
+            }
+            Pruned in = prune(w.input(), need);
+            int[] m = in.mapping();
+            List<WindowCall> calls = new ArrayList<>();
+            for (WindowCall call : kept) {
+                calls.add(new WindowCall(call.function(), call.aggregate() == null ? null : remap(call.aggregate(), m),
+                        remap(call.arguments(), m), call.ignoreNulls(), call.filter() < 0 ? -1 : m[call.filter()],
+                        call.frame(), call.name()));
+            }
+            System.arraycopy(m, 0, mapping, 0, width);
+            for (int i = width; i < mapping.length; i++) {
+                if (mapping[i] >= 0) {
+                    mapping[i] += in.node().schema().size();
+                }
+            }
+            return new Pruned(new PlanNode.Window(in.node(), remap(w.partition(), m), remapKeys(w.order(), m), calls),
+                    mapping, in.fields());
         }
 
         private Pruned join(PlanNode.Join j, Need required) {
@@ -580,6 +642,11 @@ final class ColumnPruning {
             result.add(mapping[c]);
         }
         return result;
+    }
+
+    private static AggregateCall remap(AggregateCall call, int[] mapping) {
+        return new AggregateCall(call.function(), call.column() < 0 ? -1 : mapping[call.column()], call.distinct(),
+                call.name(), call.separator(), remapKeys(call.orderBy(), mapping));
     }
 
     private static List<SortKey> remapKeys(List<SortKey> keys, int[] mapping) {

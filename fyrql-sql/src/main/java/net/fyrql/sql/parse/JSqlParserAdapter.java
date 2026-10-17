@@ -29,6 +29,7 @@ import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlExpr.BinaryOp;
 import net.fyrql.sql.ast.SqlExpr.LiteralKind;
 import net.fyrql.sql.ast.SqlExpr.UnaryOp;
+import net.fyrql.sql.ast.WindowSpec;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.AllValue;
 import net.sf.jsqlparser.expression.AnalyticExpression;
@@ -63,6 +64,9 @@ import net.sf.jsqlparser.expression.StructType;
 import net.sf.jsqlparser.expression.TimeKeyExpression;
 import net.sf.jsqlparser.expression.TrimFunction;
 import net.sf.jsqlparser.expression.WhenClause;
+import net.sf.jsqlparser.expression.WindowDefinition;
+import net.sf.jsqlparser.expression.WindowElement;
+import net.sf.jsqlparser.expression.WindowOffset;
 import net.sf.jsqlparser.expression.operators.arithmetic.Addition;
 import net.sf.jsqlparser.expression.operators.arithmetic.Concat;
 import net.sf.jsqlparser.expression.operators.arithmetic.Division;
@@ -118,10 +122,12 @@ import net.sf.jsqlparser.statement.select.WithItem;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Translates the syntax tree of JSqlParser into the syntax tree of FyrQL.
@@ -269,8 +275,6 @@ final class JSqlParserAdapter {
         reject(p.getTop(), "TOP", p);
         reject(p.getFirst(), "FIRST", p);
         reject(p.getSkip(), "SKIP", p);
-        reject(p.getQualify(), "QUALIFY", p);
-        reject(p.getWindowDefinitions(), "WINDOW", p);
         reject(p.getLateralViews(), "LATERAL VIEW", p);
         reject(p.getOracleHierarchical(), "CONNECT BY", p);
         reject(p.getPreferringClause(), "PREFERRING", p);
@@ -308,7 +312,24 @@ final class JSqlParserAdapter {
             throw new SqlException("Syntax error: JOIN without FROM", position(p));
         }
         return new QueryBody.Select(distinct, items, from, exprOrNull(p.getWhere()), groupBy(p.getGroupBy(), p),
-                exprOrNull(p.getHaving()), position(p));
+                exprOrNull(p.getHaving()), windows(p), exprOrNull(p.getQualify()), position(p));
+    }
+
+    /** The {@code WINDOW} clause; JSqlParser keeps no position for its windows, so they have the one of the select. */
+    private List<QueryBody.NamedWindow> windows(PlainSelect p) {
+        List<QueryBody.NamedWindow> windows = new ArrayList<>();
+        if (p.getWindowDefinitions() == null) {
+            return windows;
+        }
+        Set<String> names = new HashSet<>();
+        for (WindowDefinition d : p.getWindowDefinitions()) {
+            String name = unquote(d.getWindowName(), p);
+            if (!names.add(name.toLowerCase(Locale.ROOT))) {
+                throw new SqlException("window \"" + name + "\" is already defined", position(p));
+            }
+            windows.add(new QueryBody.NamedWindow(name, windowSpec(d, p), position(p)));
+        }
+        return windows;
     }
 
     private QueryBody.GroupBy groupBy(GroupByElement g, PlainSelect owner) {
@@ -804,7 +825,7 @@ final class JSqlParserAdapter {
             return cast(c, position);
         }
         if (e instanceof AnalyticExpression a) {
-            throw unsupported(a.getType() == AnalyticType.FILTER_ONLY ? "FILTER" : "window functions", a);
+            return window(a, position);
         }
         if (e instanceof TrimFunction t) {
             String name = t.getTrimSpecification() == null ? "trim" : switch (t.getTrimSpecification()) {
@@ -1017,6 +1038,143 @@ final class JSqlParserAdapter {
         return new SqlExpr.Cast(expr(c.getLeftExpression()), type, safe, position);
     }
 
+    /**
+     * {@code f(args) [FILTER (WHERE c)] OVER window}. JSqlParser keeps at
+     * most three arguments here, as expression, offset and default value,
+     * and drops arguments of other forms, such as those of
+     * {@code position(a IN b)}, which are therefore not supported.
+     * {@code IGNORE NULLS} may stand inside or after the parentheses;
+     * {@code RESPECT NULLS} is the default. JSqlParser gives the
+     * {@code IGNORE NULLS} after a last argument that is a call to that
+     * call, as in {@code lag(a, 1, f(b) IGNORE NULLS)}; it belongs to the
+     * window function.
+     */
+    private SqlExpr window(AnalyticExpression a, Position position) {
+        if (a.getType() == AnalyticType.FILTER_ONLY) {
+            throw unsupported("FILTER without OVER", a);
+        }
+        if (a.getType() != AnalyticType.OVER) {
+            throw unsupported("WITHIN GROUP", a);
+        }
+        reject(a.getKeep(), "KEEP", a);
+        reject(a.isUnique(), "UNIQUE in a function", a);
+        reject(a.getHavingClause(), "HAVING in a function", a);
+        reject(a.getLimit(), "LIMIT in a function", a);
+        reject(a.getOnOverflowTruncate(), "ON OVERFLOW", a);
+        reject(a.getKeywordArguments(), "this form of arguments", a);
+        Token first = firstToken(a);
+        if (first != null && first.next != null && ".".equals(first.next.image)) {
+            throw unsupported("qualified function names", a);
+        }
+        String name = first != null ? unquote(first.image, a) : unquote(a.getName(), a);
+        boolean star = false;
+        boolean ignoreNulls = a.isIgnoreNulls();
+        List<SqlExpr> arguments = new ArrayList<>();
+        Expression x = a.getExpression();
+        Expression lastArgument = a.getDefaultValue() != null ? a.getDefaultValue()
+                : a.getOffset() != null ? a.getOffset() : x;
+        while (lastArgument instanceof ExpressionList<?> l && l.size() == 1) {
+            lastArgument = l.get(0);
+        }
+        if (lastArgument instanceof Function f && f.getNullHandling() != null) {
+            ignoreNulls |= f.getNullHandling() == Function.NullHandling.IGNORE_NULLS;
+            f.setNullHandling(null);
+            f.setIgnoreNullsOutside(false);
+        }
+        if (x instanceof AllColumns && !(x instanceof AllTableColumns) && a.getOffset() == null) {
+            star = true;
+        } else if (x != null) {
+            for (Expression p : new Expression[] {x, a.getOffset(), a.getDefaultValue()}) {
+                if (p instanceof PostgresNamedFunctionParameter) {
+                    throw unsupported("named arguments", a);
+                }
+                if (p != null) {
+                    arguments.add(expr(p));
+                }
+            }
+        } else if (first != null && !(first.next != null && "(".equals(first.next.image)
+                && first.next.next != null && ")".equals(first.next.next.image))) {
+            throw unsupported("this form of arguments of " + name, a);
+        }
+        SqlExpr.FunctionCall call = new SqlExpr.FunctionCall(name, arguments, a.isDistinct(), star,
+                orderItems(a.getFuncOrderBy(), false), position);
+        WindowSpec over = a.getWindowName() != null ? WindowSpec.named(unquote(a.getWindowName(), a))
+                : windowSpec(a.getWindowDefinition(), a);
+        return new SqlExpr.Window(call, over, ignoreNulls, exprOrNull(a.getFilterExpression()), position);
+    }
+
+    private WindowSpec windowSpec(WindowDefinition d, Object node) {
+        List<? extends Expression> partition = d.getPartitionBy();
+        // PARTITION BY (x, y) is a row of the columns, which partitions as the columns do.
+        if (partition.size() == 1 && partition.get(0) instanceof ParenthesedExpressionList<?> row) {
+            partition = row;
+        }
+        List<SqlExpr> partitionBy = exprs(partition);
+        List<OrderItem> orderBy = orderItems(d.getOrderByElements(), false);
+        WindowElement element = d.getWindowElement();
+        return new WindowSpec(null, partitionBy, orderBy, element == null ? null : frame(element, node));
+    }
+
+    /**
+     * {@code unit BETWEEN start AND end [EXCLUDE ...]}, or {@code unit start}
+     * with {@code CURRENT ROW} as its end; the order of the bounds is
+     * checked as DuckDB's parser checks it.
+     */
+    private WindowSpec.Frame frame(WindowElement element, Object node) {
+        WindowSpec.FrameUnit unit = switch (element.getType()) {
+            case ROWS -> WindowSpec.FrameUnit.ROWS;
+            case RANGE -> WindowSpec.FrameUnit.RANGE;
+            case GROUPS -> WindowSpec.FrameUnit.GROUPS;
+        };
+        WindowSpec.Bound start;
+        WindowSpec.Bound end;
+        if (element.getRange() != null) {
+            start = bound(element.getRange().getStart(), node);
+            end = bound(element.getRange().getEnd(), node);
+        } else {
+            start = bound(element.getOffset(), node);
+            end = WindowSpec.Bound.of(WindowSpec.BoundKind.CURRENT_ROW);
+        }
+        WindowSpec.BoundKind s = start.kind();
+        WindowSpec.BoundKind e = end.kind();
+        String error = s == WindowSpec.BoundKind.UNBOUNDED_FOLLOWING ? "frame start cannot be UNBOUNDED FOLLOWING"
+                : e == WindowSpec.BoundKind.UNBOUNDED_PRECEDING ? "frame end cannot be UNBOUNDED PRECEDING"
+                : s == WindowSpec.BoundKind.CURRENT_ROW && e == WindowSpec.BoundKind.PRECEDING
+                        ? "frame starting from current row cannot have preceding rows"
+                : s == WindowSpec.BoundKind.FOLLOWING && e == WindowSpec.BoundKind.CURRENT_ROW
+                        ? "frame starting from following row cannot end with current row"
+                : s == WindowSpec.BoundKind.FOLLOWING && e == WindowSpec.BoundKind.PRECEDING
+                        ? "frame starting from following row cannot have preceding rows"
+                : null;
+        if (error != null) {
+            throw new SqlException(error, position(node));
+        }
+        WindowSpec.Exclusion exclusion = element.getExclusion() == null ? WindowSpec.Exclusion.NO_OTHERS
+                : switch (element.getExclusion()) {
+                    case CURRENT_ROW -> WindowSpec.Exclusion.CURRENT_ROW;
+                    case GROUP -> WindowSpec.Exclusion.GROUP;
+                    case TIES -> WindowSpec.Exclusion.TIES;
+                    case NO_OTHERS -> WindowSpec.Exclusion.NO_OTHERS;
+                };
+        return new WindowSpec.Frame(unit, start, end, exclusion);
+    }
+
+    private WindowSpec.Bound bound(WindowOffset offset, Object node) {
+        if (offset.getExpression() == null) {
+            return WindowSpec.Bound.of(switch (offset.getType()) {
+                case PRECEDING -> WindowSpec.BoundKind.UNBOUNDED_PRECEDING;
+                case FOLLOWING -> WindowSpec.BoundKind.UNBOUNDED_FOLLOWING;
+                case CURRENT -> WindowSpec.BoundKind.CURRENT_ROW;
+                case EXPR -> throw unsupported("this frame", node);
+            });
+        }
+        return new WindowSpec.Bound(switch (offset.getType()) {
+            case PRECEDING -> WindowSpec.BoundKind.PRECEDING;
+            case FOLLOWING -> WindowSpec.BoundKind.FOLLOWING;
+            case CURRENT, EXPR -> throw unsupported("this frame", node);
+        }, expr(offset.getExpression()));
+    }
+
     private SqlExpr functionCall(Function f, Position position) {
         checkFunction(f);
         String name = functionName(f);
@@ -1031,7 +1189,8 @@ final class JSqlParserAdapter {
         if (named != null) {
             return specialForm(name, named, f, position);
         }
-        boolean star = f.isAllColumns();
+        // JSqlParser marks f(ALL x) as all columns; ALL is the default quantifier, as in DuckDB.
+        boolean star = false;
         List<SqlExpr> arguments = new ArrayList<>();
         if (f.getParameters() != null) {
             ExpressionList<?> parameters = f.getParameters();

@@ -64,9 +64,9 @@ import static net.fyrql.core.expr.Expressions.mul;
 
 /**
  * The examples of the README: the query, with the data it describes, whose
- * printed rows and plan are those of the README, the same query through the
- * JDBC driver, and the generated code of a filter and of the pipeline of
- * TPC-H Q6, which the README shows.
+ * printed rows and plan are those of the README, the window functions over
+ * the same data, the same query through the JDBC driver, and the generated
+ * code of a filter and of the pipeline of TPC-H Q6, which the README shows.
  */
 class ReadmeExampleTest {
 
@@ -123,6 +123,59 @@ class ReadmeExampleTest {
                         Join INNER ON l#1 = r#0 [codegen]
                           Project #1 AS amount, CAST(#0 AS BIGINT) AS "#key0" [codegen]
                             Scan mem.main.orders (customerId INTEGER, amount DECIMAL(10,2))
+                          Scan csv.main.customers (id BIGINT, region VARCHAR)
+                """.formatted(pipeline), plan);
+    }
+
+    @Test
+    void theWindowExampleRuns() throws IOException {
+        Files.writeString(data.resolve("customers.csv"), "id,region\n1,north\n2,south\n3,north\n",
+                StandardCharsets.UTF_8);
+        List<Order> orders = List.of(new Order(1, 1, new BigDecimal("10.50")), new Order(2, 2, new BigDecimal("20.00")),
+                new Order(3, 3, new BigDecimal("5.25")), new Order(4, 1, null), new Order(5, null, new BigDecimal("7.00")));
+        List<String> printed = new ArrayList<>();
+        String plan;
+        String pipeline;
+
+        try (FyrQL engine = FyrQL.builder()
+                .register(CsvConnector.builder("csv").directory(data).build())
+                .register(MemoryConnector.builder("mem")
+                        .table("orders", Order.class, orders, Map.of("amount", DataType.decimal(10, 2)))
+                        .build())
+                .build()) {
+            // From here on as in the README.
+            String sql = """
+                    SELECT c.region, o.id, o.amount,
+                           rank() OVER (PARTITION BY c.region ORDER BY o.amount DESC) AS place,
+                           sum(o.amount) OVER (PARTITION BY c.region) AS total
+                    FROM orders AS o JOIN customers AS c ON o.customerId = c.id
+                    ORDER BY c.region, place""";
+            for (Object[] row : engine.rows(sql)) {
+                printed.add(Arrays.toString(row));
+            }
+            String largest = """
+                    SELECT c.region, o.id
+                    FROM orders AS o JOIN customers AS c ON o.customerId = c.id
+                    WINDOW w AS (PARTITION BY c.region ORDER BY o.amount DESC)
+                    QUALIFY row_number() OVER w = 1
+                    ORDER BY c.region""";
+            for (Object[] row : engine.rows(largest)) {
+                printed.add(Arrays.toString(row));
+            }
+            plan = engine.explain(sql);
+            pipeline = engine.codegen() == CodegenMode.ALWAYS ? "[codegen pipeline]" : "[codegen]";
+        }
+
+        assertEquals(List.of("[north, 1, 10.50, 1, 15.75]", "[north, 3, 5.25, 2, 15.75]", "[north, 4, null, 3, 15.75]",
+                "[south, 2, 20.00, 1, 20.00]", "[north, 1]", "[south, 2]"), printed);
+        assertEquals("""
+                Sort #0, #3
+                  Project #4 AS region, #0 AS id, #1 AS amount, #5 AS place, #6 AS total
+                    Window PARTITION BY #4: sum(#1) AS "sum(o.amount) OVER (PARTITION BY c.region)"
+                      Window PARTITION BY #4 ORDER BY #1 DESC: rank() AS "rank() OVER (PARTITION BY c.region ORDER BY o.amount DESC NULLS LAST)"
+                        Join INNER ON l#2 = r#0 %s
+                          Project #0 AS id, #2 AS amount, CAST(#1 AS BIGINT) AS "#key0" [codegen]
+                            Scan mem.main.orders (id BIGINT, customerId INTEGER, amount DECIMAL(10,2))
                           Scan csv.main.customers (id BIGINT, region VARCHAR)
                 """.formatted(pipeline), plan);
     }

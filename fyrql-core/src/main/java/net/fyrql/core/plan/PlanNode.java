@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.function.Function;
 
 /**
  * A node of the logical plan. Every node knows its output {@link #schema()}
@@ -764,6 +765,393 @@ public sealed interface PlanNode {
         public Schema schema() {
             List<Schema.Field> fields = new ArrayList<>(input.schema().fields());
             fields.add(new Schema.Field(name, elementType(), true));
+            return new Schema(fields);
+        }
+
+        @Override
+        public List<PlanNode> children() {
+            return List.of(input);
+        }
+    }
+
+    /**
+     * The functions of a {@link WindowCall}, with the semantics of DuckDB
+     * 1.5.6. The ranking functions number the rows of a partition in the
+     * order of the window: {@code row_number} one by one, {@code rank} with
+     * a gap after peers, {@code dense_rank} without, {@code percent_rank} as
+     * {@code (rank - 1) / (rows - 1)}, {@code cume_dist} as the share of the
+     * rows up to the last peer, and {@code ntile(n)} as the bucket among n.
+     * {@code lag} and {@code lead} take the value of the row a number of
+     * rows before or after, or a default. These ignore the frame;
+     * {@code first_value}, {@code last_value}, {@code nth_value} and the
+     * aggregates take the rows of the frame.
+     */
+    enum WindowFunction {
+        ROW_NUMBER(0, 0), RANK(0, 0), DENSE_RANK(0, 0), PERCENT_RANK(0, 0), CUME_DIST(0, 0), NTILE(1, 1),
+        LAG(1, 3), LEAD(1, 3), FIRST_VALUE(1, 1), LAST_VALUE(1, 1), NTH_VALUE(2, 2), AGGREGATE(0, 0);
+
+        private final int minArguments;
+        private final int maxArguments;
+
+        WindowFunction(int minArguments, int maxArguments) {
+            this.minArguments = minArguments;
+            this.maxArguments = maxArguments;
+        }
+
+        /** Returns the least number of arguments; none for {@code AGGREGATE}, whose aggregate has them. */
+        public int minArguments() {
+            return minArguments;
+        }
+
+        /** Returns the greatest number of arguments. */
+        public int maxArguments() {
+            return maxArguments;
+        }
+
+        /** Returns the name as DuckDB spells it; a call of {@code AGGREGATE} has the name of its aggregate. */
+        public String sqlName() {
+            return name().toLowerCase(java.util.Locale.ROOT);
+        }
+
+        /** Tells whether the function takes the rows of the frame of a row. */
+        public boolean usesFrame() {
+            return this == FIRST_VALUE || this == LAST_VALUE || this == NTH_VALUE || this == AGGREGATE;
+        }
+
+        /** Tells whether the function takes the value of a row, the only kind that may skip {@code NULL}s. */
+        public boolean takesValues() {
+            return this == LAG || this == LEAD || this == FIRST_VALUE || this == LAST_VALUE || this == NTH_VALUE;
+        }
+
+        /**
+         * Returns the function with a name, in any case; not an aggregate.
+         *
+         * @throws IllegalArgumentException if there is none
+         */
+        public static WindowFunction of(String name) {
+            String n = name.toUpperCase(java.util.Locale.ROOT);
+            if (!n.equals(AGGREGATE.name())) {
+                for (WindowFunction f : values()) {
+                    if (f.name().equals(n)) {
+                        return f;
+                    }
+                }
+            }
+            throw new IllegalArgumentException("Unknown window function " + name);
+        }
+    }
+
+    /** The units of a frame: rows, values of the order key, or groups of peers. */
+    enum FrameUnit {
+        ROWS, RANGE, GROUPS
+    }
+
+    /** The kinds of a bound of a frame. */
+    enum BoundKind {
+        UNBOUNDED_PRECEDING, PRECEDING, CURRENT_ROW, FOLLOWING, UNBOUNDED_FOLLOWING;
+
+        /** Tells whether the bound has an offset. */
+        public boolean hasOffset() {
+            return this == PRECEDING || this == FOLLOWING;
+        }
+
+        /** Returns the keywords, after the offset if there is one. */
+        public String keywords() {
+            return name().replace('_', ' ');
+        }
+    }
+
+    /** The rows a frame leaves out of itself. */
+    enum FrameExclusion {
+        NO_OTHERS, CURRENT_ROW, GROUP, TIES;
+
+        /** Returns the keywords after {@code EXCLUDE}. */
+        public String keywords() {
+            return name().replace('_', ' ');
+        }
+    }
+
+    /** The units of an interval by which a {@code RANGE} frame reaches over a date or a timestamp. */
+    enum IntervalUnit {
+        YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, MILLISECOND, MICROSECOND
+    }
+
+    /**
+     * A bound of a frame. For {@code ROWS} and {@code GROUPS}, the offset is
+     * a {@code BIGINT}, a number of rows or groups; DuckDB takes a negative
+     * one as the other direction. For {@code RANGE} it is a distance from
+     * the value of the order key: a number over a numeric key, or a count
+     * of a unit over a {@code DATE} or {@code TIMESTAMP} key.
+     *
+     * @param kind the kind
+     * @param offset the offset if the kind has one, else {@code null}; never a {@code NULL} value
+     * @param unit the unit of an interval, or {@code null} for a plain number
+     */
+    record FrameBound(BoundKind kind, Expression.Literal offset, IntervalUnit unit) {
+        public FrameBound {
+            Objects.requireNonNull(kind, "kind");
+            if (kind.hasOffset() != (offset != null)) {
+                throw new IllegalArgumentException(kind + (offset == null ? " without" : " with") + " an offset");
+            }
+            if (offset != null && offset.value() == null) {
+                throw new IllegalArgumentException("A NULL offset of " + kind);
+            }
+            if (unit != null && offset.type() != DataType.BIGINT) {
+                throw new IllegalArgumentException("A count of " + unit + " of type " + offset.type());
+            }
+        }
+
+        /** A bound without an offset. */
+        public static FrameBound of(BoundKind kind) {
+            return new FrameBound(kind, null, null);
+        }
+
+        /** A bound with a plain number as its offset. */
+        public static FrameBound of(BoundKind kind, Expression.Literal offset) {
+            return new FrameBound(kind, offset, null);
+        }
+
+        /** Returns the bound as SQL, with the offset written as the function says. */
+        public String sql(Function<FrameBound, String> offsets) {
+            return kind.hasOffset() ? offsets.apply(this) + " " + kind.keywords() : kind.keywords();
+        }
+    }
+
+    /**
+     * The rows of the partition a {@link WindowCall} takes for a row: from
+     * the start bound to the end bound, without the excluded rows. Peers are
+     * rows with equal values of the order keys; without order keys, all
+     * rows of the partition are peers.
+     */
+    record Frame(FrameUnit unit, FrameBound start, FrameBound end, FrameExclusion exclusion) {
+
+        /**
+         * The frame of a window without one, as in SQL: from the first row
+         * to the last peer of the current row, the whole partition if the
+         * window has no order.
+         */
+        public static final Frame DEFAULT = new Frame(FrameUnit.RANGE, FrameBound.of(BoundKind.UNBOUNDED_PRECEDING),
+                FrameBound.of(BoundKind.CURRENT_ROW), FrameExclusion.NO_OTHERS);
+
+        public Frame {
+            Objects.requireNonNull(unit, "unit");
+            Objects.requireNonNull(start, "start");
+            Objects.requireNonNull(end, "end");
+            Objects.requireNonNull(exclusion, "exclusion");
+            if (start.kind() == BoundKind.UNBOUNDED_FOLLOWING || end.kind() == BoundKind.UNBOUNDED_PRECEDING
+                    || start.kind().ordinal() > end.kind().ordinal()) {
+                throw new IllegalArgumentException("A frame from " + start.kind() + " to " + end.kind());
+            }
+            for (FrameBound b : List.of(start, end)) {
+                if (unit != FrameUnit.RANGE && b.offset() != null
+                        && (b.unit() != null || b.offset().type() != DataType.BIGINT)) {
+                    throw new IllegalArgumentException("A " + unit + " offset of type " + b.offset().type()
+                            + (b.unit() == null ? "" : " " + b.unit()));
+                }
+            }
+        }
+
+        /** Tells whether a bound has an offset. */
+        public boolean hasOffset() {
+            return start.offset() != null || end.offset() != null;
+        }
+
+        /**
+         * Checks the offsets of a {@code RANGE} frame against the order of
+         * the window, which must then be one key: a numeric key takes plain
+         * numbers, a {@code DATE} or {@code TIMESTAMP} key intervals.
+         *
+         * @throws IllegalArgumentException if an offset does not fit the order
+         */
+        public void check(Schema input, List<SortKey> order) {
+            if (unit != FrameUnit.RANGE || !hasOffset()) {
+                return;
+            }
+            if (order.size() != 1) {
+                throw new IllegalArgumentException("RANGE frames must have only one ORDER BY expression");
+            }
+            DataType key = input.type(order.get(0).column());
+            for (FrameBound b : List.of(start, end)) {
+                if (b.offset() == null) {
+                    continue;
+                }
+                boolean fits = b.unit() == null ? key.isNumeric() && b.offset().type().isNumeric()
+                        : key == DataType.DATE || key == DataType.TIMESTAMP;
+                if (!fits) {
+                    throw new IllegalArgumentException("A RANGE offset of type " + b.offset().type()
+                            + (b.unit() == null ? "" : " " + b.unit()) + " for an order key of type " + key);
+                }
+            }
+        }
+
+        /** Returns the frame as SQL, with the offsets written as the function says. */
+        public String sql(Function<FrameBound, String> offsets) {
+            return unit + " BETWEEN " + start.sql(offsets) + " AND " + end.sql(offsets)
+                    + (exclusion == FrameExclusion.NO_OTHERS ? "" : " EXCLUDE " + exclusion.keywords());
+        }
+    }
+
+    /**
+     * One call of a {@link Window}, over the columns of its input. The
+     * arguments are columns, so that each row has its own, as in DuckDB; a
+     * constant is a column that a projection below computes.
+     *
+     * @param function the function
+     * @param aggregate the aggregate of {@code AGGREGATE}, with its column,
+     *        {@code DISTINCT}, separator and order; {@code null} for every
+     *        other function
+     * @param arguments the arguments of every other function: the count of
+     *        {@code ntile}; the value, then the offset and the default of
+     *        {@code lag} and {@code lead}; the value of {@code first_value}
+     *        and {@code last_value}; the value and the position of
+     *        {@code nth_value}. A count, an offset and a position are
+     *        integers up to {@code BIGINT}, as DuckDB takes them
+     * @param ignoreNulls whether a function that takes values skips the
+     *        rows whose value is {@code NULL}
+     * @param filter the {@code BOOLEAN} column that tells the rows an
+     *        aggregate takes, or -1 for all
+     * @param frame the frame, which the functions that do not use one ignore
+     * @param name the name of the output column
+     */
+    record WindowCall(WindowFunction function, AggregateCall aggregate, List<Integer> arguments, boolean ignoreNulls,
+            int filter, Frame frame, String name) {
+        public WindowCall {
+            Objects.requireNonNull(function, "function");
+            arguments = List.copyOf(arguments);
+            Objects.requireNonNull(frame, "frame");
+            Objects.requireNonNull(name, "name");
+            if ((function == WindowFunction.AGGREGATE) != (aggregate != null)) {
+                throw new IllegalArgumentException(function + (aggregate == null ? " without" : " with")
+                        + " an aggregate");
+            }
+            if (arguments.size() < function.minArguments || arguments.size() > function.maxArguments) {
+                throw new IllegalArgumentException(function + " with " + arguments.size() + " arguments");
+            }
+            if (ignoreNulls && !function.takesValues()) {
+                throw new IllegalArgumentException("IGNORE NULLS for " + function);
+            }
+            if (filter < -1 || filter >= 0 && function != WindowFunction.AGGREGATE) {
+                throw new IllegalArgumentException("A filter " + filter + " for " + function);
+            }
+        }
+
+        /** A call of a function other than an aggregate, over the default frame. */
+        public static WindowCall of(WindowFunction function, List<Integer> arguments, String name) {
+            return new WindowCall(function, null, arguments, false, -1, Frame.DEFAULT, name);
+        }
+
+        /** A call of an aggregate over all rows of a frame. */
+        public static WindowCall of(AggregateCall aggregate, Frame frame) {
+            return new WindowCall(WindowFunction.AGGREGATE, aggregate, List.of(), false, -1, frame, aggregate.name());
+        }
+
+        /**
+         * Checks the call against the input schema and the order of the window.
+         *
+         * @throws IllegalArgumentException if a column does not exist or does
+         *         not fit its argument, or the frame does not fit the order
+         */
+        public void check(Schema input, List<SortKey> order) {
+            if (aggregate != null) {
+                aggregate.check(input);
+            }
+            for (int c : arguments) {
+                checkColumn(input, c);
+            }
+            switch (function) {
+                case NTILE -> requireIntegral(input, 0);
+                case LAG, LEAD -> {
+                    if (arguments.size() > 1) {
+                        requireIntegral(input, 1);
+                    }
+                    if (arguments.size() > 2) {
+                        TypeRules.require(input.type(arguments.get(0)), input.type(arguments.get(2)),
+                                "The default of " + function);
+                    }
+                }
+                case NTH_VALUE -> requireIntegral(input, 1);
+                default -> {
+                }
+            }
+            if (filter >= 0) {
+                checkColumn(input, filter);
+                TypeRules.require(DataType.BOOLEAN, input.type(filter), "The filter of " + function);
+            }
+            frame.check(input, order);
+        }
+
+        private void requireIntegral(Schema input, int argument) {
+            DataType t = input.type(arguments.get(argument));
+            if (!t.isIntegral() || t == DataType.HUGEINT) {
+                throw new IllegalArgumentException("Argument " + argument + " of " + function + " of type " + t);
+            }
+        }
+
+        /** Returns the type of the result, as DuckDB types it. */
+        public DataType type(Schema input) {
+            return switch (function) {
+                case ROW_NUMBER, RANK, DENSE_RANK, NTILE -> DataType.BIGINT;
+                case PERCENT_RANK, CUME_DIST -> DataType.DOUBLE;
+                case LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE -> input.type(arguments.get(0));
+                case AGGREGATE -> aggregate.type(input);
+            };
+        }
+
+        /** Tells whether the result may be {@code NULL}: not for the rankings but {@code ntile}, nor for counts. */
+        public boolean nullable() {
+            return switch (function) {
+                case ROW_NUMBER, RANK, DENSE_RANK, PERCENT_RANK, CUME_DIST -> false;
+                case AGGREGATE -> aggregate.function() != AggregateFunction.COUNT_STAR
+                        && aggregate.function() != AggregateFunction.COUNT;
+                default -> true;
+            };
+        }
+    }
+
+    /**
+     * Computes window functions: for every input row, one more column per
+     * call after the columns of the input, as {@link Unnest} adds one. The
+     * rows are split into partitions by the values of the partition
+     * columns, {@code NULL} being a value of its own, and ordered within a
+     * partition by the order keys; every call of the node shares the
+     * partitions and the order. The number of rows stays; the output has no
+     * defined order.
+     *
+     * @param input the input
+     * @param partition the columns of the partitions; none for one partition
+     * @param order the order within a partition; none for no order, which
+     *        makes all rows of a partition peers
+     * @param calls the calls, at least one
+     */
+    record Window(PlanNode input, List<Integer> partition, List<SortKey> order, List<WindowCall> calls)
+            implements PlanNode {
+        public Window {
+            Objects.requireNonNull(input, "input");
+            partition = List.copyOf(partition);
+            order = List.copyOf(order);
+            calls = List.copyOf(calls);
+            if (calls.isEmpty()) {
+                throw new IllegalArgumentException("Window without calls");
+            }
+            Schema in = input.schema();
+            for (int c : partition) {
+                checkColumn(in, c);
+            }
+            for (SortKey k : order) {
+                checkColumn(in, k.column());
+            }
+            for (WindowCall c : calls) {
+                c.check(in, order);
+            }
+        }
+
+        @Override
+        public Schema schema() {
+            Schema in = input.schema();
+            List<Schema.Field> fields = new ArrayList<>(in.fields());
+            for (WindowCall c : calls) {
+                fields.add(new Schema.Field(c.name(), c.type(in), c.nullable()));
+            }
             return new Schema(fields);
         }
 

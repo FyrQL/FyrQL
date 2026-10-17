@@ -192,6 +192,61 @@ public final class SqlPrinter {
             b.append(" HAVING ");
             expr(b, s.having());
         }
+        if (!s.windows().isEmpty()) {
+            b.append(" WINDOW ");
+            for (int i = 0; i < s.windows().size(); i++) {
+                QueryBody.NamedWindow w = s.windows().get(i);
+                b.append(i > 0 ? ", " : "").append(identifier(w.name())).append(" AS ");
+                window(b, w.window());
+            }
+        }
+        if (s.qualify() != null) {
+            b.append(" QUALIFY ");
+            expr(b, s.qualify());
+        }
+    }
+
+    /** Writes a window: its name alone, or its parts in parentheses. */
+    private static void window(StringBuilder b, WindowSpec w) {
+        if (w.base() != null) {
+            b.append(identifier(w.base()));
+            return;
+        }
+        int start = b.append('(').length();
+        if (!w.partitionBy().isEmpty()) {
+            b.append("PARTITION BY ");
+            int first = b.length();
+            list(b, w.partitionBy());
+            // JSqlParser reads PARTITION BY (x), y as a list in parentheses and stops at the comma; ((x)), y it reads.
+            if (w.partitionBy().size() > 1 && b.charAt(first) == '(') {
+                StringBuilder one = new StringBuilder();
+                expr(one, w.partitionBy().get(0));
+                b.insert(first + one.length(), ')').insert(first, '(');
+            }
+        }
+        orderBy(b, w.orderBy());
+        if (w.frame() != null) {
+            WindowSpec.Frame f = w.frame();
+            b.append(' ').append(f.unit()).append(" BETWEEN ");
+            bound(b, f.start());
+            b.append(" AND ");
+            bound(b, f.end());
+            if (f.exclusion() != WindowSpec.Exclusion.NO_OTHERS) {
+                b.append(" EXCLUDE ").append(f.exclusion().keywords());
+            }
+        }
+        if (b.length() > start && b.charAt(start) == ' ') {
+            b.deleteCharAt(start);
+        }
+        b.append(')');
+    }
+
+    private static void bound(StringBuilder b, WindowSpec.Bound bound) {
+        if (bound.offset() != null) {
+            expr(b, bound.offset());
+            b.append(' ');
+        }
+        b.append(bound.kind().keywords());
     }
 
     private static void from(StringBuilder b, FromItem item) {
@@ -373,15 +428,16 @@ public final class SqlPrinter {
             case SqlExpr.FunctionCall f when f.arguments().isEmpty() && !f.star()
                     && SPECIAL_FUNCTIONS.contains(f.name().toUpperCase(Locale.ROOT)) ->
                 b.append(f.name().toUpperCase(Locale.ROOT));
-            case SqlExpr.FunctionCall f -> {
-                b.append(PLAIN_IDENTIFIER.matcher(f.name()).matches() ? f.name() : identifier(f.name())).append('(');
-                if (f.star()) {
-                    b.append('*');
+            case SqlExpr.FunctionCall f -> call(b, f, false);
+            case SqlExpr.Window w -> {
+                call(b, w.call(), w.ignoreNulls());
+                if (w.filter() != null) {
+                    b.append(" FILTER (WHERE ");
+                    expr(b, w.filter());
+                    b.append(')');
                 }
-                b.append(f.distinct() ? "DISTINCT " : "");
-                list(b, f.arguments());
-                orderBy(b, f.orderBy());
-                b.append(')');
+                b.append(" OVER ");
+                window(b, w.over());
             }
             case SqlExpr.Index x -> {
                 // A name or an index takes its index directly; other bases need parentheses.
@@ -413,6 +469,19 @@ public final class SqlPrinter {
             }
             case SqlExpr.Interval i -> b.append("INTERVAL ").append(string(i.value())).append(' ').append(i.unit());
         }
+    }
+
+    /** Writes {@code f(args)}; {@code IGNORE NULLS} goes inside the parentheses, where DuckDB reads it. */
+    private static void call(StringBuilder b, SqlExpr.FunctionCall f, boolean ignoreNulls) {
+        b.append(PLAIN_IDENTIFIER.matcher(f.name()).matches() ? f.name() : identifier(f.name())).append('(');
+        if (f.star()) {
+            b.append('*');
+        }
+        b.append(f.distinct() ? "DISTINCT " : "");
+        list(b, f.arguments());
+        b.append(ignoreNulls ? " IGNORE NULLS" : "");
+        orderBy(b, f.orderBy());
+        b.append(')');
     }
 
     private static void qualified(StringBuilder b, List<String> parts) {

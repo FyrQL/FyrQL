@@ -22,9 +22,16 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
 import net.fyrql.core.plan.PlanNode.AggregateFunction;
+import net.fyrql.core.plan.PlanNode.BoundKind;
+import net.fyrql.core.plan.PlanNode.Frame;
+import net.fyrql.core.plan.PlanNode.FrameBound;
+import net.fyrql.core.plan.PlanNode.FrameExclusion;
+import net.fyrql.core.plan.PlanNode.FrameUnit;
 import net.fyrql.core.plan.PlanNode.JoinType;
 import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.PlanNode.SortKey;
+import net.fyrql.core.plan.PlanNode.WindowCall;
+import net.fyrql.core.plan.PlanNode.WindowFunction;
 import net.fyrql.core.plan.Plans;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
@@ -72,13 +79,14 @@ import static net.fyrql.core.expr.Expressions.sub;
 import static net.fyrql.core.expr.Expressions.tryCast;
 import static net.fyrql.core.expr.Expressions.when;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Hand-built plans over generated data with edge values, each compared
  * with DuckDB: every operator, every join type, the arithmetic and
- * comparison semantics, and nested types passing through.
+ * comparison semantics, windows, and nested types passing through.
  */
 class PlanDifferentialTest {
 
@@ -394,7 +402,7 @@ class PlanDifferentialTest {
                 new AggregateCall(AggregateFunction.AVG, 1, false, "avg_l")));
         differential.check(plan, AVG_ULPS);
         differential.check(new PlanNode.Aggregate(u, List.of(), List.of(
-                new AggregateCall(AggregateFunction.SUM, 2, false, "sum_h"),
+                new AggregateCall(AggregateFunction.SUM, 0, false, "sum_k"),
                 new AggregateCall(AggregateFunction.MIN, 3, false, "min_ts"),
                 new AggregateCall(AggregateFunction.MAX, 1, false, "max_v"))));
         differential.check(new PlanNode.Aggregate(new PlanNode.Filter(t, lit(false)), List.of(), List.of(
@@ -543,6 +551,129 @@ class PlanDifferentialTest {
                     differential.engine().rows(sql), Plans.ordered(plan));
             assertTrue(again.same(), () -> sql + "\n" + again.report());
         }
+    }
+
+    private static FrameBound bound(BoundKind kind, Expression offset) {
+        return FrameBound.of(kind, (Expression.Literal) offset);
+    }
+
+    private static Frame frame(FrameUnit unit, FrameBound start, FrameBound end, FrameExclusion exclusion) {
+        return new Frame(unit, start, end, exclusion);
+    }
+
+    /**
+     * Windows over the edge values: every function, frames of rows, of
+     * groups and of ranges of numbers, dates and timestamps, exclusions,
+     * filters and {@code IGNORE NULLS}, and windows below a filter, an
+     * aggregate and a sort. The order within a partition is total, by all
+     * other columns, but for the windows whose calls give peers one result.
+     * The rendered SQL of each plan, bound by FyrQL, gives the same rows
+     * again.
+     */
+    @Test
+    void windows() {
+        List<NamedExpression> columns = new ArrayList<>();
+        for (int i = 0; i < T.size(); i++) {
+            columns.add(new NamedExpression(T.name(i), c(i)));
+        }
+        columns.add(new NamedExpression("two", lit(2L)));
+        columns.add(new NamedExpression("three", lit(3)));
+        PlanNode counted = new PlanNode.Project(t, columns);
+        List<SortKey> total = List.of(SortKey.asc(0), new SortKey(1, false, true), SortKey.asc(2), SortKey.desc(3),
+                SortKey.asc(4), SortKey.asc(6), new SortKey(7, true, true));
+        FrameBound current = FrameBound.of(BoundKind.CURRENT_ROW);
+        FrameBound first = FrameBound.of(BoundKind.UNBOUNDED_PRECEDING);
+        FrameBound last = FrameBound.of(BoundKind.UNBOUNDED_FOLLOWING);
+        Frame around = frame(FrameUnit.ROWS, bound(BoundKind.PRECEDING, lit(1L)), bound(BoundKind.FOLLOWING, lit(1L)),
+                FrameExclusion.NO_OTHERS);
+        Frame whole = frame(FrameUnit.ROWS, first, last, FrameExclusion.NO_OTHERS);
+        PlanNode functions = new PlanNode.Window(counted, List.of(5), total, List.of(
+                WindowCall.of(WindowFunction.ROW_NUMBER, List.of(), "rn"),
+                WindowCall.of(WindowFunction.RANK, List.of(), "rk"),
+                WindowCall.of(WindowFunction.DENSE_RANK, List.of(), "dr"),
+                WindowCall.of(WindowFunction.PERCENT_RANK, List.of(), "pr"),
+                WindowCall.of(WindowFunction.CUME_DIST, List.of(), "cd"),
+                WindowCall.of(WindowFunction.NTILE, List.of(9), "nt"),
+                WindowCall.of(WindowFunction.LAG, List.of(0), "lag"),
+                WindowCall.of(WindowFunction.LEAD, List.of(4, 8, 4), "lead"),
+                new WindowCall(WindowFunction.LAG, null, List.of(2, 9), true, -1, Frame.DEFAULT, "lag_ignore"),
+                new WindowCall(WindowFunction.FIRST_VALUE, null, List.of(3), false, -1, around, "first"),
+                new WindowCall(WindowFunction.LAST_VALUE, null, List.of(4), true, -1, Frame.DEFAULT, "last"),
+                new WindowCall(WindowFunction.NTH_VALUE, null, List.of(6, 8), false, -1,
+                        frame(FrameUnit.GROUPS, first, current, FrameExclusion.NO_OTHERS), "nth")));
+        PlanNode aggregates = new PlanNode.Window(counted, List.of(), total, List.of(
+                WindowCall.of(agg(AggregateFunction.SUM, 0, false), frame(FrameUnit.ROWS,
+                        bound(BoundKind.PRECEDING, lit(2L)), current, FrameExclusion.NO_OTHERS)),
+                WindowCall.of(agg(AggregateFunction.AVG, 3, false), frame(FrameUnit.ROWS, current, last,
+                        FrameExclusion.CURRENT_ROW)),
+                new WindowCall(WindowFunction.AGGREGATE, agg(AggregateFunction.COUNT, 4, false), List.of(), false, 5,
+                        Frame.DEFAULT, "count_if"),
+                WindowCall.of(agg(AggregateFunction.MIN, 4, false), frame(FrameUnit.GROUPS,
+                        bound(BoundKind.PRECEDING, lit(1L)), bound(BoundKind.FOLLOWING, lit(1L)), FrameExclusion.TIES)),
+                WindowCall.of(agg(AggregateFunction.MAX, 6, false), around),
+                WindowCall.of(agg(AggregateFunction.STRING_AGG, 4, false, SortKey.asc(4)), around),
+                WindowCall.of(agg(AggregateFunction.LIST, 7, true, SortKey.desc(7)), whole),
+                WindowCall.of(agg(AggregateFunction.BOOL_OR, 5, false), around),
+                WindowCall.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"), frame(FrameUnit.ROWS,
+                        bound(BoundKind.FOLLOWING, lit(1L)), bound(BoundKind.FOLLOWING, lit(3L)),
+                        FrameExclusion.NO_OTHERS)),
+                WindowCall.of(agg(AggregateFunction.SUM, 1, true), whole)));
+        // Peers of one key: rankings, and aggregates over frames that take whole groups of peers.
+        PlanNode peers = new PlanNode.Window(t, List.of(5), List.of(SortKey.desc(0)), List.of(
+                WindowCall.of(WindowFunction.RANK, List.of(), "rk"),
+                WindowCall.of(WindowFunction.CUME_DIST, List.of(), "cd"),
+                WindowCall.of(agg(AggregateFunction.SUM, 1, false), frame(FrameUnit.RANGE,
+                        bound(BoundKind.PRECEDING, lit(2)), current, FrameExclusion.NO_OTHERS)),
+                WindowCall.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"), frame(FrameUnit.RANGE,
+                        current, bound(BoundKind.FOLLOWING, lit(5)), FrameExclusion.GROUP)),
+                WindowCall.of(agg(AggregateFunction.MIN, 3, false), frame(FrameUnit.GROUPS,
+                        bound(BoundKind.PRECEDING, lit(1L)), bound(BoundKind.FOLLOWING, lit(2L)), FrameExclusion.TIES)),
+                WindowCall.of(agg(AggregateFunction.MAX, 4, false), Frame.DEFAULT)));
+        // Ranges of dates and timestamps, over values that do not leave the range of the types.
+        PlanNode dates = new PlanNode.Window(new PlanNode.Filter(t, or(isNull(c(6)), between(c(6),
+                lit(DataType.DATE, -25_567), lit(DataType.DATE, 47_482)))), List.of(), List.of(SortKey.desc(6)), List.of(
+                WindowCall.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"), frame(FrameUnit.RANGE,
+                        interval(BoundKind.PRECEDING, 30, PlanNode.IntervalUnit.DAY), current, FrameExclusion.NO_OTHERS)),
+                WindowCall.of(agg(AggregateFunction.MAX, 0, false), frame(FrameUnit.RANGE,
+                        interval(BoundKind.PRECEDING, 1, PlanNode.IntervalUnit.MONTH),
+                        interval(BoundKind.FOLLOWING, 1, PlanNode.IntervalUnit.YEAR), FrameExclusion.NO_OTHERS)),
+                WindowCall.of(agg(AggregateFunction.COUNT, 4, false), frame(FrameUnit.RANGE,
+                        interval(BoundKind.PRECEDING, 12, PlanNode.IntervalUnit.HOUR),
+                        interval(BoundKind.FOLLOWING, 0, PlanNode.IntervalUnit.DAY), FrameExclusion.NO_OTHERS))));
+        PlanNode times = new PlanNode.Window(new PlanNode.Filter(u, or(isNull(col(U, 3)), between(col(U, 3),
+                lit(DataType.TIMESTAMP, -2_208_988_800_000_000L), lit(DataType.TIMESTAMP, 4_102_444_800_000_000L)))),
+                List.of(0), List.of(SortKey.asc(3)), List.of(
+                WindowCall.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"), frame(FrameUnit.RANGE,
+                        interval(BoundKind.PRECEDING, 1, PlanNode.IntervalUnit.DAY),
+                        interval(BoundKind.FOLLOWING, 1, PlanNode.IntervalUnit.HOUR), FrameExclusion.CURRENT_ROW)),
+                WindowCall.of(new AggregateCall(AggregateFunction.SUM, 0, false, "sum_k"), frame(FrameUnit.RANGE,
+                        interval(BoundKind.PRECEDING, 30, PlanNode.IntervalUnit.MINUTE), current, FrameExclusion.NO_OTHERS)),
+                WindowCall.of(new AggregateCall(AggregateFunction.MIN, 1, false, "min_v"), frame(FrameUnit.RANGE,
+                        interval(BoundKind.PRECEDING, 2, PlanNode.IntervalUnit.MONTH), current, FrameExclusion.NO_OTHERS))));
+        PlanNode ranked = new PlanNode.Window(t, List.of(5), total, List.of(
+                WindowCall.of(WindowFunction.ROW_NUMBER, List.of(), "rn")));
+        PlanNode ranks = new PlanNode.Window(t, List.of(), List.of(SortKey.asc(7)), List.of(
+                WindowCall.of(WindowFunction.DENSE_RANK, List.of(), "dr")));
+        List<PlanNode> plans = List.of(functions, aggregates, peers, dates, times,
+                new PlanNode.Filter(ranked, and(lt(col(8, DataType.BIGINT), lit(4L)), eq(c(5), lit(true)))),
+                new PlanNode.Aggregate(ranks, List.of(8), List.of(
+                        new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"),
+                        new AggregateCall(AggregateFunction.SUM, 0, false, "s"))),
+                new PlanNode.Limit(sorted(functions), 20, 5));
+        SqlRenderer renderer = new SqlRenderer(DuckDbDialect.INSTANCE, TableRef::toString);
+        for (PlanNode plan : plans) {
+            List<Object[]> rows = differential.check(plan, AVG_ULPS);
+            assertFalse(rows.isEmpty(), () -> Plans.print(plan));
+            String sql = renderer.render(plan);
+            ResultComparison.Outcome again = ResultComparison.compare(plan.schema(), rows,
+                    differential.engine().rows(sql), Plans.ordered(plan));
+            assertTrue(again.same(), () -> sql + "\n" + again.report());
+        }
+    }
+
+    /** A bound of a count of a unit, over a date or a timestamp. */
+    private static FrameBound interval(BoundKind kind, long count, PlanNode.IntervalUnit unit) {
+        return new FrameBound(kind, (Expression.Literal) lit(count), unit);
     }
 
     static List<List<Object>> asLists(List<Object[]> rows) {

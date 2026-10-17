@@ -17,14 +17,25 @@
 package net.fyrql.test.random;
 
 import net.fyrql.core.expr.Expression;
+import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
 import net.fyrql.core.plan.PlanNode.AggregateFunction;
+import net.fyrql.core.plan.PlanNode.BoundKind;
+import net.fyrql.core.plan.PlanNode.Frame;
+import net.fyrql.core.plan.PlanNode.FrameBound;
+import net.fyrql.core.plan.PlanNode.FrameExclusion;
+import net.fyrql.core.plan.PlanNode.FrameUnit;
+import net.fyrql.core.plan.PlanNode.IntervalUnit;
 import net.fyrql.core.plan.PlanNode.SortKey;
+import net.fyrql.core.plan.PlanNode.WindowCall;
+import net.fyrql.core.plan.PlanNode.WindowFunction;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -34,8 +45,8 @@ import java.util.SplittableRandom;
  * Generates plans over the {@linkplain RandomTables random tables} with
  * every kind of node: scans of some columns, {@code VALUES}, filters,
  * projections with {@linkplain ExpressionGenerator generated expressions},
- * joins on columns of one type, aggregations, sorts, limits, unions and
- * {@code EXCEPT}/{@code INTERSECT}.
+ * joins on columns of one type, aggregations, windows, sorts, limits,
+ * unions and {@code EXCEPT}/{@code INTERSECT}.
  * <p>
  * The results must not depend on the order in which an engine processes
  * rows: every sort orders by all columns, a limit applies to a sort only,
@@ -44,7 +55,9 @@ import java.util.SplittableRandom;
  * {@code any_value}) are ordered by their own column and leave out
  * floating-point columns, whose zeros compare equal but differ in sign.
  * Sums and averages leave out floating-point columns as well, since
- * their rounding depends on the order of addition. {@code SEMI} and
+ * their rounding depends on the order of addition. A window either orders
+ * the rows of a partition by all other columns, or its calls give the same
+ * result to peers. {@code SEMI} and
  * {@code ANTI} joins are left out, as the SQL front end does not read them.
  */
 final class PlanGenerator {
@@ -91,7 +104,7 @@ final class PlanGenerator {
     }
 
     private PlanNode nodeOnce(int depth) {
-        return switch (random.nextInt(11)) {
+        return switch (random.nextInt(12)) {
             case 0, 1 -> {
                 PlanNode input = node(depth);
                 yield new PlanNode.Filter(input, generator(input).condition(3));
@@ -107,6 +120,7 @@ final class PlanGenerator {
                 PlanNode input = node(depth);
                 yield new PlanNode.Union(List.of(input, sibling(input)));
             }
+            case 10 -> window(node(depth));
             default -> {
                 PlanNode input = node(depth);
                 PlanNode right = sibling(input);
@@ -269,6 +283,227 @@ final class PlanGenerator {
                 yield call;
             }
         };
+    }
+
+    /**
+     * A window of one to three calls over the input, sometimes with columns
+     * of small integers added for the counts and offsets of the calls. Its
+     * order is either total, by all columns but those of the partition, so
+     * that every function and frame has one result, or one key at most,
+     * whose peers the calls take together: rankings with peers, and
+     * aggregates over {@code RANGE} or {@code GROUPS} frames, which take or
+     * leave out whole groups of peers.
+     */
+    private PlanNode window(PlanNode input) {
+        if (chance(40)) {
+            input = withCounts(input);
+        }
+        Schema schema = input.schema();
+        List<Integer> partition = new ArrayList<>();
+        for (int i = 0; i < schema.size() && partition.size() < 2; i++) {
+            if (chance(20)) {
+                partition.add(i);
+            }
+        }
+        boolean total = chance(60);
+        List<SortKey> order = new ArrayList<>();
+        if (total) {
+            for (int i = 0; i < schema.size(); i++) {
+                if (!partition.contains(i)) {
+                    order.add(new SortKey(i, chance(60), chance(30)));
+                }
+            }
+            Collections.shuffle(order, new java.util.Random(random.nextLong()));
+        } else if (chance(85)) {
+            order.add(new SortKey(random.nextInt(schema.size()), chance(60), chance(30)));
+        }
+        List<WindowCall> calls = new ArrayList<>();
+        for (int n = random.nextInt(1, 4); n > 0; n--) {
+            WindowCall call = windowCall(schema, order, total);
+            if (call != null) {
+                calls.add(call);
+            }
+        }
+        if (calls.isEmpty()) {
+            calls.add(WindowCall.of(WindowFunction.RANK, List.of(), name()));
+        }
+        PlanNode window = new PlanNode.Window(input, partition, order, calls);
+        if (chance(25)) {
+            window = new PlanNode.Filter(window, generator(window).condition(2));
+        }
+        return window;
+    }
+
+    /** The input with one or two more columns of small integers, mostly positive, sometimes {@code NULL}. */
+    private PlanNode withCounts(PlanNode input) {
+        Schema schema = input.schema();
+        List<PlanNode.NamedExpression> columns = new ArrayList<>();
+        for (int i = 0; i < schema.size(); i++) {
+            columns.add(new PlanNode.NamedExpression(schema.name(i), new Expression.Column(i, schema.type(i))));
+        }
+        for (int i = random.nextInt(1, 3); i > 0; i--) {
+            DataType type = chance(50) ? DataType.INTEGER : DataType.BIGINT;
+            Expression count = chance(5) ? Expressions.nullOf(type)
+                    : new Expression.Literal(type, type == DataType.INTEGER ? (Object) random.nextInt(-1, 4)
+                            : (Object) random.nextLong(-1, 4));
+            columns.add(new PlanNode.NamedExpression(name(), count));
+        }
+        return new PlanNode.Project(input, columns);
+    }
+
+    private WindowCall windowCall(Schema schema, List<SortKey> order, boolean total) {
+        if (!total) {
+            return chance(30) ? WindowCall.of(pick(List.of(WindowFunction.RANK, WindowFunction.DENSE_RANK,
+                    WindowFunction.PERCENT_RANK, WindowFunction.CUME_DIST)), List.of(), name())
+                    : windowAggregate(schema, order, false);
+        }
+        String name = name();
+        int column = random.nextInt(schema.size());
+        DataType type = schema.type(column);
+        List<Integer> integral = new ArrayList<>();
+        List<Integer> sameType = new ArrayList<>();
+        for (int i = 0; i < schema.size(); i++) {
+            if (schema.type(i).isIntegral() && schema.type(i) != DataType.HUGEINT) {
+                integral.add(i);
+            }
+            if (schema.type(i).equals(type)) {
+                sameType.add(i);
+            }
+        }
+        WindowFunction f = pick(List.of(WindowFunction.values()));
+        boolean ignoreNulls = chance(20);
+        return switch (f) {
+            case ROW_NUMBER, RANK, DENSE_RANK, PERCENT_RANK, CUME_DIST -> WindowCall.of(f, List.of(), name);
+            case NTILE -> integral.isEmpty() ? null : WindowCall.of(f, List.of(pick(integral)), name);
+            case LAG, LEAD -> {
+                List<Integer> arguments = new ArrayList<>(List.of(column));
+                if (!integral.isEmpty() && chance(70)) {
+                    arguments.add(pick(integral));
+                    if (chance(50)) {
+                        arguments.add(pick(sameType));
+                    }
+                }
+                yield new WindowCall(f, null, arguments, ignoreNulls, -1, Frame.DEFAULT, name);
+            }
+            case FIRST_VALUE, LAST_VALUE -> new WindowCall(f, null, List.of(column), ignoreNulls, -1,
+                    frame(schema, order, true), name);
+            case NTH_VALUE -> integral.isEmpty() ? null : new WindowCall(f, null, List.of(column, pick(integral)),
+                    ignoreNulls, -1, frame(schema, order, true), name);
+            case AGGREGATE -> windowAggregate(schema, order, true);
+        };
+    }
+
+    /**
+     * An aggregate over a frame, sometimes with a filter. The aggregates
+     * whose result depends on the order of their values are ordered by
+     * them, but for {@code first} and {@code last} over a total order,
+     * which DuckDB takes as {@code first_value} and {@code last_value}.
+     */
+    private WindowCall windowAggregate(Schema schema, List<SortKey> order, boolean total) {
+        int column = random.nextInt(schema.size());
+        DataType type = schema.type(column);
+        boolean floating = type == DataType.FLOAT || type == DataType.DOUBLE;
+        boolean scalar = ExpressionGenerator.plain(type);
+        boolean distinct = chance(20);
+        AggregateFunction f = pick(List.of(AggregateFunction.values()));
+        String name = name();
+        AggregateCall call = switch (f) {
+            case COUNT_STAR -> new AggregateCall(f, -1, false, name);
+            case COUNT -> new AggregateCall(f, column, distinct, name);
+            case SUM, AVG -> type.isIntegral() || type instanceof DataType.Decimal
+                    ? new AggregateCall(f, column, distinct, name) : null;
+            case MIN, MAX -> scalar ? new AggregateCall(f, column, distinct, name) : null;
+            case BOOL_AND, BOOL_OR -> type == DataType.BOOLEAN ? new AggregateCall(f, column, false, name) : null;
+            case FIRST, LAST -> total && scalar ? new AggregateCall(f, column, false, name) : null;
+            case STRING_AGG, LIST, ANY_VALUE -> {
+                if (floating || !scalar) {
+                    yield null;
+                }
+                boolean d = distinct && f != AggregateFunction.ANY_VALUE;
+                AggregateCall c = new AggregateCall(f, column, d, name)
+                        .withOrderBy(List.of(new SortKey(column, chance(50), chance(30))));
+                yield f == AggregateFunction.STRING_AGG ? c.withSeparator(pick(List.of(",", "", "-"))) : c;
+            }
+        };
+        if (call == null) {
+            return null;
+        }
+        List<Integer> booleans = new ArrayList<>();
+        for (int i = 0; i < schema.size(); i++) {
+            if (schema.type(i) == DataType.BOOLEAN) {
+                booleans.add(i);
+            }
+        }
+        int filter = !booleans.isEmpty() && chance(20) ? pick(booleans) : -1;
+        return new WindowCall(WindowFunction.AGGREGATE, call, List.of(), false, filter, frame(schema, order, total),
+                name);
+    }
+
+    /**
+     * A frame: the default, or one of rows, groups of peers or a range of
+     * values of the only order key, with offsets mostly small and positive,
+     * and sometimes rows left out. Without a total order, there are no
+     * frames of rows.
+     */
+    private Frame frame(Schema schema, List<SortKey> order, boolean total) {
+        if (chance(20)) {
+            return Frame.DEFAULT;
+        }
+        FrameUnit unit = total ? pick(List.of(FrameUnit.values())) : pick(List.of(FrameUnit.RANGE, FrameUnit.GROUPS));
+        DataType key = order.size() == 1 ? schema.type(order.get(0).column()) : null;
+        boolean offsets = unit != FrameUnit.RANGE
+                || key != null && (key.isNumeric() || key == DataType.DATE || key == DataType.TIMESTAMP);
+        for (int attempt = 0; attempt < 10; attempt++) {
+            BoundKind start = pick(List.of(BoundKind.UNBOUNDED_PRECEDING, BoundKind.PRECEDING, BoundKind.CURRENT_ROW,
+                    BoundKind.FOLLOWING));
+            BoundKind end = pick(List.of(BoundKind.PRECEDING, BoundKind.CURRENT_ROW, BoundKind.FOLLOWING,
+                    BoundKind.UNBOUNDED_FOLLOWING));
+            if (start.ordinal() > end.ordinal() || !offsets && (start.hasOffset() || end.hasOffset())) {
+                continue;
+            }
+            FrameExclusion exclusion = chance(70) ? FrameExclusion.NO_OTHERS : pick(List.of(FrameExclusion.values()));
+            return new Frame(unit, bound(start, unit, key), bound(end, unit, key), exclusion);
+        }
+        return Frame.DEFAULT;
+    }
+
+    /** A bound with an offset where its kind has one: of the type of the order key for a range of numbers. */
+    private FrameBound bound(BoundKind kind, FrameUnit unit, DataType key) {
+        if (!kind.hasOffset()) {
+            return FrameBound.of(kind);
+        }
+        long n = chance(5) ? -1 : random.nextInt(0, 4);
+        if (unit != FrameUnit.RANGE) {
+            return FrameBound.of(kind, new Expression.Literal(DataType.BIGINT, n));
+        }
+        if (key == DataType.DATE || key == DataType.TIMESTAMP) {
+            IntervalUnit u = key == DataType.DATE
+                    ? pick(List.of(IntervalUnit.DAY, IntervalUnit.MONTH, IntervalUnit.YEAR, IntervalUnit.HOUR))
+                    : pick(List.of(IntervalUnit.values()));
+            long count = switch (u) {
+                case YEAR, MONTH -> n;
+                case DAY, HOUR -> n * random.nextInt(1, 40);
+                default -> n * random.nextLong(1, 100_000);
+            };
+            return new FrameBound(kind, new Expression.Literal(DataType.BIGINT, count), u);
+        }
+        Object value;
+        if (key instanceof DataType.Decimal d) {
+            value = new BigDecimal(BigInteger.valueOf(n * 50 + (n > 0 ? random.nextInt(0, 50) : 0)), 2)
+                    .setScale(d.scale());
+        } else {
+            value = switch ((DataType.Scalar) key) {
+                case TINYINT -> (byte) n;
+                case SMALLINT -> (short) n;
+                case INTEGER -> (int) n;
+                case BIGINT -> n;
+                case HUGEINT -> BigInteger.valueOf(n);
+                case FLOAT -> n * 1.25f;
+                case DOUBLE -> n * 0.75;
+                default -> throw new IllegalArgumentException("No RANGE offset for " + key);
+            };
+        }
+        return FrameBound.of(kind, new Expression.Literal(key, value));
     }
 
     /** Sorts by all columns, in a random order of keys and directions, which leaves no ties between different rows. */

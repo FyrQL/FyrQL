@@ -50,6 +50,9 @@ import java.util.function.Supplier;
  */
 final class TwoEngines implements AutoCloseable {
 
+    /** The start of the report of rows that differ where a second run of DuckDB agrees with FyrQL. */
+    static final String UNSTABLE = "DuckDB agrees on a second run; the first run differs:\n";
+
     private final FyrQL engine;
     private final FyrQL compiled;
     private final DuckDbReference duck = new DuckDbReference();
@@ -198,8 +201,18 @@ final class TwoEngines implements AutoCloseable {
                     "types: DuckDB " + expected.types() + ", FyrQL " + types);
         }
         ResultComparison.Outcome rows = ResultComparison.compare(schema, expected.rows(), actual, ordered, ulps);
-        return rows.same() ? new Outcome(Outcome.Kind.SAME, sql, null, null, "")
-                : new Outcome(Outcome.Kind.ROWS_DIFFER, sql, null, null, rows.report());
+        if (rows.same()) {
+            return new Outcome(Outcome.Kind.SAME, sql, null, null, "");
+        }
+        // DuckDB may give other rows on another run of the same query.
+        try {
+            if (ResultComparison.compare(schema, duck(sql, schema).rows(), actual, ordered, ulps).same()) {
+                return new Outcome(Outcome.Kind.ROWS_DIFFER, sql, null, null, UNSTABLE + rows.report());
+            }
+        } catch (SQLException e) {
+            // The difference stays as the first run shows it.
+        }
+        return new Outcome(Outcome.Kind.ROWS_DIFFER, sql, null, null, rows.report());
     }
 
     /** The column types and rows of DuckDB; the rows are FyrQL values where FyrQL's types agree. */

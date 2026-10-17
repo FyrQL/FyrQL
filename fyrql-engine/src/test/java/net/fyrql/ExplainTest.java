@@ -16,6 +16,7 @@
 
 package net.fyrql;
 
+import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.type.DataType;
@@ -40,6 +41,58 @@ class ExplainTest {
                     """, engine.explain(sql));
             assertEquals(List.of(List.of(1, 10), List.of(1, 20)),
                     engine.rows(sql).stream().map(List::of).toList());
+        }
+    }
+
+    @Test
+    void aWindowShowsItsPartitionItsOrderAndItsCalls() {
+        try (FyrQL engine = FyrQL.builder().build()) {
+            Schema s = Schema.of(new Schema.Field("k", DataType.INTEGER), new Schema.Field("o", DataType.INTEGER),
+                    new Schema.Field("x", DataType.BIGINT), new Schema.Field("f", DataType.BOOLEAN),
+                    new Schema.Field("d", DataType.DATE));
+            PlanNode values = new PlanNode.Values(s, List.of(new Object[] {1, 2, 3L, true, 0},
+                    new Object[] {2, 3, 4L, false, 1}));
+            PlanNode.Frame rows = new PlanNode.Frame(PlanNode.FrameUnit.ROWS,
+                    PlanNode.FrameBound.of(PlanNode.BoundKind.PRECEDING, new Expression.Literal(DataType.BIGINT, 1L)),
+                    PlanNode.FrameBound.of(PlanNode.BoundKind.CURRENT_ROW), PlanNode.FrameExclusion.TIES);
+            PlanNode.Frame days = new PlanNode.Frame(PlanNode.FrameUnit.RANGE, new PlanNode.FrameBound(
+                    PlanNode.BoundKind.PRECEDING, new Expression.Literal(DataType.BIGINT, 2L),
+                    PlanNode.IntervalUnit.DAY), PlanNode.FrameBound.of(PlanNode.BoundKind.CURRENT_ROW),
+                    PlanNode.FrameExclusion.NO_OTHERS);
+            PlanNode first = new PlanNode.Window(values, List.of(0), List.of(PlanNode.SortKey.desc(1)), List.of(
+                    PlanNode.WindowCall.of(PlanNode.WindowFunction.ROW_NUMBER, List.of(), "rn"),
+                    new PlanNode.WindowCall(PlanNode.WindowFunction.AGGREGATE, new PlanNode.AggregateCall(
+                            PlanNode.AggregateFunction.SUM, 2, false, "s"), List.of(), false, 3, rows, "s"),
+                    new PlanNode.WindowCall(PlanNode.WindowFunction.LAG, null, List.of(2), true, -1,
+                            PlanNode.Frame.DEFAULT, "prev")));
+            PlanNode second = new PlanNode.Window(first, List.of(), List.of(PlanNode.SortKey.asc(4)), List.of(
+                    PlanNode.WindowCall.of(new PlanNode.AggregateCall(PlanNode.AggregateFunction.COUNT_STAR, -1,
+                            false, "n"), days),
+                    PlanNode.WindowCall.of(new PlanNode.AggregateCall(PlanNode.AggregateFunction.MAX, 2, false,
+                            "max(x)"), PlanNode.Frame.DEFAULT)));
+            PlanNode plan = new PlanNode.Project(new PlanNode.Filter(second,
+                    Expressions.gt(Expressions.col(0, DataType.INTEGER), Expressions.lit(1))), List.of(
+                    new PlanNode.NamedExpression("k", Expressions.col(0, DataType.INTEGER)),
+                    new PlanNode.NamedExpression("rn", Expressions.col(5, DataType.BIGINT)),
+                    new PlanNode.NamedExpression("n", Expressions.col(8, DataType.BIGINT)),
+                    new PlanNode.NamedExpression("m", Expressions.col(9, DataType.BIGINT))));
+            assertEquals("""
+                    Window PARTITION BY #0 ORDER BY #1 DESC: row_number() AS rn, sum(#2) FILTER (WHERE #3) \
+                    ROWS BETWEEN 1 PRECEDING AND CURRENT ROW EXCLUDE TIES AS s, lag(#2 IGNORE NULLS) AS prev
+                      Values 2 rows (k INTEGER, o INTEGER, x BIGINT, f BOOLEAN, d DATE)
+                    """, engine.explain(first));
+            // The filter stays above the window without partition columns, whose calls see all rows, and the calls
+            // nothing reads are gone.
+            assertEquals("""
+                    Project #0 AS k, #5 AS rn, #6 AS n, #7 AS m
+                      Filter (#0 > CAST(1 AS INTEGER))
+                        Window ORDER BY #4: count(*) RANGE BETWEEN INTERVAL 2 DAY PRECEDING AND CURRENT ROW AS n, \
+                    max(#2) AS "max(x)"
+                          Window PARTITION BY #0 ORDER BY #1 DESC: row_number() AS rn
+                            Values 2 rows (k INTEGER, o INTEGER, x BIGINT, f BOOLEAN, d DATE)
+                    """, engine.explain(plan));
+            // Two days back from the second date reach the first.
+            assertEquals(List.of(List.of(2, 1L, 2L, 4L)), engine.rows(plan).stream().map(List::of).toList());
         }
     }
 

@@ -110,6 +110,8 @@ class SqlCorpusTest {
             "SELECT b AS g, sum(a) AS s FROM t GROUP BY g HAVING s > 3",
             "SELECT a % 2, count(*) FROM t GROUP BY a % 2",
             "SELECT a % 2 AS k, count(*) FROM t GROUP BY 1",
+            // DuckDB folds the minus signs into the position.
+            "SELECT k % 2 AS x, count(*) FROM t GROUP BY -(-1) ORDER BY -(-1) DESC",
             "SELECT a % 2 AS a, count(*) FROM t GROUP BY a",
             "SELECT k, e, count(*) FROM t GROUP BY k, e",
             "SELECT k + 1, max(a) - min(a), count(*) + 1, sum(a) * 2 FROM t GROUP BY k",
@@ -212,6 +214,7 @@ class SqlCorpusTest {
             "SELECT DISTINCT a % 2 AS p FROM t ORDER BY p DESC",
             "SELECT DISTINCT a + 1 FROM t ORDER BY a + 1",
             "SELECT count(DISTINCT e), sum(DISTINCT e), avg(DISTINCT e), min(DISTINCT e) FROM t",
+            "SELECT sum(ALL e), count(ALL b), count(ALL *) FROM t",
             "SELECT DISTINCT count(*) FROM t GROUP BY b",
             // Order and limit
             "SELECT a FROM t ORDER BY a DESC LIMIT 3",
@@ -481,7 +484,59 @@ class SqlCorpusTest {
             "SELECT x, count(*) FROM n, unnest(n.l) AS u(x) GROUP BY x",
             "SELECT tag, list(id ORDER BY id) FROM n, unnest(n.s.c.tags) AS u(tag) GROUP BY tag",
             "WITH c AS (SELECT [1, 2] AS l) SELECT * FROM c, unnest(c.l) AS u(x)",
-            "SELECT * FROM (SELECT id, l FROM n) t, unnest(t.l)");
+            "SELECT * FROM (SELECT id, l FROM n) t, unnest(t.l)",
+            // Window functions; an order with ties leaves only results that do not depend on the order of peers.
+            "SELECT a, k, row_number() OVER (PARTITION BY k ORDER BY a DESC), rank() OVER (ORDER BY k),"
+                    + " dense_rank() OVER (ORDER BY k), percent_rank() OVER (ORDER BY k),"
+                    + " cume_dist() OVER (ORDER BY k), ntile(4) OVER (ORDER BY a) FROM t",
+            "SELECT a, lag(a) OVER (ORDER BY a), lead(a, 2, -1) OVER (ORDER BY a), lag(b, -1) OVER (ORDER BY a),"
+                    + " first_value(c) OVER (ORDER BY a), last_value(c) OVER (ORDER BY a),"
+                    + " nth_value(b, 2) OVER (ORDER BY a) FROM t",
+            "SELECT a, sum(a) OVER (ORDER BY a ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING), avg(c) OVER (PARTITION BY k),"
+                    + " count(*) OVER (), count(c) OVER (ORDER BY a), min(b) OVER (ORDER BY a DESC),"
+                    + " max(d) OVER (PARTITION BY k ORDER BY a) FROM t",
+            "SELECT k, sum(a), sum(sum(a)) OVER (ORDER BY k), rank() OVER (ORDER BY count(*) DESC, k) FROM t"
+                    + " GROUP BY k",
+            "SELECT sum(count(*)) OVER () FROM t",
+            "SELECT b, count(*), sum(count(*)) OVER (), row_number() OVER (ORDER BY b) FROM t GROUP BY b"
+                    + " HAVING count(*) > 1 QUALIFY row_number() OVER (ORDER BY b) < 3",
+            "SELECT a, b, row_number() OVER w, sum(a) OVER w FROM t WINDOW w AS (PARTITION BY b ORDER BY a)",
+            "SELECT a, k FROM t QUALIFY row_number() OVER (PARTITION BY k ORDER BY a DESC) = 1",
+            "SELECT a, row_number() OVER (ORDER BY a) AS rn, rn * 10 FROM t QUALIFY rn % 2 = 0 ORDER BY rn DESC",
+            "SELECT a, d, count(*) OVER (ORDER BY d RANGE BETWEEN INTERVAL 1 YEAR PRECEDING AND CURRENT ROW),"
+                    + " count(*) OVER (ORDER BY d RANGE BETWEEN 3 PRECEDING AND 60 FOLLOWING) FROM t",
+            "SELECT a, e, sum(a) OVER (ORDER BY e RANGE BETWEEN 1 PRECEDING AND CURRENT ROW),"
+                    + " sum(a) OVER (ORDER BY c DESC RANGE BETWEEN 1.5 PRECEDING AND 0.5 FOLLOWING),"
+                    + " sum(a) OVER (ORDER BY e RANGE BETWEEN 200 PRECEDING AND '1' FOLLOWING) FROM t",
+            "SELECT ts, max(m) OVER (ORDER BY ts RANGE BETWEEN INTERVAL 1 DAY PRECEDING AND INTERVAL 30 MINUTE"
+                    + " FOLLOWING), count(*) OVER (ORDER BY ts DESC RANGE BETWEEN INTERVAL 3 MONTH PRECEDING AND"
+                    + " CURRENT ROW) FROM w",
+            "SELECT a, sum(a) OVER (ORDER BY k GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW EXCLUDE GROUP),"
+                    + " sum(a) OVER (ORDER BY k ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE TIES),"
+                    + " sum(a) OVER (ORDER BY a ROWS BETWEEN 1.5 PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW) FROM t",
+            "SELECT a, sum(a) FILTER (WHERE a > 2) OVER (ORDER BY a), count(*) FILTER (WHERE b = 'x') OVER (),"
+                    + " string_agg(b, '-' ORDER BY a DESC) OVER (PARTITION BY k), sum(DISTINCT k) OVER (),"
+                    + " list(a ORDER BY a) OVER (PARTITION BY b) FROM t",
+            "SELECT a, first_value(c IGNORE NULLS) OVER (ORDER BY a DESC), lag(c IGNORE NULLS) OVER (ORDER BY a),"
+                    + " lag(a, 1.5) OVER (ORDER BY a), ntile(2.7) OVER (ORDER BY a), lag(a, '1') OVER (ORDER BY a),"
+                    + " lag(e, 1, 0.5) OVER (ORDER BY a) FROM t",
+            "SELECT h, g, sum(h) OVER (ORDER BY g), avg(m) OVER (ORDER BY g ROWS 1 PRECEDING), sum(m) OVER (),"
+                    + " sum(s) OVER (ORDER BY ts RANGE BETWEEN INTERVAL 2 DAY PRECEDING AND CURRENT ROW) FROM w",
+            // As in DuckDB, first and last over a window are first_value and last_value; arbitrary stays an aggregate.
+            "SELECT a, first(c IGNORE NULLS) OVER (ORDER BY a), last(c) OVER (ORDER BY a ROWS BETWEEN CURRENT ROW AND"
+                    + " 1 FOLLOWING), arbitrary(c) FILTER (WHERE a > 1) OVER (ORDER BY a) FROM t",
+            "SELECT DISTINCT k, count(*) OVER (PARTITION BY k) FROM t ORDER BY 1",
+            "SELECT a FROM t ORDER BY row_number() OVER (ORDER BY c DESC), a",
+            "SELECT a, b AS x, row_number() OVER (PARTITION BY x ORDER BY a), (SELECT max(n) FROM u), unnest([1, 2])"
+                    + " FROM t",
+            "SELECT b, max(a) OVER (PARTITION BY b) FROM t WHERE a > 1 ORDER BY 1 LIMIT 3",
+            // Over a window, DuckDB takes a literal in the order of an aggregate, which it rejects elsewhere.
+            "SELECT a, count(a ORDER BY 'x') OVER (), max(a ORDER BY NULL) OVER (PARTITION BY k),"
+                    + " sum(a ORDER BY -1.5) OVER () FROM t",
+            "SELECT a, first_value(upper(b) IGNORE NULLS) OVER (ORDER BY a), lag(c, 1, abs(c) IGNORE NULLS)"
+                    + " OVER (ORDER BY a) FROM t",
+            "SELECT a, k, count(*) OVER (PARTITION BY ((a % 2)), k), count(*) OVER w FROM t"
+                    + " WINDOW w AS (PARTITION BY (k, a > 2))");
 
     /** Texts that must not bind, with the start of FyrQL's message; DuckDB rejects them as well. */
     static final List<Map.Entry<String, String>> ERRORS = List.of(
@@ -527,6 +582,9 @@ class SqlCorpusTest {
             Map.entry("SELECT * EXCLUDE (a) FROM (SELECT 1 AS a)", "SELECT list is empty after resolving * expressions!"),
             Map.entry("SELECT a FROM t ORDER BY -1", "ORDER term out of range - should be between 1 and 1"),
             Map.entry("SELECT 1 AS x FROM t GROUP BY -1", "GROUP BY term out of range - should be between 1 and 1"),
+            // DuckDB folds the minus signs into the position.
+            Map.entry("SELECT a FROM t ORDER BY -(-(-1))", "ORDER term out of range - should be between 1 and 1"),
+            Map.entry("SELECT 1 AS x FROM t GROUP BY -(-2)", "GROUP BY term out of range - should be between 1 and 1"),
             Map.entry("SELECT coalesce('2024-01-01', '2024-01-02', d) FROM t",
                     "Cannot mix values of type VARCHAR and DATE in COALESCE operator"),
             Map.entry("SELECT '2024-01-02' BETWEEN '2024-01-01' AND d FROM t",
@@ -619,7 +677,56 @@ class SqlCorpusTest {
                     "Cannot compare values of type BOOLEAN and DOUBLE in IN/ANY/ALL clause"),
             Map.entry("SELECT (-170141183460469231731687303715884105728)::HUGEINT % (s - 8) FROM w",
                     "Overflow in division of -170141183460469231731687303715884105728 / -1"),
-            Map.entry("SELECT a, (SELECT f FROM u WHERE u.a = t.a) FROM t", "More than one row returned by a subquery"));
+            Map.entry("SELECT a, (SELECT f FROM u WHERE u.a = t.a) FROM t", "More than one row returned by a subquery"),
+            Map.entry("SELECT a FROM t WHERE row_number() OVER () > 1",
+                    "WHERE clause cannot contain window functions!"),
+            Map.entry("SELECT t.a FROM t JOIN u ON row_number() OVER () = 1",
+                    "WHERE clause cannot contain window functions!"),
+            Map.entry("SELECT a FROM t GROUP BY row_number() OVER ()",
+                    "GROUP BY clause cannot contain window functions!"),
+            Map.entry("SELECT sum(row_number() OVER ()) FROM t",
+                    "aggregate function calls cannot contain window function calls"),
+            Map.entry("SELECT sum(a) OVER (ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) FROM t",
+                    "frame starting from current row cannot have preceding rows"),
+            Map.entry("SELECT sum(a) OVER (ROWS 1 FOLLOWING) FROM t",
+                    "frame starting from following row cannot end with current row"),
+            Map.entry("SELECT sum(a) OVER (ROWS BETWEEN UNBOUNDED FOLLOWING AND CURRENT ROW) FROM t",
+                    "frame start cannot be UNBOUNDED FOLLOWING"),
+            Map.entry("SELECT a FROM t WINDOW w AS (ORDER BY a), w AS (ORDER BY b)",
+                    "window \"w\" is already defined"),
+            Map.entry("SELECT a FROM t GROUP BY a HAVING row_number() OVER () > 1",
+                    "HAVING clause cannot contain window functions!"),
+            Map.entry("SELECT row_number() OVER (ORDER BY row_number() OVER ()) FROM t",
+                    "window functions are not allowed in window definitions"),
+            Map.entry("SELECT lag(row_number() OVER ()) OVER () FROM t", "window function calls cannot be nested"),
+            Map.entry("SELECT a FROM t QUALIFY a > 1",
+                    "at least one window function must appear in the SELECT column or QUALIFY clause"),
+            Map.entry("SELECT k, sum(a) OVER () FROM t GROUP BY ALL", "Cannot group on a window clause"),
+            Map.entry("SELECT k, sum(a) OVER () FROM t GROUP BY k", "column \"a\" must appear in the GROUP BY clause"),
+            Map.entry("SELECT ntile() OVER () FROM t", "NTILE needs 1 parameter, got 0"),
+            Map.entry("SELECT upper(b) OVER () FROM t", "upper is not an aggregate function"),
+            Map.entry("SELECT foo(a) OVER () FROM t", "Aggregate Function with name foo does not exist!"),
+            Map.entry("SELECT row_number() FILTER (WHERE a > 1) OVER () FROM t",
+                    "FILTER is not implemented for non-aggregate window functions!"),
+            Map.entry("SELECT lag(DISTINCT a) OVER () FROM t",
+                    "DISTINCT is not implemented for non-aggregate window functions!"),
+            Map.entry("SELECT sum(a IGNORE NULLS) OVER () FROM t",
+                    "RESPECT/IGNORE NULLS is not supported for windowed aggregates"),
+            Map.entry("SELECT a, row_number() OVER w FROM t WINDOW v AS (ORDER BY a)", "window \"w\" does not exist"),
+            Map.entry("SELECT sum(a) OVER (ORDER BY a, k RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t",
+                    "RANGE frames must have only one ORDER BY expression"),
+            Map.entry("SELECT sum(a) OVER (ORDER BY b RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t",
+                    "Cannot use an offset of type INTEGER in a RANGE frame over an order key of type VARCHAR"),
+            Map.entry("SELECT sum(a) OVER (ORDER BY a RANGE BETWEEN INTERVAL 1 DAY PRECEDING AND CURRENT ROW) FROM t",
+                    "Cannot use an INTERVAL as the offset of a RANGE frame over an order key of type INTEGER"),
+            Map.entry("SELECT sum(a) OVER (ORDER BY e RANGE BETWEEN CURRENT ROW AND 124 FOLLOWING) FROM t",
+                    "Overflow in addition of TINYINT (4 + 124)"),
+            Map.entry("SELECT sum(a) OVER (ORDER BY a RANGE BETWEEN -1 PRECEDING AND CURRENT ROW) FROM t",
+                    "Invalid RANGE PRECEDING value"),
+            Map.entry("SELECT first(c) FILTER (WHERE a > 1) OVER (ORDER BY a) FROM t",
+                    "FILTER is not implemented for non-aggregate window functions!"),
+            Map.entry("SELECT ntile(0) OVER () FROM t", "Argument for ntile must be greater than zero"),
+            Map.entry("SELECT lag(a, 1, 'x') OVER (ORDER BY a) FROM t", "Could not convert string 'x'"));
 
     /** Texts DuckDB runs and FyrQL rejects on purpose, with the start of FyrQL's message. */
     static final List<Map.Entry<String, String>> DEVIATIONS = List.of(
@@ -669,7 +776,23 @@ class SqlCorpusTest {
             Map.entry("SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a OR u.n > (SELECT 1))",
                     "Not supported: a subquery in a condition that references the outer query"),
             Map.entry("SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE t.a IN (SELECT a FROM u))",
-                    "Not supported: IN with a subquery whose value references the outer query"));
+                    "Not supported: IN with a subquery whose value references the outer query"),
+            // The filter of an aggregate goes only with a window; JSqlParser reads a window that names another
+            // and adds to it as a syntax error.
+            Map.entry("SELECT sum(a) FILTER (WHERE a > 1) FROM t", "Not supported: FILTER without OVER"),
+            Map.entry("SELECT sum(a) OVER (w ORDER BY a) FROM t WINDOW w AS (PARTITION BY b)", "Syntax error"),
+            // JSqlParser reads a partition in parentheses as the list of all; ((a % 2)), k it reads.
+            Map.entry("SELECT count(*) OVER (PARTITION BY (a % 2), k) FROM t", "Syntax error"),
+            // DuckDB also takes an order in the arguments of a window function, frame offsets that are no
+            // constants or NULL, and window functions in a correlated subquery, whose join sits above them.
+            Map.entry("SELECT lag(a ORDER BY a) OVER () FROM t", "Not supported: ORDER BY in the arguments of lag"),
+            Map.entry("SELECT sum(a) OVER (ORDER BY a ROWS BETWEEN a PRECEDING AND CURRENT ROW) FROM t",
+                    "Not supported: a frame offset that is not a constant"),
+            Map.entry("SELECT sum(a) OVER (ORDER BY a ROWS BETWEEN NULL PRECEDING AND CURRENT ROW) FROM t",
+                    "Not supported: NULL as the offset of a frame"),
+            Map.entry("SELECT a FROM t WHERE EXISTS (SELECT rank() OVER (ORDER BY f) FROM u WHERE u.a = t.a)",
+                    "Not supported: a window function in a correlated subquery"),
+            Map.entry("SELECT a, row_number() OVER (ORDER BY (SELECT 1)) FROM t", "Not supported: a subquery here"));
 
     private static FyrQL engine;
     private static DuckDbReference duck;

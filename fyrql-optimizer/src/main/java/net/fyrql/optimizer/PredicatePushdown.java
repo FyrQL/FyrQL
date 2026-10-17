@@ -28,6 +28,7 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.core.type.TypeRules;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 
 /**
@@ -48,7 +49,9 @@ import java.util.List;
  * join. A left join passes the conjuncts over its left input, a right join
  * those over its right input, a semi or anti join all of them, a full join
  * none;</li>
- * <li>an aggregation with group columns passes the conjuncts over them;</li>
+ * <li>an aggregation with group columns passes the conjuncts over them, and
+ * a window the conjuncts over its partition columns, which keep or drop
+ * whole partitions;</li>
  * <li>a sort passes everything, a union copies everything into each input,
  * {@code EXCEPT} and {@code INTERSECT} pass everything to their left input,
  * whose rows they keep, and an unnest passes the conjuncts that do not read
@@ -134,6 +137,20 @@ final class PredicatePushdown {
                     (Expressions.columns(c).get(width) ? stay : down).add(c);
                 }
                 yield filter(new PlanNode.Unnest(push(u.input(), down), u.list(), u.name()), stay);
+            }
+            case PlanNode.Window w -> {
+                // A conjunct over the partition columns keeps or drops whole partitions, which the calls compute
+                // apart; any other conjunct would change the rows the calls of a partition see.
+                BitSet partition = new BitSet();
+                w.partition().forEach(partition::set);
+                List<Expression> down = new ArrayList<>();
+                List<Expression> stay = new ArrayList<>();
+                for (Expression c : conjuncts) {
+                    BitSet columns = Expressions.columns(c);
+                    columns.andNot(partition);
+                    (columns.isEmpty() ? down : stay).add(c);
+                }
+                yield filter(new PlanNode.Window(push(w.input(), down), w.partition(), w.order(), w.calls()), stay);
             }
             case PlanNode.Scan s -> filter(s, conjuncts);
             case PlanNode.Remote r -> filter(r, conjuncts);

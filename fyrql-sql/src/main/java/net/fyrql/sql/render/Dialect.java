@@ -23,6 +23,7 @@ import net.fyrql.core.plan.PlanNode.SortKey;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -153,6 +154,55 @@ public interface Dialect {
     }
 
     /**
+     * Renders a call of a window function other than an aggregate over
+     * rendered arguments, e.g. {@code lag(t.c1, t.c2 IGNORE NULLS)}.
+     *
+     * @throws IllegalArgumentException if the dialect has no such function
+     */
+    default String windowFunction(PlanNode.WindowFunction function, List<String> arguments, boolean ignoreNulls) {
+        return function.sqlName() + "(" + String.join(", ", arguments) + (ignoreNulls ? " IGNORE NULLS)" : ")");
+    }
+
+    /**
+     * Renders the frame of a window, e.g.
+     * {@code ROWS BETWEEN 1 PRECEDING AND CURRENT ROW}, with an offset as a
+     * literal of its type and an interval as {@code INTERVAL '3' DAY}.
+     *
+     * @throws IllegalArgumentException if the dialect cannot write the frame
+     */
+    default String frame(PlanNode.Frame frame) {
+        return frame.sql(b -> b.unit() == null ? literal(b.offset().value(), b.offset().type())
+                : "INTERVAL '" + b.offset().value() + "' " + b.unit());
+    }
+
+    /**
+     * Renders a rendered call of a window function or an aggregate over a
+     * window: {@code call [FILTER (WHERE filter)] OVER ([PARTITION BY ...]
+     * [ORDER BY ...] [frame])}.
+     *
+     * @param call the rendered call
+     * @param filter the rendered condition of the rows an aggregate takes, or {@code null} for all
+     * @param partition the rendered columns of the partitions
+     * @param orderKeys the rendered keys of the order within a partition
+     * @param frame the rendered frame, or {@code null} for a function that uses none
+     * @throws IllegalArgumentException if the dialect cannot write window functions
+     */
+    default String window(String call, String filter, List<String> partition, List<String> orderKeys, String frame) {
+        List<String> parts = new ArrayList<>();
+        if (!partition.isEmpty()) {
+            parts.add("PARTITION BY " + String.join(", ", partition));
+        }
+        if (!orderKeys.isEmpty()) {
+            parts.add("ORDER BY " + String.join(", ", orderKeys));
+        }
+        if (frame != null) {
+            parts.add(frame);
+        }
+        return call + (filter == null ? "" : " FILTER (WHERE " + filter + ")") + " OVER (" + String.join(" ", parts)
+                + ")";
+    }
+
+    /**
      * Renders the keyword of a set operation, e.g. {@code EXCEPT ALL}.
      *
      * @throws IllegalArgumentException if the dialect has no such operation
@@ -218,6 +268,14 @@ public interface Dialect {
      * @param schema the schema of the rows
      */
     default boolean supportsAggregation(PlanNode.Aggregation aggregation, Schema schema) {
+        return true;
+    }
+
+    /**
+     * Tells whether the dialect computes the calls of a window exactly as
+     * FyrQL does, so that a connector may hand them over.
+     */
+    default boolean supportsWindow(PlanNode.Window window) {
         return true;
     }
 }

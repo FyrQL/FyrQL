@@ -199,6 +199,42 @@ class ColumnPruningTest {
     }
 
     @Test
+    void aWindowKeepsTheCallsInUseAndTheColumnsTheyRead() {
+        AggregateCall count = new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n");
+        PlanNode.Window window = new PlanNode.Window(Scan.all(Tables.T_REF, Tables.T), List.of(3),
+                List.of(SortKey.asc(2)), List.of(PlanNode.WindowCall.of(PlanNode.WindowFunction.FIRST_VALUE,
+                        List.of(2), "f"), PlanNode.WindowCall.of(new AggregateCall(AggregateFunction.MAX, 0, false,
+                        "m"), PlanNode.Frame.DEFAULT), PlanNode.WindowCall.of(count, PlanNode.Frame.DEFAULT)));
+        PlanNode plan = new PlanNode.Project(window, List.of(new NamedExpression("b", col(window.schema(), 1)),
+                new NamedExpression("f", col(window.schema(), 4)), new NamedExpression("n", col(window.schema(), 6))));
+        PlanNode pruned = ColumnPruning.prune(plan);
+        PlanNode.Window w = assertInstanceOf(PlanNode.Window.class,
+                assertInstanceOf(PlanNode.Project.class, pruned).input());
+        // The maximum of a is not in use: the call goes, and with it the column it alone reads.
+        assertEquals(List.of(1, 2, 3), assertInstanceOf(Scan.class, w.input()).columns());
+        assertEquals(List.of(2), w.partition());
+        assertEquals(List.of(SortKey.asc(1)), w.order());
+        assertEquals(List.of(PlanNode.WindowCall.of(PlanNode.WindowFunction.FIRST_VALUE, List.of(1), "f"),
+                PlanNode.WindowCall.of(count, PlanNode.Frame.DEFAULT)), w.calls());
+        assertEquals(List.of(new NamedExpression("b", col(w.schema(), 0)), new NamedExpression("f", col(w.schema(), 3)),
+                new NamedExpression("n", col(w.schema(), 4))), ((PlanNode.Project) pruned).columns());
+        assertSameRows(plan, pruned);
+    }
+
+    @Test
+    void aWindowWithoutACallInUseGoesAway() {
+        PlanNode.Window window = new PlanNode.Window(Scan.all(Tables.T_REF, Tables.T), List.of(3),
+                List.of(SortKey.asc(0)), List.of(PlanNode.WindowCall.of(PlanNode.WindowFunction.RANK, List.of(),
+                        "r")));
+        PlanNode plan = new PlanNode.Project(window, List.of(new NamedExpression("b", col(window.schema(), 1))));
+        PlanNode pruned = ColumnPruning.prune(plan);
+        Scan s = assertInstanceOf(Scan.class, assertInstanceOf(PlanNode.Project.class, pruned).input());
+        assertEquals(List.of(1), s.columns());
+        assertEquals(List.of(new NamedExpression("b", col(s.schema(), 0))), ((PlanNode.Project) pruned).columns());
+        assertSameRows(plan, pruned);
+    }
+
+    @Test
     void theRootKeepsItsColumnsAndANegotiatedScanIsLeftAlone() {
         Scan all = Scan.all(Tables.T_REF, Tables.T);
         assertEquals(all, ColumnPruning.prune(all));

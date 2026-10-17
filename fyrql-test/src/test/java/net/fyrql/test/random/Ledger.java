@@ -63,7 +63,8 @@ final class Ledger {
                     + " as it is: it evaluates every argument, and keeps the decimal type. Explained only where FyrQL"
                     + " agrees with DuckDB on the same SQL.", "1.5.6", null,
                     o -> (o.kind() == Outcome.Kind.FYRQL_FAILS || o.kind() == Outcome.Kind.TYPES_DIFFER)
-                            && o.bound() == Outcome.Kind.SAME && o.sql().contains("CAST(NULL AS ")),
+                            && o.bound() == Outcome.Kind.SAME
+                            && (o.sql().contains("CAST(NULL AS ") || o.sql().contains("TRY_CAST("))),
             new Entry("hugeint-sum-order", "DuckDB checks every addition of a HUGEINT sum, for sum and avg, so"
                     + " that it fails when a partial sum leaves the range, depending on the order of the values,"
                     + " which for DISTINCT is that of a hash table; FyrQL checks the final sum only.", "1.5.6", null,
@@ -85,10 +86,9 @@ final class Ledger {
                     o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().matches(
                             ".*Cannot compare values of type (?!VARCHAR )\\S+ and type (?!VARCHAR )\\S+ - an explicit cast.*")),
             new Entry("set-operation-without-common-type", "DuckDB unites two columns of types without a common"
-                    + " type, such as DATE and DECIMAL, with a cast that fails only when a row reaches it; FyrQL"
-                    + " rejects them while binding.", "1.5.6", null,
-                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().matches(
-                            ".*Cannot combine types (?!VARCHAR)\\S+ and (?!VARCHAR)\\S+ in a set operation.*")),
+                    + " type, such as DATE and DECIMAL, or a list and a VARCHAR, with a cast that fails only when a"
+                    + " row reaches it; FyrQL rejects them while binding.", "1.5.6", null,
+                    Ledger::unitesWithoutCommonType),
             new Entry("using-duplicate-alias", "DuckDB cannot resolve the merged column of a USING join of two tables"
                     + " with the same name, as in q JOIN q USING (k); FyrQL resolves it.", "1.5.6", null,
                     o -> o.kind() == Outcome.Kind.DUCKDB_FAILS && o.duckError().contains("(duplicate alias")),
@@ -113,9 +113,10 @@ final class Ledger {
                     + " evaluates it for every row of that input, also for rows that the node it passed drops;"
                     + " DuckDB without its optimizer evaluates it on the output or on the pairs, so a value that"
                     + " fails there fails in FyrQL only.", "1.5.6", null, Ledger::failsBelowANode),
-            new Entry("condition-before-projection", "FyrQL moves a condition above a projection down below it"
-                    + " and computes the projection only for the rows that pass; DuckDB without its optimizer"
-                    + " computes it for every row first, so a value that fails there fails in DuckDB only.",
+            new Entry("condition-before-projection", "FyrQL moves a condition above a projection down below it,"
+                    + " and one over the partition columns of a window, and computes the projection or the window"
+                    + " only for the rows that pass; DuckDB without its optimizer computes it for every row first,"
+                    + " so a value that fails there fails in DuckDB only.",
                     "1.5.6", null, Ledger::failsAboveACondition),
             new Entry("duckdb-short-circuit", "DuckDB evaluates the condition of a WHERE or a CASE as a selection,"
                     + " which evaluates the upper bound of BETWEEN and the right side of AND only for the rows that"
@@ -169,10 +170,51 @@ final class Ledger {
                     + " t.d NULL, unlike the same EXISTS as a condition of WHERE; FyrQL finds none.", "1.5.6", null,
                     o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.plan() != null
                             && Plans.nodes(o.plan()).stream().anyMatch(n -> n instanceof PlanNode.Join j
-                                    && j.type() == PlanNode.JoinType.MARK && j.condition() != null)));
+                                    && j.type() == PlanNode.JoinType.MARK && j.condition() != null)),
+            new Entry("window-call-pruned", "FyrQL drops the call of a window whose column no one reads; DuckDB"
+                    + " computes it, also without its optimizer, and fails where it fails, as on a negative offset"
+                    + " of a RANGE frame.", "1.5.6", null, Ledger::prunesAWindowCall),
+            new Entry("window-key-zero-sign", "DuckDB passes the partition and order columns of a window through"
+                    + " its sort keys, which turn -0.0 into 0.0; FyrQL keeps -0.0, so that a value computed from it"
+                    + " above the window, such as -10 / x, may differ in its sign.", "1.5.6", null,
+                    Ledger::differsInTheSignOfAZero),
+            new Entry("lead-lag-offset-overflow", "DuckDB adds the offset of lag or lead to the number of the row"
+                    + " and fails when the sum leaves BIGINT; FyrQL takes the row it would reach as one outside the"
+                    + " partition and returns the default, as for any other offset that leaves it.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS
+                            && o.duckError().matches("(?s).*Overflow in (addition|subtraction) of INT64.*")
+                            && o.plan() != null && Plans.nodes(o.plan()).stream().anyMatch(n ->
+                                    n instanceof PlanNode.Window w && w.calls().stream().anyMatch(c ->
+                                            (c.function() == PlanNode.WindowFunction.LAG
+                                                    || c.function() == PlanNode.WindowFunction.LEAD)
+                                                    && c.arguments().size() > 1))),
+            new Entry("duckdb-empty-frame-exclusion", "DuckDB takes rows into a frame whose start lies after its end,"
+                    + " which is empty, when the frame leaves out rows, as in GROUPS BETWEEN 0 PRECEDING AND 3"
+                    + " PRECEDING EXCLUDE TIES, where it takes earlier groups; FyrQL keeps the frame empty.", "1.5.6",
+                    null, Ledger::excludesFromAnEmptyFrame),
+            new Entry("lead-lag-default-without-cast", "DuckDB binds a default of lag or lead of a type that has no"
+                    + " cast to the type of the value, such as a BIGINT for a DATE, and fails only when a row takes a"
+                    + " default that is not NULL; FyrQL rejects it while binding.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().matches(
+                            "(?s).*No function matches (lag|lead) with an argument of type.*")),
+            new Entry("plan-without-sql", "A plan built in Java may combine types that a query cannot, such as"
+                    + " BOOLEAN and DOUBLE results of a CASE; DuckDB rejects its rendering while binding, and so"
+                    + " does FyrQL's binder.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS && o.bound() == Outcome.Kind.BOTH_FAIL
+                            && o.duckError().contains("Binder Error")),
+            new Entry("duckdb-unstable-rows", "DuckDB gives other rows for the same query over the same tables"
+                    + " on another run, rarely, as for a LIMIT in a subquery below a join; the rows of a second run"
+                    + " agree with FyrQL.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.report().startsWith(TwoEngines.UNSTABLE)));
+
+    /** The two types of a set operation that FyrQL does not unite. */
+    private static final Pattern SET_OPERATION_TYPES = Pattern.compile(
+            "(?s).*Cannot combine types (.+) and (.+) in a set operation.*");
 
     /** The node a QueryException names: its label, the type and the number of the node in the plan. */
     private static final Pattern FAILED_NODE = Pattern.compile(".* in Project#(\\d+)$");
+    /** The values of the first row that differs, as {@link net.fyrql.test.ResultComparison} reports them. */
+    private static final Pattern DIFFERING_ROW = Pattern.compile("(?s).*?expected \\[(.*?)\\], actual \\[(.*?)\\]\n.*");
     private static final Pattern FAILED_FILTER = Pattern.compile(".* in Filter#\\d+$");
     /** A string that DuckDB fails to convert, and the type. */
     private static final Pattern FAILED_STRING_CAST = Pattern.compile("Could not convert string [\"'](.*?)[\"'] to (\\S+)");
@@ -229,7 +271,8 @@ final class Ledger {
 
     /**
      * Tells whether DuckDB failed, also without its optimizer, and the plan
-     * has a filter above a projection that computes a value.
+     * has a filter above a projection that computes a value or above a
+     * window.
      */
     private static boolean failsAboveACondition(Outcome o) {
         if (o.kind() != Outcome.Kind.DUCKDB_FAILS || o.unoptimized() != Outcome.Kind.DUCKDB_FAILS || o.plan() == null) {
@@ -237,9 +280,10 @@ final class Ledger {
         }
         for (PlanNode node : Plans.nodes(o.plan())) {
             if (node instanceof PlanNode.Filter f && Plans.nodes(f.input()).stream().anyMatch(n ->
-                    n instanceof PlanNode.Project p && p.columns().stream().anyMatch(c ->
-                            !(c.expression() instanceof Expression.Column)
-                                    && !(c.expression() instanceof Expression.Literal)))) {
+                    n instanceof PlanNode.Window
+                            || n instanceof PlanNode.Project p && p.columns().stream().anyMatch(c ->
+                                    !(c.expression() instanceof Expression.Column)
+                                            && !(c.expression() instanceof Expression.Literal)))) {
                 return true;
             }
         }
@@ -296,6 +340,130 @@ final class Ledger {
             }
         }
         return false;
+    }
+
+    /**
+     * Tells whether DuckDB failed, also without its optimizer, and the plan
+     * FyrQL ran has fewer calls of windows than the plan it was given.
+     */
+    private static boolean prunesAWindowCall(Outcome o) {
+        return o.kind() == Outcome.Kind.DUCKDB_FAILS && o.unoptimized() == Outcome.Kind.DUCKDB_FAILS
+                && o.plan() != null && o.optimized() != null && windowCalls(o.optimized()) < windowCalls(o.plan());
+    }
+
+    /**
+     * Tells whether the first rows that differ differ only in the signs of
+     * floating-point values, as computed from a zero of the other sign, and
+     * the plan has a window.
+     */
+    private static boolean differsInTheSignOfAZero(Outcome o) {
+        if (o.kind() != Outcome.Kind.ROWS_DIFFER || o.plan() == null
+                || Plans.nodes(o.plan()).stream().noneMatch(n -> n instanceof PlanNode.Window)) {
+            return false;
+        }
+        Matcher m = DIFFERING_ROW.matcher(o.report());
+        if (!m.matches()) {
+            return false;
+        }
+        String[] expected = m.group(1).split(", ");
+        String[] actual = m.group(2).split(", ");
+        if (expected.length != actual.length) {
+            return false;
+        }
+        boolean differs = false;
+        for (int i = 0; i < expected.length; i++) {
+            if (!expected[i].equals(actual[i])) {
+                if (!inSignOnly(expected[i], actual[i])) {
+                    return false;
+                }
+                differs = true;
+            }
+        }
+        return differs;
+    }
+
+    /** Tells whether two values, a float or a double as the report writes them, differ in their sign bits only. */
+    private static boolean inSignOnly(String x, String y) {
+        try {
+            if (x.startsWith("d") && y.startsWith("d")) {
+                return (Long.parseUnsignedLong(x.substring(1), 16) ^ Long.parseUnsignedLong(y.substring(1), 16))
+                        == Long.MIN_VALUE;
+            }
+            if (x.startsWith("f") && y.startsWith("f")) {
+                return (Integer.parseUnsignedInt(x.substring(1), 16) ^ Integer.parseUnsignedInt(y.substring(1), 16))
+                        == Integer.MIN_VALUE;
+            }
+        } catch (NumberFormatException e) {
+            // Not a number as the report writes one.
+        }
+        return false;
+    }
+
+    /**
+     * Tells whether the rows differ and the plan has a call of a window
+     * over a frame of rows or groups that leaves out rows and whose start
+     * lies after its end.
+     */
+    private static boolean excludesFromAnEmptyFrame(Outcome o) {
+        if (o.kind() != Outcome.Kind.ROWS_DIFFER || o.plan() == null) {
+            return false;
+        }
+        for (PlanNode node : Plans.nodes(o.plan())) {
+            if (node instanceof PlanNode.Window w) {
+                for (PlanNode.WindowCall c : w.calls()) {
+                    PlanNode.Frame f = c.frame();
+                    if (c.function().usesFrame() && f.exclusion() != PlanNode.FrameExclusion.NO_OTHERS
+                            && f.unit() != PlanNode.FrameUnit.RANGE && reach(f.start()) > reach(f.end())) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The distance of a bound of rows or groups from the current one, negative before it. */
+    private static long reach(PlanNode.FrameBound b) {
+        return switch (b.kind()) {
+            case UNBOUNDED_PRECEDING -> Long.MIN_VALUE;
+            case PRECEDING -> -((Number) b.offset().value()).longValue();
+            case CURRENT_ROW -> 0;
+            case FOLLOWING -> ((Number) b.offset().value()).longValue();
+            case UNBOUNDED_FOLLOWING -> Long.MAX_VALUE;
+        };
+    }
+
+    private static int windowCalls(PlanNode plan) {
+        int calls = 0;
+        for (PlanNode node : Plans.nodes(plan)) {
+            if (node instanceof PlanNode.Window w) {
+                calls += w.calls().size();
+            }
+        }
+        return calls;
+    }
+
+    /**
+     * Tells whether FyrQL rejected a set operation of two types without a
+     * common type: a VARCHAR, which FyrQL unites with every scalar type,
+     * only with a nested type.
+     */
+    private static boolean unitesWithoutCommonType(Outcome o) {
+        if (o.kind() != Outcome.Kind.FYRQL_FAILS) {
+            return false;
+        }
+        Matcher m = SET_OPERATION_TYPES.matcher(o.fyrqlError());
+        if (!m.matches()) {
+            return false;
+        }
+        String left = m.group(1);
+        String right = m.group(2);
+        return !left.equals("VARCHAR") && !right.equals("VARCHAR") || nested(left) || nested(right);
+    }
+
+    /** Tells whether a type name is one of a list, a struct or a map. */
+    private static boolean nested(String type) {
+        return type.endsWith("]") || type.startsWith("STRUCT(") || type.startsWith("MAP(");
     }
 
     private static Predicate<Outcome> fyrqlFails(String message) {

@@ -209,7 +209,32 @@ final class ExpressionBinder {
             case SqlExpr.Index x -> index(bound(x.base()), x.index(), x.position());
             case SqlExpr.StructValue s -> structValue(s);
             case SqlExpr.Interval i -> throw intervalNotSupported(i);
+            case SqlExpr.Window w -> throw new SqlException(windowError(), w.position());
         };
+    }
+
+    /**
+     * The message for a window function in this place, worded as DuckDB
+     * words it for the clauses whose message for an aggregate is known.
+     */
+    private String windowError() {
+        if (aggregateError == null) {
+            return "Not supported: window functions";
+        }
+        if (aggregateError.equals("aggregate function calls cannot be nested")) {
+            return "aggregate function calls cannot contain window function calls";
+        }
+        // DuckDB checks the condition of a join as a WHERE clause.
+        if (aggregateError.startsWith("JOIN clause ")) {
+            return "WHERE clause cannot contain window functions!";
+        }
+        if (aggregateError.endsWith(" cannot contain aggregates!")) {
+            return aggregateError.replace(" cannot contain aggregates!", " cannot contain window functions!");
+        }
+        if (aggregateError.endsWith(" cannot contain aggregates")) {
+            return aggregateError.replace(" cannot contain aggregates", " cannot contain window functions");
+        }
+        return "Not supported: window functions";
     }
 
     private Subqueries subqueries(SqlExpr e) {

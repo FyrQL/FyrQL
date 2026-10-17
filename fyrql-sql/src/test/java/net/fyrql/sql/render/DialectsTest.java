@@ -243,6 +243,61 @@ class DialectsTest {
                                 List.of(SortKey.asc(1)))))));
     }
 
+    /** Two windows over the orders: every part of a call, and a frame over days. */
+    static PlanNode windows() {
+        PlanNode orders = PlanNode.Scan.all(FullPlan.ORDERS_REF, FullPlan.ORDERS);
+        PlanNode.Frame rows = new PlanNode.Frame(PlanNode.FrameUnit.ROWS,
+                PlanNode.FrameBound.of(PlanNode.BoundKind.PRECEDING, new Expression.Literal(DataType.BIGINT, 2L)),
+                PlanNode.FrameBound.of(PlanNode.BoundKind.FOLLOWING, new Expression.Literal(DataType.BIGINT, 1L)),
+                PlanNode.FrameExclusion.TIES);
+        PlanNode first = new PlanNode.Window(orders, List.of(3), List.of(SortKey.desc(1), SortKey.asc(0)), List.of(
+                PlanNode.WindowCall.of(PlanNode.WindowFunction.ROW_NUMBER, List.of(), "rn"),
+                new PlanNode.WindowCall(PlanNode.WindowFunction.LAG, null, List.of(2, 0, 2), true, -1,
+                        PlanNode.Frame.DEFAULT, "previous"),
+                new PlanNode.WindowCall(PlanNode.WindowFunction.AGGREGATE,
+                        new AggregateCall(AggregateFunction.SUM, 9, false, "s"), List.of(), false, 3, rows, "s"),
+                PlanNode.WindowCall.of(new AggregateCall(AggregateFunction.STRING_AGG, 2, true, "notes", ", ",
+                        List.of(SortKey.asc(2))), PlanNode.Frame.DEFAULT)));
+        PlanNode.Frame days = new PlanNode.Frame(PlanNode.FrameUnit.RANGE, new PlanNode.FrameBound(
+                PlanNode.BoundKind.PRECEDING, new Expression.Literal(DataType.BIGINT, 3L), PlanNode.IntervalUnit.DAY),
+                PlanNode.FrameBound.of(PlanNode.BoundKind.CURRENT_ROW), PlanNode.FrameExclusion.NO_OTHERS);
+        return new PlanNode.Window(first, List.of(), List.of(SortKey.asc(4)), List.of(
+                PlanNode.WindowCall.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"), days),
+                PlanNode.WindowCall.of(PlanNode.WindowFunction.FIRST_VALUE, List.of(6), "w")));
+    }
+
+    @Test
+    void duckDbRendersWindowsAndTheDatabasesRefuseThem() {
+        String orders = "SELECT \"id\" AS c0, \"amount\" AS c1, \"note\" AS c2, \"paid\" AS c3, \"day\" AS c4, "
+                + "\"at\" AS c5, \"weight\" AS c6, \"tiny\" AS c7, \"small\" AS c8, \"big\" AS c9, \"ratio\" AS c10, "
+                + "\"raw\" AS c11, \"key\" AS c12 FROM db_main_orders";
+        StringBuilder first = new StringBuilder("SELECT ");
+        StringBuilder second = new StringBuilder("SELECT ");
+        for (int i = 0; i < 13; i++) {
+            first.append("t1.c").append(i).append(" AS c").append(i).append(", ");
+        }
+        for (int i = 0; i < 17; i++) {
+            second.append("t0.c").append(i).append(" AS c").append(i).append(", ");
+        }
+        String over = " OVER (PARTITION BY t1.c3 ORDER BY t1.c1 DESC NULLS LAST, t1.c0 ASC NULLS LAST";
+        String sql = second + "count(*) OVER (ORDER BY t0.c4 ASC NULLS LAST RANGE BETWEEN INTERVAL '3' DAY PRECEDING "
+                + "AND CURRENT ROW) AS c17, first_value(t0.c6) OVER (ORDER BY t0.c4 ASC NULLS LAST RANGE BETWEEN "
+                + "UNBOUNDED PRECEDING AND CURRENT ROW) AS c18 FROM (" + first + "row_number()" + over + ") AS c13, "
+                + "lag(t1.c2, t1.c0, t1.c2 IGNORE NULLS)" + over + ") AS c14, CAST(sum(t1.c9) FILTER (WHERE t1.c3)"
+                + over + " ROWS BETWEEN CAST(2 AS BIGINT) PRECEDING AND CAST(1 AS BIGINT) FOLLOWING EXCLUDE TIES) AS "
+                + "HUGEINT) AS c15, string_agg(DISTINCT t1.c2, ', ' ORDER BY t1.c2 ASC NULLS LAST)" + over
+                + " RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS c16 FROM (" + orders + ") t1) t0";
+        assertEquals(sql, new SqlRenderer(DuckDbDialect.INSTANCE, FullPlan::tableName).render(windows()));
+        // The text of DuckDB is the text of FyrQL, which its own parser reads.
+        SqlParser.parse(sql);
+        for (Dialect d : DATABASES) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new SqlRenderer(d, FullPlan::tableName).render(windows()), d.name());
+            assertFalse(d.supportsWindow((PlanNode.Window) windows()), d.name());
+        }
+        assertTrue(DuckDbDialect.INSTANCE.supportsWindow((PlanNode.Window) windows()));
+    }
+
     /** What a source may evaluate: the table of the conservative answers. */
     @Test
     void whatASourceMayEvaluate() {

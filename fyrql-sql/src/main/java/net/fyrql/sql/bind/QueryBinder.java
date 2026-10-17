@@ -39,6 +39,7 @@ import net.fyrql.sql.ast.QueryBody;
 import net.fyrql.sql.ast.SelectItem;
 import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlPrinter;
+import net.fyrql.sql.ast.WindowSpec;
 
 import java.util.ArrayList;
 import java.util.BitSet;
@@ -50,6 +51,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 
 /** Binds the queries of one statement; see {@link Binder}. */
 final class QueryBinder {
@@ -185,7 +188,7 @@ final class QueryBinder {
             SqlExpr e = item.expression();
             checkOrderTerm(e, schema.size());
             int column = -1;
-            long position = SqlTrees.position(e);
+            long position = SqlTrees.signedPosition(e);
             if (position >= 0) {
                 column = outputPosition(position, schema.size(), e.position());
             } else if (e instanceof SqlExpr.Identifier id) {
@@ -212,7 +215,8 @@ final class QueryBinder {
      */
     private static void checkOrderTerm(SqlExpr e, int size) {
         checkOrderLiteral(e);
-        if (e instanceof SqlExpr.Unary u && u.op() == SqlExpr.UnaryOp.MINUS && SqlTrees.position(u.operand()) >= 0) {
+        long position = SqlTrees.signedPosition(e);
+        if (position != Long.MIN_VALUE && position < 0) {
             throw new SqlException("ORDER term out of range - should be between 1 and " + size, e.position());
         }
     }
@@ -627,6 +631,7 @@ final class QueryBinder {
             case PlanNode.Limit l -> untypedNulls(l.input());
             case PlanNode.Filter f -> untypedNulls(f.input());
             case PlanNode.Unnest u -> untypedNulls(u.input());
+            case PlanNode.Window w -> untypedNulls(w.input());
             case PlanNode.Project p -> {
                 BitSet input = untypedNulls(p.input());
                 BitSet result = new BitSet();
@@ -966,9 +971,18 @@ final class QueryBinder {
             throw new SqlException("Not supported: LIMIT or OFFSET in a correlated subquery",
                     (limit != null ? limit : offset).position());
         }
+        if (correlated != null) {
+            // The conditions of the join sit above the plan of the subquery, where a window would see too many rows.
+            SqlExpr.Window w = firstWindow(s, items, orderBy);
+            if (w != null) {
+                throw new SqlException("Not supported: a window function in a correlated subquery", w.position());
+            }
+        }
+        Windowing windowing = new Windowing(s.windows());
         boolean aggregates = items.stream().anyMatch(i -> i.expression() != null
                 && SqlTrees.containsAggregate(i.expression()))
-                || orderBy.stream().anyMatch(o -> !o.isAll() && SqlTrees.containsAggregate(o.expression()));
+                || orderBy.stream().anyMatch(o -> !o.isAll() && SqlTrees.containsAggregate(o.expression()))
+                || s.qualify() != null && SqlTrees.containsAggregate(s.qualify());
         // DuckDB ignores a GROUP BY ALL that finds nothing to group by in a select list without aggregates.
         boolean nothingToGroup = s.groupBy() != null && s.groupBy().all() && !aggregates && s.having() == null
                 && items.stream().noneMatch(i -> i.column() != null
@@ -983,8 +997,8 @@ final class QueryBinder {
             String nested = "aggregate function calls cannot be nested";
             SubqueryJoiner subqueries = new SubqueryJoiner((q, c) -> query(q, ctes, c),
                     new ExpressionBinder(context, scope, Map.of(), nested, null));
-            ExpressionBinder.Hook hook = unnesting.hook(new ExpressionBinder(context, scope, earlier, nested, null),
-                    null);
+            ExpressionBinder.Hook hook = windowing.hook(new ExpressionBinder(context, scope, earlier, nested, null),
+                    unnesting.hook(new ExpressionBinder(context, scope, earlier, nested, null), null));
             for (Item item : items) {
                 if (item.column() != null) {
                     outputs.add(item.column());
@@ -998,11 +1012,18 @@ final class QueryBinder {
                     earlier.putIfAbsent(SqlTrees.key(item.alias()), item.expression());
                 }
             }
+            ExpressionBinder windowArguments = new ExpressionBinder(context, scope, aliases, null, null);
+            Expression qualify = qualify(s, windowing, new ExpressionBinder(context, scope, aliases, null,
+                    windowing.hook(windowArguments, null)));
             ExpressionBinder orderBinder = new ExpressionBinder(context, scope, aliases, null,
-                    unnesting.hook(new ExpressionBinder(context, scope, aliases, null, null), null));
+                    windowing.hook(windowArguments, unnesting.hook(windowArguments, null)));
             List<Order> orders = orders(orderBy, outputs, aliasOutputs, orderBinder);
             plan = subqueries.attach(plan);
             outputs.replaceAll(subqueries::resolve);
+            plan = windowing.plan(plan, outputs, orders);
+            if (qualify != null) {
+                plan = new PlanNode.Filter(plan, windowing.resolve(qualify));
+            }
             plan = unnesting.plan(plan, outputs, orders);
             if (correlated != null) {
                 if (s.distinct() && correlation.kind() == Correlation.Kind.SCALAR) {
@@ -1025,7 +1046,7 @@ final class QueryBinder {
             untypedNulls.put(plan, untyped);
         } else {
             plan = aggregate(s, plan, scope, items, aliases, aliasOutputs, orderBy, names, ctes, correlation,
-                    correlated);
+                    correlated, windowing);
         }
         return limit(plan, limit, offset);
     }
@@ -1176,7 +1197,7 @@ final class QueryBinder {
             }
             SqlExpr e = item.expression();
             checkOrderTerm(e, outputs.size());
-            long position = SqlTrees.position(e);
+            long position = SqlTrees.signedPosition(e);
             if (position >= 0) {
                 orders.add(new Order(outputPosition(position, outputs.size(), e.position()), null, item.ascending(),
                         item.nullsFirst()));
@@ -1406,6 +1427,449 @@ final class QueryBinder {
         return result;
     }
 
+    // --------------------------------------------------------------- windows
+
+    /**
+     * The window functions of a select list, its {@code QUALIFY} clause and
+     * its {@code ORDER BY}: a call is bound over the rows that reach the
+     * select list and stands for the column that a {@link PlanNode.Window}
+     * adds after them. A projection below the windows passes the rows on and
+     * computes the other expressions the calls read after them. The calls
+     * of one partition and order share a node, and the nodes follow one
+     * another in the order in which their first calls appear.
+     */
+    private final class Windowing {
+
+        /** The column of the first call until the width of the rows is known. */
+        private static final int PLACEHOLDER = 1 << 27;
+
+        /** A call with the partition and the order of its window, over the inputs. */
+        private record Call(List<Integer> partition, List<SortKey> order, PlanNode.WindowCall call) {
+        }
+
+        /** The windows of the {@code WINDOW} clause, by {@link SqlTrees#key}. */
+        private final Map<String, WindowSpec> named = new HashMap<>();
+        /** The expressions the calls read; a call reads them by their index until the plan is made. */
+        private final List<Expression> inputs = new ArrayList<>();
+        private final List<Call> calls = new ArrayList<>();
+        /** The column of each call in the plan, once it is made. */
+        private int[] results;
+
+        Windowing(List<QueryBody.NamedWindow> windows) {
+            for (QueryBody.NamedWindow w : windows) {
+                named.putIfAbsent(SqlTrees.key(w.name()), w.window());
+            }
+        }
+
+        boolean isEmpty() {
+            return calls.isEmpty();
+        }
+
+        /**
+         * A hook that binds the window functions, the expressions they read
+         * with another binder, and leaves every other node to the next hook.
+         */
+        ExpressionBinder.Hook hook(ExpressionBinder arguments, ExpressionBinder.Hook next) {
+            return e -> e instanceof SqlExpr.Window w ? call(w, arguments) : next == null ? null : next.intercept(e);
+        }
+
+        private int input(Expression e) {
+            int i = inputs.indexOf(e);
+            if (i < 0) {
+                inputs.add(e);
+                i = inputs.size() - 1;
+            }
+            return i;
+        }
+
+        private Schema inputSchema() {
+            return Schema.of(inputs.stream().map(Expression::type).toArray(DataType[]::new));
+        }
+
+        private Expression call(SqlExpr.Window w, ExpressionBinder arguments) {
+            Position p = w.position();
+            SqlExpr.FunctionCall f = w.call();
+            List<SqlExpr> read = new ArrayList<>(f.arguments());
+            f.orderBy().forEach(o -> read.add(o.expression()));
+            if (w.filter() != null) {
+                read.add(w.filter());
+            }
+            rejectWindows(read, "window function calls cannot be nested");
+            WindowSpec spec = spec(w.over(), p);
+            List<SqlExpr> definition = new ArrayList<>(spec.partitionBy());
+            spec.orderBy().forEach(o -> definition.add(o.expression()));
+            rejectWindows(definition, "window functions are not allowed in window definitions");
+            List<Integer> partition = new ArrayList<>();
+            for (SqlExpr e : spec.partitionBy()) {
+                partition.add(input(arguments.bind(e)));
+            }
+            List<SortKey> order = new ArrayList<>();
+            for (OrderItem o : spec.orderBy()) {
+                order.add(new SortKey(input(arguments.bind(o.expression())), o.ascending(), o.nullsFirst()));
+            }
+            String name = SqlTrees.key(f.name());
+            String outputName = SqlPrinter.print(w);
+            PlanNode.WindowFunction function = function(name, p);
+            PlanNode.WindowCall call;
+            if (function == PlanNode.WindowFunction.AGGREGATE) {
+                if (w.ignoreNulls()) {
+                    throw new SqlException("RESPECT/IGNORE NULLS is not supported for windowed aggregates", p);
+                }
+                AggregateCall aggregate = aggregateCall(f, outputName, arguments, this::input, this::inputSchema,
+                        true);
+                int filter = w.filter() == null ? -1 : input(arguments.condition(w.filter()));
+                PlanNode.Frame frame = frame(spec, order, p);
+                call = ExpressionBinder.check(() -> new PlanNode.WindowCall(function, aggregate, List.of(), false,
+                        filter, frame, outputName), p, null);
+            } else {
+                if (w.filter() != null) {
+                    throw new SqlException("FILTER is not implemented for non-aggregate window functions!", p);
+                }
+                if (f.distinct()) {
+                    throw new SqlException("DISTINCT is not implemented for non-aggregate window functions!", p);
+                }
+                if (f.star()) {
+                    throw new SqlException("Function \"" + name + "\" cannot be applied to a star expression", p);
+                }
+                if (!f.orderBy().isEmpty()) {
+                    throw new SqlException("Not supported: ORDER BY in the arguments of " + name, p);
+                }
+                if (w.ignoreNulls() && !function.takesValues()) {
+                    throw new SqlException("Not supported: IGNORE NULLS for " + name, p);
+                }
+                List<Integer> columns = arguments(function, f, arguments);
+                // The functions that take no frame ignore one; it is checked all the same.
+                PlanNode.Frame given = frame(spec, order, p);
+                PlanNode.Frame frame = function.usesFrame() ? given : PlanNode.Frame.DEFAULT;
+                call = ExpressionBinder.check(() -> new PlanNode.WindowCall(function, null, columns, w.ignoreNulls(),
+                        -1, frame, outputName), p, null);
+            }
+            PlanNode.WindowCall checked = call;
+            Schema schema = inputSchema();
+            ExpressionBinder.check(() -> {
+                checked.check(schema, order);
+                return checked;
+            }, p, null);
+            Call c = new Call(partition, order, call);
+            int index = calls.indexOf(c);
+            if (index < 0) {
+                calls.add(c);
+                index = calls.size() - 1;
+            }
+            return new Expression.Column(PLACEHOLDER + index, call.type(schema));
+        }
+
+        private static void rejectWindows(List<SqlExpr> expressions, String message) {
+            for (SqlExpr e : expressions) {
+                SqlExpr.Window nested = SqlTrees.window(e);
+                if (nested != null) {
+                    throw new SqlException(message, nested.position());
+                }
+            }
+        }
+
+        /** The window a window function names, from the {@code WINDOW} clause, or the one it has. */
+        private WindowSpec spec(WindowSpec over, Position p) {
+            if (over.base() == null) {
+                return over;
+            }
+            WindowSpec spec = named.get(SqlTrees.key(over.base()));
+            if (spec == null || spec.base() != null) {
+                throw new SqlException("window \"" + over.base() + "\" does not exist", p);
+            }
+            return spec;
+        }
+
+        /** The function of a name; as in DuckDB, {@code first} and {@code last} over a window take values. */
+        private PlanNode.WindowFunction function(String name, Position p) {
+            if (name.equals("first") || name.equals("last")) {
+                return name.equals("first") ? PlanNode.WindowFunction.FIRST_VALUE : PlanNode.WindowFunction.LAST_VALUE;
+            }
+            try {
+                return PlanNode.WindowFunction.of(name);
+            } catch (IllegalArgumentException notAWindowFunction) {
+                if (SqlTrees.isAggregate(name)) {
+                    return PlanNode.WindowFunction.AGGREGATE;
+                }
+                if (context.functionNames().contains(name)) {
+                    throw new SqlException(name + " is not an aggregate function", p);
+                }
+                throw new SqlException("Aggregate Function with name " + name + " does not exist!", p);
+            }
+        }
+
+        /**
+         * The arguments of a window function other than an aggregate, as
+         * DuckDB takes them: a count of {@code ntile}, an offset of
+         * {@code lag} and {@code lead} and a position of {@code nth_value}
+         * as an integer up to {@code BIGINT}, a default of {@code lag} and {@code lead} as a
+         * value of the type of the first argument.
+         */
+        private List<Integer> arguments(PlanNode.WindowFunction function, SqlExpr.FunctionCall f,
+                ExpressionBinder arguments) {
+            Position p = f.position();
+            int n = f.arguments().size();
+            String upper = function.name();
+            if (n < function.minArguments() || n > function.maxArguments()) {
+                if (n > function.maxArguments() && function.minArguments() != function.maxArguments()) {
+                    throw new SqlException("Incorrect number of parameters for function " + function.sqlName(), p);
+                }
+                int needed = n < function.minArguments() ? function.minArguments() : function.maxArguments();
+                throw new SqlException(upper + " needs " + needed + " parameter" + (needed == 1 ? "" : "s") + ", got "
+                        + n, p);
+            }
+            List<Integer> columns = new ArrayList<>();
+            DataType value = null;
+            for (int i = 0; i < n; i++) {
+                SqlExpr a = f.arguments().get(i);
+                ExpressionBinder.Bound b = arguments.bound(a);
+                Expression e;
+                if (function == PlanNode.WindowFunction.NTILE || i == 1) {
+                    e = as(b, b.type().isIntegral() && b.type() != DataType.HUGEINT && !b.isNull() ? b.type()
+                            : DataType.BIGINT, function, a);
+                } else if (i == 2) {
+                    e = as(b, value, function, a);
+                } else {
+                    e = b.expression();
+                    value = e.type();
+                }
+                columns.add(input(e));
+            }
+            return columns;
+        }
+
+        /** An argument as a value of a type, cast if it has another. */
+        private static Expression as(ExpressionBinder.Bound b, DataType type, PlanNode.WindowFunction function,
+                SqlExpr a) {
+            if (b.isNull()) {
+                return new Expression.Literal(type, null);
+            }
+            if (b.type().equals(type)) {
+                return b.expression();
+            }
+            if (!Casts.allowed(b.type(), type)) {
+                throw new SqlException("No function matches " + function.sqlName() + " with an argument of type "
+                        + b.type(), a.position());
+            }
+            return b.kind() == ExpressionBinder.Kind.STRING ? Literals.lazily(b.literal(), type, a.position())
+                    : new Expression.Cast(b.expression(), type);
+        }
+
+        /** The frame of a window, its default if it has none. */
+        private PlanNode.Frame frame(WindowSpec spec, List<SortKey> order, Position p) {
+            WindowSpec.Frame f = spec.frame();
+            if (f == null) {
+                return PlanNode.Frame.DEFAULT;
+            }
+            PlanNode.FrameUnit unit = PlanNode.FrameUnit.valueOf(f.unit().name());
+            DataType key = null;
+            if (unit == PlanNode.FrameUnit.RANGE && (f.start().offset() != null || f.end().offset() != null)) {
+                if (order.size() != 1) {
+                    throw new SqlException("RANGE frames must have only one ORDER BY expression", p);
+                }
+                key = inputs.get(order.get(0).column()).type();
+            }
+            PlanNode.FrameBound start = bound(f.start(), unit, key, p);
+            PlanNode.FrameBound end = bound(f.end(), unit, key, p);
+            PlanNode.FrameExclusion exclusion = PlanNode.FrameExclusion.valueOf(f.exclusion().name());
+            return ExpressionBinder.check(() -> new PlanNode.Frame(unit, start, end, exclusion), p, null);
+        }
+
+        /**
+         * A bound of a frame. Its offset is a constant: a number of rows or
+         * groups, as a {@code BIGINT}; for {@code RANGE}, a number of the type
+         * of a numeric order key if an integer fits it, or an interval, or a
+         * number of days, over a {@code DATE} or {@code TIMESTAMP} key.
+         */
+        private PlanNode.FrameBound bound(WindowSpec.Bound b, PlanNode.FrameUnit unit, DataType key, Position p) {
+            PlanNode.BoundKind kind = PlanNode.BoundKind.valueOf(b.kind().name());
+            SqlExpr x = b.offset();
+            if (x == null) {
+                return PlanNode.FrameBound.of(kind);
+            }
+            boolean temporal = key == DataType.DATE || key == DataType.TIMESTAMP;
+            if (x instanceof SqlExpr.Interval i) {
+                if (!temporal) {
+                    throw new SqlException("Cannot use an INTERVAL as the offset of a " + unit + " frame"
+                            + (key == null ? "" : " over an order key of type " + key), x.position());
+                }
+                return new PlanNode.FrameBound(kind, new Expression.Literal(DataType.BIGINT, count(i)),
+                        intervalUnit(i));
+            }
+            if (SqlTrees.containsNameOutsideAggregates(x)) {
+                throw new SqlException("Not supported: a frame offset that is not a constant", x.position());
+            }
+            ExpressionBinder.Bound v = new ExpressionBinder(context, Scope.none(), Map.of(),
+                    "Frame offsets cannot contain aggregates", null).bound(x);
+            if (v.isNull()) {
+                throw new SqlException("Not supported: NULL as the offset of a frame", x.position());
+            }
+            DataType type;
+            PlanNode.IntervalUnit days = null;
+            if (unit != PlanNode.FrameUnit.RANGE) {
+                type = DataType.BIGINT;
+            } else if (key == DataType.DATE && v.type().isIntegral()) {
+                // A date minus a number is a date that many days earlier.
+                type = DataType.BIGINT;
+                days = PlanNode.IntervalUnit.DAY;
+            } else if (key.isNumeric() && (v.type().isNumeric() || v.kind() == ExpressionBinder.Kind.STRING)) {
+                // As in key - offset, an integer takes the type of the key if it fits, and a string converts.
+                boolean adapts = v.kind() == ExpressionBinder.Kind.INTEGER && key.isIntegral()
+                        && Literals.fits(v.literal(), key);
+                type = adapts || v.kind() == ExpressionBinder.Kind.STRING ? key : v.type();
+            } else {
+                throw new SqlException("Cannot use an offset of type " + v.type() + " in a RANGE frame over an order"
+                        + " key of type " + key, x.position());
+            }
+            if (!v.type().equals(type) && !Casts.allowed(v.type(), type)) {
+                throw new SqlException("Cannot use an offset of type " + v.type() + " in a " + unit + " frame",
+                        x.position());
+            }
+            Expression e = v.type().equals(type) ? v.expression()
+                    : v.kind() == ExpressionBinder.Kind.STRING ? Literals.lazily(v.literal(), type, x.position())
+                    : new Expression.Cast(v.expression(), type);
+            Object value = Literals.evaluate(e, x.position());
+            Expression.Literal offset = new Expression.Literal(type, value);
+            PlanNode.IntervalUnit u = days;
+            return ExpressionBinder.check(() -> new PlanNode.FrameBound(kind, offset, u), p, null);
+        }
+
+        private static long count(SqlExpr.Interval i) {
+            try {
+                return Long.parseLong(i.value());
+            } catch (NumberFormatException e) {
+                throw new SqlException("The interval '" + i.value() + "' is not a whole number", i.position());
+            }
+        }
+
+        private static PlanNode.IntervalUnit intervalUnit(SqlExpr.Interval i) {
+            String unit = i.unit().endsWith("S") ? i.unit().substring(0, i.unit().length() - 1) : i.unit();
+            try {
+                return PlanNode.IntervalUnit.valueOf(unit);
+            } catch (IllegalArgumentException e) {
+                throw new SqlException("Not supported: the interval unit " + i.unit(), i.position());
+            }
+        }
+
+        /**
+         * Adds the windows over the rows, if there are calls, and makes the
+         * outputs and the keys of the order read the columns of the calls.
+         */
+        PlanNode plan(PlanNode rows, List<Expression> outputs, List<Order> orders) {
+            if (calls.isEmpty()) {
+                return rows;
+            }
+            Schema schema = rows.schema();
+            int width = schema.size();
+            int[] mapping = new int[inputs.size()];
+            List<NamedExpression> projection = new ArrayList<>();
+            for (int i = 0; i < width; i++) {
+                projection.add(new NamedExpression(schema.name(i), new Expression.Column(i, schema.type(i))));
+            }
+            for (int i = 0; i < inputs.size(); i++) {
+                Expression e = inputs.get(i);
+                if (e instanceof Expression.Column c && c.index() < width) {
+                    mapping[i] = c.index();
+                } else {
+                    mapping[i] = projection.size();
+                    projection.add(new NamedExpression("#window" + (projection.size() - width), e));
+                }
+            }
+            PlanNode plan = projection.size() == width ? rows : new PlanNode.Project(rows, projection);
+            results = new int[calls.size()];
+            boolean[] placed = new boolean[calls.size()];
+            for (int i = 0; i < calls.size(); i++) {
+                if (placed[i]) {
+                    continue;
+                }
+                Call first = calls.get(i);
+                int start = plan.schema().size();
+                List<PlanNode.WindowCall> node = new ArrayList<>();
+                for (int j = i; j < calls.size(); j++) {
+                    Call c = calls.get(j);
+                    if (!placed[j] && c.partition().equals(first.partition()) && c.order().equals(first.order())) {
+                        placed[j] = true;
+                        results[j] = start + node.size();
+                        node.add(remap(c.call(), mapping));
+                    }
+                }
+                List<Integer> partition = first.partition().stream().map(c -> mapping[c]).toList();
+                plan = new PlanNode.Window(plan, partition, remapKeys(first.order(), mapping), node);
+            }
+            outputs.replaceAll(this::resolve);
+            orders.replaceAll(o -> o.expression() == null ? o
+                    : new Order(o.output(), resolve(o.expression()), o.ascending(), o.nullsFirst()));
+            return plan;
+        }
+
+        /** An expression that reads the calls, made to read their columns in the plan. */
+        Expression resolve(Expression e) {
+            return Expressions.transform(e, x -> x instanceof Expression.Column c && c.index() >= PLACEHOLDER
+                    && c.index() < PLACEHOLDER + calls.size()
+                    ? new Expression.Column(results[c.index() - PLACEHOLDER], c.type()) : x);
+        }
+
+        private static PlanNode.WindowCall remap(PlanNode.WindowCall c, int[] mapping) {
+            AggregateCall a = c.aggregate();
+            if (a != null) {
+                a = new AggregateCall(a.function(), a.column() < 0 ? -1 : mapping[a.column()], a.distinct(), a.name(),
+                        a.separator(), remapKeys(a.orderBy(), mapping));
+            }
+            List<Integer> arguments = c.arguments().stream().map(i -> mapping[i]).toList();
+            return new PlanNode.WindowCall(c.function(), a, arguments, c.ignoreNulls(),
+                    c.filter() < 0 ? -1 : mapping[c.filter()], c.frame(), c.name());
+        }
+
+        private static List<SortKey> remapKeys(List<SortKey> keys, int[] mapping) {
+            List<SortKey> result = new ArrayList<>();
+            for (SortKey k : keys) {
+                result.add(new SortKey(mapping[k.column()], k.ascending(), k.nullsFirst()));
+            }
+            return result;
+        }
+    }
+
+    /**
+     * Binds {@code QUALIFY}, which filters the rows after the windows and
+     * needs a window function in the select list or in itself.
+     */
+    private static Expression qualify(QueryBody.Select s, Windowing windowing, ExpressionBinder binder) {
+        if (s.qualify() == null) {
+            return null;
+        }
+        Expression condition = binder.condition(s.qualify());
+        if (windowing.isEmpty()) {
+            throw new SqlException("at least one window function must appear in the SELECT column or QUALIFY clause",
+                    s.qualify().position());
+        }
+        return condition;
+    }
+
+    /** The first window function of the select list, the order or {@code QUALIFY}, or {@code null}. */
+    private static SqlExpr.Window firstWindow(QueryBody.Select s, List<Item> items, List<OrderItem> orderBy) {
+        List<SqlExpr> expressions = new ArrayList<>();
+        for (Item item : items) {
+            if (item.expression() != null) {
+                expressions.add(item.expression());
+            }
+        }
+        for (OrderItem o : orderBy) {
+            if (!o.isAll()) {
+                expressions.add(o.expression());
+            }
+        }
+        if (s.qualify() != null) {
+            expressions.add(s.qualify());
+        }
+        for (SqlExpr e : expressions) {
+            SqlExpr.Window w = SqlTrees.window(e);
+            if (w != null) {
+                return w;
+            }
+        }
+        return null;
+    }
+
     // ----------------------------------------------------------- aggregation
 
     /**
@@ -1452,50 +1916,10 @@ final class QueryBinder {
         /** Binds a call of an aggregate and returns its column in the output of the aggregation. */
         Expression call(SqlExpr.FunctionCall f) {
             String name = SqlTrees.key(f.name());
-            Position p = f.position();
-            AggregateCall call;
             String outputName = f.star() || name.equals("count") && f.arguments().isEmpty() ? "count_star()"
                     : SqlPrinter.print(f);
-            if (name.equals("count") && (f.star() || f.arguments().isEmpty())) {
-                if (f.distinct() || !f.orderBy().isEmpty()) {
-                    throw new SqlException("Not supported: DISTINCT or ORDER BY in count(*)", p);
-                }
-                call = new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, outputName);
-            } else {
-                if (f.star()) {
-                    throw new SqlException("Function \"" + name + "\" cannot be applied to a star expression", p);
-                }
-                AggregateFunction function = AggregateFunction.of(name);
-                int arity = function == AggregateFunction.STRING_AGG ? 2 : 1;
-                if (f.arguments().isEmpty() || f.arguments().size() > arity) {
-                    throw new SqlException("Wrong number of arguments for the aggregate " + name, p);
-                }
-                Expression argument = argumentBinder.bind(f.arguments().get(0));
-                List<SortKey> order = new ArrayList<>();
-                int column = input(argument);
-                for (OrderItem o : f.orderBy()) {
-                    // DuckDB takes list(x ORDER BY x) for any x, a literal too.
-                    if (!f.name().equals("list") || f.orderBy().size() != 1
-                            || !SqlPrinter.print(o.expression()).equals(SqlPrinter.print(f.arguments().get(0)))) {
-                        checkOrderLiteral(o.expression());
-                    }
-                    order.add(new SortKey(input(argumentBinder.bind(o.expression())), o.ascending(),
-                            o.nullsFirst()));
-                }
-                call = ExpressionBinder.check(() -> new AggregateCall(function, column, f.distinct(), outputName),
-                        p, null);
-                if (f.arguments().size() == 2) {
-                    call = call.withSeparator(separator(f.arguments().get(1), argument.type()));
-                }
-                AggregateCall unordered = call;
-                call = ExpressionBinder.check(() -> unordered.withOrderBy(order), p, null);
-                AggregateCall checked = call;
-                Schema schema = inputSchema();
-                ExpressionBinder.check(() -> {
-                    checked.check(schema);
-                    return checked;
-                }, p, "No function matches " + name + "(" + argument.type() + ")");
-            }
+            AggregateCall call = aggregateCall(f, outputName, argumentBinder, this::input, this::inputSchema,
+                    false);
             int index = calls.indexOf(call);
             if (index < 0) {
                 calls.add(call);
@@ -1525,9 +1949,62 @@ final class QueryBinder {
         }
     }
 
+    /**
+     * Binds a call of an aggregate over the columns of an input that a
+     * projection computes.
+     *
+     * @param binder the binder of the expressions the call reads
+     * @param input gives the column of the input that computes an expression
+     * @param schema gives the schema of the input with the columns given so far
+     * @param window whether the call is over a window, where DuckDB takes a literal in its {@code ORDER BY}
+     */
+    private AggregateCall aggregateCall(SqlExpr.FunctionCall f, String outputName, ExpressionBinder binder,
+            ToIntFunction<Expression> input, Supplier<Schema> schema, boolean window) {
+        String name = SqlTrees.key(f.name());
+        Position p = f.position();
+        if (name.equals("count") && (f.star() || f.arguments().isEmpty())) {
+            if (f.distinct() || !f.orderBy().isEmpty()) {
+                throw new SqlException("Not supported: DISTINCT or ORDER BY in count(*)", p);
+            }
+            return new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, outputName);
+        }
+        if (f.star()) {
+            throw new SqlException("Function \"" + name + "\" cannot be applied to a star expression", p);
+        }
+        AggregateFunction function = AggregateFunction.of(name);
+        int arity = function == AggregateFunction.STRING_AGG ? 2 : 1;
+        if (f.arguments().isEmpty() || f.arguments().size() > arity) {
+            throw new SqlException("Wrong number of arguments for the aggregate " + name, p);
+        }
+        Expression argument = binder.bind(f.arguments().get(0));
+        List<SortKey> order = new ArrayList<>();
+        int column = input.applyAsInt(argument);
+        for (OrderItem o : f.orderBy()) {
+            // DuckDB takes list(x ORDER BY x) for any x, a literal too.
+            if (!window && (!f.name().equals("list") || f.orderBy().size() != 1
+                    || !SqlPrinter.print(o.expression()).equals(SqlPrinter.print(f.arguments().get(0))))) {
+                checkOrderLiteral(o.expression());
+            }
+            order.add(new SortKey(input.applyAsInt(binder.bind(o.expression())), o.ascending(), o.nullsFirst()));
+        }
+        AggregateCall call = ExpressionBinder.check(() -> new AggregateCall(function, column, f.distinct(),
+                outputName), p, null);
+        if (f.arguments().size() == 2) {
+            call = call.withSeparator(separator(f.arguments().get(1), argument.type()));
+        }
+        AggregateCall unordered = call;
+        AggregateCall checked = ExpressionBinder.check(() -> unordered.withOrderBy(order), p, null);
+        Schema columns = schema.get();
+        return ExpressionBinder.check(() -> {
+            checked.check(columns);
+            return checked;
+        }, p, "No function matches " + name + "(" + argument.type() + ")");
+    }
+
     private PlanNode aggregate(QueryBody.Select s, PlanNode input, Scope scope, List<Item> items,
             Map<String, SqlExpr> aliases, Map<String, Integer> aliasOutputs, List<OrderItem> orderBy,
-            List<String> names, Map<String, Cte> ctes, Correlation correlation, Correlated correlated) {
+            List<String> names, Map<String, Cte> ctes, Correlation correlation, Correlated correlated,
+            Windowing windowing) {
         ExpressionBinder groupBinder = new ExpressionBinder(context, scope, aliases,
                 "GROUP BY clause cannot contain aggregates!", null);
         List<Expression> groups = new ArrayList<>();
@@ -1538,6 +2015,9 @@ final class QueryBinder {
                     addGroup(groups, item.column());
                 } else if (!SqlTrees.containsAggregate(item.expression())) {
                     if (SqlTrees.containsNameOutsideAggregates(item.expression())) {
+                        if (SqlTrees.window(item.expression()) != null) {
+                            throw new SqlException("Cannot group on a window clause", item.position());
+                        }
                         addGroup(groups, groupBinder.bind(item.expression()));
                     }
                 } else if (SqlTrees.containsNameOutsideAggregates(item.expression())) {
@@ -1546,13 +2026,8 @@ final class QueryBinder {
             }
         } else if (groupBy != null) {
             for (SqlExpr g : groupBy.expressions()) {
-                if (g instanceof SqlExpr.Unary u && u.op() == SqlExpr.UnaryOp.MINUS
-                        && SqlTrees.position(u.operand()) >= 0) {
-                    throw new SqlException("GROUP BY term out of range - should be between 1 and " + items.size(),
-                            g.position());
-                }
-                long position = SqlTrees.position(g);
-                if (position >= 0) {
+                long position = SqlTrees.signedPosition(g);
+                if (position != Long.MIN_VALUE) {
                     if (position < 1 || position > items.size()) {
                         throw new SqlException("GROUP BY term out of range - should be between 1 and " + items.size(),
                                 g.position());
@@ -1630,7 +2105,9 @@ final class QueryBinder {
         // The subqueries are joined to the groups: their values are the same for every row of a group.
         SubqueryJoiner subqueries = new SubqueryJoiner((q, c) -> query(q, ctes, c),
                 new ExpressionBinder(context, scope, Map.of(), null, hook));
-        ExpressionBinder.Hook itemHook = unnesting.hook(new ExpressionBinder(context, scope, earlier, null, hook), hook);
+        // The expressions a window function reads are those of the groups and the aggregates.
+        ExpressionBinder.Hook itemHook = windowing.hook(new ExpressionBinder(context, scope, earlier, null, hook),
+                unnesting.hook(new ExpressionBinder(context, scope, earlier, null, hook), hook));
         for (Item item : items) {
             if (item.column() != null) {
                 outputs.add(grouped(groups, item.column(), item.name(), item.position()));
@@ -1644,15 +2121,25 @@ final class QueryBinder {
                 earlier.putIfAbsent(SqlTrees.key(item.alias()), item.expression());
             }
         }
+        SqlExpr.Window inHaving = s.having() == null ? null : SqlTrees.window(s.having());
+        if (inHaving != null) {
+            throw new SqlException("HAVING clause cannot contain window functions!", inHaving.position());
+        }
         Expression having = s.having() != null
                 ? new ExpressionBinder(context, scope, aliases, null, hook, subqueries).condition(s.having()) : null;
         ExpressionBinder post = new ExpressionBinder(context, scope, aliases, null, hook);
+        Expression qualify = qualify(s, windowing, new ExpressionBinder(context, scope, aliases, null,
+                windowing.hook(post, hook)));
         List<Order> orders = orders(orderBy, outputs, aliasOutputs, new ExpressionBinder(context, scope, aliases, null,
-                unnesting.hook(post, hook)));
+                windowing.hook(post, unnesting.hook(post, hook))));
         PlanNode plan = subqueries.attach(aggregation.plan(input));
         outputs.replaceAll(subqueries::resolve);
         if (having != null) {
             plan = new PlanNode.Filter(plan, subqueries.resolve(having));
+        }
+        plan = windowing.plan(plan, outputs, orders);
+        if (qualify != null) {
+            plan = new PlanNode.Filter(plan, windowing.resolve(qualify));
         }
         if (deferred) {
             if (!subqueries.isEmpty() || unnesting.plan(plan, outputs, orders) != plan) {

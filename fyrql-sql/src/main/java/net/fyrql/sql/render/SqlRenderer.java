@@ -117,6 +117,7 @@ public final class SqlRenderer {
                 yield b.append(dialect.unnest(expression(u.list(), t))).append(" AS ").append(column(width))
                         .append(" FROM (").append(select(u.input())).append(") ").append(t).toString();
             }
+            case PlanNode.Window w -> window(w);
             case PlanNode.Values v -> values(v);
             case PlanNode.SetOperation s -> {
                 String t = alias();
@@ -358,6 +359,57 @@ public final class SqlRenderer {
             b.append(" GROUP BY ").append(String.join(", ", groups));
         }
         return b.toString();
+    }
+
+    /**
+     * A window: the columns of the input, then one call per column, each
+     * with the partition, the order and, if the function uses one, the
+     * whole frame; a sum of integers is cast to {@code HUGEINT}.
+     */
+    private String window(PlanNode.Window w) {
+        String t = alias();
+        Schema input = w.input().schema();
+        StringBuilder b = new StringBuilder("SELECT ");
+        for (int i = 0; i < input.size(); i++) {
+            b.append(t).append('.').append(column(i)).append(" AS ").append(column(i)).append(", ");
+        }
+        List<String> partition = new ArrayList<>();
+        for (int c : w.partition()) {
+            partition.add(t + "." + column(c));
+        }
+        List<String> order = new ArrayList<>();
+        for (PlanNode.SortKey k : w.order()) {
+            order.add(orderKey(k, t));
+        }
+        for (int i = 0; i < w.calls().size(); i++) {
+            PlanNode.WindowCall call = w.calls().get(i);
+            String rendered;
+            if (call.aggregate() != null) {
+                PlanNode.AggregateCall a = call.aggregate();
+                List<String> orderKeys = new ArrayList<>();
+                for (PlanNode.SortKey k : a.orderBy()) {
+                    orderKeys.add(orderKey(k, t));
+                }
+                rendered = dialect.aggregate(a.function(), a.distinct(),
+                        a.function() == PlanNode.AggregateFunction.COUNT_STAR ? "*" : t + "." + column(a.column()),
+                        a.function() == PlanNode.AggregateFunction.STRING_AGG
+                                ? dialect.literal(a.separator(), DataType.VARCHAR) : null, orderKeys);
+            } else {
+                List<String> arguments = new ArrayList<>();
+                for (int c : call.arguments()) {
+                    arguments.add(t + "." + column(c));
+                }
+                rendered = dialect.windowFunction(call.function(), arguments, call.ignoreNulls());
+            }
+            rendered = dialect.window(rendered, call.filter() < 0 ? null : t + "." + column(call.filter()), partition,
+                    order, call.function().usesFrame() ? dialect.frame(call.frame()) : null);
+            if (call.aggregate() != null && call.aggregate().function() == PlanNode.AggregateFunction.SUM
+                    && call.type(input) == DataType.HUGEINT) {
+                rendered = dialect.cast(rendered, DataType.HUGEINT, false);
+            }
+            b.append(i > 0 ? ", " : "").append(rendered).append(" AS ").append(column(input.size() + i));
+        }
+        return b.append(" FROM (").append(select(w.input())).append(") ").append(t).toString();
     }
 
     private String orderKey(PlanNode.SortKey k, String input) {

@@ -42,7 +42,8 @@ import java.util.List;
  * dialect compares them byte by byte, and ordered only where it orders
  * them byte by byte; floating-point values are never compared in the
  * source, since their formatting and rounding differ. An aggregation is
- * just as conservative, see {@link #supportsAggregation}.
+ * just as conservative, see {@link #supportsAggregation}; a window function
+ * is not rendered at all.
  */
 abstract class StandardDialect implements Dialect {
 
@@ -220,6 +221,22 @@ abstract class StandardDialect implements Dialect {
             b.append(" ORDER BY ").append(String.join(", ", orderKeys));
         }
         return b.append(')').toString();
+    }
+
+    /**
+     * Refuses: the databases differ from DuckDB and from each other in the
+     * frames, {@code IGNORE NULLS}, {@code FILTER} and the place of
+     * {@code NULL}s, and FyrQL computes windows itself.
+     */
+    @Override
+    public String window(String call, String filter, List<String> partition, List<String> orderKeys, String frame) {
+        throw new IllegalArgumentException(name() + " cannot render a window function");
+    }
+
+    /** No: FyrQL computes windows itself. */
+    @Override
+    public boolean supportsWindow(PlanNode.Window window) {
+        return false;
     }
 
     /** Tells whether a column or a literal of the type may appear in a filter the source evaluates. */

@@ -264,6 +264,29 @@ class PredicatePushdownTest {
     }
 
     @Test
+    void aWindowPassesTheConditionsOverItsPartitionColumns() {
+        List<PlanNode.WindowCall> calls = List.of(
+                PlanNode.WindowCall.of(PlanNode.WindowFunction.ROW_NUMBER, List.of(), "rn"),
+                PlanNode.WindowCall.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"),
+                        PlanNode.Frame.DEFAULT));
+        Expression rn = col(4, DataType.BIGINT);
+        Expression onPartition = or(isNull(K), eq(K, lit(10)));
+        PlanNode plan = new Filter(new PlanNode.Window(T, List.of(3), List.of(SortKey.asc(0)), calls),
+                and(and(gt(K, lit(5)), gt(A, lit(1))), and(onPartition, gt(rn, lit(1L)))));
+        assertEquals(new Filter(new PlanNode.Window(new Filter(T, and(gt(K, lit(5)), onPartition)), List.of(3),
+                List.of(SortKey.asc(0)), calls), and(gt(A, lit(1)), gt(rn, lit(1L)))), pushed(plan));
+
+        // The calls of a partition see all its rows: a condition that also reads another column stays above, and
+        // so does every condition above a window without partition columns.
+        PlanNode other = new Filter(new PlanNode.Window(T, List.of(3), List.of(SortKey.asc(0)), calls),
+                or(gt(K, lit(10)), gt(A, lit(3))));
+        assertEquals(other, pushed(other));
+        PlanNode whole = new Filter(new PlanNode.Window(T, List.of(), List.of(SortKey.asc(0)), calls),
+                gt(K, lit(10)));
+        assertEquals(whole, pushed(whole));
+    }
+
+    @Test
     void theOptimizerPushesBeforeItPrunes() {
         PlanNode plan = new PlanNode.Project(new Filter(cross(T, U), and(eq(A, UA), gt(C, lit(0.0)))),
                 List.of(new NamedExpression("b", B), new NamedExpression("n", UN)));

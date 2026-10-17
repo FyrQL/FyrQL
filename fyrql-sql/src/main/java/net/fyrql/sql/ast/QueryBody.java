@@ -23,15 +23,35 @@ import java.util.Objects;
 public sealed interface QueryBody {
 
     /**
-     * {@code SELECT [DISTINCT] items [FROM from] [WHERE where] [GROUP BY ...] [HAVING having]};
-     * {@code from}, {@code where}, {@code groupBy} and {@code having} are {@code null} when absent.
+     * {@code SELECT [DISTINCT] items [FROM from] [WHERE where] [GROUP BY ...] [HAVING having]
+     * [WINDOW windows] [QUALIFY qualify]}; {@code from}, {@code where}, {@code groupBy},
+     * {@code having} and {@code qualify} are {@code null} when absent.
      */
     record Select(boolean distinct, List<SelectItem> items, FromItem from, SqlExpr where, GroupBy groupBy,
-            SqlExpr having, Position position) implements QueryBody {
+            SqlExpr having, List<NamedWindow> windows, SqlExpr qualify, Position position) implements QueryBody {
         public Select {
             items = List.copyOf(items);
             if (items.isEmpty()) {
                 throw new IllegalArgumentException("SELECT needs at least one item");
+            }
+            windows = List.copyOf(windows);
+            Objects.requireNonNull(position, "position");
+        }
+
+        /** A select without {@code WINDOW} and {@code QUALIFY}. */
+        public Select(boolean distinct, List<SelectItem> items, FromItem from, SqlExpr where, GroupBy groupBy,
+                SqlExpr having, Position position) {
+            this(distinct, items, from, where, groupBy, having, List.of(), null, position);
+        }
+    }
+
+    /** {@code name AS (window)} in the {@code WINDOW} clause; the window names no other. */
+    record NamedWindow(String name, WindowSpec window, Position position) {
+        public NamedWindow {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(window, "window");
+            if (window.base() != null) {
+                throw new IllegalArgumentException("a window of the WINDOW clause names no other");
             }
             Objects.requireNonNull(position, "position");
         }

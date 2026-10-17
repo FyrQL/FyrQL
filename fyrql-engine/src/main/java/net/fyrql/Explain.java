@@ -20,6 +20,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.Casts;
 import net.fyrql.exec.Codegen;
 import net.fyrql.exec.PipelinePlanner;
 import net.fyrql.sql.render.DuckDbDialect;
@@ -153,6 +154,7 @@ final class Explain {
             case PlanNode.Sort s -> "Sort " + keys(s.keys());
             case PlanNode.Limit l -> "Limit " + l.count() + (l.offset() == 0 ? "" : " OFFSET " + l.offset());
             case PlanNode.Unnest u -> "Unnest " + expression(u.list()) + " AS " + name(u.name());
+            case PlanNode.Window w -> "Window" + window(w);
             case PlanNode.Union u -> "Union ALL";
             case PlanNode.Values v -> {
                 List<String> columns = new ArrayList<>();
@@ -194,9 +196,51 @@ final class Explain {
         return String.join(" ", parts);
     }
 
+    /** The partition, the order and the calls of a window, after a leading word. */
+    private static String window(PlanNode.Window w) {
+        List<String> parts = new ArrayList<>();
+        if (!w.partition().isEmpty()) {
+            parts.add("PARTITION BY " + String.join(", ", w.partition().stream().map(c -> "#" + c).toList()));
+        }
+        if (!w.order().isEmpty()) {
+            parts.add("ORDER BY " + keys(w.order()));
+        }
+        List<String> calls = new ArrayList<>();
+        for (PlanNode.WindowCall call : w.calls()) {
+            calls.add(call(call));
+        }
+        return " " + (parts.isEmpty() ? "" : String.join(" ", parts) + ": ") + String.join(", ", calls);
+    }
+
+    /** A call of a window: the function, the filter, and the frame if the function uses one that is not the default. */
+    private static String call(PlanNode.WindowCall call) {
+        StringBuilder sb = new StringBuilder();
+        if (call.aggregate() != null) {
+            sb.append(aggregate(call.aggregate()));
+        } else {
+            sb.append(call.function().sqlName()).append('(')
+                    .append(String.join(", ", call.arguments().stream().map(c -> "#" + c).toList()))
+                    .append(call.ignoreNulls() ? " IGNORE NULLS)" : ")");
+        }
+        if (call.filter() >= 0) {
+            sb.append(" FILTER (WHERE #").append(call.filter()).append(')');
+        }
+        if (call.function().usesFrame() && !call.frame().equals(PlanNode.Frame.DEFAULT)) {
+            sb.append(' ').append(call.frame().sql(b -> b.unit() == null
+                    ? Casts.format(b.offset().value(), b.offset().type())
+                    : "INTERVAL " + b.offset().value() + " " + b.unit()));
+        }
+        return sb.append(" AS ").append(name(call.name())).toString();
+    }
+
     private static String call(PlanNode.AggregateCall call) {
+        return aggregate(call) + " AS " + name(call.name());
+    }
+
+    /** An aggregate call without its name. */
+    private static String aggregate(PlanNode.AggregateCall call) {
         if (call.function() == PlanNode.AggregateFunction.COUNT_STAR) {
-            return "count(*) AS " + name(call.name());
+            return "count(*)";
         }
         StringBuilder sb = new StringBuilder(call.function().sqlName()).append('(');
         if (call.distinct()) {
@@ -210,7 +254,7 @@ final class Explain {
         if (!call.orderBy().isEmpty()) {
             sb.append(" ORDER BY ").append(keys(call.orderBy()));
         }
-        return sb.append(") AS ").append(name(call.name())).toString();
+        return sb.append(')').toString();
     }
 
     private static String keys(List<PlanNode.SortKey> keys) {

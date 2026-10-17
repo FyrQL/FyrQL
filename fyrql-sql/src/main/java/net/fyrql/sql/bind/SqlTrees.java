@@ -33,7 +33,9 @@ final class SqlTrees {
     /**
      * Returns the operands of an expression, including the order of an
      * aggregate. A subquery is no operand: what it contains belongs to the
-     * query inside.
+     * query inside. The operands of a window function are those of its call
+     * and its window, not the call itself, so that an aggregate over a
+     * window is no aggregate of the query, while one in its arguments is.
      */
     static List<SqlExpr> children(SqlExpr e) {
         return switch (e) {
@@ -79,6 +81,7 @@ final class SqlTrees {
             case SqlExpr.Index x -> List.of(x.base(), x.index());
             case SqlExpr.StructValue s -> s.values();
             case SqlExpr.Interval i -> List.of();
+            case SqlExpr.Window w -> w.operands();
         };
     }
 
@@ -121,6 +124,20 @@ final class SqlTrees {
             }
         }
         return false;
+    }
+
+    /** Returns the first window function of an expression, also in the arguments of an aggregate, or {@code null}. */
+    static SqlExpr.Window window(SqlExpr e) {
+        if (e instanceof SqlExpr.Window w) {
+            return w;
+        }
+        for (SqlExpr c : children(e)) {
+            SqlExpr.Window w = window(c);
+            if (w != null) {
+                return w;
+            }
+        }
+        return null;
     }
 
     /** Tells whether an expression is a call of {@code unnest}, in any case. */
@@ -180,6 +197,23 @@ final class SqlTrees {
             }
         }
         return -1;
+    }
+
+    /**
+     * Returns the position of an integer literal under any number of minus
+     * signs, which DuckDB folds into it: the position under an even number,
+     * the negated position under an odd one, and {@link Long#MIN_VALUE} if
+     * the expression is no such literal.
+     */
+    static long signedPosition(SqlExpr e) {
+        boolean negated = false;
+        SqlExpr x = e;
+        while (x instanceof SqlExpr.Unary u && u.op() == SqlExpr.UnaryOp.MINUS) {
+            negated = !negated;
+            x = u.operand();
+        }
+        long position = position(x);
+        return position < 0 ? Long.MIN_VALUE : negated ? -position : position;
     }
 
     /** Returns a name in lower case, the key under which names match regardless of case. */

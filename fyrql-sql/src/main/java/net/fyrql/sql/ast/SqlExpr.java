@@ -18,6 +18,8 @@ package net.fyrql.sql.ast;
 
 import net.fyrql.core.type.DataType;
 
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 
@@ -261,6 +263,86 @@ public sealed interface SqlExpr {
         /** A call without {@code DISTINCT}, {@code *} and {@code ORDER BY}. */
         public FunctionCall(String name, List<SqlExpr> arguments, Position position) {
             this(name, arguments, false, false, List.of(), position);
+        }
+    }
+
+    /**
+     * A call of a window function or of an aggregate over a window:
+     * {@code f(args [IGNORE NULLS]) [FILTER (WHERE filter)] OVER window}.
+     * The filter may be {@code null}.
+     */
+    record Window(FunctionCall call, WindowSpec over, boolean ignoreNulls, SqlExpr filter, Position position)
+            implements SqlExpr {
+        public Window {
+            Objects.requireNonNull(call, "call");
+            Objects.requireNonNull(over, "over");
+            Objects.requireNonNull(position, "position");
+        }
+
+        /**
+         * Returns the expressions the window function reads, in this order:
+         * the arguments and the order of the call, the expressions of
+         * {@code PARTITION BY} and {@code ORDER BY}, the offsets of the frame
+         * and the filter. The call itself is no operand.
+         */
+        public List<SqlExpr> operands() {
+            List<SqlExpr> result = new ArrayList<>(call.arguments());
+            for (OrderItem o : call.orderBy()) {
+                result.add(o.expression());
+            }
+            result.addAll(over.partitionBy());
+            for (OrderItem o : over.orderBy()) {
+                result.add(o.expression());
+            }
+            if (over.frame() != null) {
+                if (over.frame().start().offset() != null) {
+                    result.add(over.frame().start().offset());
+                }
+                if (over.frame().end().offset() != null) {
+                    result.add(over.frame().end().offset());
+                }
+            }
+            if (filter != null) {
+                result.add(filter);
+            }
+            return result;
+        }
+
+        /** Returns the same window function with other operands, in the order of {@link #operands()}. */
+        public Window withOperands(List<SqlExpr> operands) {
+            Iterator<SqlExpr> it = operands.iterator();
+            List<SqlExpr> arguments = new ArrayList<>();
+            for (int i = 0; i < call.arguments().size(); i++) {
+                arguments.add(it.next());
+            }
+            List<OrderItem> callOrder = new ArrayList<>();
+            for (OrderItem o : call.orderBy()) {
+                callOrder.add(new OrderItem(it.next(), o.ascending(), o.nullsFirst()));
+            }
+            List<SqlExpr> partitionBy = new ArrayList<>();
+            for (int i = 0; i < over.partitionBy().size(); i++) {
+                partitionBy.add(it.next());
+            }
+            List<OrderItem> orderBy = new ArrayList<>();
+            for (OrderItem o : over.orderBy()) {
+                orderBy.add(new OrderItem(it.next(), o.ascending(), o.nullsFirst()));
+            }
+            WindowSpec.Frame frame = over.frame();
+            if (frame != null) {
+                WindowSpec.Bound start = frame.start().offset() == null ? frame.start()
+                        : new WindowSpec.Bound(frame.start().kind(), it.next());
+                WindowSpec.Bound end = frame.end().offset() == null ? frame.end()
+                        : new WindowSpec.Bound(frame.end().kind(), it.next());
+                frame = new WindowSpec.Frame(frame.unit(), start, end, frame.exclusion());
+            }
+            SqlExpr newFilter = filter == null ? null : it.next();
+            if (it.hasNext()) {
+                throw new IllegalArgumentException("too many operands");
+            }
+            FunctionCall newCall = new FunctionCall(call.name(), arguments, call.distinct(), call.star(), callOrder,
+                    call.position());
+            return new Window(newCall, new WindowSpec(over.base(), partitionBy, orderBy, frame), ignoreNulls,
+                    newFilter, position);
         }
     }
 

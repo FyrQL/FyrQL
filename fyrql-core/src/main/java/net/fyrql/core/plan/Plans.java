@@ -72,6 +72,7 @@ public final class Plans {
             case PlanNode.Limit l -> new PlanNode.Limit(children.get(0), l.count(), l.offset());
             case PlanNode.Union u -> new PlanNode.Union(children);
             case PlanNode.Unnest u -> new PlanNode.Unnest(children.get(0), u.list(), u.name());
+            case PlanNode.Window w -> new PlanNode.Window(children.get(0), w.partition(), w.order(), w.calls());
             case PlanNode.Values v -> v;
             case PlanNode.SetOperation s -> new PlanNode.SetOperation(children.get(0), children.get(1), s.kind(),
                     s.all());
@@ -216,6 +217,8 @@ public final class Plans {
             case PlanNode.Limit l -> sb.append("Limit ").append(l.count()).append(" offset ").append(l.offset());
             case PlanNode.Union u -> sb.append("Union");
             case PlanNode.Unnest u -> sb.append("Unnest ").append(u.list()).append(" AS ").append(u.name());
+            case PlanNode.Window w -> sb.append("Window partition ").append(w.partition()).append(" order ")
+                    .append(w.order()).append(' ').append(w.calls());
             case PlanNode.Values v -> sb.append("Values ").append(v.rows().size()).append(" rows ")
                     .append(fields(v.schema()));
             case PlanNode.SetOperation s -> sb.append(s.kind()).append(s.all() ? " ALL" : "");

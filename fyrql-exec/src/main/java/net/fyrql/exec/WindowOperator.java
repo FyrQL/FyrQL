@@ -1,0 +1,663 @@
+/*
+ * Copyright 2026 the FyrQL authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package net.fyrql.exec;
+
+import net.fyrql.connector.Batches;
+import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.plan.PlanNode.BoundKind;
+import net.fyrql.core.plan.PlanNode.Frame;
+import net.fyrql.core.plan.PlanNode.FrameBound;
+import net.fyrql.core.plan.PlanNode.FrameUnit;
+import net.fyrql.core.plan.PlanNode.SortKey;
+import net.fyrql.core.plan.PlanNode.WindowCall;
+import net.fyrql.core.plan.PlanNode.WindowFunction;
+import net.fyrql.core.type.DataType;
+import net.fyrql.core.type.Schema;
+import net.fyrql.core.vector.BigIntVector;
+import net.fyrql.core.vector.Batch;
+import net.fyrql.core.vector.DoubleVector;
+import net.fyrql.core.vector.Vector;
+import net.fyrql.core.vector.Vectors;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Computes the calls of a {@link PlanNode.Window}: materializes the input,
+ * sorts it by the partition columns and then the order keys, and computes
+ * each call partition by partition. The output has the rows in that order,
+ * each with its result per call after its columns.
+ * <p>
+ * The peers of a row are the rows of its partition with equal order keys,
+ * {@code NULL} equal to {@code NULL}. A frame is a range of rows of the
+ * partition, as DuckDB takes it: {@code ROWS} counts rows from the current
+ * one, a negative offset counting the other way; {@code GROUPS} counts
+ * groups of peers; {@code RANGE} reaches to the first or last peer, or
+ * with an offset to the rows whose key lies within the offset of the key
+ * of the current row (see {@link RangeBounds}), and for a row whose key is
+ * {@code NULL} to its peers. An exclusion cuts the frame into up to three
+ * pieces. {@code IGNORE NULLS} counts only the rows whose value is not
+ * {@code NULL}; a filter leaves the rows out of an aggregate whose filter is
+ * not true.
+ * <p>
+ * An aggregate over a frame comes from a {@link SegmentTree} per partition,
+ * or, for the aggregates that keep their values ({@code DISTINCT}, an
+ * {@code ORDER BY}, {@code string_agg}, {@code list}), from the rows of the
+ * frame one by one. Rows with the same frame as the row before share its
+ * result.
+ * <p>
+ * The budget takes the input, the results and the nodes of the trees.
+ */
+final class WindowOperator extends AbstractOperator {
+
+    /** The source of a row without a value, and of a row that takes the default. */
+    private static final int NONE = -1;
+    private static final int DEFAULT = -2;
+    /** The bytes of the peers of a row, of a result, of a key of a range and of an index of a value. */
+    private static final long BYTES_PER_ROW = 16;
+    private static final long BYTES_PER_RESULT = 16;
+    private static final long BYTES_PER_KEY = 32;
+    private static final long BYTES_PER_INDEX = 8;
+    private static final long BYTES_PER_NODE = 128;
+
+    private final PlanNode.Window window;
+    private final Operator input;
+    private final MemoryBudget budget;
+    private final int batchSize;
+    private final Schema inputSchema;
+    private final boolean trees;
+    private List<Batch> output;
+    private long reserved;
+    private int steps;
+
+    // The sorted input and the peers of each of its rows, while the calls are computed.
+    private Batch rows;
+    /** The first row of the peers of a row. */
+    private int[] peerStart;
+    /** The row after the last peer of a row. */
+    private int[] peerEnd;
+    /** The number of the peers of a row within its partition, from 0. */
+    private int[] peerGroup;
+    /** At the first row of a partition plus a number of peers, the first row of these peers. */
+    private int[] groupRow;
+    /** The number of groups of peers of the current partition. */
+    private int groups;
+    /** The rows of the current partition whose order key is not {@code NULL}, for a range with an offset. */
+    private int keyFrom;
+    private int keyTo;
+    /** The frame of a row, see {@link #frame}: the pieces {@code [pieceFrom[i], pieceTo[i])}. */
+    private final int[] pieceFrom = new int[3];
+    private final int[] pieceTo = new int[3];
+    private int pieces;
+
+    WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget, int batchSize) {
+        this(label, window, input, budget, batchSize, true);
+    }
+
+    /**
+     * With {@code trees} false, every aggregate takes the rows of each frame
+     * one by one, which the tests compare against.
+     */
+    WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget, int batchSize,
+            boolean trees) {
+        super(label, window.schema());
+        this.window = window;
+        this.input = input;
+        this.budget = budget;
+        this.batchSize = batchSize;
+        this.inputSchema = window.input().schema();
+        this.trees = trees;
+    }
+
+    @Override
+    Batch compute() {
+        if (output == null) {
+            output = computeAll();
+        }
+        return output.isEmpty() ? null : output.remove(0);
+    }
+
+    private List<Batch> computeAll() {
+        List<Batch> batches = new ArrayList<>();
+        for (Batch b = input.next(); b != null; b = input.next()) {
+            reserve(Batches.estimateBytes(b));
+            batches.add(b);
+        }
+        if (batches.isEmpty()) {
+            return new ArrayList<>();
+        }
+        Batch all = Batches.concat(inputSchema, batches);
+        batches.clear();
+        List<SortKey> keys = new ArrayList<>();
+        for (int c : window.partition()) {
+            keys.add(SortKey.asc(c));
+        }
+        keys.addAll(window.order());
+        rows = all.select(new RowOrder(all, keys).sort(this::checkCancelled));
+        int n = rows.rowCount();
+        reserve((BYTES_PER_ROW + BYTES_PER_RESULT * window.calls().size()) * n);
+        peerStart = new int[n];
+        peerEnd = new int[n];
+        peerGroup = new int[n];
+        groupRow = new int[n];
+        List<Result> results = new ArrayList<>();
+        for (WindowCall c : window.calls()) {
+            results.add(result(c, n));
+        }
+        RowOrder partitions = new RowOrder(rows, keys.subList(0, window.partition().size()));
+        RowOrder peers = new RowOrder(rows, window.order());
+        Vector orderKey = window.order().size() == 1 ? rows.column(window.order().get(0).column()) : null;
+        for (int start = 0; start < n; ) {
+            int end = start + 1;
+            while (end < n && partitions.compare(end - 1, end) == 0) {
+                end++;
+            }
+            int group = 0;
+            for (int i = start; i < end; group++) {
+                int j = i + 1;
+                while (j < end && peers.compare(j - 1, j) == 0) {
+                    j++;
+                }
+                for (int r = i; r < j; r++) {
+                    peerStart[r] = i;
+                    peerEnd[r] = j;
+                    peerGroup[r] = group;
+                }
+                groupRow[start + group] = i;
+                i = j;
+            }
+            groups = group;
+            keyFrom = orderKey != null && orderKey.isNull(start) ? peerEnd[start] : start;
+            keyTo = orderKey != null && orderKey.isNull(end - 1) ? peerStart[end - 1] : end;
+            for (Result r : results) {
+                r.partition(start, end);
+            }
+            start = end;
+        }
+        List<Vector> columns = new ArrayList<>(rows.columns());
+        for (Result r : results) {
+            columns.add(r.build());
+        }
+        Batch out = new Batch(schema(), n, columns);
+        rows = null;
+        peerStart = null;
+        peerEnd = null;
+        peerGroup = null;
+        groupRow = null;
+        return new ArrayList<>(Batches.split(out, batchSize));
+    }
+
+    private void reserve(long bytes) {
+        budget.reserve(bytes, label());
+        reserved += bytes;
+    }
+
+    private void release(long bytes) {
+        budget.release(bytes);
+        reserved -= bytes;
+    }
+
+    /** Counts a step of a long loop and checks for a canceled query now and then. */
+    private void step() {
+        if ((++steps & (CHECK_INTERVAL - 1)) == 0) {
+            checkCancelled();
+        }
+    }
+
+    private Result result(WindowCall c, int n) {
+        return switch (c.function()) {
+            case ROW_NUMBER, RANK, DENSE_RANK, NTILE -> new Ranks(c, n);
+            case PERCENT_RANK, CUME_DIST -> new Shares(c, n);
+            case LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE -> new Picks(c, n);
+            case AGGREGATE -> new Aggregates(c, n);
+        };
+    }
+
+    /** The results of a call, appended partition by partition. */
+    private abstract class Result {
+        final WindowCall call;
+        /** The bounds of a range with an offset, or {@code null}. */
+        final RangeBounds ranges;
+
+        Result(WindowCall call) {
+            this.call = call;
+            Frame f = call.frame();
+            if (call.function().usesFrame() && f.unit() == FrameUnit.RANGE && f.hasOffset()) {
+                reserve(BYTES_PER_KEY * rows.rowCount());
+                SortKey key = window.order().get(0);
+                this.ranges = new RangeBounds(rows.column(key.column()), key, f);
+            } else {
+                this.ranges = null;
+            }
+        }
+
+        /** Sets the frame of a row of the partition {@code [start, end)}. */
+        void frame(int row, int start, int end) {
+            WindowOperator.this.frame(call.frame(), ranges, row, start, end);
+        }
+
+        /** Computes the results of the rows {@code [start, end)}, a partition. */
+        abstract void partition(int start, int end);
+
+        /** Returns the results of all rows. */
+        abstract Vector build();
+    }
+
+    /** {@code row_number}, {@code rank}, {@code dense_rank} and {@code ntile}. */
+    private final class Ranks extends Result {
+        private final long[] values;
+        private final boolean[] nulls;
+
+        Ranks(WindowCall call, int n) {
+            super(call);
+            this.values = new long[n];
+            this.nulls = call.function() == WindowFunction.NTILE ? new boolean[n] : null;
+        }
+
+        @Override
+        void partition(int start, int end) {
+            Vector buckets = call.function() == WindowFunction.NTILE ? rows.column(call.arguments().get(0)) : null;
+            for (int i = start; i < end; i++) {
+                step();
+                values[i] = switch (call.function()) {
+                    case ROW_NUMBER -> i - start + 1;
+                    case RANK -> peerStart[i] - start + 1;
+                    case DENSE_RANK -> peerGroup[i] + 1L;
+                    default -> {
+                        if (buckets.isNull(i)) {
+                            nulls[i] = true;
+                            yield 0;
+                        }
+                        yield ntile(((Number) buckets.get(i)).longValue(), end - start, i - start);
+                    }
+                };
+            }
+        }
+
+        @Override
+        Vector build() {
+            return BigIntVector.wrap(DataType.BIGINT, values, nulls);
+        }
+    }
+
+    /**
+     * The bucket of a row among {@code buckets} as DuckDB numbers them: as
+     * many rows each as they divide evenly, the first buckets one more.
+     */
+    static long ntile(long buckets, long rows, long row) {
+        if (buckets < 1) {
+            throw new IllegalArgumentException("Argument for ntile must be greater than zero");
+        }
+        long n = Math.min(buckets, rows);
+        long size = rows / n;
+        long large = rows - n * size;
+        long small = large * (size + 1);
+        return row < small ? 1 + row / (size + 1) : 1 + large + (row - small) / size;
+    }
+
+    /** {@code percent_rank} and {@code cume_dist}. */
+    private final class Shares extends Result {
+        private final double[] values;
+
+        Shares(WindowCall call, int n) {
+            super(call);
+            this.values = new double[n];
+        }
+
+        @Override
+        void partition(int start, int end) {
+            double rowCount = end - start;
+            for (int i = start; i < end; i++) {
+                step();
+                values[i] = call.function() == WindowFunction.PERCENT_RANK
+                        ? rowCount > 1 ? (peerStart[i] - start) / (rowCount - 1) : 0
+                        : (peerEnd[i] - start) / rowCount;
+            }
+        }
+
+        @Override
+        Vector build() {
+            return DoubleVector.wrap(values, null);
+        }
+    }
+
+    /**
+     * The functions that take the value of one row: {@code lag},
+     * {@code lead}, {@code first_value}, {@code last_value} and
+     * {@code nth_value}. A row whose offset or position is {@code NULL}
+     * takes {@code NULL}; a row before or after the partition takes the
+     * default of {@code lag} and {@code lead}. With {@code IGNORE NULLS},
+     * the offsets and positions count only the rows whose value is not
+     * {@code NULL}, but an offset of 0 is the current row.
+     */
+    private final class Picks extends Result {
+        /** The row whose value a row takes, or {@link #NONE} or {@link #DEFAULT}. */
+        private final int[] sources;
+        /** With {@code IGNORE NULLS}, the number of values before each row that are not {@code NULL}. */
+        private final int[] counts;
+        /** With {@code IGNORE NULLS}, the rows whose value is not {@code NULL}, in their order. */
+        private final int[] present;
+        private boolean defaults;
+
+        Picks(WindowCall call, int n) {
+            super(call);
+            this.sources = new int[n];
+            if (call.ignoreNulls()) {
+                reserve(BYTES_PER_INDEX * n);
+                Vector v = rows.column(call.arguments().get(0));
+                counts = new int[n + 1];
+                present = new int[n];
+                int k = 0;
+                for (int r = 0; r < n; r++) {
+                    counts[r] = k;
+                    if (!v.isNull(r)) {
+                        present[k++] = r;
+                    }
+                }
+                counts[n] = k;
+            } else {
+                counts = null;
+                present = null;
+            }
+        }
+
+        @Override
+        void partition(int start, int end) {
+            Vector second = call.arguments().size() > 1 ? rows.column(call.arguments().get(1)) : null;
+            for (int i = start; i < end; i++) {
+                step();
+                sources[i] = switch (call.function()) {
+                    case LAG, LEAD -> shifted(i, start, end, second);
+                    case FIRST_VALUE -> {
+                        frame(i, start, end);
+                        yield nth(1);
+                    }
+                    case LAST_VALUE -> {
+                        frame(i, start, end);
+                        yield last();
+                    }
+                    default -> {
+                        long position = second.isNull(i) ? 0 : ((Number) second.get(i)).longValue();
+                        if (position < 1) {
+                            yield NONE;
+                        }
+                        frame(i, start, end);
+                        yield nth(position);
+                    }
+                };
+            }
+        }
+
+        /** Returns the source of {@code lag} or {@code lead} for a row of the partition {@code [start, end)}. */
+        private int shifted(int row, int start, int end, Vector second) {
+            if (second != null && second.isNull(row)) {
+                return NONE;
+            }
+            long offset = second == null ? 1 : ((Number) second.get(row)).longValue();
+            boolean lag = call.function() == WindowFunction.LAG;
+            if (offset == 0) {
+                return row;
+            }
+            if (!call.ignoreNulls()) {
+                long r = lag ? subtract(row, offset) : add(row, offset);
+                if (r >= start && r < end) {
+                    return (int) r;
+                }
+            } else {
+                long distance = offset == Long.MIN_VALUE ? Long.MAX_VALUE : Math.abs(offset);
+                long index = lag == offset > 0 ? counts[row] - distance : add(counts[row + 1] - 1, distance);
+                if (index >= counts[start] && index < counts[end]) {
+                    return present[(int) index];
+                }
+            }
+            boolean fallback = call.arguments().size() > 2;
+            defaults |= fallback;
+            return fallback ? DEFAULT : NONE;
+        }
+
+        /** Returns the row of the n-th row of the frame, from 1, or {@link #NONE}. */
+        private int nth(long n) {
+            for (int p = 0; p < pieces; p++) {
+                int from = pieceFrom[p];
+                int to = pieceTo[p];
+                long count = counts == null ? to - from : counts[to] - counts[from];
+                if (n <= count) {
+                    return counts == null ? from + (int) n - 1 : present[counts[from] + (int) n - 1];
+                }
+                n -= count;
+            }
+            return NONE;
+        }
+
+        /** Returns the last row of the frame, or {@link #NONE}. */
+        private int last() {
+            for (int p = pieces - 1; p >= 0; p--) {
+                int from = pieceFrom[p];
+                int to = pieceTo[p];
+                if (counts == null ? from < to : counts[from] < counts[to]) {
+                    return counts == null ? to - 1 : present[counts[to] - 1];
+                }
+            }
+            return NONE;
+        }
+
+        @Override
+        Vector build() {
+            Vector values = rows.column(call.arguments().get(0));
+            if (!defaults) {
+                return Vectors.gather(values, sources);
+            }
+            Vector fallback = rows.column(call.arguments().get(2));
+            Vector.Builder out = Vectors.builder(values.type(), sources.length);
+            for (int i = 0; i < sources.length; i++) {
+                int s = sources[i];
+                out.append(s >= 0 ? values.get(s) : s == DEFAULT ? fallback.get(i) : null);
+            }
+            return out.build();
+        }
+    }
+
+    /** An aggregate over the frame of each row. */
+    private final class Aggregates extends Result {
+        private final Vector.Builder out;
+        private final boolean mergeable;
+        private final Vector filter;
+        /** The frame of the row before: the pieces as from and to, and their number, -1 for none. */
+        private final int[] lastPieces = new int[6];
+        private int lastCount;
+
+        Aggregates(WindowCall call, int n) {
+            super(call);
+            this.out = Vectors.builder(call.type(inputSchema), n);
+            this.mergeable = trees && ValueAccumulator.mergeable(call.aggregate());
+            this.filter = call.filter() >= 0 ? rows.column(call.filter()) : null;
+        }
+
+        @Override
+        void partition(int start, int end) {
+            SegmentTree tree = null;
+            long treeBytes = 0;
+            lastCount = -1;
+            Object last = null;
+            for (int i = start; i < end; i++) {
+                step();
+                frame(i, start, end);
+                if (changed()) {
+                    ValueAccumulator acc = empty();
+                    if (mergeable) {
+                        if (tree == null) {
+                            tree = new SegmentTree(rows, start, end, filter, this::empty);
+                            treeBytes = BYTES_PER_NODE * tree.nodes();
+                            reserve(treeBytes);
+                        }
+                        for (int p = 0; p < pieces; p++) {
+                            tree.aggregate(acc, pieceFrom[p], pieceTo[p]);
+                        }
+                        last = acc.result();
+                    } else {
+                        // The values the accumulator keeps are gone with it.
+                        long held = reserved;
+                        for (int p = 0; p < pieces; p++) {
+                            for (int r = pieceFrom[p]; r < pieceTo[p]; r++) {
+                                step();
+                                if (SegmentTree.takes(filter, r)) {
+                                    acc.add(rows, r);
+                                }
+                            }
+                        }
+                        last = acc.result();
+                        release(reserved - held);
+                    }
+                }
+                out.append(last);
+            }
+            release(treeBytes);
+        }
+
+        /** Tells whether the frame differs from the one before, and remembers it. */
+        private boolean changed() {
+            boolean same = pieces == lastCount;
+            for (int p = 0; same && p < pieces; p++) {
+                same = pieceFrom[p] == lastPieces[2 * p] && pieceTo[p] == lastPieces[2 * p + 1];
+            }
+            if (!same) {
+                lastCount = pieces;
+                for (int p = 0; p < pieces; p++) {
+                    lastPieces[2 * p] = pieceFrom[p];
+                    lastPieces[2 * p + 1] = pieceTo[p];
+                }
+            }
+            return !same;
+        }
+
+        private ValueAccumulator empty() {
+            return new ValueAccumulator(call.aggregate(), inputSchema, WindowOperator.this::reserve);
+        }
+
+        @Override
+        Vector build() {
+            return out.build();
+        }
+    }
+
+    /**
+     * Sets the pieces of the frame of a row of the partition
+     * {@code [start, end)}: the rows from the start bound to the end bound,
+     * clamped to the partition, without the excluded rows.
+     */
+    private void frame(Frame f, RangeBounds ranges, int row, int start, int end) {
+        long from = switch (f.start().kind()) {
+            case UNBOUNDED_PRECEDING -> start;
+            case CURRENT_ROW -> f.unit() == FrameUnit.ROWS ? row : peerStart[row];
+            case PRECEDING, FOLLOWING -> bound(f.unit(), f.start(), true, ranges, row, start, end);
+            case UNBOUNDED_FOLLOWING -> throw new IllegalStateException("A frame from " + f.start().kind());
+        };
+        long to = switch (f.end().kind()) {
+            case UNBOUNDED_PRECEDING -> throw new IllegalStateException("A frame to " + f.end().kind());
+            case CURRENT_ROW -> f.unit() == FrameUnit.ROWS ? row + 1 : peerEnd[row];
+            case PRECEDING, FOLLOWING -> bound(f.unit(), f.end(), false, ranges, row, start, end);
+            case UNBOUNDED_FOLLOWING -> end;
+        };
+        int a = Math.clamp(from, start, end);
+        int b = Math.max(a, Math.clamp(to, start, end));
+        pieces = 0;
+        switch (f.exclusion()) {
+            case NO_OTHERS -> piece(a, b);
+            case CURRENT_ROW -> {
+                piece(a, Math.min(b, row));
+                piece(Math.max(a, row + 1), b);
+            }
+            case GROUP -> {
+                piece(a, Math.min(b, peerStart[row]));
+                piece(Math.max(a, peerEnd[row]), b);
+            }
+            case TIES -> {
+                piece(a, Math.min(b, peerStart[row]));
+                piece(Math.max(a, row), Math.min(b, row + 1));
+                piece(Math.max(a, peerEnd[row]), b);
+            }
+        }
+    }
+
+    private void piece(int from, int to) {
+        if (from < to) {
+            pieceFrom[pieces] = from;
+            pieceTo[pieces++] = to;
+        }
+    }
+
+    /**
+     * Returns the row where a bound with an offset starts the frame of a
+     * row of the partition {@code [start, end)}, or the row after the end of
+     * the frame; it may lie outside the partition.
+     */
+    private long bound(FrameUnit unit, FrameBound b, boolean starts, RangeBounds ranges, int row, int start,
+            int end) {
+        boolean preceding = b.kind() == BoundKind.PRECEDING;
+        return switch (unit) {
+            case ROWS -> {
+                long n = offset(b);
+                long r = preceding ? subtract(row, n) : add(row, n);
+                yield starts ? r : add(r, 1);
+            }
+            case GROUPS -> {
+                long n = offset(b);
+                if (n < 0) {
+                    throw new ArithmeticException("Invalid GROUPS " + b.kind().keywords() + " value");
+                }
+                long g = preceding ? peerGroup[row] - n : add(peerGroup[row], n);
+                if (g < 0) {
+                    yield start;
+                }
+                if (g >= groups) {
+                    yield end;
+                }
+                yield starts ? groupRow[start + (int) g] : g + 1 < groups ? groupRow[start + (int) g + 1] : end;
+            }
+            case RANGE -> {
+                if (ranges.isNull(row)) {
+                    yield starts ? peerStart[row] : peerEnd[row];
+                }
+                yield starts ? ranges.start(row, keyFrom, keyTo) : ranges.end(row, keyFrom, keyTo);
+            }
+        };
+    }
+
+    /** Returns the offset of a bound of {@code ROWS} or {@code GROUPS}, a number of rows or groups. */
+    private static long offset(FrameBound b) {
+        return ((Number) b.offset().value()).longValue();
+    }
+
+    /** Adds without overflow, stopping at the bounds of a long. */
+    static long add(long a, long b) {
+        long r = a + b;
+        return ((a ^ r) & (b ^ r)) < 0 ? b < 0 ? Long.MIN_VALUE : Long.MAX_VALUE : r;
+    }
+
+    /** Subtracts without overflow, stopping at the bounds of a long. */
+    static long subtract(long a, long b) {
+        long r = a - b;
+        return ((a ^ b) & (a ^ r)) < 0 ? b < 0 ? Long.MAX_VALUE : Long.MIN_VALUE : r;
+    }
+
+    @Override
+    public void close() {
+        input.close();
+        budget.release(reserved);
+        reserved = 0;
+    }
+}

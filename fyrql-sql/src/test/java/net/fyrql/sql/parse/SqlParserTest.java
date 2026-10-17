@@ -28,6 +28,7 @@ import net.fyrql.sql.ast.SelectItem;
 import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlExpr.LiteralKind;
 import net.fyrql.sql.ast.SqlPrinter;
+import net.fyrql.sql.ast.WindowSpec;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -348,10 +349,123 @@ class SqlParserTest {
     }
 
     @Test
+    void windowFunctions() {
+        assertEquals("SELECT row_number() OVER () FROM t", print("select row_number() over () from t"));
+        assertEquals("SELECT rank() OVER (PARTITION BY a, (b + 1) ORDER BY c DESC NULLS LAST) FROM t",
+                print("select rank() over (partition by a, b + 1 order by c desc) from t"));
+        // A row of columns partitions as the columns; a first column in parentheses gets a second pair, which
+        // JSqlParser needs to read on after it.
+        assertEquals("SELECT rank() OVER (PARTITION BY a, (b + 1)) FROM t",
+                print("select rank() over (partition by (a, b + 1)) from t"));
+        // JSqlParser gives IGNORE NULLS after a last argument that is a call to that call.
+        assertEquals("SELECT first_value(upper(b) IGNORE NULLS) OVER (), lag(a, 1, abs(c) IGNORE NULLS) OVER () FROM t",
+                print("select first_value(upper(b) ignore nulls) over (), lag(a, 1, abs(c) ignore nulls) over () from t"));
+        String parenthesized = "SELECT rank() OVER (PARTITION BY ((b + 1)), a) FROM t";
+        assertEquals(parenthesized, print("select rank() over (partition by ((b + 1)), a) from t"));
+        assertEquals(parenthesized, print(parenthesized));
+        assertEquals("SELECT sum(a) OVER (ORDER BY b ASC NULLS LAST ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM t",
+                print("select sum(a) over (order by b rows 2 preceding) from t"));
+        assertEquals("SELECT sum(a) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM t",
+                print("select sum(a) over (rows unbounded preceding) from t"));
+        assertEquals("SELECT sum(a) FILTER (WHERE (a > 1)) OVER (PARTITION BY b ORDER BY c ASC NULLS FIRST"
+                + " RANGE BETWEEN 1 PRECEDING AND (1 + 1) FOLLOWING EXCLUDE TIES) FROM t",
+                print("select sum(a) filter (where a > 1) over (partition by b order by c nulls first"
+                        + " range between 1 preceding and (1 + 1) following exclude ties) from t"));
+        assertEquals("SELECT count(*) OVER (GROUPS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW),"
+                + " count(*) OVER (GROUPS BETWEEN 1 FOLLOWING AND 2 FOLLOWING EXCLUDE GROUP),"
+                + " count(*) OVER (ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING) FROM t",
+                print("select count(*) over (groups between current row and unbounded following exclude current row),"
+                        + " count(*) over (groups between 1 following and 2 following exclude group),"
+                        + " count(*) over (rows between 1 preceding and 1 preceding exclude no others) from t"));
+        assertEquals("SELECT first_value(a IGNORE NULLS) OVER (ORDER BY b ASC NULLS LAST),"
+                + " last_value(a IGNORE NULLS) OVER (ORDER BY b ASC NULLS LAST),"
+                + " nth_value(a, 2) OVER (ORDER BY b ASC NULLS LAST) FROM t",
+                print("select first_value(a ignore nulls) over (order by b), last_value(a) ignore nulls over"
+                        + " (order by b), nth_value(a, 2) respect nulls over (order by b) from t"));
+        assertEquals("SELECT lag(a, 2, 0) OVER (ORDER BY b ASC NULLS LAST), lead(a) OVER () FROM t",
+                print("select lag(a, 2, 0) over (order by b), lead(a) over () from t"));
+        assertEquals("SELECT count(*) OVER (ORDER BY d ASC NULLS LAST RANGE BETWEEN INTERVAL '1' DAY PRECEDING"
+                + " AND INTERVAL '2' DAYS FOLLOWING) FROM t",
+                print("select count(*) over (order by d range between interval 1 day preceding"
+                        + " and interval '2 days' following) from t"));
+        assertEquals("SELECT string_agg(a, ',' ORDER BY a DESC NULLS LAST) OVER (), count(DISTINCT a) OVER"
+                + " (PARTITION BY b) FROM t",
+                print("select string_agg(a, ',' order by a desc) over (), count(distinct a) over (partition by b)"
+                        + " from t"));
+        assertEquals("SELECT \"my f\"(a) OVER \"my w\", (1 + sum(a) OVER ()) FROM t WINDOW \"my w\" AS ()",
+                print("select \"my f\"(a) over \"my w\", 1 + sum(a) over () from t window \"my w\" as ()"));
+        // DuckDB writes WINDOW before QUALIFY, JSqlParser reads them the other way round; both are accepted.
+        String named = "SELECT a, row_number() OVER w AS rn FROM t WINDOW w AS (ORDER BY a ASC NULLS LAST),"
+                + " v AS (PARTITION BY b) QUALIFY (rn > 1) ORDER BY a ASC NULLS LAST LIMIT 3";
+        assertEquals(named, print("select a, row_number() over w as rn from t window w as (order by a),"
+                + " v as (partition by b) qualify rn > 1 order by a limit 3"));
+        assertEquals(named, print("select a, row_number() over w as rn from t qualify rn > 1"
+                + " window w as (order by a), v as (partition by b) order by a limit 3"));
+        assertEquals("SELECT a FROM t WINDOW w AS () QUALIFY (a IN (SELECT b FROM u WINDOW v AS () QUALIFY (b > 1)))"
+                + " UNION SELECT 1 WINDOW x AS () QUALIFY true",
+                print("select a from t window w as () qualify a in (select b from u window v as () qualify b > 1)"
+                        + " union select 1 window x as () qualify true"));
+        // ALL is the default quantifier of an aggregate.
+        assertEquals("SELECT sum(a) OVER () FROM t", print("select sum(all a) over () from t"));
+        assertEquals("SELECT sum(a), count(*) FROM t", print("select sum(all a), count(all *) from t"));
+    }
+
+    @Test
+    void windowFunctionsKeepTheirParts() {
+        SqlExpr.Window w = assertInstanceOf(SqlExpr.Window.class, items(
+                "SELECT lag(a, 1) IGNORE NULLS FILTER (WHERE a > 0) OVER (PARTITION BY b ORDER BY c ROWS 3 PRECEDING)"
+                        + " FROM t").get(0));
+        assertEquals("lag", w.call().name());
+        assertEquals(2, w.call().arguments().size());
+        assertTrue(w.ignoreNulls());
+        assertInstanceOf(SqlExpr.Binary.class, w.filter());
+        assertNull(w.over().base());
+        WindowSpec.Frame frame = w.over().frame();
+        assertEquals(WindowSpec.FrameUnit.ROWS, frame.unit());
+        assertEquals(WindowSpec.BoundKind.PRECEDING, frame.start().kind());
+        assertEquals(new SqlExpr.Literal(LiteralKind.NUMBER, "3", new Position(1, 89)), frame.start().offset());
+        assertEquals(WindowSpec.Bound.of(WindowSpec.BoundKind.CURRENT_ROW), frame.end());
+        assertEquals(WindowSpec.Exclusion.NO_OTHERS, frame.exclusion());
+        assertEquals(new Position(1, 8), w.position());
+        assertEquals(List.of(w.call().arguments().get(0), w.call().arguments().get(1), w.over().partitionBy().get(0),
+                w.over().orderBy().get(0).expression(), frame.start().offset(), w.filter()), w.operands());
+        assertEquals(w, w.withOperands(w.operands()));
+        SqlExpr.Window count = assertInstanceOf(SqlExpr.Window.class, items("SELECT count(*) OVER () FROM t").get(0));
+        assertTrue(count.call().star());
+        assertNull(count.over().frame());
+        // The clauses keep their positions in the original text, also where QUALIFY moves before WINDOW.
+        QueryBody.Select s = select("SELECT a FROM t WINDOW w AS (ORDER BY a) QUALIFY b = 1");
+        assertEquals(new Position(1, 50), s.qualify().position());
+        assertEquals(new Position(1, 39), s.windows().get(0).window().orderBy().get(0).expression().position());
+        assertEquals("w", s.windows().get(0).name());
+        SqlException e = error("SELECT a FROM t WINDOW w AS (ORDER BY a) QUALIFY b = = 1");
+        assertEquals("Syntax error at or near \"=\"@1:54", e.reason() + "@" + e.position().line() + ":"
+                + e.position().column());
+    }
+
+    @Test
     void unsupportedFormsAreRejectedWithTheirPosition() {
         Map<String, String> cases = Map.ofEntries(
-                Map.entry("SELECT sum(a) OVER (PARTITION BY b) FROM t", "Not supported: window functions@1:8"),
-                Map.entry("SELECT sum(a) FILTER (WHERE a > 1) FROM t", "Not supported: FILTER@1:8"),
+                Map.entry("SELECT sum(a) FILTER (WHERE a > 1) FROM t", "Not supported: FILTER without OVER@1:8"),
+                Map.entry("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY a) FROM t",
+                        "Not supported: WITHIN GROUP@1:8"),
+                Map.entry("SELECT position('a' IN a) OVER () FROM t",
+                        "Not supported: this form of arguments of position@1:8"),
+                Map.entry("SELECT s.f(a) OVER () FROM t", "Not supported: qualified function names@1:8"),
+                Map.entry("SELECT f(a, b, c, d) OVER () FROM t",
+                        "Not supported: a window function with more than three arguments@1:22"),
+                Map.entry("SELECT sum(a) OVER (ORDER BY ALL) FROM t", "Not supported: ORDER BY ALL here@1:30"),
+                Map.entry("SELECT sum(a) OVER (ROWS BETWEEN UNBOUNDED FOLLOWING AND CURRENT ROW) FROM t",
+                        "frame start cannot be UNBOUNDED FOLLOWING@1:8"),
+                Map.entry("SELECT sum(a) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED PRECEDING) FROM t",
+                        "frame end cannot be UNBOUNDED PRECEDING@1:8"),
+                Map.entry("SELECT sum(a) OVER (ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) FROM t",
+                        "frame starting from current row cannot have preceding rows@1:8"),
+                Map.entry("SELECT sum(a) OVER (ROWS 1 FOLLOWING) FROM t",
+                        "frame starting from following row cannot end with current row@1:8"),
+                Map.entry("SELECT sum(a) OVER (RANGE BETWEEN 1 FOLLOWING AND 1 PRECEDING) FROM t",
+                        "frame starting from following row cannot have preceding rows@1:8"),
+                Map.entry("SELECT a FROM t WINDOW w AS (), W AS ()", "window \"W\" is already defined@1:1"),
                 Map.entry("SELECT a FROM t WHERE (a, b) IN (SELECT 1, 2)", "Not supported: IN with more than one column@1:23"),
                 Map.entry("SELECT a FROM t WHERE a > ANY (SELECT 1)", "Not supported: ANY and ALL@1:31"),
                 Map.entry("SELECT a FROM t WHERE a <= ALL (SELECT 1)", "Not supported: ANY and ALL@1:32"),
@@ -362,7 +476,6 @@ class SqlParserTest {
                 Map.entry("SELECT struct_pack()", "Can't pack nothing into a struct@1:8"),
                 Map.entry("SELECT f(a := 1)", "Not supported: named arguments@1:8"),
                 Map.entry("SELECT CAST(a AS INT[3])", "Arrays of a fixed size are not supported: INT[3]@1:8"),
-                Map.entry("SELECT a FROM t QUALIFY a = 1", "Not supported: QUALIFY@1:1"),
                 Map.entry("SELECT DISTINCT ON (a) a FROM t", "Not supported: DISTINCT ON@1:1"),
                 Map.entry("SELECT * FROM a ASOF JOIN b ON a.t >= b.t", "Not supported: ASOF JOIN@1:17"),
                 Map.entry("SELECT * FROM t, LATERAL (SELECT 1)", "Not supported: LATERAL@1:18"),

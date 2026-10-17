@@ -23,6 +23,7 @@ import net.fyrql.sql.ast.Query;
 import net.fyrql.sql.ast.QueryBody;
 import net.fyrql.sql.ast.SelectItem;
 import net.fyrql.sql.ast.SqlExpr;
+import net.fyrql.sql.ast.WindowSpec;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -33,8 +34,10 @@ import java.util.List;
  * item of the select list; one side of a join or a set operation in place
  * of both; an expression replaced by an operand or by {@code NULL}; fewer
  * rows of {@code VALUES}; a subquery in an expression replaced by a value of
- * the same meaning for some rows; and the same inside subqueries and common
- * tables. Many variants do not bind; they fail to show the difference and
+ * the same meaning for some rows; a window function replaced by its call,
+ * or without its frame, partition or order; a window of the {@code WINDOW}
+ * clause written out where it is used; without {@code QUALIFY}; and the
+ * same inside subqueries and common tables. Many variants do not bind; they fail to show the difference and
  * are passed over.
  */
 final class QueryShrinker {
@@ -114,25 +117,25 @@ final class QueryShrinker {
 
     private static void select(QueryBody.Select s, List<QueryBody> result) {
         if (s.where() != null) {
-            result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), null, s.groupBy(), s.having(), P));
+            result.add(with(s, s.distinct(), s.items(), s.from(), null, s.groupBy(), s.having()));
         }
         if (s.having() != null) {
-            result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), s.where(), s.groupBy(), null, P));
+            result.add(with(s, s.distinct(), s.items(), s.from(), s.where(), s.groupBy(), null));
         }
         if (s.groupBy() != null) {
-            result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), s.where(), null, s.having(), P));
+            result.add(with(s, s.distinct(), s.items(), s.from(), s.where(), null, s.having()));
         }
         if (s.distinct()) {
-            result.add(new QueryBody.Select(false, s.items(), s.from(), s.where(), s.groupBy(), s.having(), P));
+            result.add(with(s, false, s.items(), s.from(), s.where(), s.groupBy(), s.having()));
         }
         for (int i = 0; i < s.items().size() && s.items().size() > 1; i++) {
             List<SelectItem> items = new ArrayList<>(s.items());
             items.remove(i);
-            result.add(new QueryBody.Select(s.distinct(), items, s.from(), s.where(), s.groupBy(), s.having(), P));
+            result.add(with(s, s.distinct(), items, s.from(), s.where(), s.groupBy(), s.having()));
         }
         if (s.from() != null) {
             for (FromItem f : from(s.from())) {
-                result.add(new QueryBody.Select(s.distinct(), s.items(), f, s.where(), s.groupBy(), s.having(), P));
+                result.add(with(s, s.distinct(), s.items(), f, s.where(), s.groupBy(), s.having()));
             }
         }
         for (int i = 0; i < s.items().size(); i++) {
@@ -140,21 +143,59 @@ final class QueryShrinker {
                 for (SqlExpr e : expression(item.expression())) {
                     List<SelectItem> items = new ArrayList<>(s.items());
                     items.set(i, new SelectItem.ExpressionItem(e, item.alias()));
-                    result.add(new QueryBody.Select(s.distinct(), items, s.from(), s.where(), s.groupBy(), s.having(),
-                            P));
+                    result.add(with(s, s.distinct(), items, s.from(), s.where(), s.groupBy(), s.having()));
                 }
             }
         }
         if (s.where() != null) {
             for (SqlExpr e : expression(s.where())) {
-                result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), e, s.groupBy(), s.having(), P));
+                result.add(with(s, s.distinct(), s.items(), s.from(), e, s.groupBy(), s.having()));
             }
         }
         if (s.having() != null) {
             for (SqlExpr e : expression(s.having())) {
-                result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), s.where(), s.groupBy(), e, P));
+                result.add(with(s, s.distinct(), s.items(), s.from(), s.where(), s.groupBy(), e));
             }
         }
+        for (int i = 0; i < s.windows().size(); i++) {
+            QueryBody.NamedWindow window = s.windows().get(i);
+            List<QueryBody.NamedWindow> windows = new ArrayList<>(s.windows());
+            windows.remove(i);
+            List<SelectItem> items = new ArrayList<>();
+            for (SelectItem item : s.items()) {
+                items.add(item instanceof SelectItem.ExpressionItem x
+                        ? new SelectItem.ExpressionItem(inline(x.expression(), window), x.alias()) : item);
+            }
+            result.add(new QueryBody.Select(s.distinct(), items, s.from(), s.where(), s.groupBy(), s.having(),
+                    windows, s.qualify() == null ? null : inline(s.qualify(), window), P));
+        }
+        if (s.qualify() != null) {
+            result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), s.where(), s.groupBy(), s.having(),
+                    s.windows(), null, P));
+            for (SqlExpr e : expression(s.qualify())) {
+                result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), s.where(), s.groupBy(), s.having(),
+                        s.windows(), e, P));
+            }
+        }
+    }
+
+    /** The select with other clauses, keeping its {@code WINDOW} and {@code QUALIFY}. */
+    private static QueryBody.Select with(QueryBody.Select s, boolean distinct, List<SelectItem> items, FromItem from,
+            SqlExpr where, QueryBody.GroupBy groupBy, SqlExpr having) {
+        return new QueryBody.Select(distinct, items, from, where, groupBy, having, s.windows(), s.qualify(), P);
+    }
+
+    /** An expression with a window of the {@code WINDOW} clause written out wherever it names the window. */
+    private static SqlExpr inline(SqlExpr e, QueryBody.NamedWindow window) {
+        if (e instanceof SqlExpr.Window w) {
+            return window.name().equals(w.over().base())
+                    ? new SqlExpr.Window(w.call(), window.window(), w.ignoreNulls(), w.filter(), P) : w;
+        }
+        List<SqlExpr> children = new ArrayList<>();
+        for (SqlExpr c : children(e)) {
+            children.add(inline(c, window));
+        }
+        return rebuild(e, children);
     }
 
     private static List<FromItem> from(FromItem item) {
@@ -216,6 +257,28 @@ final class QueryShrinker {
             case SqlExpr.ScalarSubquery s -> {
                 for (Query q : query(s.query())) {
                     result.add(new SqlExpr.ScalarSubquery(q, P));
+                }
+            }
+            // A window function may go for its call without the window, or lose a part of its window.
+            case SqlExpr.Window w -> {
+                result.add(w.call());
+                WindowSpec over = w.over();
+                if (over.base() == null) {
+                    if (over.frame() != null) {
+                        result.add(new SqlExpr.Window(w.call(), new WindowSpec(null, over.partitionBy(),
+                                over.orderBy(), null), w.ignoreNulls(), w.filter(), P));
+                    }
+                    if (!over.partitionBy().isEmpty()) {
+                        result.add(new SqlExpr.Window(w.call(), new WindowSpec(null, List.of(), over.orderBy(),
+                                over.frame()), w.ignoreNulls(), w.filter(), P));
+                    }
+                    if (!over.orderBy().isEmpty()) {
+                        result.add(new SqlExpr.Window(w.call(), new WindowSpec(null, over.partitionBy(), List.of(),
+                                over.frame()), w.ignoreNulls(), w.filter(), P));
+                    }
+                }
+                if (w.filter() != null) {
+                    result.add(new SqlExpr.Window(w.call(), over, w.ignoreNulls(), null, P));
                 }
             }
             default -> {
@@ -296,6 +359,7 @@ final class QueryShrinker {
             case SqlExpr.StructValue s -> c.addAll(s.values());
             case SqlExpr.Interval i -> {
             }
+            case SqlExpr.Window w -> c.addAll(w.operands());
         }
         return c;
     }
@@ -336,6 +400,7 @@ final class QueryShrinker {
             case SqlExpr.Index x -> new SqlExpr.Index(c.get(0), c.get(1), P);
             case SqlExpr.StructValue s -> new SqlExpr.StructValue(s.names(), c, P);
             case SqlExpr.Interval i -> i;
+            case SqlExpr.Window w -> w.withOperands(c);
         };
     }
 }

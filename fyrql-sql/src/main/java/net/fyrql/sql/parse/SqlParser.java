@@ -68,12 +68,14 @@ public final class SqlParser {
         if (source.text().isBlank()) {
             return null;
         }
+        CCJSqlParser parser = parser(source, false);
         try {
             // As JSqlParser itself does: the simple grammar first, which is fast on deep nesting.
             try {
-                return parser(source, false).Statements();
+                return parser.Statements();
             } catch (ParseException simple) {
-                return parser(source, true).Statements();
+                parser = parser(source, true);
+                return parser.Statements();
             }
         } catch (ParseException e) {
             throw syntaxError(e, source);
@@ -81,6 +83,14 @@ public final class SqlParser {
             throw lexicalError(e, source);
         } catch (StackOverflowError e) {
             throw new SqlException("Query is nested too deeply", Position.UNKNOWN);
+        } catch (IllegalArgumentException e) {
+            // JSqlParser keeps at most three arguments of a window function and fails on more, after the call.
+            if (!String.valueOf(e.getMessage()).contains("analytic expression")) {
+                throw e;
+            }
+            Token over = parser.token == null ? null : parser.token.next != null ? parser.token.next : parser.token;
+            throw new SqlException("Not supported: a window function with more than three arguments",
+                    over == null ? Position.UNKNOWN : source.position(over));
         }
     }
 

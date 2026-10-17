@@ -19,17 +19,14 @@ package net.fyrql.exec;
 import net.fyrql.connector.Batches;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.vector.Batch;
-import net.fyrql.core.vector.Vector;
-import net.fyrql.core.vector.Vectors;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
  * Materializes the input, sorts an index over it by the keys (stable, with
- * {@code NULL} first or last as each key says) and emits the rows in that
- * order, batch by batch.
+ * {@code NULL} first or last as each key says, see {@link RowOrder}) and
+ * emits the rows in that order, batch by batch.
  */
 final class SortOperator extends AbstractOperator {
 
@@ -68,41 +65,7 @@ final class SortOperator extends AbstractOperator {
             return new ArrayList<>();
         }
         Batch all = Batches.concat(schema(), batches);
-        Integer[] order = new Integer[all.rowCount()];
-        for (int i = 0; i < order.length; i++) {
-            order[i] = i;
-        }
-        List<Vector> keys = new ArrayList<>();
-        for (PlanNode.SortKey k : sort.keys()) {
-            keys.add(all.column(k.column()));
-        }
-        int[] comparisons = new int[1];
-        Arrays.sort(order, (a, b) -> {
-            if ((++comparisons[0] & (CHECK_INTERVAL - 1)) == 0) {
-                checkCancelled();
-            }
-            for (int i = 0; i < keys.size(); i++) {
-                PlanNode.SortKey k = sort.keys().get(i);
-                Vector v = keys.get(i);
-                boolean nullA = v.isNull(a);
-                boolean nullB = v.isNull(b);
-                int c;
-                if (nullA || nullB) {
-                    c = nullA == nullB ? 0 : nullA == k.nullsFirst() ? -1 : 1;
-                } else {
-                    c = Vectors.compare(v, a, v, b);
-                    c = k.ascending() ? c : -c;
-                }
-                if (c != 0) {
-                    return c;
-                }
-            }
-            return 0;
-        });
-        int[] rows = new int[order.length];
-        for (int i = 0; i < rows.length; i++) {
-            rows[i] = order[i];
-        }
+        int[] rows = new RowOrder(all, sort.keys()).sort(this::checkCancelled);
         return new ArrayList<>(Batches.split(all.select(rows), batchSize));
     }
 

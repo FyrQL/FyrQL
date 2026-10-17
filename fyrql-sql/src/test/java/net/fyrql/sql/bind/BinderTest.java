@@ -339,6 +339,125 @@ class BinderTest {
     }
 
     @Test
+    void windowFunctionsAreRejectedWhereTheyCannotGo() {
+        SqlException e = error("SELECT a FROM t WHERE 1 + rank() OVER () > 1");
+        assertEquals("WHERE clause cannot contain window functions!", e.reason());
+        assertEquals(new Position(1, 27), e.position());
+        assertEquals("WHERE clause cannot contain window functions!",
+                error("SELECT t.a FROM t JOIN u ON t.a = row_number() OVER ()").reason());
+        assertEquals("GROUP BY clause cannot contain window functions!",
+                error("SELECT count(*) FROM t GROUP BY rank() OVER ()").reason());
+        assertEquals("aggregate function calls cannot contain window function calls",
+                error("SELECT sum(rank() OVER ()) FROM t").reason());
+        assertEquals("VALUES cannot contain window functions", error("VALUES (rank() OVER ())").reason());
+        assertEquals("HAVING clause cannot contain window functions!",
+                error("SELECT b FROM t GROUP BY b HAVING rank() OVER () > 1").reason());
+        e = error("SELECT lag(1 + rank() OVER ()) OVER () FROM t");
+        assertEquals("window function calls cannot be nested", e.reason());
+        assertEquals(new Position(1, 16), e.position());
+        assertEquals("window functions are not allowed in window definitions",
+                error("SELECT rank() OVER (ORDER BY rank() OVER ()) FROM t").reason());
+        assertEquals("Cannot group on a window clause", error("SELECT b, a + rank() OVER () FROM t GROUP BY ALL")
+                .reason());
+        assertEquals("at least one window function must appear in the SELECT column or QUALIFY clause",
+                error("SELECT a FROM t QUALIFY a > 1").reason());
+        assertEquals("window \"w\" does not exist", error("SELECT rank() OVER w FROM t WINDOW v AS ()").reason());
+        assertEquals("RANGE frames must have only one ORDER BY expression",
+                error("SELECT sum(a) OVER (ORDER BY a, b RANGE 1 PRECEDING) FROM t").reason());
+        assertEquals("FILTER is not implemented for non-aggregate window functions!",
+                error("SELECT rank() FILTER (WHERE a > 1) OVER () FROM t").reason());
+        assertEquals("NTH_VALUE needs 2 parameters, got 1", error("SELECT nth_value(a) OVER () FROM t").reason());
+        assertEquals("upper is not an aggregate function", error("SELECT upper(b) OVER () FROM t").reason());
+        assertEquals("Not supported: a frame offset that is not a constant",
+                error("SELECT sum(a) OVER (ROWS e PRECEDING) FROM t").reason());
+        e = error("SELECT a FROM t WHERE EXISTS (SELECT rank() OVER () FROM u WHERE u.a = t.a)");
+        assertEquals("Not supported: a window function in a correlated subquery", e.reason());
+        assertEquals(new Position(1, 38), e.position());
+    }
+
+    @Test
+    void theCallsOfAWindowShareANodeOverAProjectionOfWhatTheyRead() {
+        PlanNode.Project top = assertInstanceOf(PlanNode.Project.class, bind("SELECT a, row_number() OVER (PARTITION"
+                + " BY b ORDER BY a), sum(e + 1) OVER (PARTITION BY b ORDER BY a), rank() OVER (ORDER BY e DESC)"
+                + " FROM t"));
+        PlanNode.Window second = assertInstanceOf(PlanNode.Window.class, top.input());
+        PlanNode.Window first = assertInstanceOf(PlanNode.Window.class, second.input());
+        PlanNode.Project below = assertInstanceOf(PlanNode.Project.class, first.input());
+        assertInstanceOf(PlanNode.Scan.class, below.input());
+        // The projection passes a, b and e on and computes e + 1 after them.
+        assertEquals(4, below.columns().size());
+        assertEquals(List.of(1), first.partition());
+        assertEquals(List.of(PlanNode.SortKey.asc(0)), first.order());
+        assertEquals(List.of(PlanNode.WindowFunction.ROW_NUMBER, PlanNode.WindowFunction.AGGREGATE),
+                first.calls().stream().map(PlanNode.WindowCall::function).toList());
+        assertEquals(3, first.calls().get(1).aggregate().column());
+        assertEquals(List.of(), second.partition());
+        assertEquals(List.of(PlanNode.SortKey.desc(2)), second.order());
+        assertEquals(List.of(new Expression.Column(0, DataType.INTEGER), new Expression.Column(4, DataType.BIGINT),
+                new Expression.Column(5, DataType.HUGEINT), new Expression.Column(6, DataType.BIGINT)),
+                top.columns().stream().map(PlanNode.NamedExpression::expression).toList());
+    }
+
+    @Test
+    void aCallIsComputedOnceForTheSelectListQualifyAndTheOrder() {
+        PlanNode.Sort sort = assertInstanceOf(PlanNode.Sort.class, bind("SELECT a, row_number() OVER w AS rn FROM t"
+                + " WINDOW w AS (ORDER BY a) QUALIFY rn > 1 ORDER BY row_number() OVER w DESC"));
+        assertEquals(List.of(PlanNode.SortKey.desc(1)), sort.keys());
+        PlanNode.Project project = assertInstanceOf(PlanNode.Project.class, sort.input());
+        PlanNode.Filter qualify = assertInstanceOf(PlanNode.Filter.class, project.input());
+        assertEquals("Comparison[op=GT, left=Column[index=3, type=BIGINT], right=Literal[type=INTEGER, value=1]]",
+                qualify.condition().toString());
+        PlanNode.Window window = assertInstanceOf(PlanNode.Window.class, qualify.input());
+        assertEquals(1, window.calls().size());
+        assertInstanceOf(PlanNode.Scan.class, window.input());
+    }
+
+    @Test
+    void aWindowOverAnAggregationReadsItsGroupsAndAggregates() {
+        PlanNode.Project top = assertInstanceOf(PlanNode.Project.class,
+                bind("SELECT b, sum(sum(e)) OVER (ORDER BY b), rank() OVER (ORDER BY count(*) DESC) FROM t"
+                        + " GROUP BY b"));
+        PlanNode.Window second = assertInstanceOf(PlanNode.Window.class, top.input());
+        PlanNode.Window first = assertInstanceOf(PlanNode.Window.class, second.input());
+        PlanNode.Aggregate aggregate = assertInstanceOf(PlanNode.Aggregate.class, first.input());
+        assertEquals(2, aggregate.aggregates().size());
+        assertEquals(List.of(PlanNode.SortKey.asc(0)), first.order());
+        assertEquals(1, first.calls().get(0).aggregate().column());
+        assertEquals(List.of(PlanNode.SortKey.desc(2)), second.order());
+    }
+
+    @Test
+    void frameOffsetsAreConstantsOfTheTypesDuckDbComputesWith() {
+        PlanNode.Project top = assertInstanceOf(PlanNode.Project.class, bind("SELECT sum(a) OVER (ORDER BY e RANGE"
+                + " BETWEEN 1 PRECEDING AND 300 FOLLOWING), count(*) OVER (ORDER BY a ROWS 2.5 PRECEDING),"
+                + " count(*) OVER (ORDER BY DATE '2024-01-01' + a RANGE BETWEEN 2 PRECEDING AND INTERVAL 1 MONTH"
+                + " FOLLOWING), lag(a, 1.5, '7') OVER (ORDER BY a), rank() OVER (ORDER BY a ROWS 1 PRECEDING) FROM t"));
+        // The windows by e, by a and by the date, with the calls by a together: count, lag and rank.
+        List<PlanNode.WindowCall> calls = new ArrayList<>();
+        for (PlanNode n = top.input(); n instanceof PlanNode.Window w; n = w.input()) {
+            calls.addAll(0, w.calls());
+        }
+        // An integer takes the type of the key if it fits, as key - offset does.
+        PlanNode.Frame range = calls.get(0).frame();
+        assertEquals(new Expression.Literal(DataType.TINYINT, (byte) 1), range.start().offset());
+        assertEquals(new Expression.Literal(DataType.INTEGER, 300), range.end().offset());
+        // Rows are counted in whole numbers, rounded.
+        assertEquals(new Expression.Literal(DataType.BIGINT, 3L), calls.get(1).frame().start().offset());
+        // A number of days, or an interval, over a date.
+        PlanNode.Frame dates = calls.get(4).frame();
+        assertEquals(new PlanNode.FrameBound(PlanNode.BoundKind.PRECEDING, new Expression.Literal(DataType.BIGINT, 2L),
+                PlanNode.IntervalUnit.DAY), dates.start());
+        assertEquals(new PlanNode.FrameBound(PlanNode.BoundKind.FOLLOWING, new Expression.Literal(DataType.BIGINT, 1L),
+                PlanNode.IntervalUnit.MONTH), dates.end());
+        // The offset of lag is an integer, and its default takes the type of the value.
+        Schema in = assertInstanceOf(PlanNode.Window.class, top.input()).input().schema();
+        assertEquals(List.of(DataType.INTEGER, DataType.BIGINT, DataType.INTEGER),
+                calls.get(2).arguments().stream().map(in::type).toList());
+        // A function that takes no frame ignores the one it is given.
+        assertEquals(PlanNode.Frame.DEFAULT, calls.get(3).frame());
+    }
+
+    @Test
     void tableFunctionsTakeConstants() {
         PlanNode.Project top = assertInstanceOf(PlanNode.Project.class,
                 bind("SELECT * FROM READ_X('f' || '.csv', k = 1 + 1, Q = true) AS r WHERE r.a IS NULL"));

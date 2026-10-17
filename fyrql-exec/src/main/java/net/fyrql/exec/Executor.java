@@ -169,6 +169,7 @@ public final class Executor {
                     yield new UnionOperator(label, u, inputs);
                 }
                 case PlanNode.Unnest u -> new UnnestOperator(label, u, open(u.input()), batchSize);
+                case PlanNode.Window w -> new WindowOperator(label, w, open(w.input()), budget, batchSize);
                 case PlanNode.Values v -> new ValuesOperator(label, v, batchSize);
                 case PlanNode.SetOperation s -> new SetOperationOperator(label, s, open(s.left()),
                         open(s.right()), budget, batchSize);
