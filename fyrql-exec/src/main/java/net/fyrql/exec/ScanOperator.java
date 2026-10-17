@@ -20,7 +20,7 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.vector.Batch;
 
-import java.util.function.Supplier;
+import java.util.function.Function;
 
 /**
  * Reads the batches of a scan, or of a part of the plan that a source runs,
@@ -29,18 +29,19 @@ import java.util.function.Supplier;
 final class ScanOperator extends AbstractOperator {
 
     private final String what;
-    private final Supplier<BatchReader> opener;
+    private final Function<QueryContext, BatchReader> opener;
     private BatchReader reader;
 
     ScanOperator(String label, PlanNode.Scan scan, TableSource source) {
-        this(label, scan, scan.table().toString(), () -> source.open(scan));
+        this(label, scan, scan.table().toString(), context -> source.open(scan, context));
     }
 
     ScanOperator(String label, PlanNode.Remote remote, TableSource source) {
-        this(label, remote, "the part of the plan that " + remote.source() + " runs", () -> source.open(remote));
+        this(label, remote, "the part of the plan that " + remote.source() + " runs",
+                context -> source.open(remote, context));
     }
 
-    private ScanOperator(String label, PlanNode node, String what, Supplier<BatchReader> opener) {
+    private ScanOperator(String label, PlanNode node, String what, Function<QueryContext, BatchReader> opener) {
         super(label, node.schema());
         this.what = what;
         this.opener = opener;
@@ -49,7 +50,8 @@ final class ScanOperator extends AbstractOperator {
     @Override
     Batch compute() {
         if (reader == null) {
-            reader = opener.get();
+            reader = opener.apply(context());
+            context().register(reader);
         }
         while (true) {
             Batch b = reader.next();

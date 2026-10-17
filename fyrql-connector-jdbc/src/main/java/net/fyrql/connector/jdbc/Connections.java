@@ -18,9 +18,13 @@ package net.fyrql.connector.jdbc;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.Iterator;
 import java.util.Properties;
+import java.util.ServiceConfigurationError;
+import java.util.ServiceLoader;
 
 /**
  * Where a source gets its connections: one per statement from a URL or a
@@ -53,18 +57,81 @@ abstract sealed class Connections {
         return new Shared(connection);
     }
 
+    /**
+     * Connections from the {@link DriverManager}, or else from a driver in
+     * the class loader of the connector that is not registered with it: a
+     * tool such as DBeaver loads the drivers of the sources next to FyrQL
+     * in a class loader of its own, without registering them.
+     */
     private static final class Url extends Connections {
         private final String url;
         private final Properties properties;
+        /** The driver that is not registered, once it is found. */
+        private volatile Driver unregistered;
 
         Url(String url, Properties properties) {
             this.url = url;
             this.properties = properties;
         }
 
+        /**
+         * Asks the DriverManager for a driver before it connects: a failure
+         * of {@code getConnection} does not tell a URL that no driver
+         * accepts from a driver that fails.
+         */
         @Override
         Connection open() throws SQLException {
-            return DriverManager.getConnection(url, properties);
+            Driver driver = unregistered;
+            if (driver == null && !registered()) {
+                driver = unregisteredDriver();
+                unregistered = driver;
+            }
+            if (driver == null) {
+                return DriverManager.getConnection(url, properties);
+            }
+            Connection c = driver.connect(url, properties);
+            if (c == null) {
+                throw new SQLException("The driver " + driver.getClass().getName() + " does not connect to "
+                        + describe(), "08001");
+            }
+            return c;
+        }
+
+        /** Tells whether a driver of the DriverManager accepts the URL. */
+        private boolean registered() {
+            try {
+                DriverManager.getDriver(url);
+                return true;
+            } catch (SQLException e) {
+                return false;
+            }
+        }
+
+        /** Returns the first driver of the class loader of the connector that accepts the URL, or null. */
+        private Driver unregisteredDriver() throws SQLException {
+            Iterator<Driver> drivers = ServiceLoader.load(Driver.class, Connections.class.getClassLoader()).iterator();
+            while (hasNext(drivers)) {
+                Driver driver;
+                try {
+                    driver = drivers.next();
+                } catch (ServiceConfigurationError e) {
+                    // A driver that cannot be created is none for this URL either.
+                    continue;
+                }
+                if (driver.acceptsURL(url)) {
+                    return driver;
+                }
+            }
+            return null;
+        }
+
+        /** Tells whether there is another driver, and stops at a broken list of drivers. */
+        private static boolean hasNext(Iterator<Driver> drivers) {
+            try {
+                return drivers.hasNext();
+            } catch (ServiceConfigurationError e) {
+                return false;
+            }
         }
 
         @Override

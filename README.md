@@ -28,9 +28,10 @@ endpoints and databases over JDBC, an optimizer that moves conditions toward the
 tables, orders joins by the sizes of the tables and runs the joins of tables of one
 database in that database, a pushdown of filters, orders, limits and aggregations into
 the sources, an SQL front end with the names, types and forms of DuckDB, subqueries,
-also correlated ones, that become joins, and a differential test harness that compares
-the results with DuckDB. All 22 TPC-H queries run at scale factor 1 over tables spread
-across Parquet, CSV, JSON, PostgreSQL and Java collections.
+also correlated ones, that become joins, a JDBC driver, also as one JAR for tools such as
+DBeaver, and a differential test harness that compares the results with DuckDB. All 22
+TPC-H queries run at scale factor 1 over tables spread across Parquet, CSV, JSON,
+PostgreSQL and Java collections.
 
 ## Using the engine
 
@@ -380,6 +381,152 @@ builder: `defaultSource`, `defaultSchema`, `batchSize`, `memoryBudget` (such as 
 name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` returns the builder
 instead, so that an application can add sources of its own, such as tables in memory.
 
+## JDBC driver
+
+The module `fyrql-jdbc` is a JDBC driver that runs an engine in the process of the
+application. Its class is `net.fyrql.jdbc.FyrQLDriver`, which registers itself with the
+`DriverManager`, and its URL names a configuration file and, if need be, settings of the
+engine:
+
+```
+jdbc:fyrql:?config=fyrql.yaml&codegen=off&memoryBudget=512MB
+```
+
+With the file `fyrql.yaml`
+
+```yaml
+sources:
+  - name: files
+    type: csv
+    directory: data
+```
+
+and the customers of the [first example](#using-the-engine) together with five orders in
+`data/orders.csv`, this lists the tables and runs a query with a parameter:
+
+```java
+try (Connection connection = DriverManager.getConnection("jdbc:fyrql:?config=fyrql.yaml")) {
+    try (ResultSet tables = connection.getMetaData().getTables(null, null, "%", null)) {
+        while (tables.next()) {
+            System.out.println(tables.getString("TABLE_CAT") + "." + tables.getString("TABLE_SCHEM") + "."
+                    + tables.getString("TABLE_NAME"));
+        }
+    }
+    String sql = """
+            SELECT c.region, count(*) AS orders, sum(o.amount) AS revenue
+            FROM orders AS o JOIN customers AS c ON o.customer = c.id
+            WHERE o.amount > ?
+            GROUP BY ALL
+            ORDER BY revenue DESC""";
+    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        statement.setBigDecimal(1, new BigDecimal("6.00"));
+        try (ResultSet rs = statement.executeQuery()) {
+            while (rs.next()) {
+                System.out.println(rs.getString("region") + " " + rs.getLong("orders") + " "
+                        + rs.getString("revenue"));
+            }
+        }
+    }
+}
+```
+
+```
+files.main.customers
+files.main.orders
+south 1 20.0
+north 1 10.5
+```
+
+The CSV file gives `amount` the type `DOUBLE`, as DuckDB would, and so the sums are doubles.
+
+The keys of the URL are `config` and the settings of the engine of the
+[configuration file](#configuration-file): `defaultSource`, `defaultSchema`, `batchSize`,
+`memoryBudget`, `codegen`, `codegenThreshold` and `pushdown`, which win over those of the
+file. The same keys may come as properties of the connection, which win over the URL;
+`getPropertyInfo` describes them, so that tools offer them. Keys are matched without
+regard to case, values in the URL are decoded from `%xx`, and a blank value counts as not
+set. The properties `user` and `password`, which tools always send, are ignored; another
+unknown property gives a warning on the connection, and an unknown key in the URL fails
+the connection with `08001`, as does a file with an error. A relative path of the file is
+resolved against the working directory, and the paths in the file against its directory.
+Without `config`, the engine has the sources `csv`, `json` and `parquet` without tables,
+so that file names and table functions can be queried, as in
+`SELECT * FROM 'data/orders.csv'` or `SELECT * FROM read_parquet('lake/events.parquet')`.
+
+Every connection builds an engine of its own and closes it when the connection closes; an
+application with an engine of its own opens a connection over it with
+`FyrQLDriver.connect(engine, false)`, which leaves the engine open, and
+`FyrQLDataSource` is a `DataSource` for either way. The catalog of a connection is its
+default source and the schema its default schema: `setCatalog` and `setSchema` change
+where names of fewer than three parts are looked up, for this connection only. The
+`DatabaseMetaData` shows the sources as catalogs, with the term `source`, and their
+schemas, tables and columns, with the number of rows of a table, or an estimate, in
+`REMARKS` if the source has one; it reads only the sources the catalog in the call matches.
+
+A statement runs one query: a `SELECT`, `WITH`, `VALUES` or set operation, or `EXPLAIN`
+followed by a query, which gives the plan as rows of one column `plan`. The parameters
+`?` of a `PreparedStatement` go into the text as literals of the values they are set to,
+before the text is parsed; a parameter of a `MAP` type is not supported. A query runs
+until its first rows while it is executed, as in the drivers of databases, and the rest
+while its result set is read. `cancel()` and a timeout from `setQueryTimeout` stop a
+running query, also one that waits for a database, with the SQLState `57014` or `HYT00`. The queries of one connection run one at a time. An
+error has the message of FyrQL, with the position in the text or the node of the plan,
+and the exception of FyrQL as its cause; its SQLState tells the kind, such as `42601` for
+the syntax, `42P01` for an unknown table, `42703` for an unknown column, `0A000` for what
+FyrQL does not support, `22003`, `22012` and `22018` for values out of range, a division
+by zero and a failed cast, and `58030` for an error of a source.
+
+The types map to those of JDBC as follows; `getColumnTypeName` gives the name of the type
+in FyrQL, such as `DECIMAL(15,2)` or `INTEGER[]`, and `getString` the text of a value as
+DuckDB writes it, such as `[1, NULL]` or `{'a': 1}`:
+
+| FyrQL | `getColumnType` | `getObject` |
+| --- | --- | --- |
+| `BOOLEAN` | `BOOLEAN` | `Boolean` |
+| `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT` | the same | `Byte`, `Short`, `Integer`, `Long` |
+| `HUGEINT` | `NUMERIC` | `BigDecimal` |
+| `FLOAT` | `REAL` | `Float` |
+| `DOUBLE` | `DOUBLE` | `Double` |
+| `DECIMAL(p,s)` | `DECIMAL` | `BigDecimal` |
+| `VARCHAR` | `VARCHAR` | `String` |
+| `BLOB` | `VARBINARY` | `byte[]` |
+| `DATE` | `DATE` | `java.sql.Date` |
+| `TIMESTAMP` | `TIMESTAMP` | `java.sql.Timestamp` |
+| `UUID` | `OTHER` | `java.util.UUID` |
+| `T[]` | `ARRAY` | `java.sql.Array` |
+| `STRUCT(...)` | `STRUCT` | `java.sql.Struct` |
+| `MAP(K, V)` | `OTHER` | `java.util.Map` |
+
+`getObject(i, LocalDate.class)`, `LocalDateTime`, `BigInteger` and `String` work as
+well, and the elements of arrays, structs and maps are converted alike.
+
+The driver only reads. `executeUpdate` and statements other than queries fail with
+`0A000`; there are no transactions: a connection is read-only and in auto-commit, and
+`commit` and `rollback` do nothing. Results are read forward only, a call runs one
+statement and not a script, and there are no stored procedures.
+
+### DBeaver
+
+The JAR of `fyrql-jdbc-all` holds the driver with the engine, code generation and all
+connectors, with the libraries they use renamed under `net.fyrql.internal`, but not the
+JDBC drivers of databases. This builds it as `fyrql-jdbc-all/target/fyrql-jdbc-all-<version>.jar`:
+
+```
+./mvnw -B -ntp clean package -pl fyrql-jdbc-all -am -DskipTests
+```
+
+In DBeaver, a new driver in the Driver Manager gets
+- the class name `net.fyrql.jdbc.FyrQLDriver` and the URL template `jdbc:fyrql:?config={file}`,
+  without user and password;
+- as libraries the JAR, and the JDBC drivers of the databases that the configuration
+  file names, such as the one of PostgreSQL; FyrQL finds them in the class loader of
+  DBeaver, which does not register them with the `DriverManager`.
+
+A connection with that driver then asks for the configuration file. DBeaver opens several
+connections to a database, for the metadata and for each editor, and each of them builds
+an engine; switching off the separate connections in the settings of the connection
+keeps it at one.
+
 ## Code generation
 
 With the module `fyrql-codegen` on the class path, the engine compiles expressions,
@@ -714,6 +861,7 @@ Known differences from DuckDB:
 | `fyrql-engine` | the public Java API and the catalog over the registered sources |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application; read only |
+| `fyrql-jdbc-all` | the JDBC driver with the engine, code generation and all connectors in one JAR, for tools such as DBeaver; the drivers of the databases are not in it |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
 | `fyrql-bench` | JMH benchmarks of the interpreter against compiled code and of the scans of CSV and Parquet files; not published |
 

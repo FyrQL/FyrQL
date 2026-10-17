@@ -34,6 +34,7 @@ import net.fyrql.exec.MemoryBudget;
 import net.fyrql.exec.Operator;
 import net.fyrql.exec.QueryException;
 import net.fyrql.exec.spi.CompiledPipeline;
+import net.fyrql.exec.spi.JoinTable;
 import net.fyrql.exec.spi.PipelineSpec;
 import org.junit.jupiter.api.Test;
 
@@ -459,6 +460,47 @@ class PipelineCodegenTest {
         assertTrue(rows > runs * 10, rows + " rows in " + runs + " runs");
         assertEquals(0, compiler.statistics().failures());
         assertEquals(0, compiler.statistics().declined());
+    }
+
+    @Test
+    void aJoinWithoutKeysConsumesInStepsOfBoundedPairs() {
+        Schema p = Schema.of(new Schema.Field("v", DataType.INTEGER));
+        Schema b = Schema.of(new Schema.Field("w", DataType.INTEGER));
+        List<Object[]> probe = new ArrayList<>();
+        for (int i = 0; i < 3000; i++) {
+            probe.add(new Object[] {i});
+        }
+        List<Object[]> build = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            build.add(new Object[] {i});
+        }
+        // One batch of 3,000 rows of the source against 1,000 build rows: three million pairs.
+        Map<String, List<Batch>> tables = Map.of("p", batches(p, probe, 3000), "b", batches(b, build, 3000));
+        JaninoCompiler compiler = new JaninoCompiler();
+        PlanNode.Join cross = new PlanNode.Join(scan("p", p), scan("b", b), List.of(), List.of(), JoinType.CROSS);
+        Executor executor = new Executor(scan -> Batches.reader(tables.get(scan.table().table())),
+                MemoryBudget.unlimited(), 64, always(compiler));
+        long rows = 0;
+        int largest = 0;
+        try (Operator op = executor.open(cross)) {
+            assertEquals("PipelineOperator", op.getClass().getSimpleName());
+            for (Batch batch = op.next(); batch != null; batch = op.next()) {
+                rows += batch.rowCount();
+                largest = Math.max(largest, batch.rowCount());
+            }
+        }
+        assertEquals(3_000_000L, rows);
+        assertTrue(largest <= JoinTable.MAX_PAIRS, largest + " rows in a batch");
+
+        Schema pair = p.concat(b);
+        for (PlanNode plan : List.of(new PlanNode.Filter(cross, eq(col(pair, 0), col(pair, 1))),
+                new PlanNode.Join(scan("p", p), scan("b", b), List.of(), List.of(), JoinType.SINGLE,
+                        eq(col(pair, 0), col(pair, 1))),
+                new PlanNode.Join(scan("p", p), scan("b", b), List.of(), List.of(), JoinType.MARK,
+                        eq(col(pair, 0), col(pair, 1))))) {
+            String expected = run(plan, tables, Codegen.off(), false);
+            assertEquals(expected, run(plan, tables, always(compiler), true), plan::toString);
+        }
     }
 
     @Test

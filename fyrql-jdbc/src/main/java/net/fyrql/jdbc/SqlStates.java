@@ -17,6 +17,8 @@
 package net.fyrql.jdbc;
 
 import net.fyrql.core.value.ConversionException;
+import net.fyrql.exec.QueryCancelledException;
+import net.fyrql.exec.QueryContext;
 import net.fyrql.exec.QueryException;
 import net.fyrql.sql.SqlException;
 
@@ -26,6 +28,7 @@ import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLSyntaxErrorException;
+import java.sql.SQLTimeoutException;
 import java.util.Set;
 
 /**
@@ -55,6 +58,8 @@ final class SqlStates {
     static final String INVALID_CURSOR_STATE = "24000";
     /** An unknown catalog, which is a source of the engine. */
     static final String INVALID_CATALOG = "3D000";
+    /** An unknown schema of the default source. */
+    static final String INVALID_SCHEMA = "3F000";
     /** Any other error of the query text. */
     static final String SYNTAX_ERROR_OR_ACCESS_RULE = "42000";
     /** The query cannot be parsed. */
@@ -75,6 +80,8 @@ final class SqlStates {
     static final String AMBIGUOUS_TABLE = "42712";
     /** The memory budget of the engine is exceeded. */
     static final String OUT_OF_MEMORY = "53200";
+    /** The query was canceled on request. */
+    static final String QUERY_CANCELED = "57014";
     /** The query is nested too deeply. */
     static final String STATEMENT_TOO_COMPLEX = "54001";
     /** A source failed: its database, service or files. */
@@ -83,6 +90,8 @@ final class SqlStates {
     static final String FUNCTION_SEQUENCE = "HY010";
     /** Any other error. */
     static final String GENERAL = "HY000";
+    /** The query ran longer than its timeout. */
+    static final String TIMEOUT = "HYT00";
 
     /** The exceptions of the connectors for a failing source, by name: the driver does not depend on them. */
     private static final Set<String> SOURCE_EXCEPTIONS = Set.of("net.fyrql.connector.jdbc.JdbcSourceException",
@@ -123,6 +132,8 @@ final class SqlStates {
             case "0A" -> new SQLFeatureNotSupportedException(message, state, cause);
             case "22" -> new SQLDataException(message, state, cause);
             case "42" -> new SQLSyntaxErrorException(message, state, cause);
+            case "HY" -> state.equals(TIMEOUT) ? new SQLTimeoutException(message, state, cause)
+                    : new SQLException(message, state, cause);
             default -> new SQLException(message, state, cause);
         };
     }
@@ -130,9 +141,11 @@ final class SqlStates {
     /**
      * Turns an error of the engine into an exception of JDBC. The state
      * comes from the first exception in the chain of causes that tells it:
-     * the reason of a {@link SqlException}, an overflow, a failed
-     * conversion, a failing source or the memory budget; otherwise it is
-     * {@code HY000}. The message is that of the error, with the position in
+     * a canceled query, the reason of a {@link SqlException}, an overflow,
+     * a failed conversion, a failing source or the memory budget; otherwise
+     * it is {@code HY000}. A canceled query is {@code 57014}, or
+     * {@code HYT00} after its timeout, whatever error its sources stopped
+     * with. The message is that of the error, with the position in
      * the query text or the operator that failed.
      */
     static SQLException map(RuntimeException e) {
@@ -143,6 +156,9 @@ final class SqlStates {
     /** Returns the state of an error of the engine, see {@link #map}. */
     static String state(Throwable e) {
         for (Throwable t = e; t != null && t.getCause() != t; t = t.getCause()) {
+            if (t instanceof QueryCancelledException c) {
+                return c.reason() == QueryContext.Reason.TIMEOUT ? TIMEOUT : QUERY_CANCELED;
+            }
             if (t instanceof SqlException s) {
                 return stateOf(s.reason());
             }

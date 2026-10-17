@@ -27,6 +27,7 @@ import net.fyrql.exec.spi.JoinTable;
 import net.fyrql.exec.spi.KeyFunctions;
 import net.fyrql.exec.spi.PipelineSpec;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -36,7 +37,9 @@ import java.util.List;
  * {@link JoinTable}s, from the top join down, as the operators would pull
  * them: the memory of each is reserved under the label of its join, and
  * below an empty build side of an {@code INNER} or {@code SEMI} join
- * nothing is built and the source is not read. A {@code RIGHT} or
+ * nothing is built and the source is not read. Below joins without keys,
+ * a batch of the source goes through the pipeline in steps that keep the
+ * pairs of the joins within {@link JoinTable#MAX_PAIRS}. A {@code RIGHT} or
  * {@code FULL} join at the top emits its unmatched build rows at the end.
  * An error of a stage names the node of the stage, e.g. {@code Filter#3},
  * as the operator of that node would.
@@ -54,6 +57,10 @@ final class PipelineOperator extends AbstractOperator {
     private final Codegen codegen;
 
     private JoinTable[] tables;
+    /** The rows of the source that go through the pipeline at once, see {@link JoinTable#stepRows}. */
+    private int stepRows = Integer.MAX_VALUE;
+    /** The steps of a batch of the source that pairs with too many build rows at once, still to be consumed. */
+    private final ArrayDeque<Batch> steps = new ArrayDeque<>();
     private boolean sourceDone;
     private boolean leftoversDone;
     private long reserved;
@@ -92,10 +99,19 @@ final class PipelineOperator extends AbstractOperator {
             buildTables();
         }
         while (!sourceDone) {
-            Batch b = input.next();
+            Batch b = steps.poll();
             if (b == null) {
-                sourceDone = true;
-                break;
+                b = input.next();
+                if (b == null) {
+                    sourceDone = true;
+                    break;
+                }
+                if (b.rowCount() > stepRows) {
+                    steps.addAll(Batches.split(b, stepRows));
+                    b = steps.poll();
+                }
+            } else {
+                checkCancelled();
             }
             Batch out;
             try {
@@ -137,6 +153,15 @@ final class PipelineOperator extends AbstractOperator {
                 return;
             }
         }
+        // A row of the source pairs with every build row of each join without keys it passes.
+        long pairs = 1;
+        for (int p = 0; p < joins.size(); p++) {
+            PlanNode.Join j = joins.get(p);
+            if (j.leftKeys().isEmpty() && (j.condition() != null || j.type().keepsRight())) {
+                pairs = Math.min(pairs * Math.max(1, tables[p].rowCount()), JoinTable.MAX_PAIRS + 1L);
+            }
+        }
+        stepRows = JoinTable.stepRows(pairs);
     }
 
     /** Reads the right input of a join into its table; the hashes are those of the interpreter. */

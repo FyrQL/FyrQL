@@ -18,6 +18,7 @@ package net.fyrql.connector.http;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Batches;
 import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.ConnectorFactory;
@@ -50,8 +51,11 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.ServiceLoader;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPOutputStream;
 
@@ -76,6 +80,8 @@ class HttpConnectorTest {
     private final Map<String, String> lastHeaders = new ConcurrentHashMap<>();
     /** The body of /changing, which a test may change. */
     private volatile String changing = "[{'a': 1}]";
+    /** Lets /stalling finish its body. */
+    private final CountDownLatch resume = new CountDownLatch(1);
 
     @BeforeEach
     void start() throws IOException {
@@ -110,6 +116,20 @@ class HttpConnectorTest {
                     exchange.getResponseHeaders().add("Content-Encoding", "br");
                     send(exchange, 200, "[]");
                 }
+                case "/stalling" -> {
+                    exchange.getResponseHeaders().add("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(200, 0);
+                    try (OutputStream out = exchange.getResponseBody()) {
+                        out.write("[{\"n\": 1},".getBytes(StandardCharsets.UTF_8));
+                        out.flush();
+                        resume.await(10, TimeUnit.SECONDS);
+                        out.write("{\"n\": 2}]".getBytes(StandardCharsets.UTF_8));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } catch (IOException e) {
+                        // The client went away.
+                    }
+                }
                 case "/slow" -> {
                     try {
                         Thread.sleep(2000);
@@ -126,6 +146,7 @@ class HttpConnectorTest {
 
     @AfterEach
     void stop() {
+        resume.countDown();
         server.stop(0);
         executor.shutdownNow();
     }
@@ -325,6 +346,28 @@ class HttpConnectorTest {
             HttpSourceException e = assertThrows(HttpSourceException.class, () -> columns(c, "gone"));
             assertEquals(-1, e.status());
             assertTrue(e.getMessage().startsWith("GET " + refused + " failed: "), e.getMessage());
+        }
+    }
+
+    @Test
+    void cancelingAReaderThatWaitsOnTheBodyEndsItAtOnce() throws Exception {
+        Schema schema = Schema.of(new Schema.Field("n", DataType.BIGINT));
+        try (HttpConnector c = HttpConnector.builder("api").table("stalling", url("/stalling"))
+                .schema("stalling", schema).build()) {
+            ScanPlan plan = c.plan(TableRef.of("api", "stalling"), ScanRequest.columns(List.of(0)));
+            ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
+            try (BatchReader reader = c.open(c.splits(plan).get(0))) {
+                long start = System.nanoTime();
+                timer.schedule(reader::cancel, 300, TimeUnit.MILLISECONDS);
+                assertThrows(RuntimeException.class, reader::next);
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                assertTrue(millis < 5000, "the reader waited " + millis + " ms");
+                reader.cancel();
+            } finally {
+                timer.shutdownNow();
+            }
+            resume.countDown();
+            assertEquals(List.of(List.of(1L), List.of(2L)), read(c, "stalling", 0), "the next scan reads all");
         }
     }
 

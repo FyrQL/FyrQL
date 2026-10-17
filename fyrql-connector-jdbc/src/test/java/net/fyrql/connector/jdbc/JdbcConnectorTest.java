@@ -41,6 +41,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.ServiceLoader;
 import java.util.stream.IntStream;
 
@@ -397,6 +398,40 @@ class JdbcConnectorTest {
         assertEquals(JdbcDialect.MYSQL, JdbcDialect.ofUrl("jdbc:mysql://localhost/x").orElseThrow());
         assertEquals(JdbcDialect.MYSQL, JdbcDialect.ofName("mysql"));
         assertThrows(IllegalArgumentException.class, () -> JdbcDialect.ofName("oracle"));
+    }
+
+    @Test
+    void aDriverThatIsNotRegisteredIsFoundInTheClassLoaderOfTheConnector() throws SQLException {
+        TestDatabase db = TestDatabase.create(JdbcDialect.H2);
+        db.execute("CREATE TABLE t (n INTEGER)", "INSERT INTO t VALUES (1), (2), (3)");
+        String url = UnregisteredDriver.PREFIX + db.url().substring("jdbc:h2:".length());
+        assertThrows(SQLException.class, () -> DriverManager.getConnection(url), "the driver is not registered");
+        int connects = UnregisteredDriver.CONNECTS.get();
+        JdbcConnector connector = JdbcConnector.builder("db").url(url).build();
+        assertEquals(JdbcDialect.H2, connector.dialect(), "from the database the driver connects to");
+        try (FyrQL engine = FyrQL.builder().register(connector).build()) {
+            assertEquals(2L, engine.rows("SELECT count(*) FROM t WHERE \"N\" > 1").get(0)[0]);
+            assertEquals(3, engine.rows("SELECT \"N\" FROM t").size());
+        }
+        assertTrue(UnregisteredDriver.CONNECTS.get() - connects >= 3, "every connection comes from the driver");
+    }
+
+    @Test
+    void aUrlNoDriverAcceptsFailsWithTheMessageOfTheDriverManager() {
+        SQLException e = assertThrows(SQLException.class,
+                () -> Connections.url("jdbc:nothing:x", new Properties()).open());
+        assertEquals("08001", e.getSQLState());
+        assertTrue(e.getMessage().startsWith("No suitable driver"), e.getMessage());
+    }
+
+    @Test
+    void aSourceCannotBeFyrQLItself() {
+        for (String url : List.of("jdbc:fyrql:", "JDBC:FyrQL:?config=engine.yaml", " jdbc:fyrql:?codegen=off")) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> JdbcConnector.builder("self").url(url));
+            assertEquals("The JDBC source self has the URL jdbc:fyrql: of FyrQL itself; its engine cannot be a"
+                    + " source of another one", e.getMessage());
+        }
     }
 
     @Test

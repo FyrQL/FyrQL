@@ -42,6 +42,23 @@ public final class JoinTable {
     /** The error of a {@code SINGLE} join whose left row matches more than one right row. */
     public static final String MORE_THAN_ONE_ROW = "More than one row returned by a subquery used as an expression";
 
+    /**
+     * The most pairs of probe and build rows that a join without keys forms
+     * at once: its probe takes a batch in steps of {@link #stepRows} rows,
+     * so that a cross product of large inputs does not become one batch with
+     * all its pairs.
+     */
+    public static final int MAX_PAIRS = 1 << 16;
+
+    /**
+     * Returns the probe rows of one step when each of them pairs with up to
+     * {@code pairsPerRow} build rows: as many as keep the pairs within
+     * {@link #MAX_PAIRS}, and at least one.
+     */
+    public static int stepRows(long pairsPerRow) {
+        return (int) Math.max(1, MAX_PAIRS / Math.max(1, pairsPerRow));
+    }
+
     private final Batch batch;
     private final int[] heads;
     private final int[] chain;

@@ -17,6 +17,7 @@
 package net.fyrql.jdbc;
 
 import net.fyrql.core.type.Schema;
+import net.fyrql.exec.QueryContext;
 import net.fyrql.sql.parse.SqlParser;
 
 import java.sql.Connection;
@@ -26,6 +27,7 @@ import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ScheduledFuture;
 
 /**
  * A statement that runs one query at a time; each run closes the result
@@ -44,6 +46,8 @@ class FyrQLStatement implements Statement {
     private long maxRows;
     private int fetchSize;
     private int queryTimeout;
+    /** The context of the last query, which {@link #cancel()} cancels. */
+    private volatile QueryContext running;
     private int maxFieldSize;
     private boolean poolable;
     private boolean closeOnCompletion;
@@ -62,16 +66,48 @@ class FyrQLStatement implements Statement {
         }
     }
 
-    /** Runs a query and makes its result the current result set. */
+    /**
+     * Runs a query and makes its result the current result set. The query
+     * runs until its first rows before this returns, and then until its
+     * result set is read or closed; {@link #cancel()} and the query timeout
+     * end it on the way, from another thread.
+     */
     FyrQLResultSet run(String sql) throws SQLException {
         checkOpen();
         if (sql == null) {
             throw SqlStates.invalidArgument("The query must not be null");
         }
         closeResultSet();
-        BatchSource source = connection.query(sql);
-        resultSet = new FyrQLResultSet(this, source, maxRows, connection.lock(), holdability);
-        return resultSet;
+        QueryContext context = new QueryContext();
+        running = context;
+        ScheduledFuture<?> timeout = queryTimeout > 0 ? Timeouts.schedule(queryTimeout, context) : null;
+        BatchSource source;
+        try {
+            source = connection.query(sql, context);
+        } catch (SQLException | RuntimeException e) {
+            if (timeout != null) {
+                timeout.cancel(false);
+            }
+            throw e;
+        }
+        if (timeout != null) {
+            source = BatchSource.whenClosed(source, () -> timeout.cancel(false));
+        }
+        FyrQLResultSet rs = new FyrQLResultSet(this, source, maxRows, connection.lock(), holdability);
+        synchronized (this) {
+            resultSet = rs;
+        }
+        try {
+            rs.prefetch();
+        } catch (SQLException e) {
+            try {
+                rs.close();
+            } catch (SQLException suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
+        }
+        return rs;
     }
 
     /**
@@ -372,6 +408,12 @@ class FyrQLStatement implements Statement {
         return ResultSet.FETCH_FORWARD;
     }
 
+    /**
+     * Sets the seconds a query may run, from the next run on: from its
+     * start until its result set is read or closed, which includes the
+     * time the application takes between the rows. Then the query is
+     * canceled and fails with {@code HYT00}; {@code 0} is no limit.
+     */
     @Override
     public void setQueryTimeout(int seconds) throws SQLException {
         checkOpen();
@@ -387,9 +429,19 @@ class FyrQLStatement implements Statement {
         return queryTimeout;
     }
 
+    /**
+     * Cancels the query of the statement from another thread: its sources
+     * are asked to stop, and reading its result set fails with
+     * {@code 57014}, after the rows already read. Without a query, or after
+     * its result set is read, it does nothing.
+     */
     @Override
     public void cancel() throws SQLException {
         checkOpen();
+        QueryContext context = running;
+        if (context != null) {
+            context.cancel();
+        }
     }
 
     /** Accepts either value; the text goes to the engine as it is. */

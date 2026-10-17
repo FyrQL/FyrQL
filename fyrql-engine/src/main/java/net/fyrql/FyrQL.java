@@ -16,6 +16,7 @@
 
 package net.fyrql;
 
+import net.fyrql.catalog.CatalogTables;
 import net.fyrql.catalog.EngineCatalog;
 import net.fyrql.catalog.SearchPath;
 import net.fyrql.connector.BatchReader;
@@ -36,6 +37,7 @@ import net.fyrql.exec.CodegenMode;
 import net.fyrql.exec.Executor;
 import net.fyrql.exec.MemoryBudget;
 import net.fyrql.exec.Operator;
+import net.fyrql.exec.QueryContext;
 import net.fyrql.exec.TableSource;
 import net.fyrql.optimizer.Optimizer;
 import net.fyrql.exec.spi.CodegenStatistics;
@@ -56,7 +58,8 @@ import java.util.Objects;
  * execution of queries. A query is SQL text, which {@link #plan(String)}
  * parses and binds into a {@link PlanNode}, or a plan built
  * programmatically, starting with {@link #scan}. The {@link #catalog()}
- * resolves names along the search path of the builder and binds table
+ * resolves names along the search path of the builder, or along one given
+ * with a query, see {@link #plan(String, SearchPath)}, and binds table
  * functions such as {@code read_csv}; the scalar functions come from the
  * {@link FunctionRegistry} of the builder. With the module
  * {@code fyrql-codegen} on the class path, the engine compiles the
@@ -75,6 +78,7 @@ public final class FyrQL implements AutoCloseable {
 
     private final Map<String, Connector> connectors;
     private final EngineCatalog catalog;
+    private final CatalogTables catalogTables;
     private final FunctionRegistry functions;
     private final Binder binder;
     private final Optimizer optimizer;
@@ -85,6 +89,7 @@ public final class FyrQL implements AutoCloseable {
             MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options) {
         this.connectors = Collections.unmodifiableMap(new LinkedHashMap<>(connectors));
         this.catalog = new EngineCatalog(this.connectors, searchPath);
+        this.catalogTables = new CatalogTables(this.connectors);
         this.functions = functions;
         this.binder = new Binder(catalog, functions);
         this.optimizer = new Optimizer(this::connector, options);
@@ -92,7 +97,12 @@ public final class FyrQL implements AutoCloseable {
         this.executor = new Executor(new TableSource() {
             @Override
             public BatchReader open(PlanNode.Scan scan) {
-                return FyrQL.this.open(scan);
+                return FyrQL.this.open(scan, QueryContext.NONE);
+            }
+
+            @Override
+            public BatchReader open(PlanNode.Scan scan, QueryContext context) {
+                return FyrQL.this.open(scan, context);
             }
 
             @Override
@@ -105,6 +115,11 @@ public final class FyrQL implements AutoCloseable {
     /** Returns the catalog: names along the search path, columns, and table functions. */
     public EngineCatalog catalog() {
         return catalog;
+    }
+
+    /** Returns the sources, schemas, tables and columns as lists, for the metadata of tools. */
+    public CatalogTables catalogTables() {
+        return catalogTables;
     }
 
     /** Returns the scalar functions that queries in SQL can call. */
@@ -191,12 +206,36 @@ public final class FyrQL implements AutoCloseable {
     }
 
     /**
+     * Parses and binds a query with names looked up along another search
+     * path than that of the builder, e.g. the catalog and schema a client
+     * has chosen; the table functions of its default source come first.
+     *
+     * @throws SqlException             if the query cannot be parsed or bound
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public PlanNode plan(String sql, SearchPath searchPath) {
+        EngineCatalog c = catalog.withSearchPath(searchPath);
+        return (c == catalog ? binder : new Binder(c, functions)).bind(SqlParser.parse(sql));
+    }
+
+    /**
      * Runs a query; the caller closes the result.
      *
      * @throws SqlException if the query cannot be parsed or bound
      */
     public QueryResult sql(String sql) {
         return execute(plan(sql));
+    }
+
+    /**
+     * Runs a query with names looked up along a search path, see
+     * {@link #plan(String, SearchPath)}; the caller closes the result.
+     *
+     * @throws SqlException             if the query cannot be parsed or bound
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public QueryResult sql(String sql, SearchPath searchPath) {
+        return execute(plan(sql, searchPath));
     }
 
     /**
@@ -228,15 +267,40 @@ public final class FyrQL implements AutoCloseable {
         return explain(plan(sql));
     }
 
+    /**
+     * Returns the plan of a query with names looked up along a search path,
+     * see {@link #plan(String, SearchPath)}, as text in the form of
+     * {@link #explain(String)}.
+     *
+     * @throws SqlException             if the query cannot be parsed or bound
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public String explain(String sql, SearchPath searchPath) {
+        return explain(plan(sql, searchPath));
+    }
+
     /** Returns a plan as the engine runs it, as text in the form of {@link #explain(String)}. */
     public String explain(PlanNode plan) {
         return Explain.print(optimize(plan), codegen, optimizer.estimator());
     }
 
-    /** Runs a plan, after {@link #optimize}; the caller closes the result. */
+    /**
+     * Runs a plan, after {@link #optimize}; the caller closes the result,
+     * which {@link QueryResult#cancel()} cancels from another thread.
+     */
     public QueryResult execute(PlanNode plan) {
-        Operator op = executor.open(optimize(plan), optimizer.estimator());
-        return new QueryResult(op);
+        return execute(plan, new QueryContext());
+    }
+
+    /**
+     * Runs a plan as {@link #execute(PlanNode)} does, for a query that a
+     * context of the caller cancels, also before the result is there;
+     * once the context is canceled, reading the result fails with a
+     * {@link net.fyrql.exec.QueryCancelledException}.
+     */
+    public QueryResult execute(PlanNode plan, QueryContext context) {
+        Operator op = executor.open(optimize(plan), optimizer.estimator(), context);
+        return new QueryResult(op, context);
     }
 
     /** Runs a plan and collects all rows as Java values. */
@@ -261,9 +325,11 @@ public final class FyrQL implements AutoCloseable {
      * Opens the reader of a scan: the connector plans it once more, with the
      * filters it took over and the hints, the same filters as when the scan
      * was negotiated, which must give what the scan carries as taken over,
-     * and its splits are read one after the other.
+     * and its splits are read one after the other. Once the query is
+     * canceled, no further split is opened, and canceling the reader
+     * cancels the reader of the current split.
      */
-    private BatchReader open(PlanNode.Scan scan) {
+    private BatchReader open(PlanNode.Scan scan, QueryContext context) {
         Connector connector = connector(scan.table().source());
         PlanNode.Pushed pushed = scan.pushed();
         List<Expression> filters = new ArrayList<>(pushed.filters());
@@ -289,16 +355,21 @@ public final class FyrQL implements AutoCloseable {
         }
         Iterator<Split> splits = connector.splits(plan).iterator();
         return new BatchReader() {
-            private BatchReader current;
+            private volatile BatchReader current;
 
             @Override
             public Batch next() {
                 while (true) {
                     if (current == null) {
-                        if (!splits.hasNext()) {
+                        // The end of a canceled query, which its scan turns into the failure.
+                        if (context.isCancelled() || !splits.hasNext()) {
                             return null;
                         }
                         current = connector.open(splits.next());
+                        if (context.isCancelled()) {
+                            close();
+                            return null;
+                        }
                     }
                     Batch b = current.next();
                     if (b != null) {
@@ -311,9 +382,18 @@ public final class FyrQL implements AutoCloseable {
 
             @Override
             public void close() {
-                if (current != null) {
-                    current.close();
+                BatchReader r = current;
+                if (r != null) {
                     current = null;
+                    r.close();
+                }
+            }
+
+            @Override
+            public void cancel() {
+                BatchReader r = current;
+                if (r != null) {
+                    r.cancel();
                 }
             }
         };

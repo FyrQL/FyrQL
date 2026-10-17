@@ -119,20 +119,21 @@ class SqlStatesTest {
         }
     }
 
-    /** Runs a query to its end, which must fail with the state. */
+    /** Runs a query to its end, which must fail with the state, when it is executed or while it is read. */
     private void assertRunFails(String state, String sql, String message) throws SQLException {
         int closes = shop.readerCloses.get();
         try (Statement s = c.createStatement()) {
-            ResultSet rs = s.executeQuery(sql);
+            ResultSet[] rs = new ResultSet[1];
             SQLException e = assertThrows(SQLException.class, () -> {
-                while (rs.next()) {
-                    rs.getObject(1);
+                rs[0] = s.executeQuery(sql);
+                while (rs[0].next()) {
+                    rs[0].getObject(1);
                 }
             }, sql);
             assertEquals(state, e.getSQLState(), sql + ": " + e.getMessage());
             assertTrue(e.getMessage().contains(message), sql + ": " + e.getMessage());
             assertTrue(shop.readerCloses.get() > closes, "a failure releases the source: " + sql);
-            assertTrue(!rs.next(), "after a failure the result set is at its end");
+            assertTrue(rs[0] == null || !rs[0].next(), "after a failure the result set is at its end");
         }
     }
 

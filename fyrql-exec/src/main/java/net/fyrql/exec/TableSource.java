@@ -38,4 +38,21 @@ public interface TableSource {
     default BatchReader open(PlanNode.Remote remote) {
         throw new UnsupportedOperationException("No source runs a part of a plan, as " + remote.source() + " would");
     }
+
+    /**
+     * Opens the reader of a scan of a query that a context cancels; the
+     * reader may check the context between its parts. The caller registers
+     * the reader with the context. The default ignores the context.
+     */
+    default BatchReader open(PlanNode.Scan scan, QueryContext context) {
+        return open(scan);
+    }
+
+    /**
+     * Opens the reader of a part of the plan that a source runs, for a
+     * query that a context cancels, see {@link #open(PlanNode.Scan, QueryContext)}.
+     */
+    default BatchReader open(PlanNode.Remote remote, QueryContext context) {
+        return open(remote);
+    }
 }

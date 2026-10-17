@@ -31,6 +31,7 @@ import net.fyrql.connector.json.JsonRecordReader;
 import net.fyrql.connector.json.JsonSchemaInference;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.vector.Batch;
 
 import java.io.BufferedInputStream;
 import java.io.IOException;
@@ -157,7 +158,7 @@ public final class HttpConnector implements Connector {
         if (t.given() != null) {
             return t.given();
         }
-        return inferred.computeIfAbsent(ref.table(), n -> JsonSchemaInference.infer(get(t.uri()), options,
+        return inferred.computeIfAbsent(ref.table(), n -> JsonSchemaInference.infer(get(t.uri()).data(), options,
                 t.pointer(), t.uri().toString()));
     }
 
@@ -181,21 +182,47 @@ public final class HttpConnector implements Connector {
         return List.of(new Split(plan, 0, null));
     }
 
+    /**
+     * Sends the {@code GET} of the table and returns a reader of the
+     * records of the answer; canceling the reader closes the body of the
+     * answer, so that a reader that waits on it fails at once.
+     */
     @Override
     public BatchReader open(Split split) {
         TableRef ref = split.plan().table();
         Table t = table(ref);
         JsonLayout layout = layout(ref);
-        return JsonRecordReader.open(get(t.uri()), layout, split.plan().columns(), options, t.pointer(),
-                batchSize, t.uri().toString());
+        Body body = get(t.uri());
+        JsonRecordReader records = JsonRecordReader.open(body.data(), layout, split.plan().columns(), options,
+                t.pointer(), batchSize, t.uri().toString());
+        return new BatchReader() {
+            @Override
+            public Batch next() {
+                return records.next();
+            }
+
+            @Override
+            public void close() {
+                records.close();
+            }
+
+            @Override
+            public void cancel() {
+                HttpConnector.close(body.raw());
+            }
+        };
+    }
+
+    /** The body of an answer as it comes, and its data, uncompressed. */
+    private record Body(InputStream raw, InputStream data) {
     }
 
     /**
-     * Sends a {@code GET} and returns the body of the answer, uncompressed.
+     * Sends a {@code GET} and returns the body of the answer.
      *
      * @throws HttpSourceException if the status is not 2xx or there is no answer
      */
-    private InputStream get(URI uri) {
+    private Body get(URI uri) {
         HttpRequest.Builder request = HttpRequest.newBuilder(uri).GET().timeout(timeout);
         if (!hasHeader("Accept")) {
             request.header("Accept", "application/json, application/x-ndjson;q=0.9, */*;q=0.1");
@@ -236,7 +263,7 @@ public final class HttpConnector implements Connector {
             throw new HttpSourceException("GET " + uri + " answered with the status " + status
                     + (excerpt.isEmpty() ? "" : ": " + excerpt), uri, status, null);
         }
-        return body;
+        return new Body(response.body(), body);
     }
 
     private boolean hasHeader(String header) {

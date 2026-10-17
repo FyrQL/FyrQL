@@ -25,10 +25,13 @@ import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.plan.TableRef;
+import net.fyrql.core.type.DataType;
+import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
@@ -212,9 +215,116 @@ class ConnectionTest {
             assertEquals("crm", c.getCatalog());
             c.setCatalog(null);
             assertEquals("crm", c.getCatalog());
-            c.setSchema("other");
-            assertEquals("other", c.getSchema());
+            c.setSchema("MAIN");
+            assertEquals("main", c.getSchema(), "the name matches ignoring case");
+            e = assertThrows(SQLException.class, () -> c.setSchema("other"));
+            assertEquals("3F000", e.getSQLState());
+            assertEquals("There is no schema other; the schemas are main of the source crm", e.getMessage());
+            assertEquals("main", c.getSchema());
             assertEquals("crm", c.getCatalog());
+        }
+    }
+
+    @Test
+    void theCatalogOfAConnectionDecidesWhereItsQueriesLookUpNames() throws SQLException {
+        try (FyrQL engine = FyrQL.builder().register(new CountingConnector("shop"))
+                .register(new CountingConnector("crm", 3, 10)).build();
+                Connection c = FyrQLDriver.connect(engine, false);
+                Connection other = FyrQLDriver.connect(engine, false);
+                Statement s = c.createStatement();
+                PreparedStatement p = c.prepareStatement("SELECT name FROM t WHERE id < ?")) {
+            SQLException e = assertThrows(SQLException.class, () -> s.executeQuery("SELECT name FROM t"));
+            assertEquals("42712", e.getSQLState());
+            c.setCatalog("crm");
+            assertEquals(List.of("r1", "r2", "r3"), StatementTest.rows(s.executeQuery("SELECT name FROM t")));
+            assertEquals(List.of("a"), StatementTest.rows(s.executeQuery("SELECT name FROM shop.t WHERE id = 1")));
+            assertTrue(StatementTest.rows(s.executeQuery("EXPLAIN SELECT name FROM t")).toString().contains("crm"));
+            p.setInt(1, 3);
+            assertEquals(List.of("r1", "r2"), StatementTest.rows(p.executeQuery()));
+            c.setCatalog("shop");
+            assertEquals(List.of("a", "b"), StatementTest.rows(p.executeQuery()),
+                    "a prepared statement looks up its names when it runs");
+            assertEquals("name", p.getMetaData().getColumnName(1));
+            e = assertThrows(SQLException.class, () -> other.createStatement().executeQuery("SELECT name FROM t"));
+            assertEquals("42712", e.getSQLState(), "another connection keeps its own catalog");
+            assertNull(engine.catalog().searchPath().defaultSource(), "the engine keeps its search path");
+        }
+    }
+
+    /**
+     * A source with a table {@code t} in each of the schemas {@code main}
+     * and {@code Other}, whose one column is named after the schema; it
+     * cannot be scanned, only planned.
+     */
+    private static final class TwoSchemas implements Connector {
+        @Override
+        public String name() {
+            return "two";
+        }
+
+        @Override
+        public Catalog catalog() {
+            return new Catalog() {
+                @Override
+                public List<String> schemas() {
+                    return List.of("main", "Other");
+                }
+
+                @Override
+                public List<String> tables(String schema) {
+                    return List.of("t");
+                }
+
+                @Override
+                public Schema schema(TableRef table) {
+                    return Schema.of(new Schema.Field(table.schema() + "_id", DataType.INTEGER));
+                }
+            };
+        }
+
+        @Override
+        public ScanPlan plan(TableRef table, ScanRequest request) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<Split> splits(ScanPlan plan) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public BatchReader open(Split split) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    @Test
+    void theSchemaOfAConnectionDecidesWhereOnePartNamesAreLookedUpFirst() throws SQLException {
+        try (FyrQL engine = FyrQL.builder().register(new TwoSchemas()).register(new CountingConnector("shop"))
+                .build();
+                Connection c = FyrQLDriver.connect(engine, false)) {
+            c.setSchema("Other");
+            assertEquals("Other", c.getSchema(), "without a catalog, a schema is kept as it is");
+            c.setSchema("nowhere");
+            assertEquals("nowhere", c.getSchema());
+            c.setCatalog("two");
+            assertEquals("nowhere", c.getSchema(), "a new catalog keeps the schema");
+            SQLException e = assertThrows(SQLException.class, () -> column(c, "SELECT * FROM t"));
+            assertEquals("42712", e.getSQLState(), "a name not in the default schema is looked up anywhere");
+            c.setSchema("main");
+            assertEquals("main_id", column(c, "SELECT * FROM t"));
+            c.setSchema("other");
+            assertEquals("Other", c.getSchema());
+            assertEquals("Other_id", column(c, "SELECT * FROM t"));
+            assertEquals("main_id", column(c, "SELECT * FROM main.t"));
+            assertEquals("Other_id", column(c, "SELECT * FROM two.other.t"));
+        }
+    }
+
+    /** Returns the name of the first column of a query, which is planned but not run. */
+    private static String column(Connection c, String sql) throws SQLException {
+        try (PreparedStatement p = c.prepareStatement(sql)) {
+            return p.getMetaData().getColumnName(1);
         }
     }
 

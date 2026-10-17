@@ -218,7 +218,7 @@ class StatementTest {
         c.close();
         assertTrue(u.isClosed(), "closing the connection closes its statements");
         assertTrue(open.isClosed());
-        assertEquals(2, shop.readerCloses.get(), "a query opens its source with the first batch it reads");
+        assertEquals(4, shop.readerCloses.get(), "a query opens its source while it is executed");
         assertEquals(1, shop.closes.get());
     }
 

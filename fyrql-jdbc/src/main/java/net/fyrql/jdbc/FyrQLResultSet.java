@@ -47,6 +47,7 @@ import java.sql.Timestamp;
 import java.util.Calendar;
 import java.util.Map;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * A result set over the batches of a query, forward only and read only.
@@ -68,7 +69,7 @@ final class FyrQLResultSet implements ResultSet {
     private int row = -1;
     private long rowNumber;
     private boolean afterLast;
-    private boolean exhausted;
+    private volatile boolean exhausted;
     private boolean wasNull;
     private int fetchSize;
     private volatile boolean closed;
@@ -125,6 +126,18 @@ final class FyrQLResultSet implements ResultSet {
         return true;
     }
 
+    /**
+     * Reads the first batch with rows ahead, so that the query runs until
+     * its first rows while it is executed, as in the drivers of databases:
+     * tools cancel a statement only while it is executed, and an error of
+     * the first rows is one of the execution.
+     */
+    void prefetch() throws SQLException {
+        if (batch == null && pending == null && !afterLast) {
+            pending = fetch();
+        }
+    }
+
     /** Reads the next batch with rows from the source, or returns {@code null} after the last one. */
     private Batch fetch() throws SQLException {
         if (exhausted) {
@@ -166,16 +179,19 @@ final class FyrQLResultSet implements ResultSet {
         release();
     }
 
-    /** Closes the source, once. */
+    /** Closes the source, once, also when another thread closes the result set while this one reads. */
     private void release() throws SQLException {
         if (exhausted) {
             return;
         }
-        exhausted = true;
         if (lock != null) {
             lock.lock();
         }
         try {
+            if (exhausted) {
+                return;
+            }
+            exhausted = true;
             source.close();
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
@@ -186,6 +202,11 @@ final class FyrQLResultSet implements ResultSet {
         }
     }
 
+    /**
+     * Closes the result set and ends its query. While another thread reads
+     * a batch of it, the query is canceled first, so that closing does not
+     * wait until the batch is there.
+     */
     @Override
     public void close() throws SQLException {
         if (closed) {
@@ -194,6 +215,9 @@ final class FyrQLResultSet implements ResultSet {
         closed = true;
         batch = null;
         pending = null;
+        if (lock instanceof ReentrantLock l && l.isLocked() && !l.isHeldByCurrentThread()) {
+            source.cancel();
+        }
         try {
             release();
         } finally {

@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.github.stefan-zobel</groupId>
+		<artifactId>fyrql</artifactId>
+		<version>0.4.0</version>
+	</parent>
+
+	<artifactId>fyrql-jdbc-all</artifactId>
+	<name>FyrQL JDBC driver in one JAR</name>
+	<description>The JDBC driver with the engine, the configuration, code generation and all connectors in one JAR, for tools such as DBeaver; the drivers of the databases of JDBC sources are not in it.</description>
+
+	<properties>
+		<fyrql.module.name>net.fyrql.jdbc.all</fyrql.module.name>
+	</properties>
+
+	<!--
+	  Everything goes into the JAR of this module. Jackson, SnakeYAML, JSqlParser and FastCSV are renamed into packages
+	  under net.fyrql.internal, as parquet-java and Janino already are in the JARs of their modules, so that the JAR
+	  lies next to other versions of them, e.g. in the class loader of a tool.
+	-->
+	<dependencies>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-jdbc</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-codegen</artifactId>
+			<!-- In the reactor the dependencies the module renames into its own JAR would come along. -->
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-memory</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-csv</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-json</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-parquet</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-http</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-jdbc</artifactId>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-shade-plugin</artifactId>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<createDependencyReducedPom>false</createDependencyReducedPom>
+							<relocations>
+								<relocation>
+									<pattern>com.fasterxml.jackson</pattern>
+									<shadedPattern>net.fyrql.internal.jackson</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.yaml.snakeyaml</pattern>
+									<shadedPattern>net.fyrql.internal.snakeyaml</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>net.sf.jsqlparser</pattern>
+									<shadedPattern>net.fyrql.internal.jsqlparser</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>de.siegmar.fastcsv</pattern>
+									<shadedPattern>net.fyrql.internal.fastcsv</shadedPattern>
+								</relocation>
+							</relocations>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+										<exclude>META-INF/maven/**</exclude>
+										<exclude>META-INF/LICENSE*</exclude>
+										<exclude>META-INF/NOTICE*</exclude>
+										<exclude>META-INF/DEPENDENCIES*</exclude>
+										<exclude>module-info.class</exclude>
+										<!-- Classes for newer JDKs, which the shade plugin would not rename; the JAR is no multi-release JAR. -->
+										<exclude>META-INF/versions/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The JAR of the Parquet connector carries the same texts already. -->
+									<artifact>com.fasterxml.jackson.core:jackson-core</artifact>
+									<excludes>
+										<exclude>META-INF/FastDoubleParser-*</exclude>
+										<exclude>META-INF/Schubfach-*</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The style sheet of the railroad diagrams of the grammar. -->
+									<artifact>com.github.jsqlparser:jsqlparser</artifact>
+									<excludes>
+										<exclude>rr/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The list of this JAR names what the connector carries as well. -->
+									<artifact>io.github.stefan-zobel:fyrql-connector-parquet</artifact>
+									<excludes>
+										<exclude>META-INF/licenses/THIRD-PARTY.txt</exclude>
+									</excludes>
+								</filter>
+							</filters>
+							<transformers>
+								<!-- Merges the drivers, the connector factories, the expression compiler and Janino's compiler factory. -->
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+									<manifestEntries>
+										<Automatic-Module-Name>${fyrql.module.name}</Automatic-Module-Name>
+									</manifestEntries>
+								</transformer>
+							</transformers>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
+</project>

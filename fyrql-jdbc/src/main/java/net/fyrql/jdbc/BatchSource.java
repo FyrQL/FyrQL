@@ -19,6 +19,7 @@ package net.fyrql.jdbc;
 import net.fyrql.QueryResult;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.exec.QueryContext;
 
 import java.util.List;
 
@@ -41,8 +42,19 @@ interface BatchSource {
     /** Releases what the batches come from; it may be called more than once. */
     void close();
 
-    /** The batches of a query. */
-    static BatchSource of(QueryResult result) {
+    /**
+     * Cancels the query from another thread, so that {@link #next()} fails
+     * soon; rows the driver made itself are not canceled.
+     */
+    default void cancel() {
+    }
+
+    /**
+     * The batches of a query that a context cancels. Once it is canceled,
+     * closing does not fail: a source that was asked to stop may fail to
+     * close as well.
+     */
+    static BatchSource of(QueryResult result, QueryContext context) {
         return new BatchSource() {
             @Override
             public Schema schema() {
@@ -56,7 +68,47 @@ interface BatchSource {
 
             @Override
             public void close() {
-                result.close();
+                try {
+                    result.close();
+                } catch (RuntimeException e) {
+                    if (!context.isCancelled()) {
+                        throw e;
+                    }
+                }
+            }
+
+            @Override
+            public void cancel() {
+                context.cancel();
+            }
+        };
+    }
+
+    /** The batches of a source that runs an action when it is closed, after closing the source. */
+    static BatchSource whenClosed(BatchSource source, Runnable action) {
+        return new BatchSource() {
+            @Override
+            public Schema schema() {
+                return source.schema();
+            }
+
+            @Override
+            public Batch next() {
+                return source.next();
+            }
+
+            @Override
+            public void close() {
+                try {
+                    source.close();
+                } finally {
+                    action.run();
+                }
+            }
+
+            @Override
+            public void cancel() {
+                source.cancel();
             }
         };
     }

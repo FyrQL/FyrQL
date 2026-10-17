@@ -20,6 +20,7 @@ import net.fyrql.FyrQL;
 import net.fyrql.catalog.SearchPath;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.exec.QueryContext;
 
 import java.sql.Array;
 import java.sql.Blob;
@@ -40,7 +41,6 @@ import java.sql.Struct;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
@@ -58,8 +58,10 @@ import java.util.regex.Pattern;
  * opened over an engine of the application with
  * {@link FyrQLDriver#connect(FyrQL, boolean)}. The connection only reads:
  * it is always read-only and in auto-commit; the methods of transactions
- * are accepted and do nothing. The catalog is the default source of the
- * engine and the schema its default schema. The connection unwraps to the
+ * are accepted and do nothing. The catalog is the default source and the
+ * schema the default schema in which the queries of the connection look up
+ * names of fewer than three parts, at first those of the engine; changing
+ * them affects only this connection. The connection unwraps to the
  * {@link FyrQL} engine.
  * <p>
  * The queries of a connection run one at a time: starting a query and
@@ -121,22 +123,23 @@ final class FyrQLConnection implements Connection {
     }
 
     /**
-     * Starts a query: {@code EXPLAIN} and a query gives its plan, anything
-     * else goes to the engine.
+     * Starts a query that a context cancels: {@code EXPLAIN} and a query
+     * gives its plan, anything else goes to the engine. A query canceled
+     * while it is planned fails with its first batch.
      */
-    BatchSource query(String sql) throws SQLException {
+    BatchSource query(String sql, QueryContext context) throws SQLException {
         lock.lock();
         try {
             checkOpen();
             Matcher m = EXPLAIN.matcher(sql);
             if (m.matches()) {
                 List<Object[]> rows = new ArrayList<>();
-                for (String line : engine.explain(m.group(1)).split("\n")) {
+                for (String line : engine.explain(m.group(1), searchPath).split("\n")) {
                     rows.add(new Object[] {line});
                 }
                 return BatchSource.of(PLAN, rows);
             }
-            return BatchSource.of(engine.execute(engine.plan(sql)));
+            return BatchSource.of(engine.execute(engine.plan(sql, searchPath), context), context);
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
         } finally {
@@ -152,7 +155,7 @@ final class FyrQLConnection implements Connection {
         lock.lock();
         try {
             checkOpen();
-            return EXPLAIN.matcher(sql).matches() ? PLAN : engine.plan(sql).schema();
+            return EXPLAIN.matcher(sql).matches() ? PLAN : engine.plan(sql, searchPath).schema();
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
         } finally {
@@ -363,7 +366,7 @@ final class FyrQLConnection implements Connection {
     @Override
     public DatabaseMetaData getMetaData() throws SQLException {
         checkOpen();
-        throw SqlStates.unsupported("Metadata");
+        return new FyrQLDatabaseMetaData(this);
     }
 
     /** Accepts either value; the connection is always read-only. */
@@ -391,26 +394,38 @@ final class FyrQLConnection implements Connection {
         if (catalog == null) {
             return;
         }
-        searchPath = new SearchPath(source(catalog), searchPath.defaultSchema());
+        String source = match(engine.sources(), catalog);
+        if (source == null) {
+            throw new SQLException(unknown("source", catalog, engine.sources()), SqlStates.INVALID_CATALOG);
+        }
+        searchPath = new SearchPath(source, searchPath.defaultSchema());
     }
 
-    /** Returns the registered source a name matches. */
-    private String source(String name) throws SQLException {
-        List<String> sources = engine.sources();
-        if (sources.contains(name)) {
+    /**
+     * Returns the name that matches exactly, or else the only one that
+     * matches ignoring case; {@code null} if there is none or more than one.
+     */
+    private static String match(List<String> names, String name) {
+        if (names.contains(name)) {
             return name;
         }
-        List<String> matches = new ArrayList<>();
-        for (String s : sources) {
-            if (s.toLowerCase(Locale.ROOT).equals(name.toLowerCase(Locale.ROOT))) {
-                matches.add(s);
+        String match = null;
+        for (String n : names) {
+            if (n.equalsIgnoreCase(name)) {
+                if (match != null) {
+                    return null;
+                }
+                match = n;
             }
         }
-        if (matches.size() == 1) {
-            return matches.get(0);
-        }
-        throw new SQLException((matches.isEmpty() ? "There is no source " : "The source name is ambiguous: ")
-                + name + "; the sources are " + String.join(", ", sources), SqlStates.INVALID_CATALOG);
+        return match;
+    }
+
+    /** Returns the message of a name that matches none or several of the names. */
+    private static String unknown(String kind, String name, List<String> names) {
+        boolean ambiguous = names.stream().anyMatch(n -> n.equalsIgnoreCase(name));
+        return (ambiguous ? "The " + kind + " name is ambiguous: " : "There is no " + kind + " ") + name
+                + "; the " + kind + "s are " + String.join(", ", names);
     }
 
     /** Returns the default source, or {@code null} if there is none. */
@@ -585,14 +600,36 @@ final class FyrQLConnection implements Connection {
         }
     }
 
-    /** Sets the default schema of the default source, in which one-part names are looked up first. */
+    /**
+     * Sets the default schema, in which one-part names are looked up first
+     * in the default source. With a default source, the name matches a
+     * schema of it exactly, or else ignoring case if that is unique; without
+     * one, it is kept as it is until a catalog is set.
+     *
+     * @throws SQLException {@code 3F000} if the default source has no such schema
+     */
     @Override
     public void setSchema(String schema) throws SQLException {
         checkOpen();
         if (schema == null) {
             return;
         }
-        searchPath = new SearchPath(searchPath.defaultSource(), schema);
+        SearchPath path = searchPath;
+        String name = schema;
+        if (path.defaultSource() != null) {
+            List<String> schemas;
+            try {
+                schemas = engine.connector(path.defaultSource()).catalog().schemas();
+            } catch (RuntimeException e) {
+                throw SqlStates.map(e);
+            }
+            name = match(schemas, schema);
+            if (name == null) {
+                throw new SQLException(unknown("schema", schema, schemas) + " of the source "
+                        + path.defaultSource(), SqlStates.INVALID_SCHEMA);
+            }
+        }
+        searchPath = new SearchPath(path.defaultSource(), name);
     }
 
     @Override

@@ -28,6 +28,7 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.exec.spi.JoinTable;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -136,6 +137,48 @@ class OperatorTest {
                 .stream().map(r -> r.get(0)).toList());
         assertEquals(25, x.rows(new PlanNode.Join(o, c, List.of(), List.of(), JoinType.CROSS)).size());
         assertEquals(2, new PlanNode.Join(o, c, List.of(1), List.of(0), JoinType.SEMI).schema().size() - 1);
+    }
+
+    @Test
+    void aJoinWithoutKeysProbesInStepsOfBoundedPairs() {
+        Schema p = Schema.of(new Schema.Field("v", DataType.INTEGER));
+        Schema b = Schema.of(new Schema.Field("w", DataType.INTEGER));
+        List<Object[]> probeRows = new ArrayList<>();
+        for (int i = 0; i < 3000; i++) {
+            probeRows.add(new Object[] {i});
+        }
+        List<Object[]> buildRows = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            buildRows.add(new Object[] {i});
+        }
+        // One probe batch of 3,000 rows against 1,000 build rows: three million pairs.
+        PlanNode.Scan probe = table("p", p, probeRows, 3000);
+        PlanNode.Scan build = table("b", b, buildRows, 3000);
+        Executor x = executor();
+        long rows = 0;
+        int largest = 0;
+        try (Operator op = x.open(new PlanNode.Join(probe, build, List.of(), List.of(), JoinType.CROSS))) {
+            for (Batch batch = op.next(); batch != null; batch = op.next()) {
+                rows += batch.rowCount();
+                largest = Math.max(largest, batch.rowCount());
+            }
+        }
+        assertEquals(3_000_000L, rows);
+        assertTrue(largest <= JoinTable.MAX_PAIRS, largest + " rows in a batch");
+
+        Schema pair = p.concat(b);
+        List<Object[]> single = x.rows(new PlanNode.Join(probe, build, List.of(), List.of(), JoinType.SINGLE,
+                eq(col(pair, 0), col(pair, 1))));
+        assertEquals(3000, single.size());
+        for (int i = 0; i < 3000; i++) {
+            assertEquals(Arrays.asList(i, i < 1000 ? i : null), Arrays.asList(single.get(i)));
+        }
+        List<Object[]> mark = x.rows(new PlanNode.Join(probe, build, List.of(), List.of(), JoinType.MARK,
+                eq(col(pair, 0), col(pair, 1))));
+        assertEquals(3000, mark.size());
+        for (int i = 0; i < 3000; i++) {
+            assertEquals(Arrays.asList(i, i < 1000), Arrays.asList(mark.get(i)));
+        }
     }
 
     private static final Schema PAIR = ORDERS.concat(CUSTOMERS);

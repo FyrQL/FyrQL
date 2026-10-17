@@ -29,6 +29,7 @@ import net.fyrql.exec.spi.InterpretedKeys;
 import net.fyrql.exec.spi.JoinTable;
 import net.fyrql.exec.spi.KeyFunctions;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -37,8 +38,9 @@ import java.util.List;
  * A hash join: the right input is the build side, materialized into a
  * {@link JoinTable}; the left input is probed batch by batch.
  * A key with {@code NULL} matches nothing. Without keys every build row is
- * a candidate. The candidates of a probe batch that the condition of the
- * join, if any, holds for are its matches. Matches of one probe row come
+ * a candidate, and a probe batch is probed in steps that keep its pairs
+ * within {@link JoinTable#MAX_PAIRS}. The candidates of a probe batch that
+ * the condition of the join, if any, holds for are its matches. Matches of one probe row come
  * out in build order. {@code RIGHT} and {@code FULL} joins emit the
  * unmatched build rows after the probe side is exhausted. The keys are
  * hashed and compared by {@link InterpretedKeys}, and the condition is
@@ -65,6 +67,8 @@ final class HashJoinOperator extends AbstractOperator {
 
     private JoinTable table;
     private Batch build;
+    /** The steps of a probe batch that pairs with too many build rows at once, still to be probed. */
+    private final ArrayDeque<Batch> steps = new ArrayDeque<>();
     private boolean probeDone;
     private boolean leftoversDone;
     private long reserved;
@@ -108,10 +112,19 @@ final class HashJoinOperator extends AbstractOperator {
             }
         }
         while (!probeDone) {
-            Batch probe = left.next();
+            Batch probe = steps.poll();
             if (probe == null) {
-                probeDone = true;
-                break;
+                probe = left.next();
+                if (probe == null) {
+                    probeDone = true;
+                    break;
+                }
+                if (leftKeys.length == 0 && probe.rowCount() > JoinTable.stepRows(pairsPerRow())) {
+                    steps.addAll(Batches.split(probe, JoinTable.stepRows(pairsPerRow())));
+                    probe = steps.poll();
+                }
+            } else {
+                checkCancelled();
             }
             Batch out = probe(probe);
             if (out != null) {
@@ -125,6 +138,12 @@ final class HashJoinOperator extends AbstractOperator {
             }
         }
         return null;
+    }
+
+    /** The pairs a probe row forms without keys: every build row, or one for a join that asks whether a row matches. */
+    private long pairsPerRow() {
+        return join.condition() == null && !join.type().keepsRight() ? Math.min(1, build.rowCount())
+                : build.rowCount();
     }
 
     private void buildTable() {
@@ -156,6 +175,8 @@ final class HashJoinOperator extends AbstractOperator {
         Pairs pairs = new Pairs(n);
         for (int i = 0; i < n; i++) {
             if (hashes == null) {
+                // Each probe row pairs with every build row, which may take long without a batch.
+                checkCancelled();
                 int count = firstOnly ? Math.min(1, build.rowCount()) : build.rowCount();
                 for (int j = 0; j < count; j++) {
                     pairs.add(i, j);

@@ -345,6 +345,8 @@ public final class JdbcConnector implements Connector {
 
         /** The property of the MySQL driver that names the time zone of the session. */
         private static final String MYSQL_TIME_ZONE = "connectionTimeZone";
+        /** The start of the URLs of the driver of FyrQL. */
+        private static final String FYRQL_URL = "jdbc:fyrql:";
 
         private final String name;
         private String url;
@@ -363,9 +365,19 @@ public final class JdbcConnector implements Connector {
             this.name = Objects.requireNonNull(name, "name");
         }
 
-        /** Connects through a JDBC URL, one connection per statement. */
+        /**
+         * Connects through a JDBC URL, one connection per statement.
+         *
+         * @throws IllegalArgumentException if it is a URL of the driver of
+         *         FyrQL, whose engine would run inside this one
+         */
         public Builder url(String url) {
-            this.url = Objects.requireNonNull(url, "url");
+            Objects.requireNonNull(url, "url");
+            if (url.strip().regionMatches(true, 0, FYRQL_URL, 0, FYRQL_URL.length())) {
+                throw new IllegalArgumentException("The JDBC source " + name + " has the URL " + FYRQL_URL
+                        + " of FyrQL itself; its engine cannot be a source of another one");
+            }
+            this.url = url;
             return this;
         }
 

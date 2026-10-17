@@ -38,6 +38,11 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -59,8 +64,9 @@ import static net.fyrql.core.expr.Expressions.mul;
 
 /**
  * The examples of the README: the query, with the data it describes, whose
- * printed rows and plan are those of the README, and the generated code of
- * a filter and of the pipeline of TPC-H Q6, which the README shows.
+ * printed rows and plan are those of the README, the same query through the
+ * JDBC driver, and the generated code of a filter and of the pipeline of
+ * TPC-H Q6, which the README shows.
  */
 class ReadmeExampleTest {
 
@@ -119,6 +125,50 @@ class ReadmeExampleTest {
                             Scan mem.main.orders (customerId INTEGER, amount DECIMAL(10,2))
                           Scan csv.main.customers (id BIGINT, region VARCHAR)
                 """.formatted(pipeline), plan);
+    }
+
+    @Test
+    void theJdbcExampleRuns() throws IOException, SQLException {
+        Path files = Files.createDirectories(data.resolve("data"));
+        Files.writeString(files.resolve("customers.csv"), "id,region\n1,north\n2,south\n3,north\n",
+                StandardCharsets.UTF_8);
+        Files.writeString(files.resolve("orders.csv"), "id,customer,amount\n1,1,10.50\n2,2,20.00\n3,3,5.25\n4,1,\n"
+                + "5,,7.00\n", StandardCharsets.UTF_8);
+        Path config = Files.writeString(data.resolve("fyrql.yaml"), """
+                sources:
+                  - name: files
+                    type: csv
+                    directory: data
+                """, StandardCharsets.UTF_8);
+        List<String> printed = new ArrayList<>();
+
+        // From here on as in the README, with the path of the file of the test in the URL.
+        try (Connection connection = DriverManager.getConnection("jdbc:fyrql:?config="
+                + config.toAbsolutePath().toString().replace('\\', '/'))) {
+            try (ResultSet tables = connection.getMetaData().getTables(null, null, "%", null)) {
+                while (tables.next()) {
+                    printed.add(tables.getString("TABLE_CAT") + "." + tables.getString("TABLE_SCHEM") + "."
+                            + tables.getString("TABLE_NAME"));
+                }
+            }
+            String sql = """
+                    SELECT c.region, count(*) AS orders, sum(o.amount) AS revenue
+                    FROM orders AS o JOIN customers AS c ON o.customer = c.id
+                    WHERE o.amount > ?
+                    GROUP BY ALL
+                    ORDER BY revenue DESC""";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setBigDecimal(1, new BigDecimal("6.00"));
+                try (ResultSet rs = statement.executeQuery()) {
+                    while (rs.next()) {
+                        printed.add(rs.getString("region") + " " + rs.getLong("orders") + " "
+                                + rs.getString("revenue"));
+                    }
+                }
+            }
+        }
+
+        assertEquals(List.of("files.main.customers", "files.main.orders", "south 1 20.0", "north 1 10.5"), printed);
     }
 
     @Test

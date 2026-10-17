@@ -22,7 +22,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.4.0-SNAPSHOT</version>
+		<version>0.4.0</version>
 	</parent>
 
 	<artifactId>fyrql-test</artifactId>
@@ -69,6 +69,25 @@
 		<dependency>
 			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-connector-jdbc</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-jdbc</artifactId>
+		</dependency>
+		<!--
+		  Only for the order of the build: ShadedJdbcDriverTest loads the JAR in a class loader of its own, and surefire
+		  leaves it off the class path of the tests.
+		-->
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-jdbc-all</artifactId>
+			<scope>test</scope>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 		<dependency>
 			<groupId>org.duckdb</groupId>
@@ -140,9 +159,13 @@
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-surefire-plugin</artifactId>
 				<configuration>
+					<classpathDependencyExcludes>
+						<classpathDependencyExclude>io.github.stefan-zobel:fyrql-jdbc-all</classpathDependencyExclude>
+					</classpathDependencyExcludes>
 					<systemPropertyVariables>
 						<fyrql.test.containers>${fyrql.test.containers}</fyrql.test.containers>
 						<fyrql.tpch.dir>${fyrql.tpch.dir}</fyrql.tpch.dir>
+						<fyrql.jdbc.all.jar>${project.basedir}/../fyrql-jdbc-all/target/fyrql-jdbc-all-${project.version}.jar</fyrql.jdbc.all.jar>
 						<org.slf4j.simpleLogger.defaultLogLevel>warn</org.slf4j.simpleLogger.defaultLogLevel>
 					</systemPropertyVariables>
 				</configuration>
@@ -167,8 +190,9 @@
 						</configuration>
 					</execution>
 					<!--
-					  The tests of the connectors, the acceptance tests and TPC-H once more with pushdown off by
-					  default: every source only reads columns, and the results must be the same.
+					  The tests of the connectors, the acceptance tests, TPC-H and the corpus through the JDBC driver
+					  once more with pushdown off by default: every source only reads columns, and the results must
+					  be the same.
 					-->
 					<execution>
 						<id>no-pushdown</id>
@@ -183,6 +207,7 @@
 								<include>net/fyrql/test/connector/**</include>
 								<include>net/fyrql/test/AcceptanceTest.java</include>
 								<include>net/fyrql/test/tpch/**</include>
+								<include>net/fyrql/test/SqlCorpusJdbcTest.java</include>
 							</includes>
 							<reportNameSuffix>nopushdown</reportNameSuffix>
 						</configuration>

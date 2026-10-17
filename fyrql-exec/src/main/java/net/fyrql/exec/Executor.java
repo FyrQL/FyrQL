@@ -91,17 +91,27 @@ public final class Executor {
      * @param estimate the estimated rows of a node of the plan, {@code NaN} if unknown
      */
     public Operator open(PlanNode plan, ToDoubleFunction<PlanNode> estimate) {
-        return new Opening(Plans.ids(plan), estimate).open(plan);
+        return open(plan, estimate, QueryContext.NONE);
     }
 
-    /** The opening of one plan: the ids of its nodes and the estimate of their rows. */
+    /**
+     * Builds the operator tree of a plan as {@link #open(PlanNode, ToDoubleFunction)}
+     * does, for a query that a context cancels; the caller closes it.
+     */
+    public Operator open(PlanNode plan, ToDoubleFunction<PlanNode> estimate, QueryContext context) {
+        return new Opening(Plans.ids(plan), estimate, context).open(plan);
+    }
+
+    /** The opening of one plan: the ids of its nodes, the estimate of their rows and the context of the query. */
     private final class Opening {
         private final Map<PlanNode, Integer> ids;
         private final ToDoubleFunction<PlanNode> estimate;
+        private final QueryContext context;
 
-        Opening(Map<PlanNode, Integer> ids, ToDoubleFunction<PlanNode> estimate) {
+        Opening(Map<PlanNode, Integer> ids, ToDoubleFunction<PlanNode> estimate, QueryContext context) {
             this.ids = ids;
             this.estimate = estimate;
+            this.context = context;
         }
 
         private String label(PlanNode node) {
@@ -109,12 +119,14 @@ public final class Executor {
         }
 
         Operator open(PlanNode node) {
-            Operator pipeline = pipeline(node);
-            return pipeline != null ? pipeline : operator(node);
+            AbstractOperator pipeline = pipeline(node);
+            AbstractOperator op = pipeline != null ? pipeline : operator(node);
+            op.attach(context);
+            return op;
         }
 
         /** Opens the pipeline that ends at a node, or returns {@code null} if there is none or it does not compile. */
-        private Operator pipeline(PlanNode node) {
+        private AbstractOperator pipeline(PlanNode node) {
             PipelinePlanner.Pipeline p = PipelinePlanner.plan(node, codegen, estimate);
             if (p == null) {
                 return null;
@@ -136,7 +148,7 @@ public final class Executor {
             return new PipelineOperator(label(node), p.spec(), labels, compiled, input, builds, budget, codegen);
         }
 
-        private Operator operator(PlanNode node) {
+        private AbstractOperator operator(PlanNode node) {
             String label = label(node);
             return switch (node) {
                 case PlanNode.Scan s -> new ScanOperator(label, s, source);

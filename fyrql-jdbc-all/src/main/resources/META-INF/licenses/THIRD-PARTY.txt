@@ -1,0 +1,57 @@
+FyrQL is licensed under the Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+This JAR includes the following software, renamed into packages under
+net.fyrql.internal:
+
+- Jackson 2.22.3 (jackson-core, jackson-dataformat-yaml), the parser of JSON
+  files and of the configuration file
+  https://github.com/FasterXML/jackson
+  Apache License 2.0, see apache-2.0-LICENSE.txt and jackson-NOTICE.txt.
+  jackson-core includes FastDoubleParser and Schubfach, see
+  META-INF/FastDoubleParser-LICENSE, META-INF/FastDoubleParser-ThirdParty-LICENSE
+  and META-INF/Schubfach-LICENSE.
+
+- SnakeYAML 2.5, which Jackson reads YAML with
+  https://bitbucket.org/snakeyaml/snakeyaml
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- JSqlParser 5.4, the parser of SQL
+  https://github.com/JSQLParser/JSqlParser
+  Dual-licensed under the GNU Lesser General Public License 2.1 and the
+  Apache License 2.0; used here under the Apache License 2.0, see
+  apache-2.0-LICENSE.txt.
+
+- FastCSV 4.4.0, the reader of CSV files
+  https://github.com/osiegmar/FastCSV
+  MIT License, see fastcsv-LICENSE.txt.
+
+- Janino 3.1.20 of janino-lts (janino, commons-compiler), which compiles
+  expressions
+  https://github.com/janino-lts/janino
+  BSD 3-Clause License, see janino-LICENSE.txt.
+
+- Apache Parquet Java 1.18.1 (parquet-hadoop, parquet-column, parquet-common,
+  parquet-encoding, parquet-format-structures, parquet-jackson)
+  https://parquet.apache.org/
+  Apache License 2.0, see parquet-java-LICENSE.txt and parquet-java-NOTICE.txt.
+  parquet-jackson includes FastDoubleParser and Schubfach, see the files of
+  jackson-core above.
+
+- parquet-floor 2.4, only its stub classes of Hadoop types
+  https://github.com/strategicblue/parquet-floor
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- aircompressor 2.0.3
+  https://github.com/airlift/aircompressor
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- JTS Topology Suite 1.20.0, which parquet-java needs for geometry types
+  https://github.com/locationtech/jts
+  Eclipse Distribution License 1.0, see jts-LICENSE.txt.
+
+- SLF4J API and SLF4J NOP binding 1.7.36
+  https://www.slf4j.org/
+  MIT License, see slf4j-LICENSE.txt.
+
+The JAR does not include the JDBC drivers of the databases that JDBC sources
+read; they are put next to it.

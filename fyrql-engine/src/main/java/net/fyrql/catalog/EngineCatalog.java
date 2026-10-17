@@ -66,6 +66,16 @@ public final class EngineCatalog implements CatalogView {
         return resolver.searchPath();
     }
 
+    /**
+     * Returns a catalog over the same sources with another search path, or
+     * this catalog if the path is its own.
+     *
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public EngineCatalog withSearchPath(SearchPath searchPath) {
+        return searchPath.equals(searchPath()) ? this : new EngineCatalog(sources, searchPath);
+    }
+
     /** Returns the names of the table functions, in lower case. */
     public List<String> tableFunctions() {
         return List.copyOf(functions.keySet());

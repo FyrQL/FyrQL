@@ -19,6 +19,7 @@ package net.fyrql;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.Operator;
+import net.fyrql.exec.QueryContext;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,9 +32,11 @@ import java.util.List;
 public final class QueryResult implements AutoCloseable {
 
     private final Operator operator;
+    private final QueryContext context;
 
-    QueryResult(Operator operator) {
+    QueryResult(Operator operator, QueryContext context) {
         this.operator = operator;
+        this.context = context;
     }
 
     /** Returns the columns of the result. */
@@ -53,6 +56,16 @@ public final class QueryResult implements AutoCloseable {
             rows.addAll(b.rows());
         }
         return rows;
+    }
+
+    /**
+     * Cancels the query from any thread: the sources are asked to stop, and
+     * the next batch, or the one being read, fails with a
+     * {@link net.fyrql.exec.QueryCancelledException}. The result still
+     * needs to be closed.
+     */
+    public void cancel() {
+        context.cancel();
     }
 
     @Override

@@ -21,7 +21,7 @@
 
 	<groupId>io.github.stefan-zobel</groupId>
 	<artifactId>fyrql</artifactId>
-	<version>0.4.0-SNAPSHOT</version>
+	<version>0.4.0</version>
 	<packaging>pom</packaging>
 
 	<name>FyrQL</name>
@@ -51,6 +51,7 @@
 		<module>fyrql-engine</module>
 		<module>fyrql-config</module>
 		<module>fyrql-jdbc</module>
+		<module>fyrql-jdbc-all</module>
 		<module>fyrql-test</module>
 		<module>fyrql-bench</module>
 	</modules>
@@ -169,6 +170,11 @@
 			<dependency>
 				<groupId>io.github.stefan-zobel</groupId>
 				<artifactId>fyrql-jdbc</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>io.github.stefan-zobel</groupId>
+				<artifactId>fyrql-jdbc-all</artifactId>
 				<version>${project.version}</version>
 			</dependency>
 			<dependency>

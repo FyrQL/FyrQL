@@ -484,7 +484,7 @@ class SqlCorpusTest {
             "SELECT * FROM (SELECT id, l FROM n) t, unnest(t.l)");
 
     /** Texts that must not bind, with the start of FyrQL's message; DuckDB rejects them as well. */
-    private static final List<Map.Entry<String, String>> ERRORS = List.of(
+    static final List<Map.Entry<String, String>> ERRORS = List.of(
             Map.entry("SELECT x FROM t", "Referenced column \"x\" not found in FROM clause!"),
             Map.entry("SELECT a FROM t JOIN u ON t.a = u.a", "Ambiguous reference to column name \"a\""),
             Map.entry("SELECT a FROM t LIMIT a", "Referenced column \"a\" was not found because the FROM clause"),
@@ -622,7 +622,7 @@ class SqlCorpusTest {
             Map.entry("SELECT a, (SELECT f FROM u WHERE u.a = t.a) FROM t", "More than one row returned by a subquery"));
 
     /** Texts DuckDB runs and FyrQL rejects on purpose, with the start of FyrQL's message. */
-    private static final List<Map.Entry<String, String>> DEVIATIONS = List.of(
+    static final List<Map.Entry<String, String>> DEVIATIONS = List.of(
             Map.entry("SELECT DISTINCT a FROM t ORDER BY b",
                     "For SELECT DISTINCT, ORDER BY expressions must appear in select list"),
             Map.entry("SELECT sqrt('4')", "No function matches sqrt(VARCHAR)"),

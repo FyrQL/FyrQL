@@ -153,6 +153,9 @@ final class HashAggregateOperator extends AbstractOperator {
             state.startResult(groups);
         }
         for (int g = 0; g < groups; g++) {
+            if ((g & (CHECK_INTERVAL - 1)) == 0) {
+                checkCancelled();
+            }
             for (AggregateState state : states) {
                 state.result(g);
             }

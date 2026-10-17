@@ -76,7 +76,11 @@ final class SortOperator extends AbstractOperator {
         for (PlanNode.SortKey k : sort.keys()) {
             keys.add(all.column(k.column()));
         }
+        int[] comparisons = new int[1];
         Arrays.sort(order, (a, b) -> {
+            if ((++comparisons[0] & (CHECK_INTERVAL - 1)) == 0) {
+                checkCancelled();
+            }
             for (int i = 0; i < keys.size(); i++) {
                 PlanNode.SortKey k = sort.keys().get(i);
                 Vector v = keys.get(i);
