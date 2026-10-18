@@ -27,12 +27,20 @@ import net.fyrql.core.value.ConversionException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * The records of a JSON input, one after the other: the elements of the
  * top-level array, or the top-level values. With a JSON pointer, the
  * records are the elements of the array it points to, or the one value it
- * points to if that is no array; what follows that value is not read.
+ * points to if that is no array; what follows that value is not read,
+ * unless the scalar values of keys next to it are asked for, which the
+ * input then reads to the end of the outermost object along the pointer.
  */
 final class JsonInput implements AutoCloseable {
 
@@ -42,6 +50,11 @@ final class JsonInput implements AutoCloseable {
     private final String source;
     private final JsonFormat format;
     private final String pointer;
+    /** The keys next to the records whose values to keep. */
+    private final Set<String> siblingKeys;
+    private final Map<String, String> siblings = new LinkedHashMap<>();
+    /** Whether each container along the pointer is an object rather than an array, outermost first. */
+    private final List<Boolean> objects = new ArrayList<>();
     private boolean array;
     private boolean started;
     private boolean ended;
@@ -56,10 +69,26 @@ final class JsonInput implements AutoCloseable {
      * @throws IllegalArgumentException if the pointer is not one
      */
     JsonInput(InputStream in, JsonFormat format, String pointer, String source) {
+        this(in, format, pointer, source, Set.of());
+    }
+
+    /**
+     * Opens an input that keeps the scalar values of keys next to the
+     * records, in the objects along the pointer; it is closed with the
+     * reader.
+     *
+     * @param pointer the JSON pointer to the records, see {@link JsonPointers},
+     *        or the empty string for the whole input
+     * @param source the file or URL, for messages
+     * @param siblingKeys the keys whose values to keep
+     * @throws IllegalArgumentException if the pointer is not one
+     */
+    JsonInput(InputStream in, JsonFormat format, String pointer, String source, Set<String> siblingKeys) {
         JsonPointers.check(pointer);
         this.source = source;
         this.format = format;
         this.pointer = pointer;
+        this.siblingKeys = Set.copyOf(siblingKeys);
         try {
             this.parser = FACTORY.createParser(in);
         } catch (IOException e) {
@@ -78,6 +107,11 @@ final class JsonInput implements AutoCloseable {
 
     String source() {
         return source;
+    }
+
+    /** Returns the kept values of the keys next to the records, see {@link JsonRecordReader#siblings()}. */
+    Map<String, String> siblings() {
+        return Collections.unmodifiableMap(siblings);
     }
 
     /**
@@ -121,6 +155,9 @@ final class JsonInput implements AutoCloseable {
             }
             if (t == null) {
                 ended = true;
+                if (pointed && !siblingKeys.isEmpty()) {
+                    finish();
+                }
                 return false;
             }
             record++;
@@ -142,18 +179,20 @@ final class JsonInput implements AutoCloseable {
         for (JsonPointer p = JsonPointer.compile(pointer); !p.matches(); p = p.tail()) {
             String key = p.getMatchingProperty();
             if (t == JsonToken.START_OBJECT) {
+                objects.add(true);
                 String k;
                 while ((k = parser.nextFieldName()) != null) {
                     t = parser.nextToken();
                     if (k.equals(key)) {
                         break;
                     }
-                    parser.skipChildren();
+                    keepOrSkip(k, t);
                 }
                 if (k == null) {
                     throw notFound("the object has no key \"" + key + "\"");
                 }
             } else if (t == JsonToken.START_ARRAY && p.getMatchingIndex() >= 0) {
+                objects.add(false);
                 t = parser.nextToken();
                 for (int i = 0; i < p.getMatchingIndex() && t != JsonToken.END_ARRAY; i++) {
                     parser.skipChildren();
@@ -167,6 +206,34 @@ final class JsonInput implements AutoCloseable {
             }
         }
         return t;
+    }
+
+    /**
+     * Reads what follows the records up to the end of the outermost
+     * container along the pointer, keeping the values of the keys asked for.
+     */
+    private void finish() throws IOException {
+        for (int level = objects.size() - 1; level >= 0; level--) {
+            if (objects.get(level)) {
+                String k;
+                while ((k = parser.nextFieldName()) != null) {
+                    keepOrSkip(k, parser.nextToken());
+                }
+            } else {
+                while (parser.nextToken() != JsonToken.END_ARRAY) {
+                    parser.skipChildren();
+                }
+            }
+        }
+    }
+
+    /** Keeps the value of a key next to the records if it is asked for and scalar, and skips it otherwise. */
+    private void keepOrSkip(String key, JsonToken t) throws IOException {
+        if (t != null && t.isScalarValue() && t != JsonToken.VALUE_NULL && siblingKeys.contains(key)) {
+            siblings.putIfAbsent(key, parser.getText());
+        } else {
+            parser.skipChildren();
+        }
     }
 
     private ConversionException notFound(String why) {

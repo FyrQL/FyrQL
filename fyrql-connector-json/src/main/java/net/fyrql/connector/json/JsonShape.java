@@ -35,29 +35,47 @@ sealed interface JsonShape {
 
     /** The shape of every value of a type, as for a schema that is given. */
     static JsonShape of(DataType type) {
+        return of(type, null);
+    }
+
+    /**
+     * The shape of every value of a type, as for a schema that is given,
+     * whose strings, also those inside structs, lists and maps, a parser
+     * reads.
+     *
+     * @param parser reads the strings, or {@code null} to cast them
+     */
+    static JsonShape of(DataType type, JsonStringParser parser) {
         if (type instanceof DataType.Struct s) {
             List<JsonShape> fields = new ArrayList<>();
             List<String> keys = new ArrayList<>();
             for (DataType.Struct.Field f : s.fields()) {
                 keys.add(f.name());
-                fields.add(of(f.type()));
+                fields.add(of(f.type(), parser));
             }
             return new Struct(s, keys, fields);
         }
         if (type instanceof DataType.ListType l) {
-            return new ListOf(l, of(l.element()));
+            return new ListOf(l, of(l.element(), parser));
         }
         if (type instanceof DataType.MapType m) {
-            return new MapOf(m, of(m.value()));
+            return new MapOf(m, of(m.value(), parser));
         }
-        return new Scalar(type, null);
+        return new Scalar(type, null, parser);
     }
 
     /**
      * A scalar or decimal value; a string is read in its form, if it has
-     * one, otherwise cast to the type.
+     * one, otherwise by the parser, if there is one, otherwise cast to the
+     * type.
+     *
+     * @param parser reads the strings of a given layout, or {@code null}
      */
-    record Scalar(DataType type, StringKinds.Kind kind) implements JsonShape {
+    record Scalar(DataType type, StringKinds.Kind kind, JsonStringParser parser) implements JsonShape {
+
+        Scalar(DataType type, StringKinds.Kind kind) {
+            this(type, kind, null);
+        }
     }
 
     /**

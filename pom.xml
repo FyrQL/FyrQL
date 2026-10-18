@@ -21,7 +21,7 @@
 
 	<groupId>io.github.stefan-zobel</groupId>
 	<artifactId>fyrql</artifactId>
-	<version>0.4.5</version>
+	<version>0.5.0</version>
 	<packaging>pom</packaging>
 
 	<name>FyrQL</name>
@@ -46,6 +46,7 @@
 		<module>fyrql-connector-json</module>
 		<module>fyrql-connector-parquet</module>
 		<module>fyrql-connector-http</module>
+		<module>fyrql-connector-odata</module>
 		<module>fyrql-connector-jdbc</module>
 		<module>fyrql-optimizer</module>
 		<module>fyrql-engine</module>
@@ -146,6 +147,17 @@
 				<groupId>io.github.stefan-zobel</groupId>
 				<artifactId>fyrql-connector-http</artifactId>
 				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>io.github.stefan-zobel</groupId>
+				<artifactId>fyrql-connector-odata</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>io.github.stefan-zobel</groupId>
+				<artifactId>fyrql-connector-odata</artifactId>
+				<version>${project.version}</version>
+				<type>test-jar</type>
 			</dependency>
 			<dependency>
 				<groupId>io.github.stefan-zobel</groupId>

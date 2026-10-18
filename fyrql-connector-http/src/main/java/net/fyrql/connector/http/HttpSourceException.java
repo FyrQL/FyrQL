@@ -33,9 +33,12 @@ public final class HttpSourceException extends RuntimeException {
     private final int status;
 
     /**
+     * @param message the message, which must not show the values of headers
+     * @param uri the URL of the request
      * @param status the status of the answer, or -1 if there was none
+     * @param cause the cause, or {@code null}
      */
-    HttpSourceException(String message, URI uri, int status, Throwable cause) {
+    public HttpSourceException(String message, URI uri, int status, Throwable cause) {
         super(message, cause);
         this.uri = uri;
         this.status = status;

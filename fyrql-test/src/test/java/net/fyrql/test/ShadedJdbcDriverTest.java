@@ -16,7 +16,12 @@
 
 package net.fyrql.test;
 
+import net.fyrql.connector.odata.FakeODataServer;
+import net.fyrql.connector.odata.ODataVersion;
+import net.fyrql.core.type.DataType;
+import net.fyrql.core.type.Schema;
 import net.fyrql.jdbc.FyrQLDriver;
+import net.fyrql.optimizer.Optimizer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -52,9 +57,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * The JAR of {@code fyrql-jdbc-all} as a tool such as DBeaver uses it: in a
  * class loader of its own next to the driver of a database, which it does
  * not register, with a class loader of the thread that sees neither. The
- * driver reads CSV, JSON, Parquet and H2 in one query and compiles its
- * expressions; the JAR carries the libraries it renames, their licenses and
- * no class of their original packages.
+ * driver reads CSV, JSON, Parquet and H2 in one query, and an OData service
+ * of the fake server with H2 in another, and compiles its expressions; the
+ * JAR carries the libraries it renames, their licenses and no class of
+ * their original packages.
  */
 class ShadedJdbcDriverTest {
 
@@ -85,6 +91,17 @@ class ShadedJdbcDriverTest {
     @Test
     void aFederatedQueryRunsThroughTheJarInAClassLoaderOfItsOwn() throws Exception {
         Path jar = jar();
+        try (FakeODataServer server = FakeODataServer.start()) {
+            Schema discounts = new Schema(List.of(new Schema.Field("Country", DataType.VARCHAR, false),
+                    new Schema.Field("Rate", DataType.decimal(4, 2), true)));
+            server.service("pricing", ODataVersion.V4).pageSize(1).entitySet("Discounts", discounts,
+                    List.of(new Object[] {"DE", new BigDecimal("0.10")}, new Object[] {"FR", new BigDecimal("0.05")},
+                            new Object[] {"IT", null}), "Country");
+            federatedQuery(jar, server);
+        }
+    }
+
+    private void federatedQuery(Path jar, FakeODataServer server) throws Exception {
         Path data = Files.createDirectories(dir.resolve("data"));
         Files.writeString(data.resolve("orders.csv"), "id,customer,amount\n1,1,10.50\n2,2,20.00\n3,1,5.25\n",
                 StandardCharsets.UTF_8);
@@ -114,7 +131,11 @@ class ShadedJdbcDriverTest {
                   - name: db
                     type: jdbc
                     url: "%s"
-                """.formatted(h2), StandardCharsets.UTF_8);
+                  - name: erp
+                    type: odata
+                    url: "%s"
+                    trustFilters: true
+                """.formatted(h2, server.url("pricing")), StandardCharsets.UTF_8);
 
         URL h2Jar = org.h2.Driver.class.getProtectionDomain().getCodeSource().getLocation();
         Thread thread = Thread.currentThread();
@@ -147,7 +168,7 @@ class ShadedJdbcDriverTest {
                         catalogs.add(rs.getString(1));
                     }
                 }
-                assertEquals(List.of("files", "docs", "pq", "db"), catalogs);
+                assertEquals(List.of("files", "docs", "pq", "db", "erp"), catalogs);
                 try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery(sql)) {
                     assertTrue(rs.next());
                     assertEquals("Ann", rs.getString(1));
@@ -166,6 +187,24 @@ class ShadedJdbcDriverTest {
                     }
                 }
                 assertTrue(plan.toString().contains("[codegen"), "the expressions are compiled:\n" + plan);
+                try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery("SELECT k.name, d.Rate"
+                        + " FROM Discounts d JOIN countries k ON k.code = d.Country WHERE d.Rate >= 0.05"
+                        + " ORDER BY k.name")) {
+                    assertTrue(rs.next());
+                    assertEquals("France", rs.getString(1));
+                    assertEquals(0, new BigDecimal("0.05").compareTo(rs.getBigDecimal(2)), rs.getString(2));
+                    assertTrue(rs.next());
+                    assertEquals("Germany", rs.getString(1));
+                    assertEquals(0, new BigDecimal("0.10").compareTo(rs.getBigDecimal(2)), rs.getString(2));
+                    assertFalse(rs.next());
+                }
+                // The driver reads the same system property of pushdown as the engines of the tests.
+                boolean pushdown = Optimizer.Options.fromSystemProperty().equals(Optimizer.Options.DEFAULT);
+                assertEquals(pushdown, server.requests("/pricing/Discounts").stream().anyMatch(r -> "Rate ge 0.05"
+                        .equals(r.parameters().get("$filter"))), () -> "the filter goes to the service: "
+                        + server.requests());
+                assertTrue(server.requests("/pricing/Discounts").stream().anyMatch(r -> r.parameters()
+                        .containsKey("$skiptoken")), "the answer has several pages");
                 SQLException e = assertThrows(SQLException.class,
                         () -> c.createStatement().executeQuery("SELECT * FROM nowhere"));
                 assertEquals("42P01", e.getSQLState(), e.getMessage());
@@ -197,6 +236,7 @@ class ShadedJdbcDriverTest {
                     "net.fyrql.connector.json.JsonConnectorFactory",
                     "net.fyrql.connector.parquet.ParquetConnectorFactory",
                     "net.fyrql.connector.http.HttpConnectorFactory",
+                    "net.fyrql.connector.odata.ODataConnectorFactory",
                     "net.fyrql.connector.jdbc.JdbcConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),

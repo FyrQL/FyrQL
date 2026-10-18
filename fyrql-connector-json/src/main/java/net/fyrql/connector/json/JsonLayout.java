@@ -67,11 +67,22 @@ public final class JsonLayout {
      * as its type, a string cast to it.
      */
     public static JsonLayout of(Schema schema) {
+        return of(schema, null);
+    }
+
+    /**
+     * Returns the layout of objects with a given schema, as {@link #of(Schema)}
+     * does, except that a parser reads the strings, also those inside
+     * structs, lists and maps, in place of the cast to their type.
+     *
+     * @param parser reads the strings, or {@code null} to cast them
+     */
+    public static JsonLayout of(Schema schema, JsonStringParser parser) {
         List<String> keys = new ArrayList<>();
         List<JsonShape> shapes = new ArrayList<>();
         for (Schema.Field f : schema.fields()) {
             keys.add(f.name());
-            shapes.add(JsonShape.of(f.type()));
+            shapes.add(JsonShape.of(f.type(), parser));
         }
         return new JsonLayout(schema, true, keys, shapes, false, -1);
     }

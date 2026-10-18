@@ -10,8 +10,8 @@ provides a lightweight execution layer that implements three core design princip
    pipelines of filters, projections, and joins.
    Its query execution is verified by running all 22 TPC-H queries across federated sources.
  - **Polyglot Storage Abstraction**: FyrQL unifies heterogeneous data sources - including relational
-   databases (via JDBC), local files (CSV, JSON/gzip, Parquet), and live JSON HTTP endpoints into
-   a single logical mesh. It infers column types from data samples like DuckDB and handles
+   databases (via JDBC), local files (CSV, JSON/gzip, Parquet), live JSON HTTP endpoints, and
+   OData services (versions 2 and 4) into a single logical mesh. It infers column types from data samples like DuckDB and handles
    nested STRUCT, LIST, and MAP types natively, allowing cross-source subqueries and joins via
    the same SQL dialect that is used by [DuckDB](https://duckdb.org).
  - **Zero-ETL / In-Place Analytics**: FyrQL queries decentralized data directly at the source.
@@ -24,7 +24,7 @@ FyrQL is in an *early stage*. There are data types with nested `STRUCT`, `LIST` 
 columnar batches, a vectorized interpreter, code generation with Janino for expressions,
 keys and pipelines of filters, projections and joins, connectors for Java collections, CSV,
 JSON and Parquet files, JSON from HTTP
-endpoints and databases over JDBC, an optimizer that moves conditions toward the
+endpoints, OData services of versions 2 and 4 and databases over JDBC, an optimizer that moves conditions toward the
 tables, orders joins by the sizes of the tables and runs the joins of tables of one
 database in that database, a pushdown of filters, orders, limits and aggregations into
 the sources, an SQL front end with the names, types and forms of DuckDB, subqueries,
@@ -146,6 +146,22 @@ tables in the schema `main` unless it says otherwise.
   columns with a first request, which it keeps until `refresh()`. Every scan is a request
   of its own; nothing but the choice of columns and fields is pushed to the endpoint. A status other
   than 2xx is an `HttpSourceException` with the URL and the status.
+- `fyrql-connector-odata`: the entity sets of OData services of versions 2 and 4, in
+  JSON and read only. Each service is a schema and each entity set of it a table, with
+  the columns of its `$metadata`, which the connector reads when the service is first
+  used and keeps until `refresh()`. A scan is a query of its entity set that selects the
+  columns it reads with `$select`, in version 4 also fields of complex properties, and
+  reads the answer page after page over the links to the next page, only as far as the
+  engine asks for rows; a service that tells how many records there are and sends fewer
+  without a link to a next page is an error, not a part of the table. A service that
+  fails on a `$select` of complex or collection properties, as some do, is asked once
+  more without it. The connector logs in with HTTP Basic, a bearer token or OAuth 2.0
+  with the client credentials grant; an error of a service is an `ODataSourceException`
+  with the status and the message of the service, without credentials and the values of
+  headers. An `ODataProfile` adds query options and headers to every request, such as
+  the `sap-client` of SAP Gateway, and gives columns other types or leaves them out.
+  `$expand` and navigation properties, `$apply`, functions and actions, entity sets with
+  parameters, Atom, writing and client certificates are not supported.
 - `fyrql-connector-jdbc`: the tables of PostgreSQL, SQLite, H2 and MySQL. The default
   schema of the database is `main`, the others keep their names. A scan becomes one
   statement in the dialect of the database, which selects the columns the query needs
@@ -232,6 +248,43 @@ FyrQL gives it, so that the database neither overflows nor answers in a type of 
 SQLite has no such type and leaves sums to the engine. The connector of an application
 may take over the same in its own way through `Capabilities` in `fyrql-connector-spi`.
 
+An OData service gets the filters of a scan as a `$filter` that holds wherever they hold,
+and the engine evaluates them once more, since a service may compare strings without
+regard to case or ignore spaces at their end, which gives more rows but never fewer. A
+source with `trustFilters`, for all its services or for one, takes over the filters that
+have an exact counterpart; this is a promise about the service, which the connector does
+not check, and a query with `pushdown(false)` shows whether it holds:
+
+| An OData service gets | as a hint | taken over with `trustFilters` |
+| --- | --- | --- |
+| comparisons, `BETWEEN`, `IN`, `IS DISTINCT FROM` on integers, `DECIMAL`, `DATE`, `TIMESTAMP` | yes | yes |
+| `=`, `<>` on `BOOLEAN` and `UUID` | yes | yes |
+| `=`, `IN` and `LIKE 'a%'`, `'%a'`, `'%a%'` on `VARCHAR` | yes | no |
+| `IS NULL` on any column of a primitive type | yes | yes |
+| `<>`, `<`, `>` on `VARCHAR`; anything else on `FLOAT`, `DOUBLE`, `BLOB`, `STRUCT`, `LIST` | no | no |
+| `AND`, `OR`, `NOT` over the above | yes | yes |
+| arithmetic, functions, casts other than to a number type that holds every value | no | no |
+
+A part without counterpart drops out of an `AND` of a hint and leaves an `OR` without
+one. `NOT` moves inward and is never sent, since a comparison with `null` is false in
+OData rather than unknown. A literal is written as the version wants it, such as
+`datetime'2024-01-01T00:00:00'` and `12L` in version 2; one that the column cannot hold,
+such as `1.5` for an integer, turns a range into one of the values the column holds. A
+timestamp compares by ranges of the unit in which the service sends it, the millisecond
+in version 2 and the microsecond in version 4, unless its facet `Precision` says that
+the service holds no finer one. The order of a scan becomes `$orderby` when it is by
+numbers, dates and timestamps, the latter only as the last key unless the service holds
+no finer value, and its `NULL`s stand where OData puts them, first in an ascending and
+last in a descending order, which holds for an ascending order only on a column without
+`NULL`s or with `NULLS FIRST`; strings are never ordered by the service, whose collation
+is its own. The limit becomes `$top` when the filters and the order are all taken over,
+and `count(*)` without groups a request of `/$count`, with the filters as `$filter` when
+they are all taken over; `OFFSET` stays in the engine. In version 2, a scan that reads
+fields of a complex property reads the whole column, and nothing is filtered by its
+fields. What the `$metadata` forbids, by the vocabulary `Capabilities` of version 4 or
+the attributes `sap:filterable`, `sap:sortable`, `sap:pageable` and `sap:countable` of
+version 2, is not asked for.
+
 ## Optimizer
 
 Subqueries are joins by the time the optimizer sees the plan. The binder turns an
@@ -260,15 +313,16 @@ keeps the rows of the plan, and a second run changes nothing:
 3. Inner joins are ordered by their estimated sizes. The row counts of the tables come
    from the catalogs of the sources: exact for Java collections and Parquet files, from
    one `count(*)` per table for a database, estimated from the sample and the size of the
-   file for CSV and JSON, and 1,000 where a source does not know. A condition keeps a fixed share of the
+   file for CSV and JSON, from one request of `/$count` per entity set for an OData
+   service with `rowCounts`, and 1,000 where a source does not know. A condition keeps a fixed share of the
    rows, such as a tenth for `=` and 0.3 for `<`. Up to ten tables are ordered by
    dynamic programming over the connected subsets, more of them one join at a time; the
    smaller input of each join becomes its right one, on which the hash table is built.
    A semi or anti join above inner joins goes onto the table whose columns it reads,
    before that table is joined with the others.
 4. Every scan reads only the columns in use, and of a struct only the fields in use
-   where its source reads fields (Parquet and JSON files, HTTP endpoints and Java
-   collections);
+   where its source reads fields (Parquet and JSON files, HTTP endpoints, OData services
+   of version 4 and Java collections);
    `explain` shows such a field as `s.a VARCHAR`. A window function whose value is not
    used is not computed.
 5. The largest part of the plan that reads only tables of one database and holds a
@@ -366,13 +420,20 @@ sources:
       products: { url: "https://example.com/v1/products", pointer: /data }
     headers:
       Authorization: Bearer ${env:API_TOKEN}
+  - name: erp
+    type: odata
+    services:
+      sales: https://example.com/odata/v2/SalesService/
+      trips: { url: "https://example.com/odata/v4/TripService/", trustFilters: true }
+    user: ${env:ERP_USER}
+    password: ${env:ERP_PASSWORD}
 engine:
   defaultSource: shop
   pushdown: true
 ```
 
 The `type` of a source picks its connector, which must be on the class path: `csv`,
-`json`, `parquet`, `http` or `jdbc`; a connector of an application joins them through a
+`json`, `parquet`, `http`, `odata` or `jdbc`; a connector of an application joins them through a
 `ConnectorFactory` listed in `META-INF/services`. The other keys of a source are the
 options of its type, read as text with nested keys joined by dots (`tables.products.url`);
 an unknown or misspelled option is an error that lists the known ones. Relative paths
@@ -383,6 +444,18 @@ builder: `defaultSource`, `defaultSchema`, `batchSize`, `memoryBudget` (such as 
 `codegen` (`off`, `auto` or `always`), `codegenThreshold` and `pushdown`. A file whose
 name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` returns the builder
 instead, so that an application can add sources of its own, such as tables in memory.
+
+A source of the type `odata` names one service with `url`, whose schema is `main`, or
+several under `services`, each with its `url` and, if need be, `version` (`v2` or `v4`,
+which otherwise comes from its `$metadata`) and `trustFilters`. It logs in with `user`
+and `password`, with `token`, or with `oauth.tokenUrl`, `oauth.clientId`,
+`oauth.clientSecret` and optionally `oauth.scope` and `oauth.clientAuthentication`
+(`basic`, the default, or `post`). Its other options are `headers`, `timeout`, `pageSize`
+(the size of the pages a service of version 4 is asked for), `batchSize`, `trustFilters`
+and `rowCounts`, both `false` by default; with `rowCounts`, the catalog tells the
+optimizer the number of rows of each entity set by a request of `/$count`, which a tool
+that lists the tables, such as DBeaver through the JDBC driver, then sends for every
+entity set.
 
 ## JDBC driver
 
@@ -901,6 +974,12 @@ Known differences from DuckDB:
   checked for valid UTF-8, a `BSON` column is a `BLOB` that DuckDB does not read, and
   files compressed with `LZ4` (the older framing of Hadoop), `BROTLI` or `LZO` are an
   error that names the codec and the file.
+- Of an OData service, FyrQL reads the types it does not have as others: an
+  `Edm.Decimal` without a `Precision`, with one above 38 or with a `Scale` of `variable`
+  or `floating` as a `DOUBLE`, an `Edm.DateTimeOffset` as a `TIMESTAMP` with its instant
+  in UTC, an `Edm.Time`, `Edm.TimeOfDay` or `Edm.Duration` as a `VARCHAR` with the text
+  the service sends, and a member of an enumeration as a `VARCHAR` with its name.
+  `Edm.Stream`, the geographic types and navigation properties are no columns.
 - A select list unnests one list, which may appear in several items; DuckDB unnests
   several lists side by side. `unnest` in a `LEFT JOIN`, with named arguments such as
   `recursive := true`, and of a struct that only an aggregate gives are not taken.
@@ -934,6 +1013,7 @@ Known differences from DuckDB:
 | `fyrql-connector-json` | JSON files as tables, with the columns inferred as DuckDB infers them |
 | `fyrql-connector-parquet` | Parquet files as tables, read with parquet-java without Hadoop, which it carries renamed |
 | `fyrql-connector-http` | JSON from HTTP endpoints as tables |
+| `fyrql-connector-odata` | the entity sets of OData services of versions 2 and 4 as tables, with filters, orders, limits and `count(*)` pushed to the service |
 | `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
@@ -984,6 +1064,12 @@ A server of one's own takes the place of either with
 and `.user` and `.password` alike; the tests replace their tables in its database. The tests
 of the connectors run once more with `-Dfyrql.pushdown=off`, where every source only reads
 the columns a query needs, and must give the same results.
+
+The OData connector is tested against a server of its own, which answers as services of
+versions 2 and 4 do, also with the quirks of some of them: comparisons without regard to
+case, an ignored `$filter` or `$top`, answers cut short without a link to the next page,
+numbers as strings and a failing `$select` of complex properties. The build sends no
+request to a public service.
 
 The 22 TPC-H queries, in the text of the specification with its parameters of
 validation, run over the tables of TPC-H spread across the connectors: `lineitem` as a

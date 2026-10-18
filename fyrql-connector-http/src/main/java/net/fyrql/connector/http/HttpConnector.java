@@ -33,15 +33,9 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 
-import java.io.BufferedInputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.net.http.HttpTimeoutException;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -51,7 +45,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.zip.GZIPInputStream;
 
 /**
  * JSON that HTTP endpoints answer to a {@code GET}, as tables in the schema
@@ -81,17 +74,11 @@ import java.util.zip.GZIPInputStream;
 public final class HttpConnector implements Connector {
 
     /** The time to connect and to wait for the status of an answer, by default. */
-    public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
-
-    /** The most bytes of the body of an answer with an error status that its message shows. */
-    private static final int EXCERPT = 200;
+    public static final Duration DEFAULT_TIMEOUT = HttpTransport.DEFAULT_TIMEOUT;
 
     private final String name;
     private final Map<String, Table> tables;
-    private final Map<String, String> headers;
-    private final Duration timeout;
-    private final HttpClient client;
-    private final boolean ownsClient;
+    private final HttpTransport transport;
     private final JsonOptions options;
     private final int batchSize;
     private final Catalog catalog;
@@ -102,13 +89,10 @@ public final class HttpConnector implements Connector {
     private record Table(URI uri, String pointer, JsonLayout given) {
     }
 
-    private HttpConnector(Builder b, Map<String, Table> tables, HttpClient client, boolean ownsClient) {
+    private HttpConnector(Builder b, Map<String, Table> tables, HttpTransport transport) {
         this.name = b.name;
         this.tables = Collections.unmodifiableMap(new LinkedHashMap<>(tables));
-        this.headers = Collections.unmodifiableMap(new LinkedHashMap<>(b.headers));
-        this.timeout = b.timeout;
-        this.client = client;
-        this.ownsClient = ownsClient;
+        this.transport = transport;
         this.options = b.options;
         this.batchSize = b.batchSize;
         this.catalog = new Catalog() {
@@ -158,8 +142,11 @@ public final class HttpConnector implements Connector {
         if (t.given() != null) {
             return t.given();
         }
-        return inferred.computeIfAbsent(ref.table(), n -> JsonSchemaInference.infer(get(t.uri()).data(), options,
-                t.pointer(), t.uri().toString()));
+        return inferred.computeIfAbsent(ref.table(), n -> {
+            try (HttpTransport.Response response = get(t.uri())) {
+                return JsonSchemaInference.infer(response.body(), options, t.pointer(), t.uri().toString());
+            }
+        });
     }
 
     /** Forgets the inferred columns of every table, so that the next use infers them again. */
@@ -192,8 +179,8 @@ public final class HttpConnector implements Connector {
         TableRef ref = split.plan().table();
         Table t = table(ref);
         JsonLayout layout = layout(ref);
-        Body body = get(t.uri());
-        JsonRecordReader records = JsonRecordReader.open(body.data(), layout, split.plan().columns(), options,
+        HttpTransport.Response response = get(t.uri());
+        JsonRecordReader records = JsonRecordReader.open(response.body(), layout, split.plan().columns(), options,
                 t.pointer(), batchSize, t.uri().toString());
         return new BatchReader() {
             @Override
@@ -208,110 +195,24 @@ public final class HttpConnector implements Connector {
 
             @Override
             public void cancel() {
-                HttpConnector.close(body.raw());
+                response.abort();
             }
         };
     }
 
-    /** The body of an answer as it comes, and its data, uncompressed. */
-    private record Body(InputStream raw, InputStream data) {
-    }
-
     /**
-     * Sends a {@code GET} and returns the body of the answer.
+     * Sends a {@code GET} and returns the answer.
      *
      * @throws HttpSourceException if the status is not 2xx or there is no answer
      */
-    private Body get(URI uri) {
-        HttpRequest.Builder request = HttpRequest.newBuilder(uri).GET().timeout(timeout);
-        if (!hasHeader("Accept")) {
-            request.header("Accept", "application/json, application/x-ndjson;q=0.9, */*;q=0.1");
-        }
-        if (!hasHeader("Accept-Encoding")) {
-            request.header("Accept-Encoding", "gzip");
-        }
-        headers.forEach(request::header);
-        HttpResponse<InputStream> response;
-        try {
-            response = client.send(request.build(), HttpResponse.BodyHandlers.ofInputStream());
-        } catch (HttpTimeoutException e) {
-            throw new HttpSourceException("GET " + uri + " timed out after " + timeout.toMillis() + " ms", uri, -1, e);
-        } catch (IOException e) {
-            throw new HttpSourceException("GET " + uri + " failed: " + e, uri, -1, e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new HttpSourceException("GET " + uri + " was interrupted", uri, -1, e);
-        }
-        int status = response.statusCode();
-        String encoding = response.headers().firstValue("Content-Encoding").orElse("identity").strip()
-                .toLowerCase(Locale.ROOT);
-        if (!encoding.equals("identity") && !encoding.equals("gzip")) {
-            close(response.body());
-            throw new HttpSourceException("GET " + uri + " answered with the Content-Encoding " + encoding
-                    + ", of which only gzip is supported", uri, status, null);
-        }
-        InputStream body;
-        try {
-            body = uncompressed(response.body());
-        } catch (IOException e) {
-            close(response.body());
-            throw new HttpSourceException("GET " + uri + " answered with a body that cannot be read: " + e, uri,
-                    status, e);
-        }
-        if (status / 100 != 2) {
-            String excerpt = excerpt(body);
-            throw new HttpSourceException("GET " + uri + " answered with the status " + status
-                    + (excerpt.isEmpty() ? "" : ": " + excerpt), uri, status, null);
-        }
-        return new Body(response.body(), body);
-    }
-
-    private boolean hasHeader(String header) {
-        for (String h : headers.keySet()) {
-            if (h.equalsIgnoreCase(header)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Uncompresses a body that starts as gzip does, whatever its headers say. */
-    private static InputStream uncompressed(InputStream in) throws IOException {
-        BufferedInputStream buffered = new BufferedInputStream(in, 1 << 16);
-        buffered.mark(2);
-        int first = buffered.read();
-        int second = buffered.read();
-        buffered.reset();
-        return first == 0x1f && second == 0x8b ? new GZIPInputStream(buffered, 1 << 16) : buffered;
-    }
-
-    /** Returns the start of a body on one line, for a message, and closes it. */
-    private static String excerpt(InputStream body) {
-        try (body) {
-            byte[] bytes = body.readNBytes(EXCERPT + 1);
-            boolean more = bytes.length > EXCERPT;
-            String text = new String(bytes, 0, Math.min(bytes.length, EXCERPT), StandardCharsets.UTF_8);
-            text = text.replaceAll("[\\s\\p{Cntrl}]+", " ").strip();
-            return more && !text.isEmpty() ? text + " ..." : text;
-        } catch (IOException e) {
-            return "";
-        }
-    }
-
-    private static void close(InputStream in) {
-        try {
-            in.close();
-        } catch (IOException e) {
-            // Nothing more to do; the request has failed already.
-        }
+    private HttpTransport.Response get(URI uri) {
+        return transport.get(uri, Map.of());
     }
 
     /** Shuts the HTTP client down if the connector created it; a client that was given stays open. */
     @Override
     public void close() {
-        if (ownsClient) {
-            client.shutdown();
-        }
+        transport.close();
     }
 
     /** Collects the endpoints and settings of an HTTP connector. */
@@ -469,10 +370,13 @@ public final class HttpConnector implements Connector {
                 tables.put(e.getKey(), new Table(e.getValue(), pointers.getOrDefault(e.getKey(), ""),
                         schema == null ? null : JsonLayout.of(schema)));
             }
-            boolean owns = client == null;
-            HttpClient c = owns ? HttpClient.newBuilder().connectTimeout(timeout)
-                    .followRedirects(HttpClient.Redirect.NORMAL).build() : client;
-            return new HttpConnector(this, tables, c, owns);
+            HttpTransport.Builder transport = HttpTransport.builder()
+                    .accept("application/json, application/x-ndjson;q=0.9, */*;q=0.1").headers(headers)
+                    .timeout(timeout);
+            if (client != null) {
+                transport.client(client);
+            }
+            return new HttpConnector(this, tables, transport.build());
         }
     }
 }

@@ -41,6 +41,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Reads the records of JSON input in batches, streaming: only the columns
@@ -135,8 +136,39 @@ public final class JsonRecordReader implements BatchReader {
      */
     public static JsonRecordReader open(InputStream in, JsonLayout layout, List<ColumnPath> columns,
             JsonOptions options, String pointer, int batchSize, String source) {
-        return new JsonRecordReader(new JsonInput(in, options.format(), pointer, source), layout, columns, options,
-                batchSize);
+        return open(in, layout, columns, options, pointer, batchSize, source, Set.of());
+    }
+
+    /**
+     * Opens a reader of the records a JSON pointer points to, as
+     * {@link #open(InputStream, JsonLayout, List, JsonOptions, String, int, String)}
+     * does, that also keeps the scalar values of some keys next to the
+     * records, in the objects along the pointer, such as the number of all
+     * records and the link to the next page of
+     * {@code {"count": 2, "items": [...], "next": "..."}}; see
+     * {@link #siblings()}. To find the keys that follow the records, it
+     * reads the input to the end of the outermost object along the pointer.
+     *
+     * @param siblingKeys the keys whose values to keep
+     */
+    public static JsonRecordReader open(InputStream in, JsonLayout layout, List<ColumnPath> columns,
+            JsonOptions options, String pointer, int batchSize, String source, Set<String> siblingKeys) {
+        return new JsonRecordReader(new JsonInput(in, options.format(), pointer, source, siblingKeys), layout,
+                columns, options, batchSize);
+    }
+
+    /**
+     * Returns the values of the keys asked for when the reader was opened
+     * that the objects along the pointer hold next to the records, by key:
+     * the text of a string, a number as written, {@code true} or
+     * {@code false}; a key whose value is {@code null}, an object or an
+     * array is left out, and of a key that appears more than once, the
+     * first value is kept. The map is complete once {@link #next()} has
+     * returned {@code null}; before that, it holds the keys that precede
+     * the records.
+     */
+    public Map<String, String> siblings() {
+        return input.siblings();
     }
 
     /** Returns the columns that are read, in order. */
@@ -363,6 +395,13 @@ public final class JsonRecordReader implements BatchReader {
                                 + shape.kind().name());
                     }
                     return v;
+                }
+                if (shape.parser() != null) {
+                    try {
+                        return shape.parser().parse(s, type);
+                    } catch (RuntimeException e) {
+                        throw new ValueException("cannot read \"" + s + "\" as " + type + ": " + e.getMessage());
+                    }
                 }
                 if (type == DataType.VARCHAR) {
                     return s;
