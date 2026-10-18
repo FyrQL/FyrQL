@@ -21,6 +21,7 @@ import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.Split;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.TableRef;
@@ -32,7 +33,9 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -172,5 +175,36 @@ class MemoryConnectorTest {
                         Optional.empty()));
         assertEquals(List.of(), none.acceptedFilters());
         assertFalse(none.limitAccepted());
+    }
+
+    @Test
+    void aListWithRandomAccessHasASplitForEveryFewRows() {
+        Schema schema = Schema.of(new Schema.Field("n", DataType.INTEGER));
+        List<Object[]> rows = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            rows.add(new Object[] {i});
+        }
+        MemoryConnector c = MemoryConnector.builder("mem").table("t", schema, rows)
+                .table("linked", schema, new LinkedList<>(rows)).batchSize(3).splitRows(4).build();
+        ScanPlan plan = c.plan(TableRef.of("mem", "t"), ScanRequest.columns(List.of(0)));
+        List<Split> splits = c.splits(plan);
+        assertEquals(List.of(0, 1, 2), splits.stream().map(Split::index).toList());
+        assertEquals(List.of(List.of(0, 1, 2, 3), List.of(4, 5, 6, 7), List.of(8, 9)),
+                splits.stream().map(split -> values(c, split)).toList());
+
+        // The last split reads up to the end of the list, also of a longer one; a shorter one ends a split early.
+        rows.add(new Object[] {10});
+        assertEquals(List.of(8, 9, 10), values(c, splits.get(2)));
+        rows.subList(5, rows.size()).clear();
+        assertEquals(List.of(4), values(c, splits.get(1)));
+        assertEquals(List.of(), values(c, splits.get(2)));
+
+        assertEquals(1, c.splits(c.plan(TableRef.of("mem", "linked"), ScanRequest.columns(List.of(0)))).size());
+        MemoryConnector whole = MemoryConnector.builder("mem").table("t", schema, rows).build();
+        assertEquals(1, whole.splits(whole.plan(TableRef.of("mem", "t"), ScanRequest.columns(List.of(0)))).size());
+    }
+
+    private static List<Object> values(MemoryConnector c, Split split) {
+        return Batches.readAll(c.open(split)).stream().flatMap(b -> b.rows().stream()).map(r -> r[0]).toList();
     }
 }

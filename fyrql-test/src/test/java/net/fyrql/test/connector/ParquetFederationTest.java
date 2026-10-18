@@ -164,11 +164,12 @@ class ParquetFederationTest {
      * week, the limit delivers just its rows, and the products read only
      * the fields of {@code dims} in use; without pushdown, every row group
      * and every field is read, and the engine stops reading after the
-     * limit within the second row group.
+     * limit within the second row group. The engine runs on one thread,
+     * whose scans read no split ahead.
      */
     @Test
     void withPushdownTheOrdersSkipRowGroupsAndTheProductsReadOnlyTheFieldsInUse() {
-        try (FyrQL engine = engine(null)) {
+        try (FyrQL engine = builder(null).threads(1).build()) {
             int all = reads(engine, "SELECT * FROM orders").size();
             assertEquals(10, all, "the row groups of the orders");
             int week = reads(engine, QUERIES.get(1)).size();
@@ -199,6 +200,10 @@ class ParquetFederationTest {
     }
 
     private static FyrQL engine(Boolean pushdown) {
+        return builder(pushdown).build();
+    }
+
+    private static FyrQL.Builder builder(Boolean pushdown) {
         FyrQL.Builder b = FyrQL.builder()
                 .register(ParquetConnector.builder("parquet").path("orders", orders).path("products", products)
                         .recordReads(true).build())
@@ -207,7 +212,7 @@ class ParquetFederationTest {
         if (pushdown != null) {
             b.pushdown(pushdown);
         }
-        return b.build();
+        return b;
     }
 
     private static String path(Path p) {

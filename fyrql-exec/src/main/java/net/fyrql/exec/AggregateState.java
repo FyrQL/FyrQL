@@ -63,6 +63,15 @@ abstract class AggregateState {
     /** Accumulates the rows of a batch into their groups; there are {@code groups} groups so far. */
     abstract void add(Batch b, int[] groupOf, int rows, int groups);
 
+    /**
+     * Adds what a group of another state of the same aggregate holds to a
+     * group of this one, as if the rows of the other group came after those
+     * of this one; the other state stays as it is. Sums of {@code FLOAT}s
+     * and {@code DOUBLE}s add up in another order than row by row, and of
+     * equal values, {@code min} and {@code max} keep the one of this group.
+     */
+    abstract void combine(int group, AggregateState other, int otherGroup);
+
     /** Starts the results of a number of groups. */
     abstract void startResult(int groups);
 
@@ -224,6 +233,12 @@ abstract class AggregateState {
         }
 
         @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            counts = grow(counts, group + 1);
+            counts[group] += ((Count) other).counts[otherGroup];
+        }
+
+        @Override
         void startResult(int groups) {
             this.groups = groups;
             counts = grow(counts, groups);
@@ -328,6 +343,26 @@ abstract class AggregateState {
         }
 
         @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            ExactSum o = (ExactSum) other;
+            if (o.counts[otherGroup] == 0) {
+                return;
+            }
+            sums = grow(sums, group + 1);
+            counts = grow(counts, group + 1);
+            if (bigs != null) {
+                bigs = grow(bigs, group + 1);
+            }
+            counts[group] += o.counts[otherGroup];
+            BigInteger big = o.bigs == null ? null : o.bigs[otherGroup];
+            if (big != null) {
+                addBig(group, big);
+            } else {
+                add(group, o.sums[otherGroup]);
+            }
+        }
+
+        @Override
         void startResult(int groups) {
             sums = grow(sums, groups);
             counts = grow(counts, groups);
@@ -426,6 +461,18 @@ abstract class AggregateState {
         }
 
         @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            DoubleSum o = (DoubleSum) other;
+            if (o.counts[otherGroup] == 0) {
+                return;
+            }
+            sums = grow(sums, group + 1);
+            counts = grow(counts, group + 1);
+            sums[group] += o.sums[otherGroup];
+            counts[group] += o.counts[otherGroup];
+        }
+
+        @Override
         void startResult(int groups) {
             sums = grow(sums, groups);
             counts = grow(counts, groups);
@@ -489,6 +536,21 @@ abstract class AggregateState {
                     best[g] = x;
                     has[g] = true;
                 }
+            }
+        }
+
+        @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            LongExtreme o = (LongExtreme) other;
+            if (!o.has[otherGroup]) {
+                return;
+            }
+            best = grow(best, group + 1);
+            has = grow(has, group + 1);
+            long x = o.best[otherGroup];
+            if (!has[group] || (max ? x > best[group] : x < best[group])) {
+                best[group] = x;
+                has[group] = true;
             }
         }
 
@@ -590,6 +652,22 @@ abstract class AggregateState {
                         best[g] = x;
                     }
                 }
+            }
+        }
+
+        @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            DoubleExtreme o = (DoubleExtreme) other;
+            if (!o.has[otherGroup]) {
+                return;
+            }
+            best = grow(best, group + 1);
+            has = grow(has, group + 1);
+            double x = o.best[otherGroup];
+            int c = has[group] ? Vectors.compare(x, best[group]) : 0;
+            if (!has[group] || (max ? c > 0 : c < 0)) {
+                best[group] = x;
+                has[group] = true;
             }
         }
 

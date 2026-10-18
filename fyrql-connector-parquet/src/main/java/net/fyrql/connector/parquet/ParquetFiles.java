@@ -23,7 +23,6 @@ import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
-import org.apache.parquet.io.LocalInputFile;
 import org.apache.parquet.schema.MessageType;
 
 import java.io.IOException;
@@ -257,7 +256,7 @@ final class ParquetFiles {
     }
 
     private static ParquetMetadata read(Path file) {
-        try (ParquetFileReader reader = ParquetFileReader.open(new LocalInputFile(file), options())) {
+        try (ParquetFileReader reader = ParquetFileReader.open(new LocalFile(file), options())) {
             return reader.getFooter();
         } catch (IOException | RuntimeException e) {
             throw new IllegalArgumentException("Cannot read the Parquet file " + file + ": " + e.getMessage(), e);

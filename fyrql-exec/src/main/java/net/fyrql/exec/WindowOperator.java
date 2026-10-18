@@ -34,7 +34,10 @@ import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.IntStream;
 
 /**
  * Computes the calls of a {@link PlanNode.Window}: materializes the input,
@@ -60,6 +63,15 @@ import java.util.List;
  * frame one by one. Rows with the same frame as the row before share its
  * result.
  * <p>
+ * On more than one thread, the input is sorted on several threads, see
+ * {@link RowOrder#sort(Runnable, int)}, over a segment the workers keep its
+ * batches in the order of the morsels, see {@link Materialize}, and the
+ * partitions are computed in ranges of about equal numbers of rows, one
+ * task each, see {@link Workers#run}; each call writes the results of a
+ * partition to the places of its rows, so that they do not depend on the
+ * threads. A task computes its partitions in their order, the calls of
+ * each in theirs, so that the failure is the one of one thread.
+ * <p>
  * The budget takes the input, the results and the nodes of the trees.
  */
 final class WindowOperator extends AbstractOperator {
@@ -73,6 +85,8 @@ final class WindowOperator extends AbstractOperator {
     private static final long BYTES_PER_KEY = 32;
     private static final long BYTES_PER_INDEX = 8;
     private static final long BYTES_PER_NODE = 128;
+    /** The fewest rows of a range of partitions of its own, see {@link #ranges}. */
+    private static final int MIN_RANGE_ROWS = 4096;
 
     private final PlanNode.Window window;
     private final Operator input;
@@ -80,9 +94,9 @@ final class WindowOperator extends AbstractOperator {
     private final int batchSize;
     private final Schema inputSchema;
     private final boolean trees;
+    private final int threads;
     private List<Batch> output;
-    private long reserved;
-    private int steps;
+    private final AtomicLong reserved = new AtomicLong();
 
     // The sorted input and the peers of each of its rows, while the calls are computed.
     private Batch rows;
@@ -94,18 +108,17 @@ final class WindowOperator extends AbstractOperator {
     private int[] peerGroup;
     /** At the first row of a partition plus a number of peers, the first row of these peers. */
     private int[] groupRow;
-    /** The number of groups of peers of the current partition. */
-    private int groups;
-    /** The rows of the current partition whose order key is not {@code NULL}, for a range with an offset. */
-    private int keyFrom;
-    private int keyTo;
-    /** The frame of a row, see {@link #frame}: the pieces {@code [pieceFrom[i], pieceTo[i])}. */
-    private final int[] pieceFrom = new int[3];
-    private final int[] pieceTo = new int[3];
-    private int pieces;
 
     WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget, int batchSize) {
-        this(label, window, input, budget, batchSize, true);
+        this(label, window, input, budget, batchSize, 1);
+    }
+
+    /**
+     * @param threads the most threads that sort the input and compute the partitions
+     */
+    WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget, int batchSize,
+            int threads) {
+        this(label, window, input, budget, batchSize, true, threads);
     }
 
     /**
@@ -114,6 +127,11 @@ final class WindowOperator extends AbstractOperator {
      */
     WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget, int batchSize,
             boolean trees) {
+        this(label, window, input, budget, batchSize, trees, 1);
+    }
+
+    private WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget,
+            int batchSize, boolean trees, int threads) {
         super(label, window.schema());
         this.window = window;
         this.input = input;
@@ -121,6 +139,7 @@ final class WindowOperator extends AbstractOperator {
         this.batchSize = batchSize;
         this.inputSchema = window.input().schema();
         this.trees = trees;
+        this.threads = threads;
     }
 
     @Override
@@ -132,11 +151,7 @@ final class WindowOperator extends AbstractOperator {
     }
 
     private List<Batch> computeAll() {
-        List<Batch> batches = new ArrayList<>();
-        for (Batch b = input.next(); b != null; b = input.next()) {
-            reserve(Batches.estimateBytes(b));
-            batches.add(b);
-        }
+        List<Batch> batches = Materialize.read(input, label(), budget, reserved);
         if (batches.isEmpty()) {
             return new ArrayList<>();
         }
@@ -147,7 +162,7 @@ final class WindowOperator extends AbstractOperator {
             keys.add(SortKey.asc(c));
         }
         keys.addAll(window.order());
-        rows = all.select(new RowOrder(all, keys).sort(this::checkCancelled));
+        rows = all.select(new RowOrder(all, keys).sort(this::checkCancelled, threads));
         int n = rows.rowCount();
         reserve((BYTES_PER_ROW + BYTES_PER_RESULT * window.calls().size()) * n);
         peerStart = new int[n];
@@ -161,11 +176,130 @@ final class WindowOperator extends AbstractOperator {
         RowOrder partitions = new RowOrder(rows, keys.subList(0, window.partition().size()));
         RowOrder peers = new RowOrder(rows, window.order());
         Vector orderKey = window.order().size() == 1 ? rows.column(window.order().get(0).column()) : null;
-        for (int start = 0; start < n; ) {
-            int end = start + 1;
-            while (end < n && partitions.compare(end - 1, end) == 0) {
-                end++;
+        int[] starts = starts(partitions, n);
+        int[] ranges = ranges(starts, n);
+        Workers.run(ranges.length - 1, threads, t -> {
+            Partition p = new Partition();
+            for (int k = ranges[t]; k < ranges[t + 1]; k++) {
+                p.compute(starts[k], starts[k + 1], peers, orderKey, results);
             }
+        });
+        List<Vector> columns = new ArrayList<>(rows.columns());
+        for (Result r : results) {
+            columns.add(r.build());
+        }
+        Batch out = new Batch(schema(), n, columns);
+        rows = null;
+        peerStart = null;
+        peerEnd = null;
+        peerGroup = null;
+        groupRow = null;
+        return new ArrayList<>(Batches.split(out, batchSize));
+    }
+
+    /**
+     * Returns the first rows of the partitions of the sorted rows and, at
+     * the end, their number; on several threads, each finds the first rows
+     * within a range of the rows.
+     */
+    private int[] starts(RowOrder partitions, int n) {
+        int chunks = Math.max(1, Math.min(threads, n / MIN_RANGE_ROWS));
+        int[][] found = new int[chunks][];
+        int[] counts = new int[chunks];
+        Workers.run(chunks, threads, c -> {
+            int from = (int) ((long) n * c / chunks);
+            int to = (int) ((long) n * (c + 1) / chunks);
+            int[] own = new int[16];
+            int count = 0;
+            for (int r = Math.max(1, from); r < to; r++) {
+                if ((r & (CHECK_INTERVAL - 1)) == 0) {
+                    checkCancelled();
+                }
+                if (partitions.compare(r - 1, r) != 0) {
+                    if (count == own.length) {
+                        own = Arrays.copyOf(own, 2 * count);
+                    }
+                    own[count++] = r;
+                }
+            }
+            found[c] = own;
+            counts[c] = count;
+        });
+        int total = 0;
+        for (int count : counts) {
+            total += count;
+        }
+        int[] starts = new int[total + 2];
+        int k = 1;
+        for (int c = 0; c < chunks; c++) {
+            System.arraycopy(found[c], 0, starts, k, counts[c]);
+            k += counts[c];
+        }
+        starts[k] = n;
+        return starts;
+    }
+
+    /**
+     * Cuts the partitions into ranges of about equal numbers of rows, more
+     * of them than threads, so that a fast thread takes more; returns the
+     * first partition of each range and, at the end, the number of
+     * partitions. A partition is never cut.
+     */
+    private int[] ranges(int[] starts, int n) {
+        int partitions = starts.length - 1;
+        if (threads == 1) {
+            return new int[] {0, partitions};
+        }
+        long target = Math.max(MIN_RANGE_ROWS, n / (4L * threads));
+        IntStream.Builder ranges = IntStream.builder();
+        ranges.add(0);
+        int from = 0;
+        for (int k = 1; k < partitions; k++) {
+            if (starts[k] - starts[from] >= target) {
+                ranges.add(k);
+                from = k;
+            }
+        }
+        ranges.add(partitions);
+        return ranges.build().toArray();
+    }
+
+    private void reserve(long bytes) {
+        budget.reserve(bytes, label());
+        reserved.addAndGet(bytes);
+    }
+
+    /**
+     * What one thread knows of the partition it computes: its rows, the
+     * groups of peers, the frame of the current row, the frame of the row
+     * before for an aggregate, and the memory it holds.
+     */
+    private final class Partition {
+        private int start;
+        private int end;
+        /** The number of groups of peers of the partition. */
+        private int groups;
+        /** The rows of the partition whose order key is not {@code NULL}, for a range with an offset. */
+        private int keyFrom;
+        private int keyTo;
+        /** The frame of a row, see {@link #frame}: the pieces {@code [pieceFrom[i], pieceTo[i])}. */
+        private final int[] pieceFrom = new int[3];
+        private final int[] pieceTo = new int[3];
+        private int pieces;
+        /** The frame of the row before: the pieces as from and to, and their number, -1 for none. */
+        private final int[] lastPieces = new int[6];
+        private int lastCount;
+        private int steps;
+        /** The bytes this thread holds in the budget. */
+        private long held;
+
+        /**
+         * Finds the peers of the rows {@code [start, end)}, a partition, and
+         * computes the calls over them.
+         */
+        void compute(int start, int end, RowOrder peers, Vector orderKey, List<Result> results) {
+            this.start = start;
+            this.end = end;
             int group = 0;
             for (int i = start; i < end; group++) {
                 int j = i + 1;
@@ -184,36 +318,123 @@ final class WindowOperator extends AbstractOperator {
             keyFrom = orderKey != null && orderKey.isNull(start) ? peerEnd[start] : start;
             keyTo = orderKey != null && orderKey.isNull(end - 1) ? peerStart[end - 1] : end;
             for (Result r : results) {
-                r.partition(start, end);
+                r.partition(this);
             }
-            start = end;
         }
-        List<Vector> columns = new ArrayList<>(rows.columns());
-        for (Result r : results) {
-            columns.add(r.build());
+
+        void reserve(long bytes) {
+            WindowOperator.this.reserve(bytes);
+            held += bytes;
         }
-        Batch out = new Batch(schema(), n, columns);
-        rows = null;
-        peerStart = null;
-        peerEnd = null;
-        peerGroup = null;
-        groupRow = null;
-        return new ArrayList<>(Batches.split(out, batchSize));
+
+        void release(long bytes) {
+            budget.release(bytes);
+            reserved.addAndGet(-bytes);
+            held -= bytes;
+        }
+
+        /** Tells whether the frame differs from the one before, and remembers it. */
+        boolean changed() {
+            boolean same = pieces == lastCount;
+            for (int p = 0; same && p < pieces; p++) {
+                same = pieceFrom[p] == lastPieces[2 * p] && pieceTo[p] == lastPieces[2 * p + 1];
+            }
+            if (!same) {
+                lastCount = pieces;
+                for (int p = 0; p < pieces; p++) {
+                    lastPieces[2 * p] = pieceFrom[p];
+                    lastPieces[2 * p + 1] = pieceTo[p];
+                }
+            }
+            return !same;
+        }
+
+        /**
+         * Sets the pieces of the frame of a row of the partition: the rows
+         * from the start bound to the end bound, clamped to the partition,
+         * without the excluded rows.
+         */
+        void frame(Frame f, RangeBounds ranges, int row) {
+            long from = switch (f.start().kind()) {
+                case UNBOUNDED_PRECEDING -> start;
+                case CURRENT_ROW -> f.unit() == FrameUnit.ROWS ? row : peerStart[row];
+                case PRECEDING, FOLLOWING -> bound(f.unit(), f.start(), true, ranges, row);
+                case UNBOUNDED_FOLLOWING -> throw new IllegalStateException("A frame from " + f.start().kind());
+            };
+            long to = switch (f.end().kind()) {
+                case UNBOUNDED_PRECEDING -> throw new IllegalStateException("A frame to " + f.end().kind());
+                case CURRENT_ROW -> f.unit() == FrameUnit.ROWS ? row + 1 : peerEnd[row];
+                case PRECEDING, FOLLOWING -> bound(f.unit(), f.end(), false, ranges, row);
+                case UNBOUNDED_FOLLOWING -> end;
+            };
+            int a = Math.clamp(from, start, end);
+            int b = Math.max(a, Math.clamp(to, start, end));
+            pieces = 0;
+            switch (f.exclusion()) {
+                case NO_OTHERS -> piece(a, b);
+                case CURRENT_ROW -> {
+                    piece(a, Math.min(b, row));
+                    piece(Math.max(a, row + 1), b);
+                }
+                case GROUP -> {
+                    piece(a, Math.min(b, peerStart[row]));
+                    piece(Math.max(a, peerEnd[row]), b);
+                }
+                case TIES -> {
+                    piece(a, Math.min(b, peerStart[row]));
+                    piece(Math.max(a, row), Math.min(b, row + 1));
+                    piece(Math.max(a, peerEnd[row]), b);
+                }
+            }
+        }
+
+        private void piece(int from, int to) {
+            if (from < to) {
+                pieceFrom[pieces] = from;
+                pieceTo[pieces++] = to;
+            }
+        }
+
+        /**
+         * Returns the row where a bound with an offset starts the frame of a
+         * row of the partition, or the row after the end of the frame; it
+         * may lie outside the partition.
+         */
+        private long bound(FrameUnit unit, FrameBound b, boolean starts, RangeBounds ranges, int row) {
+            boolean preceding = b.kind() == BoundKind.PRECEDING;
+            return switch (unit) {
+                case ROWS -> {
+                    long n = offset(b);
+                    long r = preceding ? subtract(row, n) : add(row, n);
+                    yield starts ? r : add(r, 1);
+                }
+                case GROUPS -> {
+                    long n = offset(b);
+                    if (n < 0) {
+                        throw new ArithmeticException("Invalid GROUPS " + b.kind().keywords() + " value");
+                    }
+                    long g = preceding ? peerGroup[row] - n : add(peerGroup[row], n);
+                    if (g < 0) {
+                        yield start;
+                    }
+                    if (g >= groups) {
+                        yield end;
+                    }
+                    yield starts ? groupRow[start + (int) g] : g + 1 < groups ? groupRow[start + (int) g + 1] : end;
+                }
+                case RANGE -> {
+                    if (ranges.isNull(row)) {
+                        yield starts ? peerStart[row] : peerEnd[row];
+                    }
+                    yield starts ? ranges.start(row, keyFrom, keyTo) : ranges.end(row, keyFrom, keyTo);
+                }
+            };
+        }
     }
 
-    private void reserve(long bytes) {
-        budget.reserve(bytes, label());
-        reserved += bytes;
-    }
-
-    private void release(long bytes) {
-        budget.release(bytes);
-        reserved -= bytes;
-    }
-
-    /** Counts a step of a long loop and checks for a canceled query now and then. */
-    private void step() {
-        if ((++steps & (CHECK_INTERVAL - 1)) == 0) {
+    /** Counts a step of a long loop of a partition and checks for a canceled query now and then. */
+    private void step(Partition p) {
+        if ((++p.steps & (CHECK_INTERVAL - 1)) == 0) {
             checkCancelled();
         }
     }
@@ -227,7 +448,7 @@ final class WindowOperator extends AbstractOperator {
         };
     }
 
-    /** The results of a call, appended partition by partition. */
+    /** The results of a call, in the places of the rows, partition by partition. */
     private abstract class Result {
         final WindowCall call;
         /** The bounds of a range with an offset, or {@code null}. */
@@ -245,13 +466,16 @@ final class WindowOperator extends AbstractOperator {
             }
         }
 
-        /** Sets the frame of a row of the partition {@code [start, end)}. */
-        void frame(int row, int start, int end) {
-            WindowOperator.this.frame(call.frame(), ranges, row, start, end);
+        /** Sets the frame of a row of a partition. */
+        void frame(Partition p, int row) {
+            p.frame(call.frame(), ranges, row);
         }
 
-        /** Computes the results of the rows {@code [start, end)}, a partition. */
-        abstract void partition(int start, int end);
+        /**
+         * Computes the results of the rows of a partition; the partitions
+         * may come in any order, each on one thread.
+         */
+        abstract void partition(Partition p);
 
         /** Returns the results of all rows. */
         abstract Vector build();
@@ -269,10 +493,12 @@ final class WindowOperator extends AbstractOperator {
         }
 
         @Override
-        void partition(int start, int end) {
+        void partition(Partition p) {
+            int start = p.start;
+            int end = p.end;
             Vector buckets = call.function() == WindowFunction.NTILE ? rows.column(call.arguments().get(0)) : null;
             for (int i = start; i < end; i++) {
-                step();
+                step(p);
                 values[i] = switch (call.function()) {
                     case ROW_NUMBER -> i - start + 1;
                     case RANK -> peerStart[i] - start + 1;
@@ -319,10 +545,12 @@ final class WindowOperator extends AbstractOperator {
         }
 
         @Override
-        void partition(int start, int end) {
+        void partition(Partition p) {
+            int start = p.start;
+            int end = p.end;
             double rowCount = end - start;
             for (int i = start; i < end; i++) {
-                step();
+                step(p);
                 values[i] = call.function() == WindowFunction.PERCENT_RANK
                         ? rowCount > 1 ? (peerStart[i] - start) / (rowCount - 1) : 0
                         : (peerEnd[i] - start) / rowCount;
@@ -351,7 +579,8 @@ final class WindowOperator extends AbstractOperator {
         private final int[] counts;
         /** With {@code IGNORE NULLS}, the rows whose value is not {@code NULL}, in their order. */
         private final int[] present;
-        private boolean defaults;
+        /** Whether a row takes the default; set by the threads of the partitions, read after them. */
+        private volatile boolean defaults;
 
         Picks(WindowCall call, int n) {
             super(call);
@@ -376,27 +605,27 @@ final class WindowOperator extends AbstractOperator {
         }
 
         @Override
-        void partition(int start, int end) {
+        void partition(Partition p) {
             Vector second = call.arguments().size() > 1 ? rows.column(call.arguments().get(1)) : null;
-            for (int i = start; i < end; i++) {
-                step();
+            for (int i = p.start; i < p.end; i++) {
+                step(p);
                 sources[i] = switch (call.function()) {
-                    case LAG, LEAD -> shifted(i, start, end, second);
+                    case LAG, LEAD -> shifted(i, p.start, p.end, second);
                     case FIRST_VALUE -> {
-                        frame(i, start, end);
-                        yield nth(1);
+                        frame(p, i);
+                        yield nth(p, 1);
                     }
                     case LAST_VALUE -> {
-                        frame(i, start, end);
-                        yield last();
+                        frame(p, i);
+                        yield last(p);
                     }
                     default -> {
                         long position = second.isNull(i) ? 0 : ((Number) second.get(i)).longValue();
                         if (position < 1) {
                             yield NONE;
                         }
-                        frame(i, start, end);
-                        yield nth(position);
+                        frame(p, i);
+                        yield nth(p, position);
                     }
                 };
             }
@@ -425,15 +654,17 @@ final class WindowOperator extends AbstractOperator {
                 }
             }
             boolean fallback = call.arguments().size() > 2;
-            defaults |= fallback;
+            if (fallback) {
+                defaults = true;
+            }
             return fallback ? DEFAULT : NONE;
         }
 
         /** Returns the row of the n-th row of the frame, from 1, or {@link #NONE}. */
-        private int nth(long n) {
-            for (int p = 0; p < pieces; p++) {
-                int from = pieceFrom[p];
-                int to = pieceTo[p];
+        private int nth(Partition f, long n) {
+            for (int p = 0; p < f.pieces; p++) {
+                int from = f.pieceFrom[p];
+                int to = f.pieceTo[p];
                 long count = counts == null ? to - from : counts[to] - counts[from];
                 if (n <= count) {
                     return counts == null ? from + (int) n - 1 : present[counts[from] + (int) n - 1];
@@ -444,10 +675,10 @@ final class WindowOperator extends AbstractOperator {
         }
 
         /** Returns the last row of the frame, or {@link #NONE}. */
-        private int last() {
-            for (int p = pieces - 1; p >= 0; p--) {
-                int from = pieceFrom[p];
-                int to = pieceTo[p];
+        private int last(Partition f) {
+            for (int p = f.pieces - 1; p >= 0; p--) {
+                int from = f.pieceFrom[p];
+                int to = f.pieceTo[p];
                 if (counts == null ? from < to : counts[from] < counts[to]) {
                     return counts == null ? to - 1 : present[counts[to] - 1];
                 }
@@ -473,168 +704,77 @@ final class WindowOperator extends AbstractOperator {
 
     /** An aggregate over the frame of each row. */
     private final class Aggregates extends Result {
-        private final Vector.Builder out;
+        private final Object[] values;
         private final boolean mergeable;
         private final Vector filter;
-        /** The frame of the row before: the pieces as from and to, and their number, -1 for none. */
-        private final int[] lastPieces = new int[6];
-        private int lastCount;
 
         Aggregates(WindowCall call, int n) {
             super(call);
-            this.out = Vectors.builder(call.type(inputSchema), n);
+            this.values = new Object[n];
             this.mergeable = trees && ValueAccumulator.mergeable(call.aggregate());
             this.filter = call.filter() >= 0 ? rows.column(call.filter()) : null;
         }
 
         @Override
-        void partition(int start, int end) {
+        void partition(Partition f) {
+            int start = f.start;
+            int end = f.end;
             SegmentTree tree = null;
+            // One accumulator for the frames of the partition, emptied for each.
+            ValueAccumulator frame = null;
             long treeBytes = 0;
-            lastCount = -1;
+            f.lastCount = -1;
             Object last = null;
             for (int i = start; i < end; i++) {
-                step();
-                frame(i, start, end);
-                if (changed()) {
-                    ValueAccumulator acc = empty();
+                step(f);
+                frame(f, i);
+                if (f.changed()) {
                     if (mergeable) {
                         if (tree == null) {
-                            tree = new SegmentTree(rows, start, end, filter, this::empty);
+                            tree = new SegmentTree(rows, start, end, filter, () -> empty(f));
                             treeBytes = BYTES_PER_NODE * tree.nodes();
-                            reserve(treeBytes);
+                            f.reserve(treeBytes);
+                            frame = empty(f);
+                        } else {
+                            frame.reset();
                         }
-                        for (int p = 0; p < pieces; p++) {
-                            tree.aggregate(acc, pieceFrom[p], pieceTo[p]);
+                        for (int p = 0; p < f.pieces; p++) {
+                            tree.aggregate(frame, f.pieceFrom[p], f.pieceTo[p]);
                         }
-                        last = acc.result();
+                        last = frame.result();
                     } else {
+                        ValueAccumulator acc = empty(f);
                         // The values the accumulator keeps are gone with it.
-                        long held = reserved;
-                        for (int p = 0; p < pieces; p++) {
-                            for (int r = pieceFrom[p]; r < pieceTo[p]; r++) {
-                                step();
+                        long held = f.held;
+                        for (int p = 0; p < f.pieces; p++) {
+                            for (int r = f.pieceFrom[p]; r < f.pieceTo[p]; r++) {
+                                step(f);
                                 if (SegmentTree.takes(filter, r)) {
                                     acc.add(rows, r);
                                 }
                             }
                         }
                         last = acc.result();
-                        release(reserved - held);
+                        f.release(f.held - held);
                     }
                 }
-                out.append(last);
+                values[i] = last;
             }
-            release(treeBytes);
+            f.release(treeBytes);
         }
 
-        /** Tells whether the frame differs from the one before, and remembers it. */
-        private boolean changed() {
-            boolean same = pieces == lastCount;
-            for (int p = 0; same && p < pieces; p++) {
-                same = pieceFrom[p] == lastPieces[2 * p] && pieceTo[p] == lastPieces[2 * p + 1];
-            }
-            if (!same) {
-                lastCount = pieces;
-                for (int p = 0; p < pieces; p++) {
-                    lastPieces[2 * p] = pieceFrom[p];
-                    lastPieces[2 * p + 1] = pieceTo[p];
-                }
-            }
-            return !same;
-        }
-
-        private ValueAccumulator empty() {
-            return new ValueAccumulator(call.aggregate(), inputSchema, WindowOperator.this::reserve);
+        private ValueAccumulator empty(Partition f) {
+            return new ValueAccumulator(call.aggregate(), inputSchema, f::reserve);
         }
 
         @Override
         Vector build() {
+            Vector.Builder out = Vectors.builder(call.type(inputSchema), values.length);
+            for (Object v : values) {
+                out.append(v);
+            }
             return out.build();
         }
-    }
-
-    /**
-     * Sets the pieces of the frame of a row of the partition
-     * {@code [start, end)}: the rows from the start bound to the end bound,
-     * clamped to the partition, without the excluded rows.
-     */
-    private void frame(Frame f, RangeBounds ranges, int row, int start, int end) {
-        long from = switch (f.start().kind()) {
-            case UNBOUNDED_PRECEDING -> start;
-            case CURRENT_ROW -> f.unit() == FrameUnit.ROWS ? row : peerStart[row];
-            case PRECEDING, FOLLOWING -> bound(f.unit(), f.start(), true, ranges, row, start, end);
-            case UNBOUNDED_FOLLOWING -> throw new IllegalStateException("A frame from " + f.start().kind());
-        };
-        long to = switch (f.end().kind()) {
-            case UNBOUNDED_PRECEDING -> throw new IllegalStateException("A frame to " + f.end().kind());
-            case CURRENT_ROW -> f.unit() == FrameUnit.ROWS ? row + 1 : peerEnd[row];
-            case PRECEDING, FOLLOWING -> bound(f.unit(), f.end(), false, ranges, row, start, end);
-            case UNBOUNDED_FOLLOWING -> end;
-        };
-        int a = Math.clamp(from, start, end);
-        int b = Math.max(a, Math.clamp(to, start, end));
-        pieces = 0;
-        switch (f.exclusion()) {
-            case NO_OTHERS -> piece(a, b);
-            case CURRENT_ROW -> {
-                piece(a, Math.min(b, row));
-                piece(Math.max(a, row + 1), b);
-            }
-            case GROUP -> {
-                piece(a, Math.min(b, peerStart[row]));
-                piece(Math.max(a, peerEnd[row]), b);
-            }
-            case TIES -> {
-                piece(a, Math.min(b, peerStart[row]));
-                piece(Math.max(a, row), Math.min(b, row + 1));
-                piece(Math.max(a, peerEnd[row]), b);
-            }
-        }
-    }
-
-    private void piece(int from, int to) {
-        if (from < to) {
-            pieceFrom[pieces] = from;
-            pieceTo[pieces++] = to;
-        }
-    }
-
-    /**
-     * Returns the row where a bound with an offset starts the frame of a
-     * row of the partition {@code [start, end)}, or the row after the end of
-     * the frame; it may lie outside the partition.
-     */
-    private long bound(FrameUnit unit, FrameBound b, boolean starts, RangeBounds ranges, int row, int start,
-            int end) {
-        boolean preceding = b.kind() == BoundKind.PRECEDING;
-        return switch (unit) {
-            case ROWS -> {
-                long n = offset(b);
-                long r = preceding ? subtract(row, n) : add(row, n);
-                yield starts ? r : add(r, 1);
-            }
-            case GROUPS -> {
-                long n = offset(b);
-                if (n < 0) {
-                    throw new ArithmeticException("Invalid GROUPS " + b.kind().keywords() + " value");
-                }
-                long g = preceding ? peerGroup[row] - n : add(peerGroup[row], n);
-                if (g < 0) {
-                    yield start;
-                }
-                if (g >= groups) {
-                    yield end;
-                }
-                yield starts ? groupRow[start + (int) g] : g + 1 < groups ? groupRow[start + (int) g + 1] : end;
-            }
-            case RANGE -> {
-                if (ranges.isNull(row)) {
-                    yield starts ? peerStart[row] : peerEnd[row];
-                }
-                yield starts ? ranges.start(row, keyFrom, keyTo) : ranges.end(row, keyFrom, keyTo);
-            }
-        };
     }
 
     /** Returns the offset of a bound of {@code ROWS} or {@code GROUPS}, a number of rows or groups. */
@@ -657,7 +797,6 @@ final class WindowOperator extends AbstractOperator {
     @Override
     public void close() {
         input.close();
-        budget.release(reserved);
-        reserved = 0;
+        budget.release(reserved.getAndSet(0));
     }
 }

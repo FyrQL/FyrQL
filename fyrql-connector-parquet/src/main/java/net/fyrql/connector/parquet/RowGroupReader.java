@@ -39,7 +39,6 @@ import org.apache.parquet.filter2.predicate.FilterPredicate;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.io.InputFile;
-import org.apache.parquet.io.LocalInputFile;
 import org.apache.parquet.io.RecordReader;
 import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.io.api.Converter;
@@ -166,7 +165,7 @@ final class RowGroupReader implements BatchReader {
             throw new IllegalArgumentException("The Parquet file " + file + " changed since its footer was read");
         }
         read = requested.getColumns().stream().map(d -> String.join(".", d.getPath())).toList();
-        InputFile input = new LocalInputFile(file);
+        InputFile input = new LocalFile(file);
         try (ParquetFileReader reader = new ParquetFileReader(input, footer.metadata(), predicate == null
                 ? ParquetFiles.options() : ParquetFiles.options(FilterCompat.get(predicate), false),
                 input.newStream())) {

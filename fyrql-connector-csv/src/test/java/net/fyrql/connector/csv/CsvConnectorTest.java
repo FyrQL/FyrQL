@@ -20,6 +20,7 @@ import net.fyrql.connector.Batches;
 import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.Split;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -30,6 +31,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,6 +41,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Random;
 import java.util.ServiceLoader;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -302,21 +305,141 @@ class CsvConnectorTest {
         ConnectorFactory factory = ServiceLoader.load(ConnectorFactory.class).stream()
                 .map(ServiceLoader.Provider::get).filter(f -> f.type().equals("csv")).findFirst().orElseThrow();
         CsvConnector c = (CsvConnector) factory.create("files", Map.of("directory", "data", "tables.b", "b.txt",
-                "tables.c.file", "c.txt", "delimiter", ";", "nullString", "n/a", "sampleRows", "10"), dir);
+                "tables.c.file", "c.txt", "delimiter", ";", "nullString", "n/a", "sampleRows", "10", "batchSize", "1",
+                "splitSize", "4B"), dir);
         assertEquals(List.of("a", "b", "c"), c.catalog().tables("main"));
-        assertEquals(List.of(Arrays.asList(1L, null)), rows(c, "a"));
-        assertEquals(List.of(List.of(1L, 2L), List.of(3L, 4L)), rows(c, "b"));
-        assertEquals(List.of(List.of(5L, 6L), List.of(7L, 8L)), rows(c, "c"));
+        assertEquals(2, c.splits(plan(c, "b", 0, 1)).size());
+        assertEquals(List.of(Arrays.asList(1L, null)), rowsOfSplits(c, "a", 0, 1));
+        assertEquals(List.of(List.of(1L, 2L), List.of(3L, 4L)), rowsOfSplits(c, "b", 0, 1));
+        assertEquals(List.of(List.of(5L, 6L), List.of(7L, 8L)), rowsOfSplits(c, "c", 0, 1));
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> factory.create("files", Map.of("delimter", ";"), dir));
         assertTrue(e.getMessage().startsWith("The CSV source files has an unknown option delimter; known are"),
                 e.getMessage());
         e = assertThrows(IllegalArgumentException.class, () -> factory.create("files", Map.of("delimiter", ";;"), dir));
         assertEquals("The option delimiter of the CSV source files must be one character: ;;", e.getMessage());
+        e = assertThrows(IllegalArgumentException.class, () -> factory.create("files", Map.of("splitSize", "lots"), dir));
+        assertTrue(e.getMessage().startsWith("The option splitSize of the CSV source files must be a number of bytes"),
+                e.getMessage());
         e = assertThrows(IllegalArgumentException.class,
                 () -> factory.create("files", Map.of("tables.b.url", "b.txt"), dir));
         assertEquals("The table b of the CSV source files has an unknown attribute url; known are file",
                 e.getMessage());
+    }
+
+    @Test
+    void aLargerFileIsReadInPartsThatGiveWhatTheWholeFileGives() throws IOException {
+        Random random = new Random(20261018);
+        StringBuilder csv = new StringBuilder("\uFEFFid,text,x\n");
+        for (int r = 0; r < 3000; r++) {
+            csv.append(r).append(',').append(field(random)).append(',')
+                    .append(random.nextInt(5) == 0 ? "" : String.valueOf(random.nextDouble()))
+                    .append(random.nextBoolean() ? "\n" : "\r\n");
+            if (random.nextInt(20) == 0) {
+                csv.append('\n');
+            }
+        }
+        Path file = dir.resolve("big.csv");
+        Files.writeString(file, csv, StandardCharsets.UTF_8);
+        CsvConnector whole = CsvConnector.builder("csv").file("big", file).splitSize(0).batchSize(64).build();
+        assertEquals(1, whole.splits(plan(whole, "big", 0, 1, 2)).size());
+        List<List<Object>> expected = rowsOfSplits(whole, "big", 0, 1, 2);
+        assertEquals(3000, expected.size());
+        assertEquals(List.of(DataType.BIGINT, DataType.VARCHAR, DataType.DOUBLE),
+                whole.catalog().schema(TableRef.of("csv", "big")).types());
+        List<List<Object>> backwards = rowsOfSplits(whole, "big", 2, 0);
+        for (long splitSize : new long[] {1, 1000, 10_000, Files.size(file) / 3}) {
+            for (int batchSize : new int[] {1, 7, 64}) {
+                CsvConnector parts = CsvConnector.builder("csv").file("big", file).splitSize(splitSize)
+                        .batchSize(batchSize).build();
+                assertTrue(parts.splits(plan(parts, "big", 0, 1, 2)).size() > 1, splitSize + "/" + batchSize);
+                assertEquals(expected, rowsOfSplits(parts, "big", 0, 1, 2), splitSize + "/" + batchSize);
+                assertEquals(backwards, rowsOfSplits(parts, "big", 2, 0), splitSize + "/" + batchSize);
+            }
+        }
+        CsvConnector small = CsvConnector.builder("csv").file("big", file).splitSize(Files.size(file)).build();
+        assertEquals(1, small.splits(plan(small, "big", 0)).size());
+
+        // A changed file is indexed again.
+        CsvConnector parts = CsvConnector.builder("csv").file("big", file).splitSize(1000).batchSize(16).build();
+        assertEquals(expected, rowsOfSplits(parts, "big", 0, 1, 2));
+        Files.writeString(file, "id,text,x\n" + "1,a,0.5\n".repeat(500) + "2,b,1.5\n", StandardCharsets.UTF_8);
+        List<List<Object>> changed = rowsOfSplits(parts, "big", 0, 1, 2);
+        assertEquals(501, changed.size());
+        assertEquals(List.of(2L, "b", 1.5), changed.get(500));
+    }
+
+    /** A field of a random kind: plain, quoted with a delimiter, quotes or line breaks, or not ASCII. */
+    private static String field(Random random) {
+        return switch (random.nextInt(6)) {
+            case 0 -> "plain" + random.nextInt(100);
+            case 1 -> "\"a, b\"";
+            case 2 -> "\"say \"\"hi\"\"\"";
+            case 3 -> "\"line one\nline two\"";
+            case 4 -> "\"crlf\r\n,\"\"x\"\"\r\n\"";
+            default -> "\u00e4\u00f6\u00fc \u20ac";
+        };
+    }
+
+    @Test
+    void anErrorInAPartNamesTheLineThatReadingTheWholeFileNames() throws IOException {
+        for (String bad : List.of("x,\"y\"", "1,\"y\"z", "1,y,3")) {
+            StringBuilder csv = new StringBuilder("a,b\n");
+            for (int r = 0; r < 600; r++) {
+                csv.append(r == 450 ? bad : r + ",\"two\nlines\"").append('\n');
+            }
+            Path file = dir.resolve("bad.csv");
+            Files.writeString(file, csv, StandardCharsets.UTF_8);
+            Schema schema = Schema.of(new Schema.Field("a", DataType.INTEGER), new Schema.Field("b", DataType.VARCHAR));
+            CsvConnector whole = CsvConnector.builder("csv").file("t", file).schema("t", schema).sampleRows(10)
+                    .splitSize(0).build();
+            CsvConnector parts = CsvConnector.builder("csv").file("t", file).schema("t", schema).sampleRows(10)
+                    .splitSize(256).batchSize(8).build();
+            assertTrue(parts.splits(plan(parts, "t", 0, 1)).size() > 1);
+            String expected = assertThrows(RuntimeException.class, () -> rowsOfSplits(whole, "t", 0, 1)).getMessage();
+            assertTrue(expected.contains("line 902") || expected.startsWith("Line 902 of"), expected);
+            RuntimeException e = assertThrows(RuntimeException.class, () -> rowsOfSplits(parts, "t", 0, 1));
+            assertEquals(expected, e.getMessage());
+        }
+    }
+
+    @Test
+    void aFileInACharsetThatTheIndexCannotReadByItsBytesIsOneSplit() throws IOException {
+        StringBuilder csv = new StringBuilder("a,b\n");
+        for (int r = 0; r < 500; r++) {
+            csv.append(r).append(",\u00e4").append(r).append('\n');
+        }
+        for (Charset charset : List.of(StandardCharsets.UTF_16, StandardCharsets.ISO_8859_1)) {
+            Path file = dir.resolve("charset.csv");
+            Files.writeString(file, csv, charset);
+            CsvConnector whole = CsvConnector.builder("csv").charset(charset).file("t", file).splitSize(0).build();
+            CsvConnector parts = CsvConnector.builder("csv").charset(charset).file("t", file).splitSize(100)
+                    .batchSize(16).build();
+            List<List<Object>> expected = rowsOfSplits(whole, "t", 0, 1);
+            assertEquals(500, expected.size());
+            assertEquals(List.of(499L, "\u00e4499"), expected.get(499), charset.name());
+            int splits = parts.splits(plan(parts, "t", 0, 1)).size();
+            assertTrue(charset == StandardCharsets.UTF_16 ? splits == 1 : splits > 1, charset + ": " + splits);
+            assertEquals(expected, rowsOfSplits(parts, "t", 0, 1));
+        }
+    }
+
+    private static ScanPlan plan(CsvConnector c, String table, Integer... columns) {
+        return c.plan(TableRef.of(c.name(), table), ScanRequest.columns(List.of(columns)));
+    }
+
+    /** Reads columns of a table from each of its splits in turn. */
+    private static List<List<Object>> rowsOfSplits(CsvConnector c, String table, Integer... columns) {
+        ScanPlan plan = plan(c, table, columns);
+        List<List<Object>> rows = new ArrayList<>();
+        for (Split split : c.splits(plan)) {
+            for (Batch b : Batches.readAll(c.open(split))) {
+                for (int r = 0; r < b.rowCount(); r++) {
+                    rows.add(Arrays.asList(b.row(r)));
+                }
+            }
+        }
+        return rows;
     }
 
     private static List<List<Object>> rows(CsvConnector c, String table) {

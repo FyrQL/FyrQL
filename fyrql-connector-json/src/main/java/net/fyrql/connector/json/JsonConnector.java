@@ -33,10 +33,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -60,7 +63,9 @@ import java.util.zip.GZIPInputStream;
  * {@link JsonSchemaInference}, unless a schema is given; objects and arrays
  * become {@code STRUCT}, {@code MAP} and {@code LIST} values. A scan reads
  * the file as a stream and skips the values of the columns it does not
- * need; see {@link JsonRecordReader} for how values are read.
+ * need; see {@link JsonRecordReader} for how values are read. A file of
+ * records larger than the split size is read in parts of about that size,
+ * which the engine reads on several threads, see {@link #splits}.
  * <p>
  * The connector also offers the table functions {@code read_json},
  * {@code read_json_auto}, {@code read_ndjson} and {@code read_ndjson_auto}
@@ -68,6 +73,12 @@ import java.util.zip.GZIPInputStream;
  * {@link #bind}.
  */
 public final class JsonConnector implements Connector, TableFunctionProvider {
+
+    /** The split size by default, see {@link Builder#splitSize}. */
+    public static final long SPLIT_SIZE = 4L << 20;
+
+    /** How far at least the start of a part is looked for, see {@link #splits}. */
+    private static final long SEARCH = 1L << 20;
 
     private static final List<String> TABLE_FUNCTIONS = List.of("read_json", "read_json_auto", "read_ndjson",
             "read_ndjson_auto");
@@ -82,6 +93,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider {
     private final Map<String, Table> tables;
     private final JsonOptions options;
     private final int batchSize;
+    private final long splitSize;
     private final Catalog catalog;
     /** The tables of table function calls by their names, and the names by the calls. */
     private final Map<String, Table> callTables = new ConcurrentHashMap<>();
@@ -98,11 +110,17 @@ public final class JsonConnector implements Connector, TableFunctionProvider {
     private record Call(Path file, FileTime modified, long size, JsonOptions options) {
     }
 
-    private JsonConnector(String name, Map<String, Table> tables, JsonOptions options, int batchSize) {
+    /** The bytes of a file that a split reads, from {@code from} to before {@code to}. */
+    private record Range(long from, long to) {
+    }
+
+    private JsonConnector(String name, Map<String, Table> tables, JsonOptions options, int batchSize,
+            long splitSize) {
         this.name = name;
         this.tables = Collections.unmodifiableMap(new LinkedHashMap<>(tables));
         this.options = options;
         this.batchSize = batchSize;
+        this.splitSize = splitSize;
         this.catalog = new Catalog() {
             @Override
             public List<String> schemas() {
@@ -306,16 +324,252 @@ public final class JsonConnector implements Connector, TableFunctionProvider {
         return Capabilities.NONE.withFields(true).plan(table, table(table).layout().schema(), request, null);
     }
 
+    /**
+     * Returns one split for a file of at most the split size, and otherwise
+     * a split for each part of about the split size if the file is a
+     * sequence of records in UTF-8, uncompressed. A part starts after a line
+     * break whose line ends with a closing brace or bracket and after which
+     * the next character other than white space is an opening one. In JSON
+     * that parses, no line break is inside a string, and a value follows
+     * another one with nothing but white space between them only at the top
+     * level, so a part starts where a record does. A file of one array of
+     * records, a compressed file and a file in UTF-16 or UTF-32 are one
+     * split; where no such line break follows within the split size or a
+     * mebibyte, whichever is more, the rest of a file is one split.
+     */
     @Override
     public List<Split> splits(ScanPlan plan) {
-        return List.of(new Split(plan, 0, null));
+        List<Long> starts = splitSize > 0 ? starts(table(plan.table())) : List.of(0L);
+        if (starts.size() < 2) {
+            return List.of(new Split(plan, 0, null));
+        }
+        List<Split> splits = new ArrayList<>();
+        for (int i = 0; i < starts.size(); i++) {
+            long to = i + 1 < starts.size() ? starts.get(i + 1) : Long.MAX_VALUE;
+            splits.add(new Split(plan, i, new Range(starts.get(i), to)));
+        }
+        return splits;
     }
 
+    /** Returns the offsets at which the parts of a file start, see {@link #splits}. */
+    private List<Long> starts(Table table) {
+        String fileName = table.file().getFileName().toString().toLowerCase(Locale.ROOT);
+        if (table.options().format() == JsonFormat.ARRAY || fileName.endsWith(".gz") || fileName.endsWith(".zst")) {
+            return List.of(0L);
+        }
+        List<Long> starts = new ArrayList<>(List.of(0L));
+        try (FileChannel channel = FileChannel.open(table.file(), StandardOpenOption.READ)) {
+            long size = channel.size();
+            if (size <= splitSize || !sequence(channel, table.options().format())) {
+                return starts;
+            }
+            for (long at = splitSize; at < size; ) {
+                long start = boundary(channel, at, at + Math.max(splitSize, SEARCH));
+                if (start < 0 || start >= size) {
+                    break;
+                }
+                starts.add(start);
+                at = start + splitSize;
+            }
+        } catch (IOException e) {
+            // Opening the split reports it.
+            return List.of(0L);
+        }
+        return starts;
+    }
+
+    /**
+     * Tells whether a file is in UTF-8, as far as its first bytes tell, and
+     * holds a sequence of records rather than one array of them.
+     */
+    private static boolean sequence(FileChannel channel, JsonFormat format) throws IOException {
+        ByteBuffer head = ByteBuffer.allocate(1 << 16);
+        while (head.hasRemaining() && channel.read(head, head.position()) > 0) {
+            // Reads up to the size of the buffer.
+        }
+        int n = head.position();
+        int i = n >= 3 && head.get(0) == (byte) 0xEF && head.get(1) == (byte) 0xBB && head.get(2) == (byte) 0xBF
+                ? 3 : 0;
+        for (int k = 0; k < Math.min(n, 4); k++) {
+            // UTF-16 and UTF-32 have zeros in their first four bytes, or a byte order mark of 0xFE and 0xFF.
+            if (head.get(k) == 0 || head.get(k) == (byte) 0xFE || head.get(k) == (byte) 0xFF) {
+                return false;
+            }
+        }
+        while (i < n && whiteSpace(head.get(i))) {
+            i++;
+        }
+        return i < n && (format == JsonFormat.NEWLINE_DELIMITED || head.get(i) != '[');
+    }
+
+    /**
+     * Returns the offset after the first line break from {@code from} on
+     * that starts a part, see {@link #splits}, or -1 if there is none before
+     * {@code to} or the end of the file.
+     */
+    private static long boundary(FileChannel channel, long from, long to) throws IOException {
+        ByteBuffer buffer = ByteBuffer.allocate(1 << 16);
+        // The last byte other than white space, and the offset after a line break that may start a part.
+        byte last = 0;
+        long candidate = -1;
+        for (long position = from; ; ) {
+            buffer.clear();
+            int n = channel.read(buffer, position);
+            if (n <= 0) {
+                return -1;
+            }
+            for (int i = 0; i < n; i++) {
+                byte b = buffer.get(i);
+                long at = position + i;
+                if (b == '\n') {
+                    if (candidate < 0) {
+                        if (at >= to) {
+                            return -1;
+                        }
+                        if (last == '}' || last == ']') {
+                            candidate = at + 1;
+                        }
+                    }
+                } else if (!whiteSpace(b)) {
+                    if (candidate >= 0 && (b == '{' || b == '[')) {
+                        return candidate;
+                    }
+                    candidate = -1;
+                    last = b;
+                    if (at >= to) {
+                        return -1;
+                    }
+                }
+            }
+            position += n;
+        }
+    }
+
+    private static boolean whiteSpace(byte b) {
+        return b == ' ' || b == '\t' || b == '\n' || b == '\r';
+    }
+
+    /**
+     * Reads the requested columns in batches. A part of a file gives the
+     * values and the errors, with their lines and records counted from the
+     * start of the file, that reading the whole file gives for its records.
+     */
     @Override
     public BatchReader open(Split split) {
         Table table = table(split.plan().table());
+        if (split.state() instanceof Range range) {
+            InputStream in;
+            try {
+                in = new RangeInputStream(table.file(), range.from(), range.to());
+            } catch (IOException e) {
+                throw new UncheckedIOException("Cannot open " + table.file(), e);
+            }
+            return JsonRecordReader.open(in, table.layout(), split.plan().columns(),
+                    table.options().withFormat(JsonFormat.NEWLINE_DELIMITED), batchSize, table.file().toString(),
+                    range.from() == 0 ? JsonInput.Origin.START : new Before(table.file(), range.from()));
+        }
         return JsonRecordReader.open(open(table.file()), table.layout(), split.plan().columns(),
                 table.options(), batchSize, table.file().toString());
+    }
+
+    /** The bytes of a file from one offset to before another one, or to its end. */
+    private static final class RangeInputStream extends InputStream {
+        private final FileChannel channel;
+        private final long end;
+        private long position;
+
+        RangeInputStream(Path file, long from, long to) throws IOException {
+            this.channel = FileChannel.open(file, StandardOpenOption.READ);
+            this.position = from;
+            this.end = to;
+        }
+
+        @Override
+        public int read() throws IOException {
+            byte[] one = new byte[1];
+            return read(one, 0, 1) < 0 ? -1 : one[0] & 0xFF;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            if (len == 0) {
+                return 0;
+            }
+            if (position >= end) {
+                return -1;
+            }
+            int n = channel.read(ByteBuffer.wrap(b, off, (int) Math.min(len, end - position)), position);
+            if (n < 0) {
+                return -1;
+            }
+            position += n;
+            return n;
+        }
+
+        @Override
+        public void close() throws IOException {
+            channel.close();
+        }
+    }
+
+    /**
+     * The lines and the records of a file before an offset at which a
+     * record starts, counted when a message first asks for them: each line
+     * break is one, as the parser counts them, and so is each value at the
+     * top level.
+     */
+    private static final class Before implements JsonInput.Origin {
+        private final Path file;
+        private final long offset;
+        private long lines = -1;
+        private long records;
+
+        Before(Path file, long offset) {
+            this.file = file;
+            this.offset = offset;
+        }
+
+        @Override
+        public long lines() {
+            count();
+            return lines;
+        }
+
+        @Override
+        public long records() {
+            count();
+            return records;
+        }
+
+        private void count() {
+            if (lines >= 0) {
+                return;
+            }
+            long breaks = 0;
+            try (InputStream in = new RangeInputStream(file, 0, offset)) {
+                byte[] buffer = new byte[1 << 16];
+                boolean afterReturn = false;
+                for (int n; (n = in.read(buffer, 0, buffer.length)) > 0; ) {
+                    for (int i = 0; i < n; i++) {
+                        byte b = buffer[i];
+                        if (b == '\r' || b == '\n' && !afterReturn) {
+                            breaks++;
+                        }
+                        afterReturn = b == '\r';
+                    }
+                }
+                try (JsonInput input = new JsonInput(new RangeInputStream(file, 0, offset),
+                        JsonFormat.NEWLINE_DELIMITED, "", file.toString())) {
+                    while (input.next()) {
+                        input.parser().skipChildren();
+                    }
+                    records = input.record();
+                }
+            } catch (IOException e) {
+                throw new UncheckedIOException("Cannot read " + file, e);
+            }
+            lines = breaks;
+        }
     }
 
     /** Infers the columns of a file. */
@@ -344,6 +598,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider {
         private final Map<String, Schema> schemas = new LinkedHashMap<>();
         private JsonOptions options = JsonOptions.DEFAULT;
         private int batchSize = 2048;
+        private long splitSize = SPLIT_SIZE;
 
         private Builder(String name) {
             this.name = Objects.requireNonNull(name, "name");
@@ -402,6 +657,19 @@ public final class JsonConnector implements Connector, TableFunctionProvider {
             return this;
         }
 
+        /**
+         * Sets the size in bytes of the parts that a larger file of records
+         * is read in, on several threads; 0 reads every file in one part.
+         * 4 MiB by default, see {@link JsonConnector#splits}.
+         */
+        public Builder splitSize(long splitSize) {
+            if (splitSize < 0) {
+                throw new IllegalArgumentException("The split size must not be negative: " + splitSize);
+            }
+            this.splitSize = splitSize;
+            return this;
+        }
+
         /** Gives a table an explicit schema instead of the inferred one; the names are the keys. */
         public Builder schema(String table, Schema schema) {
             schemas.put(table, schema);
@@ -448,7 +716,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider {
                 JsonLayout layout = schema != null ? JsonLayout.of(schema) : infer(e.getValue(), options);
                 tables.put(e.getKey(), new Table(e.getValue(), options, layout));
             }
-            return new JsonConnector(name, tables, options, batchSize);
+            return new JsonConnector(name, tables, options, batchSize, splitSize);
         }
     }
 }

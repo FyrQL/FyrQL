@@ -16,6 +16,7 @@
 
 package net.fyrql.codegen;
 
+import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Batches;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
@@ -32,7 +33,10 @@ import net.fyrql.exec.CodegenMode;
 import net.fyrql.exec.Executor;
 import net.fyrql.exec.MemoryBudget;
 import net.fyrql.exec.Operator;
+import net.fyrql.exec.QueryContext;
 import net.fyrql.exec.QueryException;
+import net.fyrql.exec.Splits;
+import net.fyrql.exec.TableSource;
 import net.fyrql.exec.spi.CompiledPipeline;
 import net.fyrql.exec.spi.JoinTable;
 import net.fyrql.exec.spi.PipelineSpec;
@@ -44,7 +48,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.SplittableRandom;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 import static net.fyrql.codegen.JaninoCompilerTest.T;
 import static net.fyrql.codegen.JaninoCompilerTest.c;
@@ -136,9 +143,15 @@ class PipelineCodegenTest {
     }
 
     private static String run(Executor executor, PlanNode plan, boolean pipeline) {
+        return run(executor, plan, op -> assertEquals(pipeline, op.getClass().getSimpleName()
+                .equals("PipelineOperator"), plan::toString));
+    }
+
+    /** Runs a plan; the rows as text, or the error, after a check of the top operator. */
+    private static String run(Executor executor, PlanNode plan, Consumer<Operator> check) {
         StringBuilder sb = new StringBuilder();
         try (Operator op = executor.open(plan)) {
-            assertEquals(pipeline, op.getClass().getSimpleName().equals("PipelineOperator"), plan::toString);
+            check.accept(op);
             for (Batch b = op.next(); b != null; b = op.next()) {
                 assertEquals(plan.schema().types(), b.schema().types());
                 for (int r = 0; r < b.rowCount(); r++) {
@@ -458,6 +471,75 @@ class PipelineCodegenTest {
             }
         }
         assertTrue(rows > runs * 10, rows + " rows in " + runs + " runs");
+        assertEquals(0, compiler.statistics().failures());
+        assertEquals(0, compiler.statistics().declined());
+    }
+
+    /**
+     * Runs a plan over tables by name on a number of threads, each batch of
+     * a table a split of its own; the rows as text, or the error.
+     *
+     * @param readers notes the threads that read the splits
+     */
+    private static String parallel(PlanNode plan, Map<String, List<Batch>> tables, Codegen codegen, int threads,
+            Set<String> readers) {
+        TableSource source = new TableSource() {
+            @Override
+            public BatchReader open(PlanNode.Scan scan) {
+                return Batches.reader(tables.get(scan.table().table()));
+            }
+
+            @Override
+            public Splits splits(PlanNode.Scan scan, QueryContext context) {
+                return Splits.of(tables.get(scan.table().table()), b -> {
+                    readers.add(Thread.currentThread().getName());
+                    return Batches.reader(List.of(b));
+                });
+            }
+        };
+        Executor executor = new Executor(source, MemoryBudget.unlimited(), 64, codegen, threads, true);
+        return run(executor, plan, op -> { });
+    }
+
+    @Test
+    void joinsOnSeveralThreadsAgreeWithOneThread() {
+        JaninoCompiler compiler = new JaninoCompiler();
+        Set<String> readers = ConcurrentHashMap.newKeySet();
+        int runs = 0;
+        int rows = 0;
+        for (JoinType type : JoinType.values()) {
+            for (List<Integer> keys : List.of(List.of(0), List.of(0, 1), List.<Integer>of())) {
+                for (boolean condition : new boolean[] {false, true}) {
+                    if (type == JoinType.CROSS ? !keys.isEmpty() || condition : keys.isEmpty() && type.needsKeys()) {
+                        continue;
+                    }
+                    for (PlanNode plan : joinPlans(type, keys, condition)) {
+                        for (int data = 0; data < 4; data++) {
+                            long seed = runs;
+                            List<Object[]> probe = data == 2 ? List.of() : joinRows(seed, 150, false);
+                            List<Object[]> build = data == 1 ? List.of() : joinRows(seed + 1, data == 3 ? 6 : 40,
+                                    data == 3);
+                            Map<String, List<Batch>> tables = new HashMap<>();
+                            tables.put("p", batches(P, probe, 7));
+                            tables.put("b", batches(B, build, 7));
+                            tables.put("c", batches(B, joinRows(seed + 2, 30, false), 7));
+                            String expected = parallel(plan, tables, Codegen.off(), 1, readers);
+                            for (int threads : new int[] {2, 4}) {
+                                assertEquals(expected, parallel(plan, tables, always(compiler), threads, readers),
+                                        plan::toString);
+                                assertEquals(expected, parallel(plan, tables, Codegen.off(), threads, readers),
+                                        plan::toString);
+                            }
+                            runs++;
+                            rows += (int) expected.lines().count();
+                        }
+                    }
+                }
+            }
+        }
+        assertTrue(rows > runs * 10, rows + " rows in " + runs + " runs");
+        assertTrue(readers.stream().anyMatch(t -> t.startsWith("fyrql-worker-")), readers::toString);
+        assertTrue(compiler.statistics().compiled() > 0);
         assertEquals(0, compiler.statistics().failures());
         assertEquals(0, compiler.statistics().declined());
     }

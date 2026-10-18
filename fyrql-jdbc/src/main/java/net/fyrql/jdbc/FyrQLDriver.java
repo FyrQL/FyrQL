@@ -45,8 +45,9 @@ import java.util.logging.Logger;
  * connectors are on the class path, so that table functions such as
  * {@code read_csv} and file names in {@code FROM} work.</li>
  * <li>{@code defaultSource}, {@code defaultSchema}, {@code batchSize},
- * {@code memoryBudget}, {@code codegen}, {@code codegenThreshold} and
- * {@code pushdown} are the settings of the engine, as the configuration
+ * {@code memoryBudget}, {@code codegen}, {@code codegenThreshold},
+ * {@code pushdown}, {@code threads} and {@code preserveOrder} are the
+ * settings of the engine, as the configuration
  * file takes them, over whose settings they win.</li>
  * </ul>
  * The same keys may be given as properties of the connection, which win

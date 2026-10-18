@@ -71,9 +71,17 @@ final class GroupTable {
      * caller can account for its memory.
      */
     int[] groups(Batch b, KeyFunctions keys, Consumer<Batch> newKeys) {
-        int n = b.rowCount();
-        int[] hashes = new int[n];
+        int[] hashes = new int[b.rowCount()];
         keys.hash(b, keyColumns, hashes);
+        return groups(b, hashes, keys, newKeys);
+    }
+
+    /**
+     * Finds the groups of the rows of a batch as {@link #groups(Batch, KeyFunctions, Consumer)}
+     * does, with the hashes of their keys given, which {@code keys} would compute.
+     */
+    int[] groups(Batch b, int[] hashes, KeyFunctions keys, Consumer<Batch> newKeys) {
+        int n = b.rowCount();
         int[] result = new int[n];
         int[] newRows = new int[n];
         int added = 0;
@@ -124,6 +132,20 @@ final class GroupTable {
             parts.add(b.column(column));
         }
         return Vectors.concat(keyBatches.get(0).schema().type(column), parts);
+    }
+
+    /** Returns the keys of all groups in their order, the key columns only; there must be at least one group. */
+    Batch keys() {
+        List<Vector> columns = new ArrayList<>(keyColumns.length);
+        for (int k = 0; k < keyColumns.length; k++) {
+            columns.add(keys(k));
+        }
+        return new Batch(keyBatches.get(0).schema(), size, columns);
+    }
+
+    /** Returns the hash of the key of a group. */
+    int hash(int group) {
+        return groupHash[group];
     }
 
     private int add(int hash, int row) {

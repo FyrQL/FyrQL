@@ -85,6 +85,7 @@ class ReadmeExampleTest {
         List<String> printed = new ArrayList<>();
         String plan;
         String pipeline;
+        String parallel;
 
         // From here on as in the README, with the directory of the test for "data".
         try (FyrQL engine = FyrQL.builder()
@@ -107,6 +108,9 @@ class ReadmeExampleTest {
             // The README shows the plan of AUTO: the tables are too small for a pipeline unless code is always
             // generated.
             pipeline = engine.codegen() == CodegenMode.ALWAYS ? " [codegen pipeline]" : "";
+            // With more than one thread, the chains over the scans run as segments: the one of the orders up to the
+            // projection above the join, and the customers the join builds on.
+            parallel = engine.threads() > 1 ? " [parallel]" : "";
 
             assertEquals("[region VARCHAR, orders BIGINT, revenue DECIMAL(38,2)]",
                     engine.plan(sql).schema().fields().toString());
@@ -119,12 +123,12 @@ class ReadmeExampleTest {
                 Sort #2 DESC
                   Project #0 AS region, #1 AS orders, #2 AS revenue
                     Aggregate GROUP BY #0: count(*) AS "count_star()", sum(#1) AS "sum(o.amount)" [codegen]
-                      Project #3 AS "#group0", #0 AS "#argument0"%s
+                      Project #3 AS "#group0", #0 AS "#argument0"%s%s
                         Join INNER ON l#1 = r#0 [codegen]
                           Project #1 AS amount, CAST(#0 AS BIGINT) AS "#key0" [codegen]
                             Scan mem.main.orders (customerId INTEGER, amount DECIMAL(10,2))
-                          Scan csv.main.customers (id BIGINT, region VARCHAR)
-                """.formatted(pipeline), plan);
+                          Scan csv.main.customers (id BIGINT, region VARCHAR)%s
+                """.formatted(pipeline, parallel, parallel), plan);
     }
 
     @Test
@@ -136,6 +140,7 @@ class ReadmeExampleTest {
         List<String> printed = new ArrayList<>();
         String plan;
         String pipeline;
+        String parallel;
 
         try (FyrQL engine = FyrQL.builder()
                 .register(CsvConnector.builder("csv").directory(data).build())
@@ -164,6 +169,7 @@ class ReadmeExampleTest {
             }
             plan = engine.explain(sql);
             pipeline = engine.codegen() == CodegenMode.ALWAYS ? "[codegen pipeline]" : "[codegen]";
+            parallel = engine.threads() > 1 ? " [parallel]" : "";
         }
 
         assertEquals(List.of("[north, 1, 10.50, 1, 15.75]", "[north, 3, 5.25, 2, 15.75]", "[north, 4, null, 3, 15.75]",
@@ -173,11 +179,11 @@ class ReadmeExampleTest {
                   Project #4 AS region, #0 AS id, #1 AS amount, #5 AS place, #6 AS total
                     Window PARTITION BY #4: sum(#1) AS "sum(o.amount) OVER (PARTITION BY c.region)"
                       Window PARTITION BY #4 ORDER BY #1 DESC: rank() AS "rank() OVER (PARTITION BY c.region ORDER BY o.amount DESC NULLS LAST)"
-                        Join INNER ON l#2 = r#0 %s
+                        Join INNER ON l#2 = r#0 %s%s
                           Project #0 AS id, #2 AS amount, CAST(#1 AS BIGINT) AS "#key0" [codegen]
                             Scan mem.main.orders (id BIGINT, customerId INTEGER, amount DECIMAL(10,2))
-                          Scan csv.main.customers (id BIGINT, region VARCHAR)
-                """.formatted(pipeline), plan);
+                          Scan csv.main.customers (id BIGINT, region VARCHAR)%s
+                """.formatted(pipeline, parallel, parallel), plan);
     }
 
     @Test

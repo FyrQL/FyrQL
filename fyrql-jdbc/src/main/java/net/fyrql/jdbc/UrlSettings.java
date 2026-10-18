@@ -72,7 +72,11 @@ record UrlSettings(Map<String, String> values, List<String> unknownProperties) {
                     "always")),
             new Key("codegenThreshold", "The rows after which an operator compiles in the mode auto", List.of()),
             new Key("pushdown", "Whether sources take over filters, aggregations, sorts and limits", List.of("true",
-                    "false")));
+                    "false")),
+            new Key("threads", "The most threads on which one query runs at a time; the number of processors by"
+                    + " default", List.of()),
+            new Key("preserveOrder", "Whether rows that no ORDER BY orders come in the order of their sources",
+                    List.of("true", "false")));
 
     private static final List<String> IGNORED = List.of("user", "password");
 

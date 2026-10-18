@@ -33,6 +33,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A hash join: the right input is the build side, materialized into a
@@ -45,7 +46,10 @@ import java.util.List;
  * unmatched build rows after the probe side is exhausted. The keys are
  * hashed and compared by {@link InterpretedKeys}, and the condition is
  * evaluated by the {@link Evaluator}, or, once {@link Codegen#due} says so,
- * by compiled code, whose keys hash alike.
+ * by compiled code, whose keys hash alike. A build side that a segment
+ * reads is hashed by its workers, see {@link JoinBuild}. In a copy of a
+ * chain of a segment, the join probes the table the segment shares among
+ * its workers, which emits the unmatched build rows itself.
  */
 final class HashJoinOperator extends AbstractOperator {
 
@@ -71,7 +75,7 @@ final class HashJoinOperator extends AbstractOperator {
     private final ArrayDeque<Batch> steps = new ArrayDeque<>();
     private boolean probeDone;
     private boolean leftoversDone;
-    private long reserved;
+    private final AtomicLong reserved = new AtomicLong();
 
     HashJoinOperator(String label, PlanNode.Join join, Operator left, Operator right, MemoryBudget budget,
             Codegen codegen) {
@@ -83,6 +87,15 @@ final class HashJoinOperator extends AbstractOperator {
         this.leftKeys = join.leftKeys().stream().mapToInt(Integer::intValue).toArray();
         this.rightKeys = join.rightKeys().stream().mapToInt(Integer::intValue).toArray();
         this.codegen = codegen;
+    }
+
+    /** A join that probes a table built already, which emits no unmatched build rows. */
+    HashJoinOperator(String label, PlanNode.Join join, Operator left, JoinTable table, Codegen codegen) {
+        this(label, join, left, null, MemoryBudget.unlimited(), codegen);
+        this.table = table;
+        this.build = table.batch();
+        this.leftoversDone = true;
+        start();
     }
 
     /** Switches to compiled key functions when it is time, which keeps the hashes of the table valid. */
@@ -104,12 +117,7 @@ final class HashJoinOperator extends AbstractOperator {
     Batch compute() {
         if (build == null) {
             buildTable();
-            JoinType type = join.type();
-            if (build.rowCount() == 0 && (type == JoinType.INNER || type == JoinType.SEMI)) {
-                // As DuckDB's hash join: without build rows these joins have no output, and the probe side is not
-                // read. A cross product reads it, and DuckDB builds a right join on its left side.
-                probeDone = true;
-            }
+            start();
         }
         while (!probeDone) {
             Batch probe = steps.poll();
@@ -146,17 +154,33 @@ final class HashJoinOperator extends AbstractOperator {
                 : build.rowCount();
     }
 
-    private void buildTable() {
-        List<Batch> batches = new ArrayList<>();
-        for (Batch b = right.next(); b != null; b = right.next()) {
-            long bytes = Batches.estimateBytes(b);
-            budget.reserve(bytes, label());
-            reserved += bytes;
-            batches.add(b);
-            rowsSeen += b.rowCount();
+    /** Ends the join before its probe side is read if it can have no output. */
+    private void start() {
+        JoinType type = join.type();
+        if (build.rowCount() == 0 && (type == JoinType.INNER || type == JoinType.SEMI)) {
+            // As DuckDB's hash join: without build rows these joins have no output, and the probe side is not
+            // read. A cross product reads it, and DuckDB builds a right join on its left side.
+            probeDone = true;
         }
-        compileKeys();
-        table = new JoinTable(join.right().schema(), batches, rightKeys, keys);
+    }
+
+    private void buildTable() {
+        if (right instanceof ParallelSegment) {
+            table = JoinBuild.read(right, join, label(), budget, codegen, reserved);
+            rowsSeen += table.rowCount();
+            compileKeys();
+        } else {
+            List<Batch> batches = new ArrayList<>();
+            for (Batch b = right.next(); b != null; b = right.next()) {
+                long bytes = Batches.estimateBytes(b);
+                budget.reserve(bytes, label());
+                reserved.addAndGet(bytes);
+                batches.add(b);
+                rowsSeen += b.rowCount();
+            }
+            compileKeys();
+            table = new JoinTable(join.right().schema(), batches, rightKeys, keys);
+        }
         build = table.batch();
     }
 
@@ -199,8 +223,10 @@ final class HashJoinOperator extends AbstractOperator {
         if (join.condition() != null && pairs.size > 0) {
             pairs = pairs.select(matching(probe, pairs));
         }
-        for (int p = 0; p < pairs.size; p++) {
-            table.markMatched(pairs.buildRows[p]);
+        if (type == JoinType.RIGHT || type == JoinType.FULL) {
+            for (int p = 0; p < pairs.size; p++) {
+                table.markMatched(pairs.buildRows[p]);
+            }
         }
         if (type == JoinType.INNER || type == JoinType.RIGHT || type == JoinType.CROSS) {
             return pairs.size == 0 ? null : combine(probe, pairs);
@@ -302,9 +328,10 @@ final class HashJoinOperator extends AbstractOperator {
     @Override
     public void close() {
         left.close();
-        right.close();
-        budget.release(reserved);
-        reserved = 0;
+        if (right != null) {
+            right.close();
+        }
+        budget.release(reserved.getAndSet(0));
     }
 
     /** Pairs of a probe row and a build row, in the order of the probe rows; -1 stands for no build row. */

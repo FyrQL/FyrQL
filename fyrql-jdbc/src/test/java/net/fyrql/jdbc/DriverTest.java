@@ -98,10 +98,12 @@ class DriverTest {
     @Test
     void theUrlSetsTheEngine() throws Exception {
         try (Connection c = driver.connect("jdbc:fyrql:?codegen=off&pushdown=false&batchSize=7&memoryBudget=64MB"
-                + "&codegenThreshold=5&defaultSchema=other", null)) {
+                + "&codegenThreshold=5&defaultSchema=other&threads=3&preserveOrder=false", null)) {
             FyrQL engine = c.unwrap(FyrQL.class);
             assertEquals(CodegenMode.OFF, engine.codegen());
             assertFalse(engine.pushdown());
+            assertEquals(3, engine.threads());
+            assertFalse(engine.preserveOrder());
             assertEquals("other", c.getSchema());
         }
         try (Connection c = driver.connect("jdbc:fyrql:?CODEGEN=off&&", null)) {
@@ -145,7 +147,8 @@ class DriverTest {
     @Test
     void aBadUrlCannotConnect() {
         failsToConnect("jdbc:fyrql:?colour=red", "The URL has the unknown key colour; known are config, defaultSource,"
-                + " defaultSchema, batchSize, memoryBudget, codegen, codegenThreshold, pushdown");
+                + " defaultSchema, batchSize, memoryBudget, codegen, codegenThreshold, pushdown, threads,"
+                + " preserveOrder");
         failsToConnect("jdbc:fyrql:foo", "The URL jdbc:fyrql:foo is not of the form jdbc:fyrql: or"
                 + " jdbc:fyrql:?config=<file>&<key>=<value>...");
         failsToConnect("jdbc:fyrql:?codegen", "The URL has the part codegen, which is not of the form <key>=<value>");
@@ -205,7 +208,8 @@ class DriverTest {
     void thePropertyInfoDescribesTheKeys() throws SQLException {
         DriverPropertyInfo[] info = driver.getPropertyInfo("jdbc:fyrql:?codegen=always", new Properties());
         assertEquals(List.of("config", "defaultSource", "defaultSchema", "batchSize", "memoryBudget", "codegen",
-                "codegenThreshold", "pushdown"), Arrays.stream(info).map(i -> i.name).toList());
+                "codegenThreshold", "pushdown", "threads", "preserveOrder"),
+                Arrays.stream(info).map(i -> i.name).toList());
         DriverPropertyInfo codegen = info[5];
         assertEquals("always", codegen.value);
         assertArrayEquals(new String[] {"off", "auto", "always"}, codegen.choices);
@@ -213,7 +217,7 @@ class DriverTest {
         assertTrue(codegen.description.startsWith("When expressions are compiled"));
         assertNull(info[0].value);
         assertNull(info[0].choices);
-        assertEquals(8, driver.getPropertyInfo("jdbc:fyrql:?colour=red", null).length, "a bad URL is no error here");
+        assertEquals(10, driver.getPropertyInfo("jdbc:fyrql:?colour=red", null).length, "a bad URL is no error here");
     }
 
     private void failsToConnect(String url, String message) {

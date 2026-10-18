@@ -26,7 +26,7 @@ keys and pipelines of filters, projections and joins, connectors for Java collec
 JSON and Parquet files, JSON from HTTP
 endpoints, OData services of versions 2 and 4 and databases over JDBC, an optimizer that moves conditions toward the
 tables, orders joins by the sizes of the tables and runs the joins of tables of one
-database in that database, a pushdown of filters, orders, limits and aggregations into
+database in that database, parallel execution on all cores over the parts of the sources, a pushdown of filters, orders, limits and aggregations into
 the sources, an SQL front end with the names, types and forms of DuckDB, subqueries,
 also correlated ones, that become joins, window functions with all frames of DuckDB, a
 JDBC driver, also as one JAR for tools such as
@@ -72,18 +72,20 @@ prints the rows and the plan:
 Sort #2 DESC
   Project #0 AS region, #1 AS orders, #2 AS revenue
     Aggregate GROUP BY #0: count(*) AS "count_star()", sum(#1) AS "sum(o.amount)" [codegen]
-      Project #3 AS "#group0", #0 AS "#argument0"
+      Project #3 AS "#group0", #0 AS "#argument0" [parallel]
         Join INNER ON l#1 = r#0 [codegen]
           Project #1 AS amount, CAST(#0 AS BIGINT) AS "#key0" [codegen]
             Scan mem.main.orders (customerId INTEGER, amount DECIMAL(10,2))
-          Scan csv.main.customers (id BIGINT, region VARCHAR)
+          Scan csv.main.customers (id BIGINT, region VARCHAR) [parallel]
 ```
 
 The plan is the one the engine runs: the scan of the orders reads only the two columns
 the query uses. With the module `fyrql-codegen` on the class path, as here, `[codegen]`
 marks the nodes whose expressions or keys the engine compiles once enough rows pass; over
 larger tables, `[codegen pipeline]` marks a chain of nodes that runs as one compiled loop;
-see [Code generation](#code-generation). `engine.plan(sql)` returns the plan itself,
+see [Code generation](#code-generation). `[parallel]` marks the top of a chain that runs
+on several threads when its source has several parts; see
+[Parallel execution](#parallel-execution). `engine.plan(sql)` returns the plan itself,
 `engine.rows(sql)` all rows at once. A query
 that does not parse or bind throws an `SqlException` with the position in the text, for
 example `Referenced column "x" not found in FROM clause! at line 1, column 33`.
@@ -92,7 +94,7 @@ Plans can also be built in Java from the nodes of `PlanNode`, starting with
 `engine.scan(TableRef.of("mem", "orders"))`, and run with `engine.execute(plan)`.
 The builder takes further settings: `defaultSource` and `defaultSchema` for short names,
 `functions` for a `FunctionRegistry` with functions of the application, `memoryBudget`,
-`batchSize`, and `pushdown`. Before a plan runs, the [optimizer](#optimizer) rewrites
+`batchSize`, `pushdown`, `threads` and `preserveOrder`. Before a plan runs, the [optimizer](#optimizer) rewrites
 it, every scan is narrowed to the columns in use, and with pushdown (the default, or the system property `fyrql.pushdown` set to `on`
 or `off`) the source of a scan takes over what it can of the filter, aggregation, sort and
 limit above it; `explain` shows that as `[pushed: ...]`. A source may only take over what
@@ -206,13 +208,13 @@ their customers:
 Sort #0, #1
   Project #0 AS city, #1 AS name, #2 AS orders
     Aggregate GROUP BY #0, #1: count(*) AS "count_star()" [codegen]
-      Project #5 AS "#group0", #1 AS "#group1"
+      Project #5 AS "#group0", #1 AS "#group1" [parallel]
         Join INNER ON l#0 = r#1 [codegen]
           Scan api.main.products (sku VARCHAR, name VARCHAR)
-          Join INNER ON l#0 = r#0 [codegen]
+          Join INNER ON l#0 = r#0 [codegen] [parallel]
             Project #0 AS customer_id, #1 AS sku
               Scan pg.main.orders (customer_id BIGINT, sku VARCHAR) [pushed: WHERE ((#0 > CAST(10 AS INTEGER)) AND (#1 <> 'p3'))]
-            Scan files.main.customers (id BIGINT, city VARCHAR)
+            Scan files.main.customers (id BIGINT, city VARCHAR) [parallel]
 ```
 
 A filter is pushed when it stands on a table, as in the subquery above, or when the
@@ -339,14 +341,15 @@ Steps 4 for fields, 5 and 6 change what a source does and are left out with
 customers of PostgreSQL in one statement, which filters and joins them; the filter on
 the Parquet file of `lineitem` stays in the engine, which builds its hash table on the
 smaller result of the database. The filter, the join and the two projections above it
-run as one compiled [pipeline](#code-generation):
+run as one compiled [pipeline](#code-generation), on all threads over the row groups of
+`lineitem`, which share the hash table:
 
 ```
 Limit 10
   Sort #1 DESC, #2
     Project #0 AS l_orderkey, #3 AS revenue, #1 AS o_orderdate, #2 AS o_shippriority
       Aggregate GROUP BY #0, #1, #2: sum(#3) AS "sum((l_extendedprice * (1 - l_discount)))" [codegen]
-        Project #2 AS "#group0", #0 AS "#group1", #1 AS "#group2", (#3 * (CAST(1 AS INTEGER) - #4)) AS "#argument0" [codegen pipeline]
+        Project #2 AS "#group0", #0 AS "#group1", #1 AS "#group2", (#3 * (CAST(1 AS INTEGER) - #4)) AS "#argument0" [codegen pipeline] [parallel]
           Project #6 AS o_orderdate, #7 AS o_shippriority, #0 AS l_orderkey, #1 AS l_extendedprice, #2 AS l_discount [codegen]
             Join INNER ON l#0 = r#0 [codegen]
               Filter (#3 > DATE '1995-03-15') [codegen]
@@ -384,7 +387,7 @@ Sort #0
                   |     Scan db.main.orders (o_custkey INTEGER)
               Project #0 AS "avg(c_acctbal)"
                 Aggregate avg(#0) AS "avg(c_acctbal)"
-                  Project #1 AS "#argument0"
+                  Project #1 AS "#argument0" [parallel]
                     Filter (substring(#0, CAST(1 AS INTEGER), CAST(2 AS INTEGER)) IN ('13', '31', '23', '29', '30', '18', '17')) [codegen]
                       Scan db.main.customer (c_phone VARCHAR, c_acctbal DECIMAL(15,2)) [pushed: WHERE (#1 > CAST('0.00' AS DECIMAL(3,2)))]
 ```
@@ -441,7 +444,8 @@ are resolved against the directory of the file. A value may name an environment 
 as `${env:NAME}`, or `${env:NAME:-default}`, and a system property as `${sys:name}`, so
 that secrets need not be in the file. The settings under `engine` are those of the
 builder: `defaultSource`, `defaultSchema`, `batchSize`, `memoryBudget` (such as `512MB`),
-`codegen` (`off`, `auto` or `always`), `codegenThreshold` and `pushdown`. A file whose
+`codegen` (`off`, `auto` or `always`), `codegenThreshold`, `pushdown`, `threads` and
+`preserveOrder` (see [Parallel execution](#parallel-execution)). A file whose
 name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` returns the builder
 instead, so that an application can add sources of its own, such as tables in memory.
 
@@ -517,8 +521,8 @@ The CSV file gives `amount` the type `DOUBLE`, as DuckDB would, and so the sums 
 
 The keys of the URL are `config` and the settings of the engine of the
 [configuration file](#configuration-file): `defaultSource`, `defaultSchema`, `batchSize`,
-`memoryBudget`, `codegen`, `codegenThreshold` and `pushdown`, which win over those of the
-file. The same keys may come as properties of the connection, which win over the URL;
+`memoryBudget`, `codegen`, `codegenThreshold`, `pushdown`, `threads` and `preserveOrder`,
+which win over those of the file. The same keys may come as properties of the connection, which win over the URL;
 `getPropertyInfo` describes them, so that tools offer them. Keys are matched without
 regard to case, values in the URL are decoded from `%xx`, and a blank value counts as not
 set. The properties `user` and `password`, which tools always send, are ignored; another
@@ -795,6 +799,94 @@ parquet-java decodes a Parquet file value by value, with several calls for each 
 of each column; over all columns of a file, that takes about as long as reading the CSV
 file.
 
+## Parallel execution
+
+A query runs on several threads, by default on as many as the machine has processors;
+`FyrQL.builder().threads(n)` or the system property `fyrql.threads` sets another number,
+and with `threads(1)` every query runs on the thread that reads its result. The work is
+divided by the splits of the sources, the morsels: a row group of a Parquet file, a part
+of a CSV file or of a file of JSON lines, a part of a list in memory. A chain of filters,
+projections, `unnest` and the sides of joins that probe their hash tables, over a scan,
+up to the first node of another kind, is a segment, and so is a `UNION ALL` of such
+chains without joins. The workers of a segment take the splits one by one from a common
+queue, so that a worker that is done early takes the next one, and each runs a copy of
+the chain, also of a compiled pipeline. The hash tables of the joins of a chain are built
+before, once, from segments of their own, and shared by the workers. `explain` marks the
+top node of each segment with `[parallel]`, as in the plans of this README; a segment
+whose scan has one split runs on the thread of the query. The node above a segment takes
+the rows of its workers:
+
+- An aggregation whose aggregates are `count`, `sum`, `avg`, `min`, `max`, `bool_and`
+  and `bool_or` without `DISTINCT` and without an order lets each worker group its own
+  rows, then divides the groups into 16 partitions by their hashes and merges the
+  partitions on several threads. A worker that holds more than 65,536 groups with fewer
+  than two rows each on average passes its further rows on as they are, so that many
+  groups do not cost the memory of every worker. The groups come out in the order of
+  their first rows, as on one thread. Other aggregates, such as `string_agg`, `list` or
+  `first`, read the rows in the order of the splits on the thread of the query.
+- A sort and a window keep the rows of the workers in the order of the splits; the sort
+  sorts runs on several threads and merges them, stably, and the window computes its
+  partitions on several threads, in ranges of at least 4,096 rows.
+- A limit, a set operation and the result read the rows in the order of the splits, as
+  one thread gives them (`preserveOrder`, the default). With
+  `FyrQL.builder().preserveOrder(false)`, a limit and the result take the rows as the
+  workers deliver them, and an aggregation directly below gives its groups partition by
+  partition; this changes only the order of a result without `ORDER BY`.
+
+The results are those of one thread, with three exceptions, which DuckDB has as well: the
+last binary digits of `sum` and `avg` over `FLOAT` and `DOUBLE`, which add the partial
+sums of the workers; which of the values `-0.0` and `0.0` a `min` or `max` keeps; and,
+when rows of several splits fail, which of the errors is reported (that of the earliest
+split among those that failed before the query stopped). The tests run every random query
+and every TPC-H query on several threads and on one and compare them.
+
+The sources divide their tables into splits as follows:
+
+- Parquet: one split per row group.
+- Java collections: a `List` with random access in parts of `splitRows` rows (65,536 by
+  default), a setting of the builder of the connector; another collection is one split.
+- CSV: a file larger than `splitSize` (4 MiB by default, `0` turns it off), an option of
+  the builder and of the configuration, in parts of about that size. The parts follow the
+  index of FastCSV, which finds the start of each record, also with line breaks inside
+  quotes; the connector builds it on one thread when a query first reads the file, and
+  again when the size or the time of change of the file changes. A file in a charset whose
+  line breaks the index cannot find byte by byte, such as UTF-16, is one split. An error
+  names the line that reading the whole file names.
+- JSON: a file of JSON lines larger than `splitSize` (4 MiB by default), but no array, no
+  gzipped file and none in UTF-16 or UTF-32, in parts that start after a line that ends
+  with `}` or `]` and before a line that starts with `{` or `[`, which in valid JSON lies
+  between two records, also where records span several lines. An error names the line and
+  the record that reading the whole file names.
+- Databases, HTTP endpoints and OData services: one split.
+
+The workers come from one pool of daemon threads of the JVM (`fyrql-worker-N`), created
+as needed; `threads` limits the workers of each query, and no task waits for another, so
+that several engines, such as one per connection of the JDBC driver, share the pool. A
+cancelled query stops all its workers. The rows that the workers have read ahead of a
+limit, a set operation or the result, at most two splits per worker, are outside the
+memory budget.
+
+`ParallelBenchmark` in `fyrql-bench` runs operators over the four million rows of the
+benchmarks of code generation, in memory and in splits of about 65,000 rows,
+interpreted. On the laptop of the TPC-H figures under [Building](#building), with six
+cores and twelve threads, after a while under load, in milliseconds per run:
+
+| Benchmark | 1 thread | 4 threads | 12 threads |
+| --- | ---: | ---: | ---: |
+| The filter of TPC-H Q6, its rows in the order of the splits | 218 | 111 | 109 |
+| Aggregation in the shape of TPC-H Q1, in six groups | 207 | 93 | 103 |
+| Aggregation in 100,000 groups | 209 | 171 | 228 |
+| Hash join with 100,000 keys and an aggregation by its nations | 378 | 162 | 168 |
+| Sort of all rows by a decimal | 4,805 | 2,543 | 1,848 |
+| Window with `row_number` and a moving sum in 100,000 partitions | 6,987 | 3,371 | 2,699 |
+
+Batches that are already in memory are read as fast as the memory delivers them, so
+that six cores gain little beyond four threads. With 100,000 groups in random order, each
+worker holds a table of nearly all groups, twelve such tables no longer fit into the
+caches, and the merge adds them up once more: such an aggregation gains little, and on
+twelve threads nothing. Dividing the groups among the workers by their hashes from the
+start, as DuckDB does, would avoid that; it is not done yet.
+
 ## Supported SQL
 
 Queries only; there is no DDL or DML. Names, types and the meaning of the forms follow
@@ -890,10 +982,10 @@ Sort #0, #3
   Project #4 AS region, #0 AS id, #1 AS amount, #5 AS place, #6 AS total
     Window PARTITION BY #4: sum(#1) AS "sum(o.amount) OVER (PARTITION BY c.region)"
       Window PARTITION BY #4 ORDER BY #1 DESC: rank() AS "rank() OVER (PARTITION BY c.region ORDER BY o.amount DESC NULLS LAST)"
-        Join INNER ON l#2 = r#0 [codegen]
+        Join INNER ON l#2 = r#0 [codegen] [parallel]
           Project #0 AS id, #2 AS amount, CAST(#1 AS BIGINT) AS "#key0" [codegen]
             Scan mem.main.orders (id BIGINT, customerId INTEGER, amount DECIMAL(10,2))
-          Scan csv.main.customers (id BIGINT, region VARCHAR)
+          Scan csv.main.customers (id BIGINT, region VARCHAR) [parallel]
 ```
 
 A `Window` node appends one column per call to the rows of its input, for all calls with
@@ -931,6 +1023,10 @@ functions in a correlated subquery, and subqueries or `unnest` inside window fun
 Known differences from DuckDB:
 
 - `now()` is a `TIMESTAMP` without time zone.
+- On several threads, the last binary digits of `sum` and `avg` over `FLOAT` and
+  `DOUBLE`, which of `-0.0` and `0.0` a `min` or `max` keeps, and which error is reported
+  when rows of several parts of a source fail may change from run to run, as in DuckDB;
+  see [Parallel execution](#parallel-execution).
 - `INTERVAL '90' DAY` (also `INTERVAL 1 year` and `INTERVAL '3 months'`) exists only
   as a constant added to or subtracted from a constant date or timestamp, such as
   `DATE '1998-12-01' - INTERVAL '90' DAY`, and is computed when the query is bound.
@@ -1004,7 +1100,7 @@ Known differences from DuckDB:
 | --- | --- |
 | `fyrql-core` | data types, values, vectors and batches, expressions, functions, logical plan |
 | `fyrql-connector-spi` | the interfaces that connectors implement |
-| `fyrql-exec` | the vectorized interpreter, the choice of pipelines, and the interfaces of code generation |
+| `fyrql-exec` | the vectorized interpreter, the choice of pipelines, the parallel execution of segments, and the interfaces of code generation |
 | `fyrql-codegen` | code generation with Janino, which it carries renamed; optional |
 | `fyrql-sql` | the SQL parser, the binder, which turns subqueries into joins, and the rendering of plans as SQL per dialect |
 | `fyrql-optimizer` | the folding of constants, the moving of conditions toward the tables and into join keys, the order of inner joins by the row counts of the catalogs, the narrowing of scans to the columns and fields in use, joins in a database and the pushdown into sources |
@@ -1020,7 +1116,7 @@ Known differences from DuckDB:
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application; read only |
 | `fyrql-jdbc-all` | the JDBC driver with the engine, code generation and all connectors in one JAR, for tools such as DBeaver; the drivers of the databases are not in it |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
-| `fyrql-bench` | JMH benchmarks of the interpreter against compiled code and of the scans of CSV and Parquet files; not published |
+| `fyrql-bench` | JMH benchmarks of the interpreter against compiled code, of the operators on one and on several threads, and of the scans of CSV and Parquet files; not published |
 
 ## Building
 
@@ -1047,8 +1143,10 @@ queries with a fixed seed in `verify`; more queries or another seed are a proper
 A difference fails the test unless the ledger of known differences explains it
 (`fyrql-test`, `net.fyrql.test.random.Ledger`); the report shows each other difference
 shrunk to a small query. Every random query also runs with compiled code from the first
-row on, which must give exactly the results of the interpreter, and the other tests of
-`fyrql-test` run a second time with `-Dfyrql.codegen=always`.
+row on, which must give exactly the results of the interpreter, and on one thread, which
+must give the results of all threads over tables in splits of 16 rows, with the
+exceptions of [Parallel execution](#parallel-execution); the other tests of `fyrql-test`
+run a second time with `-Dfyrql.codegen=always`.
 
 The JDBC connector is tested against H2, SQLite and PostgreSQL in every build; PostgreSQL
 comes as binaries that the build unpacks and starts in a temporary directory, without
@@ -1077,56 +1175,61 @@ Parquet file, `partsupp` as a CSV file, `orders` and `customer` in PostgreSQL, `
 `supplier` as JSON lines, `nation` and `region` as Java collections. The data comes from
 `io.trino.tpch`, a Java port of the TPC-H generator, and DuckDB reads the same files for
 the comparison; it also writes the Parquet file from a CSV file of the generator, in row
-groups of 122,880 rows. In `verify` the queries run at scale factor 0.01; the profile
-`tpch` runs them at scale factor 1 with a heap of 8 GB, once in the interpreter (`OFF`)
-and once with code generation (`AUTO`), and writes the time and the peak of the heap of
-every query in both modes, a scan of `lineitem` for reference, and the plans with code
-generation into `fyrql-test/target/tpch-report.md`:
+groups of 122,880 rows. In `verify` the queries run at scale factor 0.01, on all threads
+and on one; the profile `tpch` runs them at scale factor 1 with a heap of 8 GB, in the
+interpreter (`OFF`) and with code generation (`AUTO`), each on one thread and on all,
+three times in turn (`-Dfyrql.tpch.runs=3`), and writes the time of the fastest run and
+the highest peak of the heap of every query, a scan of `lineitem` for reference, and the
+plans with code generation into `fyrql-test/target/tpch-report.md`:
 
 ```
 ./mvnw -B -ntp verify -P tpch -Dtest=TpchScale1Test -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
 The files take about 0.6 GB in `fyrql-test/target/tpch` and are written once; loading
-PostgreSQL takes about 30 s. On a laptop with an AMD Ryzen 5 5600H and JDK 21, all 22
-queries give the rows of DuckDB in both modes, with a peak of the heap between 0.4 and
-1.7 GB; in seconds:
+PostgreSQL takes about 30 s. On a laptop with an AMD Ryzen 5 5600H (six cores, twelve
+threads) and JDK 21, all 22 queries give the rows of DuckDB in all four ways, with a peak
+of the heap between 0.4 and 1.9 GB; in seconds, the fastest of three runs:
 
-| Query | Interpreted | Compiled | DuckDB |
-| --- | ---: | ---: | ---: |
-| Scan of `lineitem` | 0.6 | 0.3 | 0.0 |
-| Q1 | 3.5 | 2.4 | 0.2 |
-| Q2 | 1.1 | 0.9 | 0.4 |
-| Q3 | 2.3 | 2.0 | 0.5 |
-| Q4 | 1.0 | 0.8 | 0.3 |
-| Q5 | 1.5 | 1.3 | 2.3 |
-| Q6 | 1.6 | 1.5 | 0.1 |
-| Q7 | 4.2 | 4.2 | 0.4 |
-| Q8 | 2.0 | 2.0 | 0.5 |
-| Q9 | 2.7 | 2.4 | 0.7 |
-| Q10 | 1.8 | 1.6 | 0.5 |
-| Q11 | 0.5 | 0.6 | 0.3 |
-| Q12 | 3.4 | 2.9 | 0.3 |
-| Q13 | 2.8 | 2.4 | 0.5 |
-| Q14 | 1.8 | 1.5 | 0.1 |
-| Q15 | 3.1 | 2.6 | 0.1 |
-| Q16 | 0.7 | 0.6 | 0.4 |
-| Q17 | 1.8 | 1.4 | 0.2 |
-| Q18 | 2.4 | 2.3 | 0.6 |
-| Q19 | 2.2 | 2.0 | 0.2 |
-| Q20 | 2.1 | 1.9 | 0.3 |
-| Q21 | 4.1 | 3.1 | 0.6 |
-| Q22 | 1.2 | 1.0 | 0.4 |
-| All 22 queries | 47.7 | 41.4 | 9.9 |
+| Query | Interpreted, 1 thread | Interpreted, 12 threads | Compiled, 1 thread | Compiled, 12 threads | DuckDB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Scan of `lineitem` | 0.17 | 0.04 | 0.17 | 0.04 | 0.01 |
+| Q1 | 2.41 | 0.57 | 1.38 | 0.31 | 0.09 |
+| Q2 | 0.56 | 0.19 | 0.55 | 0.20 | 0.25 |
+| Q3 | 1.10 | 0.51 | 0.95 | 0.49 | 0.25 |
+| Q4 | 0.67 | 0.34 | 0.59 | 0.32 | 0.19 |
+| Q5 | 1.15 | 0.59 | 1.07 | 0.58 | 1.16 |
+| Q6 | 0.77 | 0.17 | 0.59 | 0.14 | 0.03 |
+| Q7 | 2.79 | 1.58 | 2.10 | 1.44 | 0.26 |
+| Q8 | 1.58 | 0.82 | 1.49 | 0.80 | 0.28 |
+| Q9 | 2.25 | 1.02 | 2.02 | 1.06 | 0.45 |
+| Q10 | 1.42 | 0.61 | 1.16 | 0.53 | 0.31 |
+| Q11 | 0.43 | 0.14 | 0.40 | 0.16 | 0.23 |
+| Q12 | 1.94 | 1.04 | 1.78 | 0.95 | 0.25 |
+| Q13 | 2.26 | 2.25 | 1.90 | 1.89 | 0.34 |
+| Q14 | 0.89 | 0.40 | 0.80 | 0.33 | 0.15 |
+| Q15 | 1.47 | 0.71 | 1.29 | 0.61 | 0.09 |
+| Q16 | 0.48 | 0.28 | 0.42 | 0.26 | 0.30 |
+| Q17 | 1.57 | 1.07 | 1.50 | 0.98 | 0.20 |
+| Q18 | 2.33 | 2.04 | 2.24 | 2.00 | 0.61 |
+| Q19 | 1.94 | 0.93 | 1.76 | 0.83 | 0.21 |
+| Q20 | 1.42 | 0.82 | 1.12 | 0.68 | 0.29 |
+| Q21 | 3.91 | 2.39 | 2.07 | 1.41 | 0.60 |
+| Q22 | 1.03 | 0.93 | 0.93 | 0.92 | 0.37 |
+| All 22 queries | 34.4 | 19.4 | 28.1 | 16.9 | 6.9 |
 
-With `lineitem` as a CSV file, the 22 queries took 79.4 s in the interpreter, 74.7 s
-compiled and 45.4 s in DuckDB, and the scan of `lineitem` 2.5, 2.4 and 1.6 s; before the
-CSV files were read into typed columns, joins and aggregations kept their values in
-primitive arrays and pipelines were compiled, the interpreter took 287 s. The scan reads
-four of the 16 columns, which a Parquet file keeps apart. The time left goes mostly into
-the joins and aggregations, which run in one thread, where DuckDB runs on all cores;
-compiled code gains about 13 % over the interpreter. Q15, Q17 and Q18 read `lineitem`
-twice, once for the subquery, and Q21 three times.
+After a while under load, the same laptop takes up to half as long again for every
+query, DuckDB included, so that only times of one run compare. On twelve threads, Q1 and
+Q6, which read `lineitem` and aggregate it into few groups, take less than a quarter of
+the time of one thread, and most other queries a third to two thirds. Q13 and Q22 read
+only the orders and customers of PostgreSQL, which a database gives as one split, and
+gain nothing; Q18 and Q21 read the orders in a chain with joins on one thread. Run once
+and cold on one thread, before queries ran on several threads, the 22 queries took 47.7 s
+in the interpreter and 41.4 s compiled; with `lineitem` as a CSV file, 79.4 s, 74.7 s and
+45.4 s in DuckDB, and before the CSV files were read into typed columns, joins and
+aggregations kept their values in primitive arrays and pipelines were compiled, the
+interpreter took 287 s. Q15, Q17 and Q18 read `lineitem` twice, once for the subquery,
+and Q21 three times.
 
 ## License
 

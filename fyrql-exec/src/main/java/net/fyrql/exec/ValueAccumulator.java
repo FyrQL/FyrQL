@@ -100,6 +100,22 @@ final class ValueAccumulator {
                 && call.function() != AggregateFunction.LIST;
     }
 
+    /**
+     * Empties an accumulator of a {@link #mergeable} aggregate, so that it
+     * takes the rows of another frame as a new one would.
+     */
+    void reset() {
+        count = 0;
+        longSum = 0;
+        bigSum = null;
+        doubleSum = 0;
+        if (type instanceof Decimal d) {
+            decimalSum = BigDecimal.valueOf(0, d.scale());
+        }
+        extreme = null;
+        bool = function == AggregateFunction.BOOL_AND;
+    }
+
     /** Adds the value of a row. */
     void add(Batch b, int row) {
         if (function == AggregateFunction.COUNT_STAR) {

@@ -37,7 +37,6 @@ import org.apache.parquet.filter2.predicate.FilterPredicate;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.io.InputFile;
-import org.apache.parquet.io.LocalInputFile;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -325,7 +324,7 @@ public final class ParquetConnector implements Connector, TableFunctionProvider 
      */
     private static List<BlockMetaData> passing(ParquetFiles.Footer footer, FilterPredicate predicate) {
         Path file = footer.version().file();
-        InputFile input = new LocalInputFile(file);
+        InputFile input = new LocalFile(file);
         try (ParquetFileReader reader = new ParquetFileReader(input, footer.metadata(),
                 ParquetFiles.options(FilterCompat.get(predicate), true), input.newStream())) {
             return reader.getRowGroups();

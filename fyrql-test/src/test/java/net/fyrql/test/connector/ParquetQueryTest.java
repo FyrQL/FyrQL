@@ -334,7 +334,8 @@ class ParquetQueryTest {
         try (DuckDbReference duckdb = new DuckDbReference()) {
             Path file = write(duckdb, 7);
             ParquetConnector parquet = ParquetConnector.builder("pq").path("t", file).recordReads(true).build();
-            try (FyrQL engine = FyrQL.builder().register(parquet).build()) {
+            // On one thread, whose scans read no row group ahead of the limit.
+            try (FyrQL engine = FyrQL.builder().register(parquet).threads(1).build()) {
                 assertEquals(2500, engine.rows("SELECT * FROM t LIMIT 2500").size());
                 long delivered = parquet.reads().stream().mapToLong(ParquetConnector.Read::rows).sum();
                 parquet.clearReads();

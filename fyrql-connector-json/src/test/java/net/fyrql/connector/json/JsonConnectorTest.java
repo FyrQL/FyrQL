@@ -21,6 +21,7 @@ import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.Split;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -45,6 +46,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Random;
 import java.util.ServiceLoader;
 import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
@@ -76,6 +78,24 @@ class JsonConnectorTest {
             }
         }
         return rows;
+    }
+
+    /** Reads columns of a table from each of its splits in turn. */
+    private static List<List<Object>> readSplits(JsonConnector c, String table, Integer... columns) {
+        ScanPlan plan = c.plan(TableRef.of(c.name(), table), ScanRequest.columns(List.of(columns)));
+        List<List<Object>> rows = new ArrayList<>();
+        for (Split split : c.splits(plan)) {
+            for (Batch b : Batches.readAll(c.open(split))) {
+                for (int r = 0; r < b.rowCount(); r++) {
+                    rows.add(Arrays.asList(b.row(r)));
+                }
+            }
+        }
+        return rows;
+    }
+
+    private static int splits(JsonConnector c, String table) {
+        return c.splits(c.plan(TableRef.of(c.name(), table), ScanRequest.columns(List.of(0)))).size();
     }
 
     private static int day(String date) {
@@ -333,10 +353,12 @@ class JsonConnectorTest {
         ConnectorFactory factory = ServiceLoader.load(ConnectorFactory.class).stream()
                 .map(ServiceLoader.Provider::get).filter(f -> f.type().equals("json")).findFirst().orElseThrow();
         JsonConnector c = (JsonConnector) factory.create("docs", Map.of("directory", "data", "tables.b", "lines.txt",
-                "sampleSize", "-1", "ignoreErrors", "true", "batchSize", "1"), dir);
+                "sampleSize", "-1", "ignoreErrors", "true", "batchSize", "1", "splitSize", "1"), dir);
         assertEquals(List.of("a", "b"), c.catalog().tables("main"));
-        assertEquals(List.of(List.of(1L), List.of(2L)), read(c, "a", 0));
-        assertEquals(List.of(List.of("p"), List.of("q")), read(c, "b", 0));
+        assertEquals(1, splits(c, "a"));
+        assertEquals(2, splits(c, "b"));
+        assertEquals(List.of(List.of(1L), List.of(2L)), readSplits(c, "a", 0));
+        assertEquals(List.of(List.of("p"), List.of("q")), readSplits(c, "b", 0));
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> factory.create("docs", Map.of("format", "xml"), dir));
         assertTrue(e.getMessage().startsWith("The option format of the JSON source docs is invalid: Unknown JSON"
@@ -344,5 +366,103 @@ class JsonConnectorTest {
         e = assertThrows(IllegalArgumentException.class,
                 () -> factory.create("docs", Map.of("ignoreErrors", "maybe"), dir));
         assertEquals("The option ignoreErrors of the JSON source docs must be true, false, on or off: maybe", e.getMessage());
+        e = assertThrows(IllegalArgumentException.class, () -> factory.create("docs", Map.of("splitSize", "-1"), dir));
+        assertTrue(e.getMessage().startsWith("The option splitSize of the JSON source docs must be a number of bytes"),
+                e.getMessage());
+    }
+
+    @Test
+    void aLargerFileOfRecordsIsReadInPartsThatGiveWhatTheWholeFileGives() throws IOException {
+        Random random = new Random(20261018);
+        StringBuilder json = new StringBuilder("\uFEFF");
+        for (int r = 0; r < 2000; r++) {
+            String s = switch (random.nextInt(4)) {
+                case 0 -> "plain";
+                case 1 -> "a}\\n{b";
+                case 2 -> "\u00e4 \\\"q\\\" ]\\r\\n[ \\u00fc";
+                default -> "";
+            };
+            String record = "{\"id\": " + r + ", \"s\": \"" + s + "\", \"n\": {\"x\": " + random.nextInt(100)
+                    + ", \"l\": [1, 2]}}";
+            if (random.nextInt(10) == 0) {
+                // Over several lines, which end with a comma or an opening brace, or with a closing brace at the end.
+                record = record.replace(", ", ",\n  ").replace("{\"id\"", "{\n  \"id\"");
+            }
+            json.append(record).append(random.nextBoolean() ? "\n" : "\r\n");
+            if (random.nextInt(20) == 0) {
+                json.append(" \n");
+            }
+        }
+        Path file = dir.resolve("big.jsonl");
+        Files.writeString(file, json, StandardCharsets.UTF_8);
+        for (JsonFormat format : List.of(JsonFormat.AUTO, JsonFormat.NEWLINE_DELIMITED)) {
+            JsonConnector whole = JsonConnector.builder("js").format(format).file("t", file).splitSize(0).build();
+            assertEquals(1, splits(whole, "t"));
+            List<List<Object>> expected = readSplits(whole, "t", 0, 1, 2);
+            assertEquals(2000, expected.size());
+            List<List<Object>> backwards = readSplits(whole, "t", 2, 0);
+            for (long splitSize : new long[] {1, 1000, 10_000, Files.size(file) / 3}) {
+                for (int batchSize : new int[] {1, 7, 2048}) {
+                    JsonConnector parts = JsonConnector.builder("js").format(format).file("t", file)
+                            .splitSize(splitSize).batchSize(batchSize).build();
+                    String what = format + "/" + splitSize + "/" + batchSize;
+                    assertTrue(splits(parts, "t") > 1, what);
+                    assertEquals(expected, readSplits(parts, "t", 0, 1, 2), what);
+                    assertEquals(backwards, readSplits(parts, "t", 2, 0), what);
+                }
+            }
+            JsonConnector small = JsonConnector.builder("js").format(format).file("t", file)
+                    .splitSize(Files.size(file)).build();
+            assertEquals(1, splits(small, "t"));
+        }
+    }
+
+    @Test
+    void anErrorInAPartNamesTheLineAndTheRecordThatReadingTheWholeFileNames() throws IOException {
+        Schema schema = Schema.of(new Schema.Field("id", DataType.BIGINT), new Schema.Field("s", DataType.VARCHAR));
+        for (String bad : List.of("{\"id\": \"x\", \"s\": \"y\"}", "{\"id\": 1, \"s\": }", "{\"id\": 1 \"s\": \"y\"}")) {
+            StringBuilder json = new StringBuilder();
+            for (int r = 0; r < 600; r++) {
+                json.append(r == 450 ? bad : "{\"id\": " + r + ",\n \"s\": \"two lines\"}").append('\n');
+            }
+            Path file = dir.resolve("bad.jsonl");
+            Files.writeString(file, json, StandardCharsets.UTF_8);
+            JsonConnector whole = JsonConnector.builder("js").schema("t", schema).file("t", file).splitSize(0)
+                    .build();
+            JsonConnector parts = JsonConnector.builder("js").schema("t", schema).file("t", file).splitSize(256)
+                    .batchSize(8).build();
+            assertTrue(splits(parts, "t") > 1);
+            String expected = assertThrows(ConversionException.class, () -> readSplits(whole, "t", 0, 1))
+                    .getMessage();
+            assertTrue(expected.contains("ecord 451"), expected);
+            assertEquals(expected,
+                    assertThrows(ConversionException.class, () -> readSplits(parts, "t", 0, 1)).getMessage());
+        }
+    }
+
+    @Test
+    void anArrayACompressedFileAndAFileInUtf16AreOneSplit() throws IOException {
+        StringBuilder lines = new StringBuilder();
+        for (int r = 0; r < 500; r++) {
+            lines.append("{\"id\": ").append(r).append("}\n");
+        }
+        Path array = dir.resolve("array.json");
+        Files.writeString(array, "[" + lines.toString().replace("}\n{", "},\n{") + "]", StandardCharsets.UTF_8);
+        Path compressed = dir.resolve("lines.jsonl.gz");
+        try (OutputStream out = new GZIPOutputStream(Files.newOutputStream(compressed))) {
+            out.write(lines.toString().repeat(20).getBytes(StandardCharsets.UTF_8));
+        }
+        Path utf16 = dir.resolve("utf16.jsonl");
+        Files.writeString(utf16, lines, StandardCharsets.UTF_16);
+        for (Path file : List.of(array, compressed, utf16)) {
+            JsonConnector c = JsonConnector.builder("js").file("t", file).splitSize(100).build();
+            assertEquals(1, splits(c, "t"), file.toString());
+            List<List<Object>> rows = readSplits(c, "t", 0);
+            assertEquals(file == compressed ? 10_000 : 500, rows.size());
+            assertEquals(List.of(499L), rows.get(499));
+        }
+        Path plain = dir.resolve("plain.jsonl");
+        Files.writeString(plain, lines, StandardCharsets.UTF_8);
+        assertTrue(splits(JsonConnector.builder("js").file("t", plain).splitSize(100).build(), "t") > 1);
     }
 }

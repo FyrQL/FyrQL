@@ -23,6 +23,7 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Casts;
 import net.fyrql.exec.Codegen;
 import net.fyrql.exec.PipelinePlanner;
+import net.fyrql.exec.SegmentPlanner;
 import net.fyrql.sql.render.DuckDbDialect;
 import net.fyrql.sql.render.SqlRenderer;
 
@@ -30,6 +31,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.IntFunction;
 import java.util.function.ToDoubleFunction;
 import java.util.regex.Pattern;
@@ -43,9 +45,11 @@ import java.util.regex.Pattern;
  * compiles is marked {@code [codegen]}; a chain that runs as one compiled
  * pipeline, see {@link PipelinePlanner}, is marked
  * {@code [codegen pipeline]} at its top node and {@code [codegen]} at the
- * nodes below it. A part of the plan that a source
- * runs is a line {@code Remote source [what it runs]}, with the part below
- * it, each line after a {@code |}.
+ * nodes below it. With more than one thread, the top node of a segment,
+ * see {@link SegmentPlanner}, is marked {@code [parallel]}: it runs on
+ * several threads if its scans have more than one split. A part of the
+ * plan that a source runs is a line {@code Remote source [what it runs]},
+ * with the part below it, each line after a {@code |}.
  */
 final class Explain {
 
@@ -55,9 +59,11 @@ final class Explain {
     private Explain() {
     }
 
-    static String print(PlanNode plan, Codegen codegen, ToDoubleFunction<PlanNode> estimate) {
+    /** Prints a plan that an engine with a number of threads runs. */
+    static String print(PlanNode plan, Codegen codegen, ToDoubleFunction<PlanNode> estimate, int threads) {
         StringBuilder sb = new StringBuilder();
-        print(plan, codegen, estimate, new IdentityHashMap<>(), 0, sb);
+        Set<PlanNode> segments = threads > 1 ? SegmentPlanner.tops(plan) : Set.of();
+        print(plan, codegen, estimate, segments, new IdentityHashMap<>(), 0, sb);
         return sb.toString();
     }
 
@@ -66,7 +72,7 @@ final class Explain {
      * found so far, by node, tell the nodes inside a pipeline.
      */
     private static void print(PlanNode node, Codegen codegen, ToDoubleFunction<PlanNode> estimate,
-            Map<PlanNode, String> marks, int depth, StringBuilder sb) {
+            Set<PlanNode> segments, Map<PlanNode, String> marks, int depth, StringBuilder sb) {
         if (!marks.containsKey(node)) {
             PipelinePlanner.Pipeline pipeline = PipelinePlanner.plan(node, codegen, estimate);
             if (pipeline != null) {
@@ -82,9 +88,12 @@ final class Explain {
         } else if (compiled(node, codegen)) {
             sb.append(" [codegen]");
         }
+        if (segments.contains(node)) {
+            sb.append(" [parallel]");
+        }
         sb.append('\n');
         for (PlanNode child : node.children()) {
-            print(child, codegen, estimate, marks, depth + 1, sb);
+            print(child, codegen, estimate, segments, marks, depth + 1, sb);
         }
         if (node instanceof PlanNode.Remote r) {
             remote(r.logical(), "  ".repeat(depth + 1) + "| ", 0, sb);

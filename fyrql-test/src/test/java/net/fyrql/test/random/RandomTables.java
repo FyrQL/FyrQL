@@ -24,6 +24,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.DataGenerator;
 import net.fyrql.exec.CodegenMode;
+import net.fyrql.exec.Executor;
 import net.fyrql.test.DuckDbReference;
 
 import java.math.BigDecimal;
@@ -126,18 +127,27 @@ final class RandomTables {
         };
     }
 
-    /** Builds an engine over the tables that interprets everything. */
+    /** Builds an engine over the tables that interprets everything, on the threads of the default. */
     static FyrQL engine(Map<String, List<Object[]>> rows) {
         return engine(rows, CodegenMode.OFF);
     }
 
-    /** Builds an engine over the tables with a mode of code generation. */
+    /** Builds an engine over the tables with a mode of code generation, on the threads of the default. */
     static FyrQL engine(Map<String, List<Object[]>> rows, CodegenMode codegen) {
-        MemoryConnector.Builder memory = MemoryConnector.builder(SOURCE).batchSize(16);
+        return engine(rows, codegen, Executor.threadsFromSystemProperty());
+    }
+
+    /**
+     * Builds an engine over the tables with a mode of code generation and a
+     * number of threads; a table has a split for every 16 rows, so that the
+     * segments of a query run on several threads.
+     */
+    static FyrQL engine(Map<String, List<Object[]>> rows, CodegenMode codegen, int threads) {
+        MemoryConnector.Builder memory = MemoryConnector.builder(SOURCE).batchSize(16).splitRows(16);
         for (Map.Entry<String, List<Object[]>> table : rows.entrySet()) {
             memory.table(table.getKey(), SCHEMAS.get(table.getKey()), table.getValue());
         }
-        return FyrQL.builder().register(memory.build()).batchSize(16).codegen(codegen).build();
+        return FyrQL.builder().register(memory.build()).batchSize(16).codegen(codegen).threads(threads).build();
     }
 
     /** Copies the tables of an engine into DuckDB under their plain names. */

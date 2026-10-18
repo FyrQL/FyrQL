@@ -59,8 +59,9 @@ class PushdownTest {
     static void setUp() {
         MemoryConnector.Builder tables = CorpusTables.builder()
                 .pushdown(Capabilities.filtersAndLimit(e -> true).withFields(true));
-        on = FyrQL.builder().register(tables.build()).pushdown(true).build();
-        off = FyrQL.builder().register(tables.build()).pushdown(false).build();
+        // A fixed number of threads, for the marks of the plans.
+        on = FyrQL.builder().register(tables.build()).pushdown(true).threads(4).build();
+        off = FyrQL.builder().register(tables.build()).pushdown(false).threads(4).build();
         duck = new DuckDbReference();
         CorpusTables.load(on, duck);
     }
@@ -112,16 +113,16 @@ class PushdownTest {
         assertEquals("""
                 Limit 3
                   Sort #0
-                    Project #1 AS b
+                    Project #1 AS b [parallel]
                       Scan memory.main.t (a INTEGER, b VARCHAR, k INTEGER) [pushed: WHERE ((#0 > CAST(2 AS INTEGER)) AND (#2 = CAST(10 AS INTEGER)))]
                 """, explain);
         assertEquals("""
-                Project #0 AS b, #1 AS k
+                Project #0 AS b, #1 AS k [parallel]
                   Scan memory.main.t (b VARCHAR, k INTEGER) [pushed: WHERE (#1 = CAST(10 AS INTEGER)) LIMIT 2]
                 """, on.explain("SELECT b, k FROM t WHERE k = 10 LIMIT 2"));
         assertEquals("""
                 Limit 2
-                  Project #0 AS b
+                  Project #0 AS b [parallel]
                     Filter (#1 = CAST(10 AS INTEGER)) [codegen]
                       Scan memory.main.t (b VARCHAR, k INTEGER)
                 """, off.explain("SELECT b FROM t WHERE k = 10 LIMIT 2"));
@@ -133,13 +134,13 @@ class PushdownTest {
         assertEquals("""
                 Project #0 AS id, #1 AS x
                   Sort #2 DESC
-                    Project #0 AS id, #1 AS x, #2 AS "#order0"
+                    Project #0 AS id, #1 AS x, #2 AS "#order0" [parallel]
                       Scan memory.main.n (id INTEGER, s.c.x DOUBLE, s.a INTEGER, s.c.tags VARCHAR[]) [pushed: WHERE ((#2 > CAST(0 AS INTEGER)) AND (#3 IS NOT NULL))]
                 """, on.explain(sql));
         assertEquals("""
                 Project #0 AS id, #1 AS x
                   Sort #2 DESC
-                    Project #0 AS id, struct_extract(struct_extract(#1, 'c'), 'x') AS x, struct_extract(#1, 'a') AS "#order0"
+                    Project #0 AS id, struct_extract(struct_extract(#1, 'c'), 'x') AS x, struct_extract(#1, 'a') AS "#order0" [parallel]
                       Filter ((struct_extract(#1, 'a') > CAST(0 AS INTEGER)) AND (struct_extract(struct_extract(#1, 'c'), 'tags') IS NOT NULL))
                         Scan memory.main.n (id INTEGER, s STRUCT(a INTEGER, b VARCHAR, "name" VARCHAR, c STRUCT(x DOUBLE, tags VARCHAR[])))
                 """, off.explain(sql));
@@ -151,18 +152,19 @@ class PushdownTest {
         String sql = "SELECT t.b, u.f FROM t, u WHERE t.a = u.a AND t.k = 10 AND u.f <> 'q'";
         // The small tables fuse the join and the nodes below it only when code is always generated.
         String pipeline = off.codegen() == CodegenMode.ALWAYS ? " [codegen pipeline]" : "";
+        // The join is in the segment of the side it probes; the side it builds is a segment of its own.
         assertEquals("""
-                Project #3 AS b, #1 AS f%s
+                Project #3 AS b, #1 AS f%s [parallel]
                   Join INNER ON l#0 = r#0 [codegen]
                     Scan memory.main.u (a INTEGER, f VARCHAR) [pushed: WHERE (#1 <> 'q')]
-                    Scan memory.main.t (a INTEGER, b VARCHAR, k INTEGER) [pushed: WHERE (#2 = CAST(10 AS INTEGER))]
+                    Scan memory.main.t (a INTEGER, b VARCHAR, k INTEGER) [pushed: WHERE (#2 = CAST(10 AS INTEGER))] [parallel]
                 """.formatted(pipeline), on.explain(sql));
         assertEquals("""
-                Project #3 AS b, #1 AS f%s
+                Project #3 AS b, #1 AS f%s [parallel]
                   Join INNER ON l#0 = r#0 [codegen]
                     Filter (#1 <> 'q') [codegen]
                       Scan memory.main.u (a INTEGER, f VARCHAR)
-                    Filter (#2 = CAST(10 AS INTEGER)) [codegen]
+                    Filter (#2 = CAST(10 AS INTEGER)) [codegen] [parallel]
                       Scan memory.main.t (a INTEGER, b VARCHAR, k INTEGER)
                 """.formatted(pipeline), off.explain(sql));
     }

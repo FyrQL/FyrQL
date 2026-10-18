@@ -44,7 +44,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * The TPC-H queries of {@link TpchQueries} at scale factor 0.01, over
  * Parquet, CSV, JSON, a database and the memory connector: each gives the
  * rows of DuckDB over the same files, the same rows with and without
- * pushdown, and a plan without cross products; with pushdown, the
+ * pushdown and on one thread, and a plan without cross products; with pushdown, the
  * database joins the customers and orders of Q3, Q5, Q7, Q8 and Q10 itself
  * and keeps the customers without orders of Q22. The semi join of Q18
  * filters the orders before they are joined with the customers. The files are
@@ -56,6 +56,7 @@ class TpchTest {
     private static TpchEngine tpch;
     private static FyrQL engine;
     private static FyrQL off;
+    private static FyrQL single;
     private static DuckDbReference duck;
 
     /** Returns the directory of the files of a scale factor. */
@@ -68,6 +69,7 @@ class TpchTest {
         tpch = TpchEngine.load(TpchEngine.SMALL, directory(TpchEngine.SMALL));
         engine = tpch.open(null, null);
         off = tpch.open(false, null);
+        single = tpch.open(null, null, 1);
         duck = new DuckDbReference();
         tpch.views(duck);
     }
@@ -80,6 +82,9 @@ class TpchTest {
         if (off != null) {
             off.close();
         }
+        if (single != null) {
+            single.close();
+        }
         if (engine != null) {
             engine.close();
         }
@@ -91,7 +96,7 @@ class TpchTest {
 
     @ParameterizedTest
     @MethodSource("queries")
-    void theQueryGivesTheRowsOfDuckDbWithAndWithoutPushdown(TpchQueries.Query query) {
+    void theQueryGivesTheRowsOfDuckDbWithAndWithoutPushdownAndOnOneThread(TpchQueries.Query query) {
         PlanNode plan = engine.plan(query.sql());
         String explain = engine.explain(plan);
         assertFalse(explain.contains("Join CROSS"), explain);
@@ -103,6 +108,11 @@ class TpchTest {
         Optional<String> modes = TpchQueries.compare(plan, off.rows(plan), actual);
         if (modes.isPresent()) {
             fail(query.name() + " with and without pushdown differs:\n" + modes.get() + "\n" + explain);
+        }
+        Optional<String> threads = TpchQueries.compare(plan, single.rows(plan), actual);
+        if (threads.isPresent()) {
+            fail(query.name() + " on one thread and on " + engine.threads() + " differs:\n" + threads.get() + "\n"
+                    + explain);
         }
         Optional<String> oracle = TpchQueries.compare(plan, duck.query(query.sql(), plan.schema()), actual);
         if (oracle.isPresent()) {
@@ -136,7 +146,9 @@ class TpchTest {
      * left input of a join, as long as the nodes are marked.
      */
     private static List<Integer> probes(String explain) {
-        List<String> lines = explain.lines().toList();
+        // The mark of a segment comes after the marks of the code.
+        List<String> lines = explain.lines().map(l -> l.endsWith(" [parallel]")
+                ? l.substring(0, l.length() - " [parallel]".length()) : l).toList();
         List<Integer> pipelines = new ArrayList<>();
         for (int top = 0; top < lines.size(); top++) {
             if (!lines.get(top).endsWith(" [codegen pipeline]")) {

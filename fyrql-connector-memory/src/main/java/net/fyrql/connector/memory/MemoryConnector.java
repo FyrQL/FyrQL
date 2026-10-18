@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.RandomAccess;
 import java.util.function.Function;
 
 /**
@@ -56,22 +57,36 @@ import java.util.function.Function;
  * struct columns, see
  * {@link Builder#pushdown}; it evaluates the filters with the evaluator of
  * the engine, so the results are the same either way.
+ * <p>
+ * A table of a list with random access, such as an {@code ArrayList}, has a
+ * split for every {@link Builder#splitRows} rows, which the engine may read
+ * in parallel; the list must then not change while a query reads it.
  */
 public final class MemoryConnector implements Connector {
+
+    /** The default number of rows of a split of a list. */
+    public static final int DEFAULT_SPLIT_ROWS = 65_536;
 
     private final String name;
     private final Map<String, Table> tables;
     private final int batchSize;
+    private final int splitRows;
     private final Capabilities capabilities;
     private final Catalog catalog;
 
     private record Table(Schema schema, Collection<?> rows, Function<Object, Object[]> toRow) {
     }
 
-    private MemoryConnector(String name, Map<String, Table> tables, int batchSize, Capabilities capabilities) {
+    /** The rows of a split of a list, from {@code from} to before {@code to}, or to its end in the last split. */
+    private record Range(int from, int to) {
+    }
+
+    private MemoryConnector(String name, Map<String, Table> tables, int batchSize, int splitRows,
+            Capabilities capabilities) {
         this.name = name;
         this.tables = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(tables));
         this.batchSize = batchSize;
+        this.splitRows = splitRows;
         this.capabilities = capabilities;
         this.catalog = new Catalog() {
             @Override
@@ -124,9 +139,25 @@ public final class MemoryConnector implements Connector {
         return capabilities.plan(table, table(table).schema(), request, request);
     }
 
+    /**
+     * Returns a split for every {@link Builder#splitRows} rows of a list with
+     * random access, the last one up to the end of the list, and one split
+     * for any other collection and for a scan with a limit.
+     */
     @Override
     public List<Split> splits(ScanPlan plan) {
-        return List.of(new Split(plan, 0, null));
+        Collection<?> rows = table(plan.table()).rows();
+        if (!(rows instanceof List<?> && rows instanceof RandomAccess) || plan.limitAccepted()
+                || rows.size() <= splitRows) {
+            return List.of(new Split(plan, 0, null));
+        }
+        List<Split> splits = new ArrayList<>();
+        int size = rows.size();
+        for (int from = 0; from < size; from += splitRows) {
+            int to = size - from <= splitRows ? Integer.MAX_VALUE : from + splitRows;
+            splits.add(new Split(plan, splits.size(), new Range(from, to)));
+        }
+        return splits;
     }
 
     @Override
@@ -138,7 +169,8 @@ public final class MemoryConnector implements Connector {
         Expression condition = plan.acceptedFilters().isEmpty() ? null
                 : Expressions.conjunction(plan.acceptedFilters());
         long limit = plan.limitAccepted() ? ((ScanRequest) plan.state()).limit().getAsLong() : Long.MAX_VALUE;
-        Iterator<?> rows = table.rows().iterator();
+        Iterator<?> rows = split.state() instanceof Range r ? range((List<?>) table.rows(), r)
+                : table.rows().iterator();
         return new BatchReader() {
             private long delivered;
 
@@ -186,6 +218,13 @@ public final class MemoryConnector implements Connector {
         };
     }
 
+    /** The rows of a split of a list, as many of them as the list still has. */
+    private static Iterator<?> range(List<?> rows, Range range) {
+        int size = rows.size();
+        int to = Math.min(range.to(), size);
+        return rows.subList(Math.min(range.from(), to), to).iterator();
+    }
+
     /** The value of a column of a row, or of a field inside it. */
     private static Object value(Object[] row, ColumnPath path, Schema schema) {
         Object v = row[path.column()];
@@ -207,6 +246,7 @@ public final class MemoryConnector implements Connector {
         private final String name;
         private final Map<String, Table> tables = new LinkedHashMap<>();
         private int batchSize = 2048;
+        private int splitRows = DEFAULT_SPLIT_ROWS;
         private Capabilities capabilities = Capabilities.NONE;
 
         private Builder(String name) {
@@ -219,6 +259,18 @@ public final class MemoryConnector implements Connector {
                 throw new IllegalArgumentException("batchSize: " + batchSize);
             }
             this.batchSize = batchSize;
+            return this;
+        }
+
+        /**
+         * Sets the rows of a split of a table of a list with random access;
+         * {@value MemoryConnector#DEFAULT_SPLIT_ROWS} by default.
+         */
+        public Builder splitRows(int rows) {
+            if (rows < 1) {
+                throw new IllegalArgumentException("splitRows: " + rows);
+            }
+            this.splitRows = rows;
             return this;
         }
 
@@ -266,7 +318,7 @@ public final class MemoryConnector implements Connector {
         }
 
         public MemoryConnector build() {
-            return new MemoryConnector(name, tables, batchSize, capabilities);
+            return new MemoryConnector(name, tables, batchSize, splitRows, capabilities);
         }
     }
 }

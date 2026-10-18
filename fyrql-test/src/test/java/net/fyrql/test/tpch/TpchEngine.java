@@ -48,12 +48,19 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * {@code json}), and {@code nation} and {@code region} in the memory
  * connector (source {@code mem}). The queries name the tables without a
  * source; each name is found in exactly one. DuckDB reads the same files
- * through views.
+ * through views. At the small scale factor, the CSV and the JSON files are
+ * read in parts of 64 KiB.
  */
 final class TpchEngine {
 
     /** The scale factor of the tests in every build. */
     static final double SMALL = 0.01;
+
+    /**
+     * The size of the parts that the CSV and the JSON files are read in at
+     * the small scale factor, so that they are several splits there too.
+     */
+    private static final long SMALL_SPLIT_SIZE = 64 << 10;
 
     private final double scaleFactor;
     private final Path dir;
@@ -121,8 +128,19 @@ final class TpchEngine {
      * @param codegen when to compile, or {@code null} for the system property
      */
     FyrQL open(Boolean pushdown, CodegenMode codegen) {
-        CsvConnector.Builder csv = CsvConnector.builder("files").delimiter(TpchData.DELIMITER).header(true);
-        JsonConnector.Builder json = JsonConnector.builder("json").format(JsonFormat.NEWLINE_DELIMITED);
+        return open(pushdown, codegen, 0);
+    }
+
+    /**
+     * Opens an engine over the five sources that runs each query on at most
+     * {@code threads} threads, or as many as its builder chooses if that is 0.
+     */
+    FyrQL open(Boolean pushdown, CodegenMode codegen, int threads) {
+        long splitSize = scaleFactor <= SMALL ? SMALL_SPLIT_SIZE : CsvConnector.SPLIT_SIZE;
+        CsvConnector.Builder csv = CsvConnector.builder("files").delimiter(TpchData.DELIMITER).header(true)
+                .splitSize(splitSize);
+        JsonConnector.Builder json = JsonConnector.builder("json").format(JsonFormat.NEWLINE_DELIMITED)
+                .splitSize(splitSize);
         MemoryConnector.Builder memory = MemoryConnector.builder("mem");
         ParquetConnector.Builder parquet = ParquetConnector.builder("parquet");
         for (TpchTable table : TpchTable.values()) {
@@ -151,6 +169,9 @@ final class TpchEngine {
         }
         if (codegen != null) {
             b.codegen(codegen);
+        }
+        if (threads > 0) {
+            b.threads(threads);
         }
         return b.build();
     }

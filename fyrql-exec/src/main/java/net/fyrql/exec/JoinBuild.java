@@ -1,0 +1,127 @@
+/*
+ * Copyright 2026 the FyrQL authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package net.fyrql.exec;
+
+import net.fyrql.connector.Batches;
+import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.type.DataType;
+import net.fyrql.core.vector.Batch;
+import net.fyrql.exec.spi.InterpretedKeys;
+import net.fyrql.exec.spi.JoinTable;
+import net.fyrql.exec.spi.KeyFunctions;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
+
+/**
+ * Reads the build side of a join into a {@link JoinTable}, each batch
+ * hashed where it is read: by the workers of a segment, which collects the
+ * batches in the order of its morsels, see {@link ParallelSegment#collect},
+ * or else on the thread of the query. The table is the one that hashing
+ * the concatenated batches would give, since every key function hashes
+ * alike; each reader switches to compiled key functions once
+ * {@link Codegen#due} says so for the rows it has hashed. The memory of
+ * each batch is reserved under the label of the join.
+ */
+final class JoinBuild {
+
+    /** A batch of the build side and the hashes of its keys, {@code null} without keys. */
+    private record Part(Batch batch, int[] hashes) {
+    }
+
+    private JoinBuild() {
+    }
+
+    /**
+     * Reads the right input of a join into its table.
+     *
+     * @param right    the operator of the right input
+     * @param label    the label of the join
+     * @param reserved counts the bytes reserved in the budget, which the caller releases
+     */
+    static JoinTable read(Operator right, PlanNode.Join join, String label, MemoryBudget budget, Codegen codegen,
+            AtomicLong reserved) {
+        int[] keys = join.rightKeys().stream().mapToInt(Integer::intValue).toArray();
+        List<DataType> types = new ArrayList<>();
+        for (int k : join.leftKeys()) {
+            types.add(join.left().schema().type(k));
+        }
+        List<Part> parts;
+        if (right instanceof ParallelSegment segment) {
+            parts = segment.collect(() -> new Hasher(keys, types, label, budget, codegen, reserved));
+        } else {
+            Hasher hasher = new Hasher(keys, types, label, budget, codegen, reserved);
+            parts = new ArrayList<>();
+            for (Batch b = right.next(); b != null; b = right.next()) {
+                parts.add(hasher.apply(b));
+            }
+        }
+        List<Batch> batches = new ArrayList<>(parts.size());
+        List<int[]> hashes = new ArrayList<>(parts.size());
+        for (Part p : parts) {
+            batches.add(p.batch());
+            hashes.add(p.hashes());
+        }
+        return new JoinTable(join.right().schema(), batches, hashes, keys);
+    }
+
+    /** Reserves the memory of the batches of one reader and hashes their keys. */
+    private static final class Hasher implements Function<Batch, Part> {
+        private final int[] keys;
+        private final List<DataType> types;
+        private final String label;
+        private final MemoryBudget budget;
+        private final Codegen codegen;
+        private final AtomicLong reserved;
+        private KeyFunctions functions = InterpretedKeys.INSTANCE;
+        private boolean asked;
+        private long rows;
+
+        Hasher(int[] keys, List<DataType> types, String label, MemoryBudget budget, Codegen codegen,
+                AtomicLong reserved) {
+            this.keys = keys;
+            this.types = types;
+            this.label = label;
+            this.budget = budget;
+            this.codegen = codegen;
+            this.reserved = reserved;
+        }
+
+        @Override
+        public Part apply(Batch b) {
+            long bytes = Batches.estimateBytes(b);
+            budget.reserve(bytes, label);
+            reserved.addAndGet(bytes);
+            if (keys.length == 0) {
+                return new Part(b, null);
+            }
+            if (!asked && codegen.due(rows)) {
+                asked = true;
+                KeyFunctions compiled = codegen.keys(types);
+                if (compiled != null) {
+                    functions = compiled;
+                }
+            }
+            rows += b.rowCount();
+            int[] hashes = new int[b.rowCount()];
+            functions.hash(b, keys, hashes);
+            return new Part(b, hashes);
+        }
+    }
+}

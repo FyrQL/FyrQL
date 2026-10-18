@@ -18,6 +18,7 @@ package net.fyrql.exec;
 
 import net.fyrql.connector.BatchReader;
 import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 
 import java.util.function.Function;
@@ -61,12 +62,22 @@ final class ScanOperator extends AbstractOperator {
             if (b.rowCount() == 0) {
                 continue;
             }
-            if (!b.schema().types().equals(schema().types())) {
-                throw new IllegalStateException("The source of " + what + " delivered the types "
-                        + b.schema().types() + ", the scan expects " + schema().types());
-            }
-            return b.schema().equals(schema()) ? b : new Batch(schema(), b.rowCount(), b.columns());
+            return checked(b, schema(), what);
         }
+    }
+
+    /**
+     * Returns a batch of a source with the names of the scan, after checking
+     * that it has the types of the scan.
+     *
+     * @param what the scan in the message of a failure
+     */
+    static Batch checked(Batch b, Schema schema, String what) {
+        if (!b.schema().types().equals(schema.types())) {
+            throw new IllegalStateException("The source of " + what + " delivered the types "
+                    + b.schema().types() + ", the scan expects " + schema.types());
+        }
+        return b.schema().equals(schema) ? b : new Batch(schema, b.rowCount(), b.columns());
     }
 
     @Override

@@ -30,6 +30,7 @@ import net.fyrql.exec.spi.PipelineSpec;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Runs a chain of stages as one compiled pipeline over the batches of its
@@ -42,7 +43,10 @@ import java.util.List;
  * pairs of the joins within {@link JoinTable#MAX_PAIRS}. A {@code RIGHT} or
  * {@code FULL} join at the top emits its unmatched build rows at the end.
  * An error of a stage names the node of the stage, e.g. {@code Filter#3},
- * as the operator of that node would.
+ * as the operator of that node would. A build side that a segment reads is
+ * hashed by its workers, see {@link JoinBuild}. In a copy of a chain of a
+ * segment, the pipeline probes the tables the segment shares among its
+ * workers, which emits the unmatched build rows itself.
  */
 final class PipelineOperator extends AbstractOperator {
 
@@ -63,7 +67,7 @@ final class PipelineOperator extends AbstractOperator {
     private final ArrayDeque<Batch> steps = new ArrayDeque<>();
     private boolean sourceDone;
     private boolean leftoversDone;
-    private long reserved;
+    private final AtomicLong reserved = new AtomicLong();
 
     /**
      * @param label    the label of the last stage
@@ -91,6 +95,20 @@ final class PipelineOperator extends AbstractOperator {
                 joinLabels.add(labels.get(k));
             }
         }
+    }
+
+    /**
+     * A pipeline that probes tables built already, which emits no unmatched
+     * build rows.
+     *
+     * @param tables the table of each join, in the order of {@link PipelineSpec#probes()}
+     */
+    PipelineOperator(String label, PipelineSpec spec, List<String> labels, CompiledPipeline pipeline,
+            Operator input, JoinTable[] tables, Codegen codegen) {
+        this(label, spec, labels, pipeline, input, List.of(), MemoryBudget.unlimited(), codegen);
+        this.tables = tables.clone();
+        this.leftoversDone = true;
+        stepRows = stepRows();
     }
 
     @Override
@@ -153,6 +171,11 @@ final class PipelineOperator extends AbstractOperator {
                 return;
             }
         }
+        stepRows = stepRows();
+    }
+
+    /** Returns the rows of the source that go through the pipeline at once. */
+    private int stepRows() {
         // A row of the source pairs with every build row of each join without keys it passes.
         long pairs = 1;
         for (int p = 0; p < joins.size(); p++) {
@@ -161,18 +184,21 @@ final class PipelineOperator extends AbstractOperator {
                 pairs = Math.min(pairs * Math.max(1, tables[p].rowCount()), JoinTable.MAX_PAIRS + 1L);
             }
         }
-        stepRows = JoinTable.stepRows(pairs);
+        return JoinTable.stepRows(pairs);
     }
 
     /** Reads the right input of a join into its table; the hashes are those of the interpreter. */
     private JoinTable build(int p) {
         PlanNode.Join j = joins.get(p);
         Operator right = builds.get(p);
+        if (right instanceof ParallelSegment) {
+            return JoinBuild.read(right, j, joinLabels.get(p), budget, codegen, reserved);
+        }
         List<Batch> batches = new ArrayList<>();
         for (Batch b = right.next(); b != null; b = right.next()) {
             long bytes = Batches.estimateBytes(b);
             budget.reserve(bytes, joinLabels.get(p));
-            reserved += bytes;
+            reserved.addAndGet(bytes);
             batches.add(b);
         }
         int[] keys = j.rightKeys().stream().mapToInt(Integer::intValue).toArray();
@@ -200,7 +226,6 @@ final class PipelineOperator extends AbstractOperator {
         for (Operator build : builds) {
             build.close();
         }
-        budget.release(reserved);
-        reserved = 0;
+        budget.release(reserved.getAndSet(0));
     }
 }

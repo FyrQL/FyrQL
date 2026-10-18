@@ -25,7 +25,6 @@ import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.RemotePlan;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
-import net.fyrql.connector.Split;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.plan.PlanNode;
@@ -38,6 +37,7 @@ import net.fyrql.exec.Executor;
 import net.fyrql.exec.MemoryBudget;
 import net.fyrql.exec.Operator;
 import net.fyrql.exec.QueryContext;
+import net.fyrql.exec.Splits;
 import net.fyrql.exec.TableSource;
 import net.fyrql.optimizer.Optimizer;
 import net.fyrql.exec.spi.CodegenStatistics;
@@ -47,7 +47,6 @@ import net.fyrql.sql.parse.SqlParser;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -86,7 +85,8 @@ public final class FyrQL implements AutoCloseable {
     private final Codegen codegen;
 
     private FyrQL(Map<String, Connector> connectors, SearchPath searchPath, FunctionRegistry functions,
-            MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options) {
+            MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options, int threads,
+            boolean preserveOrder) {
         this.connectors = Collections.unmodifiableMap(new LinkedHashMap<>(connectors));
         this.catalog = new EngineCatalog(this.connectors, searchPath);
         this.catalogTables = new CatalogTables(this.connectors);
@@ -106,10 +106,15 @@ public final class FyrQL implements AutoCloseable {
             }
 
             @Override
+            public Splits splits(PlanNode.Scan scan, QueryContext context) {
+                return FyrQL.this.splits(scan);
+            }
+
+            @Override
             public BatchReader open(PlanNode.Remote remote) {
                 return FyrQL.this.open(remote);
             }
-        }, budget, batchSize, codegen);
+        }, budget, batchSize, codegen, threads, preserveOrder);
     }
 
     /** Returns the catalog: names along the search path, columns, and table functions. */
@@ -140,6 +145,16 @@ public final class FyrQL implements AutoCloseable {
     /** Tells whether scans are negotiated with their connectors, so that a source takes over what it can. */
     public boolean pushdown() {
         return optimizer.options().pushdown();
+    }
+
+    /** Returns the most threads on which one query runs at a time. */
+    public int threads() {
+        return executor.threads();
+    }
+
+    /** Tells whether rows that no sort orders come in the order in which their sources deliver them. */
+    public boolean preserveOrder() {
+        return executor.preserveOrder();
     }
 
     /**
@@ -259,7 +274,11 @@ public final class FyrQL implements AutoCloseable {
      * whose expressions or keys the engine compiles once enough rows pass
      * is marked {@code [codegen]}; a chain of filters and projections that
      * runs as one compiled pipeline is marked {@code [codegen pipeline]} at
-     * its top and {@code [codegen]} below.
+     * its top and {@code [codegen]} below. With more than one thread, the
+     * top of a chain of filters, projections, unnests and joins (down the
+     * side they probe) over a scan, or of a union of such chains without
+     * joins, is marked {@code [parallel]}: the chain runs on several threads
+     * if the scan has more than one split.
      *
      * @throws SqlException if the query cannot be parsed or bound
      */
@@ -281,7 +300,7 @@ public final class FyrQL implements AutoCloseable {
 
     /** Returns a plan as the engine runs it, as text in the form of {@link #explain(String)}. */
     public String explain(PlanNode plan) {
-        return Explain.print(optimize(plan), codegen, optimizer.estimator());
+        return Explain.print(optimize(plan), codegen, optimizer.estimator(), executor.threads());
     }
 
     /**
@@ -322,14 +341,20 @@ public final class FyrQL implements AutoCloseable {
     }
 
     /**
-     * Opens the reader of a scan: the connector plans it once more, with the
-     * filters it took over and the hints, the same filters as when the scan
-     * was negotiated, which must give what the scan carries as taken over,
-     * and its splits are read one after the other. Once the query is
-     * canceled, no further split is opened, and canceling the reader
-     * cancels the reader of the current split.
+     * Opens the reader of a scan, which reads its splits one after the
+     * other, see {@link Splits#sequential}.
      */
     private BatchReader open(PlanNode.Scan scan, QueryContext context) {
+        return Splits.sequential(splits(scan), context);
+    }
+
+    /**
+     * Returns the splits of a scan: the connector plans it once more, with
+     * the filters it took over and the hints, the same filters as when the
+     * scan was negotiated, which must give what the scan carries as taken
+     * over.
+     */
+    private Splits splits(PlanNode.Scan scan) {
         Connector connector = connector(scan.table().source());
         PlanNode.Pushed pushed = scan.pushed();
         List<Expression> filters = new ArrayList<>(pushed.filters());
@@ -353,50 +378,7 @@ public final class FyrQL implements AutoCloseable {
             throw new IllegalStateException("The connector " + connector.name() + " plans " + plan.output()
                     + " for a scan of " + scan.schema());
         }
-        Iterator<Split> splits = connector.splits(plan).iterator();
-        return new BatchReader() {
-            private volatile BatchReader current;
-
-            @Override
-            public Batch next() {
-                while (true) {
-                    if (current == null) {
-                        // The end of a canceled query, which its scan turns into the failure.
-                        if (context.isCancelled() || !splits.hasNext()) {
-                            return null;
-                        }
-                        current = connector.open(splits.next());
-                        if (context.isCancelled()) {
-                            close();
-                            return null;
-                        }
-                    }
-                    Batch b = current.next();
-                    if (b != null) {
-                        return b;
-                    }
-                    current.close();
-                    current = null;
-                }
-            }
-
-            @Override
-            public void close() {
-                BatchReader r = current;
-                if (r != null) {
-                    current = null;
-                    r.close();
-                }
-            }
-
-            @Override
-            public void cancel() {
-                BatchReader r = current;
-                if (r != null) {
-                    r.cancel();
-                }
-            }
-        };
+        return Splits.of(connector.splits(plan), connector::open);
     }
 
     /**
@@ -434,6 +416,8 @@ public final class FyrQL implements AutoCloseable {
         private CodegenMode codegenMode;
         private long codegenThreshold = Codegen.DEFAULT_THRESHOLD;
         private Boolean pushdown;
+        private int threads;
+        private boolean preserveOrder = true;
 
         private Builder() {
         }
@@ -533,10 +517,36 @@ public final class FyrQL implements AutoCloseable {
         }
 
         /**
+         * Sets the most threads on which one query runs at a time; by
+         * default the system property {@value Executor#THREADS_PROPERTY},
+         * or the number of processors. With 1, a query runs on the thread
+         * that reads its result.
+         */
+        public Builder threads(int threads) {
+            if (threads < 1) {
+                throw new IllegalArgumentException("threads: " + threads);
+            }
+            this.threads = threads;
+            return this;
+        }
+
+        /**
+         * Sets whether rows that no sort orders come in the order in which
+         * their sources deliver them, as on one thread, also under a
+         * {@code LIMIT}; on by default. Off, the rows of parts of a scan
+         * that run in parallel come as they are done.
+         */
+        public Builder preserveOrder(boolean enabled) {
+            this.preserveOrder = enabled;
+            return this;
+        }
+
+        /**
          * Builds the engine.
          *
          * @throws IllegalArgumentException if the default source is not registered, or the system property
-         *         {@value CodegenMode#PROPERTY} or {@value Optimizer.Options#PROPERTY} has an unknown value
+         *         {@value CodegenMode#PROPERTY}, {@value Optimizer.Options#PROPERTY} or
+         *         {@value Executor#THREADS_PROPERTY} has an unknown value
          * @throws IllegalStateException    if code generation is {@code ALWAYS} without a compiler
          */
         public FyrQL build() {
@@ -549,7 +559,8 @@ public final class FyrQL implements AutoCloseable {
                     : connectors.size() == 1 ? connectors.keySet().iterator().next() : null;
             return new FyrQL(connectors, new SearchPath(source, defaultSchema),
                     functions != null ? functions : FunctionRegistry.standard(), new MemoryBudget(memoryBudget),
-                    batchSize, codegen, options);
+                    batchSize, codegen, options, threads > 0 ? threads : Executor.threadsFromSystemProperty(),
+                    preserveOrder);
         }
     }
 }

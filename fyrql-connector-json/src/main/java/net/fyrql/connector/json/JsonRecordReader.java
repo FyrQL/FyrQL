@@ -158,6 +158,19 @@ public final class JsonRecordReader implements BatchReader {
     }
 
     /**
+     * Opens a reader of the records of a part of a file that starts where a
+     * record does; its messages count the lines and the records from the
+     * start of the file.
+     *
+     * @param origin the lines and the records of the file before the part
+     */
+    static JsonRecordReader open(InputStream in, JsonLayout layout, List<ColumnPath> columns, JsonOptions options,
+            int batchSize, String source, JsonInput.Origin origin) {
+        return new JsonRecordReader(new JsonInput(in, options.format(), source, origin), layout, columns, options,
+                batchSize);
+    }
+
+    /**
      * Returns the values of the keys asked for when the reader was opened
      * that the objects along the pointer hold next to the records, by key:
      * the text of a string, a number as written, {@code true} or
@@ -496,7 +509,7 @@ public final class JsonRecordReader implements BatchReader {
 
     /** Returns the error for a value of the current record, with the column and a hint about the sample. */
     private ConversionException error(String reason) {
-        StringBuilder b = new StringBuilder("Record ").append(input.record()).append(" of ").append(input.source());
+        StringBuilder b = new StringBuilder("Record ").append(input.number()).append(" of ").append(input.source());
         if (column >= 0) {
             b.append(", column ").append(layout.schema().name(column));
         }

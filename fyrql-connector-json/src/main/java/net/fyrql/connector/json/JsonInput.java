@@ -48,6 +48,7 @@ final class JsonInput implements AutoCloseable {
 
     private final JsonParser parser;
     private final String source;
+    private final Origin origin;
     private final JsonFormat format;
     private final String pointer;
     /** The keys next to the records whose values to keep. */
@@ -84,8 +85,25 @@ final class JsonInput implements AutoCloseable {
      * @throws IllegalArgumentException if the pointer is not one
      */
     JsonInput(InputStream in, JsonFormat format, String pointer, String source, Set<String> siblingKeys) {
+        this(in, format, pointer, source, siblingKeys, Origin.START);
+    }
+
+    /**
+     * Opens an input that is a part of its source, which starts where a
+     * record does; its messages count the lines and the records from the
+     * start of the source. It is closed with the reader.
+     *
+     * @param origin the lines and the records of the source before the input
+     */
+    JsonInput(InputStream in, JsonFormat format, String source, Origin origin) {
+        this(in, format, "", source, Set.of(), origin);
+    }
+
+    private JsonInput(InputStream in, JsonFormat format, String pointer, String source, Set<String> siblingKeys,
+            Origin origin) {
         JsonPointers.check(pointer);
         this.source = source;
+        this.origin = origin;
         this.format = format;
         this.pointer = pointer;
         this.siblingKeys = Set.copyOf(siblingKeys);
@@ -100,9 +118,40 @@ final class JsonInput implements AutoCloseable {
         return parser;
     }
 
-    /** Returns the number of the current record, from 1. */
+    /**
+     * Where an input starts in its source: the lines and the records before
+     * it, which are only counted for a message.
+     */
+    interface Origin {
+
+        /** The start of a source. */
+        Origin START = new Origin() {
+            @Override
+            public long lines() {
+                return 0;
+            }
+
+            @Override
+            public long records() {
+                return 0;
+            }
+        };
+
+        /** Returns the line breaks before the input. */
+        long lines();
+
+        /** Returns the records before the input. */
+        long records();
+    }
+
+    /** Returns the number of the current record in the input, from 1. */
     long record() {
         return record;
+    }
+
+    /** Returns the number of the current record in the source, from 1, for messages. */
+    long number() {
+        return origin.records() + record;
     }
 
     String source() {
@@ -244,15 +293,15 @@ final class JsonInput implements AutoCloseable {
     /** Returns the error for JSON that does not parse, with its place. */
     ConversionException malformed(JsonProcessingException e) {
         JsonLocation l = e.getLocation();
-        String at = l == null ? "" : " at line " + l.getLineNr() + ", column " + l.getColumnNr();
-        return new ConversionException("Malformed JSON in " + source + at + ", in record " + Math.max(record, 1)
-                + ": " + e.getOriginalMessage(), e);
+        String at = l == null ? "" : " at line " + (origin.lines() + l.getLineNr()) + ", column " + l.getColumnNr();
+        return new ConversionException("Malformed JSON in " + source + at + ", in record "
+                + (origin.records() + Math.max(record, 1)) + ": " + e.getOriginalMessage(), e);
     }
 
     /** Returns the line and column of the current token, for messages. */
     String where() {
         JsonLocation l = parser.currentTokenLocation();
-        return "line " + l.getLineNr() + ", column " + l.getColumnNr();
+        return "line " + (origin.lines() + l.getLineNr()) + ", column " + l.getColumnNr();
     }
 
     /** Describes a token for a message, as DuckDB names the types of JSON values. */

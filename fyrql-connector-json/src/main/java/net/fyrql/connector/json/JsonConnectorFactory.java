@@ -32,8 +32,9 @@ import java.util.Optional;
  * which apply to every file: {@code format} ({@code auto}, {@code array} or
  * {@code newline_delimited}), {@code sampleSize}, {@code mapInferenceThreshold},
  * {@code fieldAppearanceThreshold}, {@code ignoreErrors}, {@code dateFormat}
- * and {@code timestampFormat}; and {@code batchSize}. A source without files
- * serves only the table functions.
+ * and {@code timestampFormat}; and {@code batchSize} and {@code splitSize}
+ * (a number of bytes, such as {@code 4MiB}). A source without files serves
+ * only the table functions.
  */
 public final class JsonConnectorFactory implements ConnectorFactory {
 
@@ -54,6 +55,7 @@ public final class JsonConnectorFactory implements ConnectorFactory {
         o.get("dateFormat", null, JsonConnectorFactory::format).ifPresent(b::dateFormat);
         o.get("timestampFormat", null, JsonConnectorFactory::format).ifPresent(b::timestampFormat);
         o.integer("batchSize").ifPresent(b::batchSize);
+        o.bytes("splitSize").ifPresent(b::splitSize);
         Optional<Path> files = o.path("directory");
         Map<String, Map<String, String>> tables = o.tables("file");
         o.rejectUnknown();

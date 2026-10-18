@@ -19,9 +19,12 @@ package net.fyrql.connector.csv;
 import de.siegmar.fastcsv.reader.AbstractBaseCsvCallbackHandler;
 import de.siegmar.fastcsv.reader.CommentStrategy;
 import de.siegmar.fastcsv.reader.CsvCallbackHandler;
+import de.siegmar.fastcsv.reader.CsvIndex;
+import de.siegmar.fastcsv.reader.CsvParseException;
 import de.siegmar.fastcsv.reader.CsvReader;
 import de.siegmar.fastcsv.reader.CsvRecord;
 import de.siegmar.fastcsv.reader.CsvRecordHandler;
+import de.siegmar.fastcsv.reader.IndexedCsvReader;
 import de.siegmar.fastcsv.reader.RecordType;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Catalog;
@@ -70,11 +73,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  * of its column. An empty field is {@code NULL}. A file that does not parse, e.g. with an
  * unterminated quote or a field that is not a number, is an error.
  * <p>
+ * A file larger than the split size is read in parts of about that size,
+ * which the engine reads on several threads, see {@link #splits}.
+ * <p>
  * The connector also offers the table functions {@code read_csv} and
  * {@code read_csv_auto} for any file; built without files it serves only
  * them. See {@link #bind}.
  */
 public final class CsvConnector implements Connector, TableFunctionProvider {
+
+    /** The split size by default, see {@link Builder#splitSize}. */
+    public static final long SPLIT_SIZE = 4L << 20;
 
     /** The types a column is tried against, in order; the first that fits every sampled value wins. */
     private static final List<DataType> SNIFF_ORDER = List.of(DataType.BOOLEAN, DataType.BIGINT, DataType.DOUBLE,
@@ -90,11 +99,14 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
     private final int batchSize;
     private final int sampleRows;
     private final Charset charset;
+    private final long splitSize;
     private final Catalog catalog;
     /** The tables of table function calls by their names, and the names by the calls. */
     private final Map<String, Table> callTables = new ConcurrentHashMap<>();
     private final Map<Call, String> calls = new ConcurrentHashMap<>();
     private final AtomicInteger callCount = new AtomicInteger();
+    /** The index of each file read in splits, in the version it was built for. */
+    private final Map<IndexKey, Pages> indexes = new ConcurrentHashMap<>();
 
     /**
      * A file and how to read it.
@@ -112,12 +124,26 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
             String nullString) {
     }
 
-    private CsvConnector(String name, Map<String, Table> tables, int batchSize, int sampleRows, Charset charset) {
+    /** What the index of a file depends on besides the file. */
+    private record IndexKey(Path file, char delimiter, char quote, Charset charset) {
+    }
+
+    /** The index of a file in a version, or {@code null} if its bytes cannot be indexed. */
+    private record Pages(long size, FileTime modified, CsvIndex index) {
+    }
+
+    /** The pages of an index that a split reads, from {@code from} to before {@code to}. */
+    private record PageRange(CsvIndex index, int from, int to) {
+    }
+
+    private CsvConnector(String name, Map<String, Table> tables, int batchSize, int sampleRows, Charset charset,
+            long splitSize) {
         this.name = name;
         this.tables = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(tables));
         this.batchSize = batchSize;
         this.sampleRows = sampleRows;
         this.charset = charset;
+        this.splitSize = splitSize;
         this.catalog = new Catalog() {
             @Override
             public List<String> schemas() {
@@ -279,20 +305,94 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
         return ScanPlan.columnsOnly(table, table(table).schema(), request, null);
     }
 
+    /**
+     * Returns one split for a file of at most the split size, and otherwise
+     * a split for each part of about the split size. The parts are cut
+     * between the records that FastCSV's {@link IndexedCsvReader} finds in
+     * the bytes of the file, quoted line breaks included, and grouped from
+     * its pages of one batch each; the index is built once for each
+     * version of a file. A file in a charset whose characters the index
+     * cannot find by their bytes, which is any but UTF-8 and the charsets
+     * of one byte per character that keep ASCII as it is, is one split.
+     */
     @Override
     public List<Split> splits(ScanPlan plan) {
-        return List.of(new Split(plan, 0, null));
+        CsvIndex index = splitSize > 0 ? index(table(plan.table())) : null;
+        if (index == null) {
+            return List.of(new Split(plan, 0, null));
+        }
+        List<CsvIndex.CsvPage> pages = index.pages();
+        List<Split> splits = new ArrayList<>();
+        int from = 0;
+        for (int p = 1; p <= pages.size(); p++) {
+            if (p == pages.size() || pages.get(p).offset() - pages.get(from).offset() >= splitSize) {
+                splits.add(new Split(plan, splits.size(), new PageRange(index, from, p)));
+                from = p;
+            }
+        }
+        return splits.size() > 1 ? splits : List.of(new Split(plan, 0, null));
+    }
+
+    /** Returns the index of a file larger than the split size, or {@code null} for one split. */
+    private CsvIndex index(Table table) {
+        long size;
+        FileTime modified;
+        try {
+            size = Files.size(table.file());
+            modified = Files.getLastModifiedTime(table.file());
+        } catch (IOException e) {
+            // Opening the split reports it.
+            return null;
+        }
+        if (size <= splitSize) {
+            return null;
+        }
+        IndexKey key = new IndexKey(table.file(), table.delimiter(), table.quote(), table.charset());
+        Pages known = indexes.get(key);
+        if (known == null || known.size() != size || !known.modified().equals(modified)) {
+            CsvIndex index;
+            try (IndexedCsvReader<CsvRecord> reader = indexed(table, CsvRecordHandler.of(), null)) {
+                index = reader.getIndex();
+            } catch (IllegalArgumentException e) {
+                // A charset or a delimiter that the index cannot find by its bytes.
+                index = null;
+            } catch (IOException e) {
+                throw new UncheckedIOException("Cannot read " + table.file(), e);
+            }
+            known = new Pages(size, modified, index);
+            indexes.put(key, known);
+        }
+        return known.index();
+    }
+
+    /** Opens an indexed reader of a file with pages of one batch, over a built index or building one. */
+    private <T> IndexedCsvReader<T> indexed(Table table, CsvCallbackHandler<T> handler, CsvIndex index)
+            throws IOException {
+        IndexedCsvReader.IndexedCsvReaderBuilder b = IndexedCsvReader.builder()
+                .fieldSeparator(table.delimiter())
+                .quoteCharacter(table.quote())
+                .commentStrategy(CommentStrategy.NONE)
+                .pageSize(batchSize);
+        if (index != null) {
+            b.index(index);
+        }
+        return b.build(handler, table.file(), table.charset());
     }
 
     /**
      * Reads the requested columns in batches. The fields go from the buffer
      * of the CSV reader straight into the vectors, see {@link FieldParser};
-     * the values and the errors are those of {@link #parse}.
+     * the values and the errors are those of {@link #parse}. A part of a
+     * file gives the values and the errors, with their line numbers, that
+     * reading the whole file gives for its records.
      */
     @Override
     public BatchReader open(Split split) {
         Table table = table(split.plan().table());
         RecordReader handler = new RecordReader(table, split.plan().wholeColumns(), split.plan().output(), batchSize);
+        if (split.state() instanceof PageRange range) {
+            return pages(table, handler, range);
+        }
         CsvReader<Boolean> reader = reader(table, handler);
         Iterator<Boolean> records = reader.iterator();
         return new BatchReader() {
@@ -300,12 +400,13 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
             public Batch next() {
                 // Each record is read into the vectors as it is fetched, so no record is fetched ahead.
                 int n = 0;
-                while (n < batchSize && records.hasNext()) {
-                    records.next();
-                    if (handler.failure != null) {
-                        throw handler.failure;
+                try {
+                    while (n < batchSize && records.hasNext()) {
+                        records.next();
+                        n++;
                     }
-                    n++;
+                } catch (CsvParseException e) {
+                    throw unwrap(e);
                 }
                 return n == 0 ? null : handler.batch(n);
             }
@@ -321,12 +422,57 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
         };
     }
 
+    /** Reads the pages of a part of a file, a batch from each; the header is in the first page only. */
+    private BatchReader pages(Table table, RecordReader handler, PageRange range) {
+        handler.header = table.header() && range.from() == 0;
+        IndexedCsvReader<Boolean> reader;
+        try {
+            reader = indexed(table, handler, range.index());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot open " + table.file(), e);
+        }
+        return new BatchReader() {
+            private int page = range.from();
+
+            @Override
+            public Batch next() {
+                while (page < range.to()) {
+                    int n;
+                    try {
+                        n = reader.readPage(page++).size();
+                    } catch (CsvParseException e) {
+                        throw unwrap(e);
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e.getMessage(), e);
+                    }
+                    if (n > 0) {
+                        return handler.batch(n);
+                    }
+                }
+                return null;
+            }
+
+            @Override
+            public void close() {
+                try {
+                    reader.close();
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }
+        };
+    }
+
+    /** Returns the error of a record that the CSV reader wrapped, or else the error of the reader. */
+    private static RuntimeException unwrap(CsvParseException e) {
+        return e.getCause() instanceof ConversionException c ? c : e;
+    }
+
     /**
      * Reads each record of a file into the vectors of the requested columns.
-     * It skips the header, if there is one. An error is not thrown from the
-     * callbacks, which the CSV reader would wrap, but kept in
-     * {@link #failure}: a record with the wrong number of fields, or else the
-     * first requested column whose field does not parse.
+     * It skips the header, if there is one. A record with the wrong number
+     * of fields, or else the first requested column whose field does not
+     * parse, is an error, which the CSV reader wraps, see {@link #unwrap}.
      */
     private static final class RecordReader extends AbstractBaseCsvCallbackHandler<Boolean> {
         private final Table table;
@@ -334,10 +480,9 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
         private final FieldParser[] parsers;
         /** The positions in the output of each field of a record. */
         private final int[][] targets;
-        private boolean header;
+        boolean header;
         private int errorColumn;
         private RuntimeException error;
-        ConversionException failure;
 
         RecordReader(Table table, List<Integer> columns, Schema output, int batchSize) {
             this.table = table;
@@ -391,10 +536,10 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
                 return null;
             }
             if (getFieldCount() != table.schema().size()) {
-                failure = new ConversionException("Line " + getStartingLineNumber() + " of " + table.file() + " has "
+                throw new ConversionException("Line " + getStartingLineNumber() + " of " + table.file() + " has "
                         + getFieldCount() + " fields, the header " + table.schema().size());
             } else if (error != null) {
-                failure = new ConversionException("Line " + getStartingLineNumber() + " of " + table.file()
+                throw new ConversionException("Line " + getStartingLineNumber() + " of " + table.file()
                         + ", column " + output.name(errorColumn) + ": " + error.getMessage(), error);
             }
             return Boolean.TRUE;
@@ -612,6 +757,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
         private Charset charset = StandardCharsets.UTF_8;
         private int sampleRows = 1000;
         private int batchSize = 2048;
+        private long splitSize = SPLIT_SIZE;
 
         private Builder(String name) {
             this.name = Objects.requireNonNull(name, "name");
@@ -653,6 +799,19 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
 
         public Builder batchSize(int batchSize) {
             this.batchSize = batchSize;
+            return this;
+        }
+
+        /**
+         * Sets the size in bytes of the parts that a larger file is read in,
+         * on several threads; 0 reads every file in one part. 4 MiB by
+         * default, see {@link CsvConnector#splits}.
+         */
+        public Builder splitSize(long splitSize) {
+            if (splitSize < 0) {
+                throw new IllegalArgumentException("The split size must not be negative: " + splitSize);
+            }
+            this.splitSize = splitSize;
             return this;
         }
 
@@ -700,7 +859,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
                 withSchemas.put(e.getKey(), new Table(t.file(), t.delimiter(), t.quote(), t.header(), t.nullString(),
                         t.charset(), schema, t.rows()));
             }
-            return new CsvConnector(name, withSchemas, batchSize, sampleRows, charset);
+            return new CsvConnector(name, withSchemas, batchSize, sampleRows, charset, splitSize);
         }
     }
 }

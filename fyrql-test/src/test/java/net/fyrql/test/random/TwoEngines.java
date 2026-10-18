@@ -46,7 +46,12 @@ import java.util.function.Supplier;
  * from or the plan it binds from the text. FyrQL runs every plan twice,
  * interpreted and with all expressions and keys compiled from the first
  * row on; the two must agree exactly, or the outcome is
- * {@link Outcome.Kind#MODES_DIFFER}.
+ * {@link Outcome.Kind#MODES_DIFFER}. Both run on the threads of the default,
+ * over tables in many splits; a third run on one thread must agree with
+ * the interpreted one, floating-point values within the tolerance of the
+ * comparison with DuckDB, since an aggregation on several threads adds up
+ * sums of them in another order, or the outcome is
+ * {@link Outcome.Kind#THREADS_DIFFER}.
  */
 final class TwoEngines implements AutoCloseable {
 
@@ -55,6 +60,7 @@ final class TwoEngines implements AutoCloseable {
 
     private final FyrQL engine;
     private final FyrQL compiled;
+    private final FyrQL sequential;
     private final DuckDbReference duck = new DuckDbReference();
     private final SqlRenderer renderer = new SqlRenderer(DuckDbDialect.INSTANCE,
             t -> DuckDbDialect.INSTANCE.quoteIdentifier(t.table()));
@@ -62,6 +68,7 @@ final class TwoEngines implements AutoCloseable {
     TwoEngines(long seed) {
         engine = RandomTables.engine(RandomTables.rows(seed));
         compiled = RandomTables.engine(RandomTables.rows(seed), CodegenMode.ALWAYS);
+        sequential = RandomTables.engine(RandomTables.rows(seed), CodegenMode.OFF, 1);
         RandomTables.load(engine, duck);
     }
 
@@ -123,6 +130,10 @@ final class TwoEngines implements AutoCloseable {
             if (modes != null) {
                 return modes;
             }
+            Outcome threads = threads(sql, plan, actual, fyrqlError, ulps);
+            if (threads != null) {
+                return threads;
+            }
         }
         PlanNode optimized = null;
         if (plan != null) {
@@ -155,31 +166,54 @@ final class TwoEngines implements AutoCloseable {
      * {@code null} if they agree.
      */
     private Outcome modes(String sql, PlanNode plan, List<Object[]> interpreted, String interpretedError) {
+        return agree(Outcome.Kind.MODES_DIFFER, "interpreted", "compiled code", compiled, sql, plan, interpreted,
+                interpretedError, 0);
+    }
+
+    /**
+     * Runs a plan on one thread and compares it with the interpreted run on
+     * several threads in the same way, except that floating-point values
+     * agree within a number of units in the last place. Returns
+     * {@code null} if they agree.
+     */
+    private Outcome threads(String sql, PlanNode plan, List<Object[]> parallel, String parallelError, int ulps) {
+        return agree(Outcome.Kind.THREADS_DIFFER, "several threads", "one thread", sequential, sql, plan, parallel,
+                parallelError, ulps);
+    }
+
+    /**
+     * Runs a plan in another engine and compares it with a run: both fail,
+     * or both give the same rows in the same order, bit for bit up to the
+     * sign of zero and the kind of NaN, with a tolerance of 0 units in the
+     * last place. Returns {@code null} if they agree.
+     */
+    private Outcome agree(Outcome.Kind kind, String name, String otherName, FyrQL other, String sql, PlanNode plan,
+            List<Object[]> expected, String expectedError, int ulps) {
         List<Object[]> rows = null;
         String error = null;
         boolean crash = false;
         try {
-            rows = compiled.rows(plan);
+            rows = other.rows(plan);
         } catch (RuntimeException | StackOverflowError e) {
             error = e.getClass().getSimpleName() + ": " + e.getMessage();
             crash = !(e instanceof QueryException || e instanceof ConversionException || e instanceof SqlException);
         }
         String report;
         if (crash) {
-            report = "compiled code crashes: " + error;
-        } else if ((error == null) != (interpretedError == null)) {
-            report = "interpreted: " + (interpretedError == null ? "runs" : interpretedError) + "\ncompiled: "
+            report = otherName + " crashes: " + error;
+        } else if ((error == null) != (expectedError == null)) {
+            report = name + ": " + (expectedError == null ? "runs" : expectedError) + "\n" + otherName + ": "
                     + (error == null ? "runs" : error);
         } else if (error != null) {
             return null;
         } else {
-            ResultComparison.Outcome same = ResultComparison.compare(plan.schema(), interpreted, rows, true, 0);
+            ResultComparison.Outcome same = ResultComparison.compare(plan.schema(), expected, rows, true, ulps);
             if (same.same()) {
                 return null;
             }
-            report = "interpreted (expected) against compiled:\n" + same.report();
+            report = name + " (expected) against " + otherName + ":\n" + same.report();
         }
-        return new Outcome(Outcome.Kind.MODES_DIFFER, sql, null, null, report).withPlan(plan, null);
+        return new Outcome(kind, sql, null, null, report).withPlan(plan, null);
     }
 
     private Outcome compare(String sql, Schema schema, List<Object[]> actual, String fyrqlError, boolean ordered,
@@ -253,5 +287,6 @@ final class TwoEngines implements AutoCloseable {
         duck.close();
         engine.close();
         compiled.close();
+        sequential.close();
     }
 }

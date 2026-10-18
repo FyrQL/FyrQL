@@ -29,7 +29,8 @@ import java.util.Optional;
  * tables, and {@code tables.<name>} or {@code tables.<name>.file} for single
  * files, both resolved against the directory of the configuration; and
  * {@code delimiter}, {@code quote}, {@code header}, {@code nullString},
- * {@code charset}, {@code sampleRows} and {@code batchSize}, which apply to
+ * {@code charset}, {@code sampleRows}, {@code batchSize} and
+ * {@code splitSize} (a number of bytes, such as {@code 4MiB}), which apply to
  * every file. A source without files serves only the table functions.
  */
 public final class CsvConnectorFactory implements ConnectorFactory {
@@ -50,6 +51,7 @@ public final class CsvConnectorFactory implements ConnectorFactory {
         o.get("charset", "a charset such as UTF-8", Charset::forName).ifPresent(b::charset);
         o.integer("sampleRows").ifPresent(b::sampleRows);
         o.integer("batchSize").ifPresent(b::batchSize);
+        o.bytes("splitSize").ifPresent(b::splitSize);
         Optional<Path> files = o.path("directory");
         Map<String, Map<String, String>> tables = o.tables("file");
         o.rejectUnknown();

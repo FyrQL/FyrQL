@@ -49,6 +49,16 @@ public interface TableSource {
     }
 
     /**
+     * Returns the parts of a scan that can be read independently of each
+     * other, for a query that a context cancels; read one after the other,
+     * they give what {@link #open(PlanNode.Scan, QueryContext)} reads. The
+     * default is one part, which that method opens.
+     */
+    default Splits splits(PlanNode.Scan scan, QueryContext context) {
+        return Splits.single(() -> open(scan, context));
+    }
+
+    /**
      * Opens the reader of a part of the plan that a source runs, for a
      * query that a context cancels, see {@link #open(PlanNode.Scan, QueryContext)}.
      */

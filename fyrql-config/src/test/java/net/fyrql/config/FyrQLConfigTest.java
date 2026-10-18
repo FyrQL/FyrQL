@@ -89,10 +89,13 @@ class FyrQLConfigTest {
 
     @Test
     void aFileAloneBuildsAnEngineThatJoinsCsvJsonAndADatabase() throws IOException {
-        Path file = config("defaultSource: shop\nbatchSize: 2\nmemoryBudget: 64MiB\ncodegen: off\npushdown: true\n");
+        Path file = config("defaultSource: shop\nbatchSize: 2\nmemoryBudget: 64MiB\ncodegen: off\npushdown: true\n"
+                + "threads: 3\npreserveOrder: false\n");
         try (FyrQL engine = FyrQLConfig.open(file)) {
             assertEquals(List.of("shop", "files", "docs"), engine.sources());
             assertTrue(engine.pushdown());
+            assertEquals(3, engine.threads());
+            assertFalse(engine.preserveOrder());
             List<Object[]> rows = engine.rows(QUERY);
             assertEquals(List.of(List.of(1, "Ann", "Pen", 4.5), List.of(3, "Bob", "Pen", 15.0),
                     List.of(4, "Cid", "Ink", 8.0)), rows.stream().map(Arrays::asList).toList());
@@ -106,6 +109,7 @@ class FyrQLConfigTest {
     void withoutPushdownTheDatabaseOnlyReadsColumns() throws IOException {
         try (FyrQL engine = FyrQLConfig.open(config("defaultSource: shop\npushdown: off\n"))) {
             assertFalse(engine.pushdown());
+            assertTrue(engine.preserveOrder());
             assertEquals(3, engine.rows(QUERY).size());
             List<String> statements = ((JdbcConnector) engine.connector("shop")).statements();
             assertFalse(statements.get(0).contains("WHERE"), statements.get(0));
@@ -124,13 +128,17 @@ class FyrQLConfigTest {
         Path file = config("pushdown: maybe\n");
         assertEquals(file + ": The option pushdown of the engine must be true, false, on or off: maybe",
                 assertThrows(ConfigException.class, () -> FyrQLConfig.open(file)).getMessage());
+        Path none = config("threads: 0\n");
+        assertEquals(none + ": threads: 0", assertThrows(ConfigException.class, () -> FyrQLConfig.open(none))
+                .getMessage());
         Path other = config("defaultSource: shops\n");
         assertEquals(other + ": The default source shops of the engine is none of the sources shop, files, docs",
                 assertThrows(ConfigException.class, () -> FyrQLConfig.open(other)).getMessage());
         Path typo = config("batchsize: 2\n");
         assertTrue(assertThrows(ConfigException.class, () -> FyrQLConfig.open(typo)).getMessage().startsWith(
                 typo + ": The engine has an unknown option batchsize; known are defaultSource, defaultSchema,"
-                        + " batchSize, memoryBudget, codegen, codegenThreshold, pushdown"));
+                        + " batchSize, memoryBudget, codegen, codegenThreshold, pushdown, threads,"
+                        + " preserveOrder"));
         Files.delete(dir.resolve("products.json"));
         Path missing = config("{}");
         String message = assertThrows(ConfigException.class, () -> FyrQLConfig.open(missing)).getMessage();

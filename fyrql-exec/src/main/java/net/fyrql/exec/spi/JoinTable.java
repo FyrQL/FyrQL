@@ -71,18 +71,38 @@ public final class JoinTable {
      * boxing, hashed on the key columns, if any, by the key functions.
      */
     public JoinTable(Schema schema, List<Batch> batches, int[] keys, KeyFunctions functions) {
-        batch = batches.isEmpty() ? Batch.empty(schema) : Batches.concat(schema, batches);
+        this(concat(schema, batches), keys, functions);
+    }
+
+    /**
+     * Builds the table over batches of the build side whose keys are hashed
+     * already, as the key functions hash them, e.g. by the threads that read
+     * the batches.
+     *
+     * @param hashes the hashes of the keys of each batch; ignored without keys
+     */
+    public JoinTable(Schema schema, List<Batch> batches, List<int[]> hashes, int[] keys) {
+        this(concat(schema, batches), keys, keys.length == 0 ? null : concat(hashes));
+    }
+
+    private JoinTable(Batch batch, int[] keys, KeyFunctions functions) {
+        this(batch, keys, keys.length == 0 ? null : hashes(batch, keys, functions));
+    }
+
+    private JoinTable(Batch batch, int[] keys, int[] hashes) {
+        this.batch = batch;
+        this.hashes = hashes;
         int n = batch.rowCount();
         matched = new boolean[n];
         if (keys.length == 0) {
             heads = null;
             chain = null;
-            hashes = null;
             hasNullKey = false;
             return;
         }
-        hashes = new int[n];
-        functions.hash(batch, keys, hashes);
+        if (hashes.length != n) {
+            throw new IllegalArgumentException(hashes.length + " hashes for " + n + " rows");
+        }
         int capacity = Integer.highestOneBit(Math.max(16, n * 2 - 1)) << 1;
         heads = new int[capacity];
         Arrays.fill(heads, -1);
@@ -99,6 +119,30 @@ public final class JoinTable {
             heads[slot] = i;
         }
         hasNullKey = nullKey;
+    }
+
+    private static Batch concat(Schema schema, List<Batch> batches) {
+        return batches.isEmpty() ? Batch.empty(schema) : Batches.concat(schema, batches);
+    }
+
+    private static int[] hashes(Batch batch, int[] keys, KeyFunctions functions) {
+        int[] hashes = new int[batch.rowCount()];
+        functions.hash(batch, keys, hashes);
+        return hashes;
+    }
+
+    private static int[] concat(List<int[]> parts) {
+        int n = 0;
+        for (int[] part : parts) {
+            n += part.length;
+        }
+        int[] all = new int[n];
+        int at = 0;
+        for (int[] part : parts) {
+            System.arraycopy(part, 0, all, at, part.length);
+            at += part.length;
+        }
+        return all;
     }
 
     /** Returns the rows of the build side. */
@@ -131,7 +175,12 @@ public final class JoinTable {
         return chain[row];
     }
 
-    /** Records that a row of the build side matched. */
+    /**
+     * Records that a row of the build side matched. Several threads that
+     * probe the table may mark rows at once: the mark of each row is a
+     * variable of its own, which they only set, and the marks are read once
+     * the threads have finished.
+     */
     public void markMatched(int row) {
         matched[row] = true;
     }

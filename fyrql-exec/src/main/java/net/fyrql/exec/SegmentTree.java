@@ -45,6 +45,11 @@ final class SegmentTree {
     private final Supplier<ValueAccumulator> empty;
     /** The nodes by level, from the lowest one up to the level of one node. */
     private final List<ValueAccumulator[]> levels = new ArrayList<>();
+    /**
+     * The right edges of the range of {@link #aggregate}, three ints each:
+     * the level, from and to; with them, a tree serves one thread at a time.
+     */
+    private final int[] right;
 
     /**
      * Builds the tree over the rows {@code [begin, end)} of a batch.
@@ -68,6 +73,7 @@ final class SegmentTree {
             levels.add(level);
             below = level.length;
         }
+        right = new int[3 * levels.size()];
     }
 
     /** Returns the number of nodes. */
@@ -87,7 +93,7 @@ final class SegmentTree {
         int s = from - begin;
         int e = to - begin;
         // The right edges come after the middle, the lower ones last.
-        List<int[]> right = new ArrayList<>();
+        int edges = 0;
         int level = 0;
         while (s < e) {
             int parentStart = (s + FAN_OUT - 1) / FAN_OUT;
@@ -97,14 +103,15 @@ final class SegmentTree {
                 break;
             }
             add(result, level, s, parentStart * FAN_OUT);
-            right.add(new int[] {level, parentEnd * FAN_OUT, e});
+            right[edges++] = level;
+            right[edges++] = parentEnd * FAN_OUT;
+            right[edges++] = e;
             s = parentStart;
             e = parentEnd;
             level++;
         }
-        for (int i = right.size() - 1; i >= 0; i--) {
-            int[] r = right.get(i);
-            add(result, r[0], r[1], r[2]);
+        for (int i = edges - 3; i >= 0; i -= 3) {
+            add(result, right[i], right[i + 1], right[i + 2]);
         }
     }
 
