@@ -28,16 +28,23 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
+import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.render.Dialect;
 import net.fyrql.sql.render.SqlRenderer;
 
 import javax.sql.DataSource;
+import java.math.BigInteger;
 import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -64,6 +71,13 @@ import java.util.function.Predicate;
  * well, nested a {@code SELECT} per node, when the database evaluates all
  * of it as FyrQL does, see {@link #planRemote}.
  * <p>
+ * With {@link Builder#splitRows} a scan of a large table is read in parts,
+ * one statement per range of a key column, which the engine reads on
+ * several threads at once, each over a connection of its own; see
+ * {@link #splits(ScanPlan, int)}. On one thread, a scan stays one
+ * statement. Each part is a transaction of its own, so the parts
+ * may see different states of a table that changes while it is read.
+ * <p>
  * Connections come from a URL or a data source, one per statement, closed
  * when its result is read; or the application shares one connection,
  * which it closes itself, e.g. for an in-memory database that lives as
@@ -79,6 +93,13 @@ public final class JdbcConnector implements Connector {
     /** The rows of a batch unless set. */
     public static final int DEFAULT_BATCH_SIZE = 2048;
 
+    /**
+     * The most parts a scan is read in, see {@link Builder#splitRows}: the
+     * database works for every part at once, and on one machine more
+     * parts gain nothing.
+     */
+    public static final int MAX_SPLITS = 8;
+
     private final String name;
     private final Connections connections;
     private final JdbcDialect dialect;
@@ -87,6 +108,19 @@ public final class JdbcConnector implements Connector {
     private final int batchSize;
     private final Consumer<String> listener;
     private final List<String> statements;
+    private final long splitRows;
+    private final Map<String, String> splitColumns;
+
+    /**
+     * The state of a scan plan: its statement, and the scan it renders,
+     * from which the statements of its splits are rendered.
+     */
+    private record ScanState(String sql, PlanNode.Scan scan) {
+        @Override
+        public String toString() {
+            return sql;
+        }
+    }
 
     private JdbcConnector(Builder b, Connections connections, JdbcDialect dialect) {
         this.name = b.name;
@@ -97,6 +131,8 @@ public final class JdbcConnector implements Connector {
         this.batchSize = b.batchSize;
         this.listener = b.listener;
         this.statements = b.recordStatements ? new ArrayList<>() : null;
+        this.splitRows = b.splitRows;
+        this.splitColumns = Map.copyOf(b.splitColumns);
     }
 
     /** Starts a connector with the name under which it will be registered. */
@@ -157,7 +193,8 @@ public final class JdbcConnector implements Connector {
      * the time zone of its session; the order if the dialect orders every
      * key so, and a limit; or the aggregation if the dialect groups and
      * aggregates as FyrQL does, none of its columns holds instants, and
-     * every filter is taken over. The state of the plan is the statement.
+     * every filter is taken over. The state of the plan holds the
+     * statement.
      */
     @Override
     public ScanPlan plan(TableRef table, ScanRequest asked) {
@@ -177,9 +214,13 @@ public final class JdbcConnector implements Connector {
                 plan.orderAccepted() ? request.order() : List.of(),
                 plan.aggregationAccepted() ? request.aggregation() : Optional.empty());
         PlanNode.Scan scan = new PlanNode.Scan(table, tableSchema, columns, pushed);
-        String sql = new SqlRenderer(dialect.sql(), catalog::qualifiedName).renderScan(scan);
+        String sql = renderer().renderScan(scan);
         return new ScanPlan(plan.table(), plan.output(), plan.columns(), plan.acceptedFilters(), plan.limitAccepted(),
-                plan.orderAccepted(), plan.aggregationAccepted(), sql);
+                plan.orderAccepted(), plan.aggregationAccepted(), new ScanState(sql, scan));
+    }
+
+    private SqlRenderer renderer() {
+        return new SqlRenderer(dialect.sql(), catalog::qualifiedName);
     }
 
     /** Which of the columns of a table, in the order given, hold instants. */
@@ -207,14 +248,181 @@ public final class JdbcConnector implements Connector {
         return false;
     }
 
+    /**
+     * Returns one split; or with {@link Builder#splitRows}, for a table of
+     * more rows, one split per range of its key column, see
+     * {@link Builder#splitColumn}, each its own statement. The ranges are of
+     * equal width between the least and the greatest key, which a
+     * statement asks for each time; their number is the rows of the table,
+     * counted once, divided by {@code splitRows} and rounded up, at most
+     * {@value #MAX_SPLITS}. The first
+     * range is open towards smaller keys and the last towards greater
+     * ones, so that a row added since is read all the same; if the column
+     * may hold {@code NULL}, its rows are one more split. A scan the
+     * database aggregates, orders or limits stays one split, as does a
+     * scan over a shared connection, of a table without a key column, of
+     * an empty table and of a table of one key.
+     */
     @Override
     public List<Split> splits(ScanPlan plan) {
-        return List.of(new Split(plan, 0, null));
+        return splits(plan, MAX_SPLITS);
     }
 
+    /**
+     * Returns the parts of a scan as {@link #splits(ScanPlan)} does, but at
+     * most as many ranges as there are threads. A scan for one thread stays
+     * one split, to which a statement and a connection per part would only
+     * add their cost.
+     */
+    @Override
+    public List<Split> splits(ScanPlan plan, int threads) {
+        ScanState state = (ScanState) plan.state();
+        List<Expression> ranges = ranges(plan, state.scan(), threads);
+        if (ranges.isEmpty()) {
+            return List.of(new Split(plan, 0, state.sql()));
+        }
+        SqlRenderer renderer = renderer();
+        List<Split> splits = new ArrayList<>(ranges.size());
+        for (Expression range : ranges) {
+            splits.add(new Split(plan, splits.size(), renderer.renderScan(state.scan(), range)));
+        }
+        return splits;
+    }
+
+    /** The conditions of the parts a scan for some threads is read in, or none if it is read in one. */
+    private List<Expression> ranges(ScanPlan plan, PlanNode.Scan scan, int threads) {
+        if (splitRows == 0 || threads < 2 || !connections.owned() || plan.aggregationAccepted()
+                || plan.orderAccepted() || plan.limitAccepted()) {
+            return List.of();
+        }
+        TableRef table = scan.table();
+        int column = splitColumn(table, scan.tableSchema());
+        if (column < 0) {
+            return List.of();
+        }
+        long rows = catalog.rowCount(table).orElse(0);
+        long parts = Math.min(Math.min(MAX_SPLITS, threads), rows / splitRows + (rows % splitRows == 0 ? 0 : 1));
+        if (parts < 2) {
+            return List.of();
+        }
+        DataType type = scan.tableSchema().type(column);
+        long[] bounds = bounds(table, scan.tableSchema().name(column), type);
+        if (bounds == null || bounds[0] == bounds[1]) {
+            return List.of();
+        }
+        BigInteger low = BigInteger.valueOf(bounds[0]);
+        BigInteger width = BigInteger.valueOf(bounds[1]).subtract(low);
+        List<Long> cuts = new ArrayList<>();
+        for (long i = 1; i < parts; i++) {
+            long cut = low.add(width.multiply(BigInteger.valueOf(i)).divide(BigInteger.valueOf(parts))).longValue();
+            if (cut > (cuts.isEmpty() ? bounds[0] : cuts.get(cuts.size() - 1))) {
+                cuts.add(cut);
+            }
+        }
+        Expression.Column key = new Expression.Column(column, type);
+        List<Expression> ranges = new ArrayList<>();
+        for (int i = 0; i <= cuts.size(); i++) {
+            Expression from = i == 0 ? null : compare(Expression.ComparisonOp.GE, key, cuts.get(i - 1));
+            Expression to = i == cuts.size() ? null : compare(Expression.ComparisonOp.LT, key, cuts.get(i));
+            ranges.add(from == null ? to : to == null ? from : new Expression.And(from, to));
+        }
+        if (scan.tableSchema().nullable(column)) {
+            ranges.add(new Expression.IsNull(key, false));
+        }
+        for (Expression range : ranges) {
+            if (!dialect.sql().supports(range)) {
+                return List.of();
+            }
+        }
+        return ranges;
+    }
+
+    private static Expression compare(Expression.ComparisonOp op, Expression.Column key, long value) {
+        Object literal = switch ((DataType.Scalar) key.type()) {
+            case TINYINT -> (byte) value;
+            case SMALLINT -> (short) value;
+            case INTEGER, DATE -> (int) value;
+            default -> value;
+        };
+        return new Expression.Comparison(op, key, new Expression.Literal(key.type(), literal));
+    }
+
+    /**
+     * The index of the column a table is split by: the one set for it with
+     * {@link Builder#splitColumn}, or else the column of its primary key if
+     * that is of one column and of a type ranges are taken of; or -1.
+     *
+     * @throws IllegalArgumentException if the column set for the table is
+     *         not one of it or not of a type ranges are taken of
+     */
+    private int splitColumn(TableRef table, Schema schema) {
+        String set = splitColumns.get(table.schema() + "." + table.table());
+        if (set == null) {
+            set = splitColumns.get(table.table());
+        }
+        if (set != null) {
+            int column = schema.indexOf(set);
+            if (column < 0) {
+                throw new IllegalArgumentException("The JDBC source " + name + " splits " + table + " by " + set
+                        + ", which is no column of it");
+            }
+            if (!rangesOf(table, column, schema.type(column))) {
+                throw new IllegalArgumentException("The JDBC source " + name + " splits " + table + " by " + set
+                        + " of type " + schema.type(column).sqlName() + "; it takes an integral type up to BIGINT, "
+                        + "DATE or TIMESTAMP");
+            }
+            return column;
+        }
+        int column = catalog.primaryKey(table).map(schema::indexOf).orElse(-1);
+        return column >= 0 && rangesOf(table, column, schema.type(column)) ? column : -1;
+    }
+
+    /**
+     * Tells whether ranges are taken of a column: one of an integral type
+     * up to {@code BIGINT}, a {@code DATE} or a {@code TIMESTAMP} that holds
+     * no instants, which the database would compare in the time zone of its
+     * session.
+     */
+    private boolean rangesOf(TableRef table, int column, DataType type) {
+        return (type == DataType.TINYINT || type == DataType.SMALLINT || type == DataType.INTEGER
+                || type == DataType.BIGINT || type == DataType.DATE || type == DataType.TIMESTAMP)
+                && !catalog.withTimeZone(table).get(column);
+    }
+
+    /** The least and the greatest value of a column, as {@code long}, or {@code null} if it has none. */
+    private long[] bounds(TableRef table, String column, DataType type) {
+        String c = "t." + dialect.sql().quoteIdentifier(column);
+        String sql = "SELECT min(" + c + "), max(" + c + ") FROM " + catalog.qualifiedName(table) + " t";
+        record(sql);
+        try {
+            Connection connection = connections.open();
+            try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery(sql)) {
+                ResultSetMetaData md = rs.getMetaData();
+                ColumnReaders.ColumnReader min = ColumnReaders.of(dialect, type, md.getColumnType(1),
+                        md.getColumnTypeName(1));
+                ColumnReaders.ColumnReader max = ColumnReaders.of(dialect, type, md.getColumnType(2),
+                        md.getColumnTypeName(2));
+                if (!rs.next()) {
+                    return null;
+                }
+                Object low = min.read(rs, 1);
+                Object high = max.read(rs, 2);
+                return low == null || high == null ? null
+                        : new long[] {((Number) low).longValue(), ((Number) high).longValue()};
+            } finally {
+                connections.release(connection);
+            }
+        } catch (SQLException e) {
+            throw new JdbcSourceException("The JDBC source " + name + " cannot read the range of " + column + " in "
+                    + table + " from " + connections.describe() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** Reads a split: its own statement, or else the one of its plan. */
     @Override
     public BatchReader open(Split split) {
-        return read((String) split.plan().state(), split.plan().output());
+        String sql = split.state() instanceof String own ? own : ((ScanState) split.plan().state()).sql();
+        return read(sql, split.plan().output());
     }
 
     /**
@@ -237,7 +445,7 @@ public final class JdbcConnector implements Connector {
         }
         String sql;
         try {
-            sql = new SqlRenderer(dialect.sql(), catalog::qualifiedName).render(plan);
+            sql = renderer().render(plan);
         } catch (IllegalArgumentException e) {
             return Optional.empty();
         }
@@ -329,6 +537,12 @@ public final class JdbcConnector implements Connector {
 
     /** Sends a statement and reads its result. */
     private BatchReader read(String sql, Schema output) {
+        record(sql);
+        return JdbcReader.open(name, sql, connections, dialect, output, fetchSize, batchSize);
+    }
+
+    /** Tells the listener about a statement about to be sent, and records it. */
+    private void record(String sql) {
         if (listener != null) {
             listener.accept(sql);
         }
@@ -337,7 +551,6 @@ public final class JdbcConnector implements Connector {
                 statements.add(sql);
             }
         }
-        return JdbcReader.open(name, sql, connections, dialect, output, fetchSize, batchSize);
     }
 
     /** Collects the settings of a connector. */
@@ -360,6 +573,8 @@ public final class JdbcConnector implements Connector {
         private int batchSize = DEFAULT_BATCH_SIZE;
         private boolean recordStatements;
         private Consumer<String> listener;
+        private long splitRows;
+        private final Map<String, String> splitColumns = new HashMap<>();
 
         private Builder(String name) {
             this.name = Objects.requireNonNull(name, "name");
@@ -453,6 +668,48 @@ public final class JdbcConnector implements Connector {
         /** Keeps every statement sent, see {@link JdbcConnector#statements()}; off by default. */
         public Builder recordStatements(boolean record) {
             this.recordStatements = record;
+            return this;
+        }
+
+        /**
+         * Reads a scan of a table of more rows than this in parts of about
+         * as many rows, each one statement over a range of a key column, see
+         * {@link #splitColumn}, which the engine reads on several threads at
+         * once, each over a connection of its own; at most
+         * {@value JdbcConnector#MAX_SPLITS} parts, and no more than threads
+         * read them, so that on one thread a scan stays one statement. Each part is a transaction
+         * of its own, so the parts may see different states of a table that
+         * changes while it is read: rows may be missing or come twice. 0,
+         * the default, reads every scan in one statement, as a shared
+         * connection always does.
+         */
+        public Builder splitRows(long rows) {
+            if (rows < 0) {
+                throw new IllegalArgumentException("splitRows: " + rows);
+            }
+            this.splitRows = rows;
+            return this;
+        }
+
+        /**
+         * Splits a table by a column, see {@link #splitRows}, instead of the
+         * column of its primary key, which is the default if the key is of
+         * one column. The table is named as in the catalog, {@code orders}
+         * or {@code main.orders} in the default schema, {@code sales.orders}
+         * in another. The column must be of an integral type up to
+         * {@code BIGINT}, a {@code DATE} or a {@code TIMESTAMP} without a
+         * time zone. Ranges of equal width make parts of equal size only if
+         * the values are spread evenly, and without an index on the column
+         * the database reads the whole table for every part.
+         */
+        public Builder splitColumn(String table, String column) {
+            Objects.requireNonNull(table, "table");
+            Objects.requireNonNull(column, "column");
+            if (table.isBlank() || column.isBlank()) {
+                throw new IllegalArgumentException("splitColumn: a table and a column, not '" + table + "' and '"
+                        + column + "'");
+            }
+            splitColumns.put(table.strip(), column.strip());
             return this;
         }
 

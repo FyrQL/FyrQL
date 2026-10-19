@@ -51,7 +51,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * with a second table of the database and with a table of another source.
  * With pushdown, the statements the database receives show the filters,
  * the order, the limit, the aggregation and the joins it took over, and
- * only the columns a query needs.
+ * only the columns a query needs. A third engine reads {@code items} in
+ * ranges of {@code id}, see {@link JdbcConnector.Builder#splitRows}, and
+ * must give the same rows.
  */
 public final class JdbcConformance {
 
@@ -60,6 +62,10 @@ public final class JdbcConformance {
 
     private static final long SEED = 20261014L;
     private static final int ROWS = 300;
+    /** The rows of the parts {@code items} is read in by the third engine: four, one per thread, rather than five. */
+    private static final long SPLIT_ROWS = 64;
+    /** The threads of the third engine, which reads no more parts at a time. */
+    private static final int SPLIT_THREADS = 4;
     private static final List<String> STRINGS = List.of("", "a", "ab", "Ab", "AB", "b", "x y", " a", "%", "_",
             "\u00E4", "\u00E9t\u00E9", "Zebra", "zebra", "\u65E5\u672C", "a b", "it's");
 
@@ -301,7 +307,8 @@ public final class JdbcConformance {
      * Runs the conformance over a database: loads the tables, checks that
      * the catalog reads the table back with the types it stores, runs every query in
      * an engine with the pushdown of the run and in one without, compares
-     * both with DuckDB, and checks the statements the database receives.
+     * both with DuckDB and with an engine that reads in parts, and checks
+     * the statements the database receives.
      */
     public static void check(TestDatabase db) {
         JdbcDialect dialect = db.dialect();
@@ -310,8 +317,9 @@ public final class JdbcConformance {
         Schema stored = stored(dialect);
         JdbcConnector primary = db.connector(SOURCE);
         JdbcConnector plain = db.connector(SOURCE);
+        JdbcConnector split = db.connector(SOURCE, b -> b.splitRows(SPLIT_ROWS).splitColumn("items", "id"));
         assertEquals(stored, primary.catalog().schema(TableRef.of(SOURCE, "items")), dialect + " reads the table back");
-        try (FyrQL engine = engine(primary, null); FyrQL off = engine(plain, false);
+        try (FyrQL engine = engine(primary, null); FyrQL off = engine(plain, false); FyrQL parts = engine(split, null, SPLIT_THREADS);
                 DuckDbReference duck = new DuckDbReference()) {
             duck.load("items", stored, List.of(Batch.ofRows(stored, storedRows(dialect))));
             duck.load("items2", ITEMS2, List.of(Batch.ofRows(ITEMS2, items2Rows())));
@@ -334,6 +342,13 @@ public final class JdbcConformance {
                                 + engine.explain(plan));
                         continue;
                     }
+                    ResultComparison.Outcome inParts = ResultComparison.compare(schema, parts.rows(plan), actual,
+                            ordered);
+                    if (!inParts.same()) {
+                        failures.add(sql + "\n  read in parts and in one differ:\n" + inParts.report() + "\n"
+                                + engine.explain(plan));
+                        continue;
+                    }
                     ResultComparison.Outcome oracle = ResultComparison.compare(schema, duck.query(sql, schema), actual,
                             ordered);
                     if (!oracle.same()) {
@@ -352,6 +367,8 @@ public final class JdbcConformance {
             } else {
                 assertEquals(0, pushed);
             }
+            assertTrue(split.statements().stream().filter(s -> s.startsWith("SELECT min(")).count() >= 10,
+                    dialect + " reads items in parts: " + split.statements());
             for (String sent : plain.statements()) {
                 assertFalse(sent.contains(" WHERE ") || sent.contains(" ORDER BY ") || sent.contains(" LIMIT ")
                         || sent.contains(" GROUP BY ") || sent.contains("count(") || sent.contains(" JOIN "), sent);
@@ -361,11 +378,19 @@ public final class JdbcConformance {
     }
 
     private static FyrQL engine(JdbcConnector connector, Boolean pushdown) {
+        return engine(connector, pushdown, 0);
+    }
+
+    /** An engine over the connector and the tags in memory, on some threads, or as many as set if 0. */
+    private static FyrQL engine(JdbcConnector connector, Boolean pushdown, int threads) {
         FyrQL.Builder b = FyrQL.builder().register(connector)
                 .register(MemoryConnector.builder("memory").table("tags", TAGS, tagRows()).build())
                 .defaultSource(SOURCE);
         if (pushdown != null) {
             b.pushdown(pushdown);
+        }
+        if (threads > 0) {
+            b.threads(threads);
         }
         return b.build();
     }

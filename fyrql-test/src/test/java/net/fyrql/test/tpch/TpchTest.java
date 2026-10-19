@@ -47,7 +47,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * pushdown and on one thread, and a plan without cross products; with pushdown, the
  * database joins the customers and orders of Q3, Q5, Q7, Q8 and Q10 itself
  * and keeps the customers without orders of Q22. The semi join of Q18
- * filters the orders before they are joined with the customers. The files are
+ * filters the orders before they are joined with the customers. The scans
+ * of {@code orders} and {@code customer} are read in ranges of their keys.
+ * The files are
  * written into {@code target/tpch} once, or into the directory of the
  * system property {@code fyrql.tpch.dir}.
  */
@@ -195,10 +197,29 @@ class TpchTest {
         JdbcConnector db = (JdbcConnector) engine.connector("db");
         db.clearStatements();
         engine.rows(query.sql());
-        // Q22 keeps the customers without orders with NOT EXISTS and reads their average balance on its own.
+        // Q22 keeps the customers without orders with NOT EXISTS and reads their average balance on its own, in parts.
         boolean q22 = query.name().equals("q22");
         String join = q22 ? " WHERE NOT EXISTS (" : " INNER JOIN ";
-        assertEquals(q22 ? 2 : 1, db.statements().size(), db.statements().toString());
-        assertEquals(1, db.statements().stream().filter(s -> s.contains(join)).count(), db.statements().toString());
+        List<String> scans = db.statements().stream().filter(s -> !s.contains(join)).toList();
+        assertEquals(1, db.statements().size() - scans.size(), db.statements().toString());
+        assertEquals(q22, !scans.isEmpty(), db.statements().toString());
+        assertTrue(scans.stream().allMatch(s -> s.contains(".\"customer\" t")), db.statements().toString());
+    }
+
+    @Test
+    void theOrdersAreReadInRangesOfTheirKey() {
+        JdbcConnector db = (JdbcConnector) engine.connector("db");
+        db.clearStatements();
+        String q13 = TpchQueries.ALL.stream().filter(q -> q.name().equals("q13")).findFirst().orElseThrow().sql();
+        engine.rows(q13);
+        List<String> sent = db.statements();
+        // 15,000 orders in parts of 1,000 rows, at most eight and no more than threads read them; on one thread,
+        // one statement.
+        int parts = Math.min(JdbcConnector.MAX_SPLITS, engine.threads());
+        assertEquals(parts > 1, sent.stream().anyMatch(
+                s -> s.startsWith("SELECT min(t.\"o_orderkey\"), max(t.\"o_orderkey\")")), sent.toString());
+        assertEquals(parts > 1 ? parts : 0, sent.stream().filter(s -> s.contains(".\"orders\" t WHERE ")).count(),
+                sent.toString());
+        assertTrue(engine.threads() == 1 || engine.explain(q13).contains("[parallel]"));
     }
 }

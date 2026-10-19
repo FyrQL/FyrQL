@@ -49,7 +49,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * connector (source {@code mem}). The queries name the tables without a
  * source; each name is found in exactly one. DuckDB reads the same files
  * through views. At the small scale factor, the CSV and the JSON files are
- * read in parts of 64 KiB.
+ * read in parts of 64 KiB. In the database, {@code orders} and
+ * {@code customer} have their primary keys, by whose ranges the source
+ * reads them in parts: of 250,000 rows, or of 1,000 at the small scale
+ * factor, so that both are read in several parts there too.
  */
 final class TpchEngine {
 
@@ -61,6 +64,12 @@ final class TpchEngine {
      * the small scale factor, so that they are several splits there too.
      */
     private static final long SMALL_SPLIT_SIZE = 64 << 10;
+
+    /** The rows of the parts the tables of the database are read in. */
+    private static final long SPLIT_ROWS = 250_000;
+
+    /** The rows of the parts the tables of the database are read in at the small scale factor. */
+    private static final long SMALL_SPLIT_ROWS = 1_000;
 
     private final double scaleFactor;
     private final Path dir;
@@ -95,6 +104,7 @@ final class TpchEngine {
             for (TpchTable table : TpchTable.values()) {
                 if (table.store() == TpchTable.Store.DATABASE) {
                     database.copy(table.tableName(), table.schema(), TpchData.file(dir, table), TpchData.DELIMITER);
+                    primaryKey(database, table);
                 }
             }
         } else {
@@ -105,10 +115,22 @@ final class TpchEngine {
                     List<Object[]> rows = new ArrayList<>();
                     table.rows(scaleFactor).forEach(rows::add);
                     database.load(table.tableName(), table.schema(), rows);
+                    primaryKey(database, table);
                 }
             }
         }
         return new TpchEngine(scaleFactor, dir, database);
+    }
+
+    /** Gives a table of the database the primary key of TPC-H. */
+    private static void primaryKey(TestDatabase database, TpchTable table) {
+        String key = switch (table) {
+            case ORDERS -> "o_orderkey";
+            case CUSTOMER -> "c_custkey";
+            default -> throw new IllegalArgumentException(table + " is not in the database");
+        };
+        String q = database.dialect().sql().quoteIdentifier("x").substring(0, 1);
+        database.execute("ALTER TABLE " + q + table.tableName() + q + " ADD PRIMARY KEY (" + q + key + q + ")");
     }
 
     double scaleFactor() {
@@ -163,7 +185,8 @@ final class TpchEngine {
             }
         }
         FyrQL.Builder b = FyrQL.builder().register(csv.build()).register(json.build()).register(memory.build())
-                .register(files).register(database.connector("db"));
+                .register(files).register(database.connector("db",
+                        db -> db.splitRows(scaleFactor <= SMALL ? SMALL_SPLIT_ROWS : SPLIT_ROWS)));
         if (pushdown != null) {
             b.pushdown(pushdown);
         }

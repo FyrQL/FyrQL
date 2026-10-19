@@ -59,6 +59,16 @@ public interface TableSource {
     }
 
     /**
+     * Returns the parts of a scan as {@link #splits(PlanNode.Scan, QueryContext)}
+     * does, for at most {@code threads} threads that read them at a time,
+     * see {@link net.fyrql.connector.Connector#splits(net.fyrql.connector.ScanPlan, int)}.
+     * The default ignores the threads.
+     */
+    default Splits splits(PlanNode.Scan scan, int threads, QueryContext context) {
+        return splits(scan, context);
+    }
+
+    /**
      * Opens the reader of a part of the plan that a source runs, for a
      * query that a context cancels, see {@link #open(PlanNode.Scan, QueryContext)}.
      */

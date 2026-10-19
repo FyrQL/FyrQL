@@ -31,6 +31,7 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -46,7 +47,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * listed. Tables and views are listed by name, system tables are not. A schema of
  * another name than the default that is called {@code main} is hidden by
  * the default. The number of rows of a table is counted with
- * {@code count(*)} when first asked for and kept as well.
+ * {@code count(*)} when first asked for and kept as well, and so is its
+ * primary key.
  */
 final class JdbcCatalog implements Catalog {
 
@@ -60,6 +62,7 @@ final class JdbcCatalog implements Catalog {
     private final Map<String, List<String>> tables = new ConcurrentHashMap<>();
     private final Map<List<String>, Columns> columns = new ConcurrentHashMap<>();
     private final Map<List<String>, Long> rowCounts = new ConcurrentHashMap<>();
+    private final Map<List<String>, Optional<String>> primaryKeys = new ConcurrentHashMap<>();
 
     /** The schemas as listed, and the name in the database of the one listed as {@code main}. */
     private record Schemas(List<String> listed, String defaultSchema) {
@@ -118,6 +121,30 @@ final class JdbcCatalog implements Catalog {
     }
 
     /**
+     * Returns the name of the column of the primary key of a table, or
+     * empty if the table has no primary key or one of several columns.
+     */
+    Optional<String> primaryKey(TableRef table) {
+        columns(table);
+        String real = databaseSchema(table.schema());
+        return primaryKeys.computeIfAbsent(List.of(real, table.table()), k -> withConnection(
+                c -> readPrimaryKey(c, k.get(0), k.get(1)), "read the primary key of " + table));
+    }
+
+    private Optional<String> readPrimaryKey(Connection c, String schema, String table) throws SQLException {
+        DatabaseMetaData md = c.getMetaData();
+        List<String> names = new ArrayList<>();
+        try (ResultSet rs = dialect == JdbcDialect.SQLITE ? md.getPrimaryKeys(null, null, table)
+                : dialect.catalogsAsSchemas() ? md.getPrimaryKeys(schema, null, table)
+                : md.getPrimaryKeys(null, schema, table)) {
+            while (rs.next()) {
+                names.add(rs.getString("COLUMN_NAME"));
+            }
+        }
+        return names.size() == 1 ? Optional.of(names.get(0)) : Optional.empty();
+    }
+
+    /**
      * Returns the columns of a table that hold instants, which the database
      * compares in the time zone of its session, see
      * {@link JdbcTypes#withTimeZone}.
@@ -140,6 +167,7 @@ final class JdbcCatalog implements Catalog {
         tables.clear();
         columns.clear();
         rowCounts.clear();
+        primaryKeys.clear();
     }
 
     /** Returns the name in the database of a listed schema, or {@code null} if it is not listed. */

@@ -417,7 +417,7 @@ final class ParallelSegment extends AbstractOperator {
     /** Returns the splits of the scan of a chain, a failure under the label of the scan. */
     private Splits splits(Chain c) {
         try {
-            return source.splits(c.scan(), context());
+            return source.splits(c.scan(), threads, context());
         } catch (QueryException e) {
             throw e;
         } catch (RuntimeException e) {

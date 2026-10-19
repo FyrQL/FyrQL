@@ -222,6 +222,20 @@ public final class SqlRenderer {
      *         dialect cannot write a part of it
      */
     public String renderScan(PlanNode.Scan s) {
+        return renderScan(s, null);
+    }
+
+    /**
+     * Renders a scan as {@link #renderScan(PlanNode.Scan)} does, with a
+     * further condition in its {@code WHERE} clause, such as the range of
+     * keys of one part of the table. The columns of the condition are the
+     * columns of the table, not those of the scan, so it may test a column
+     * the scan does not read.
+     *
+     * @param restriction the further condition, or {@code null} for none
+     * @throws IllegalArgumentException as {@link #renderScan(PlanNode.Scan)} does
+     */
+    public String renderScan(PlanNode.Scan s, Expression restriction) {
         if (s.readsFields()) {
             throw new IllegalArgumentException("A scan of fields inside columns is not rendered flat");
         }
@@ -244,6 +258,11 @@ public final class SqlRenderer {
         b.append(" FROM ").append(tableNames.apply(s.table())).append(' ').append(t);
         if (!pushed.filters().isEmpty()) {
             b.append(" WHERE ").append(expression(pushed.condition(), columns));
+        }
+        if (restriction != null) {
+            // Every rendered condition is a term that binds tighter than AND, or is in parentheses.
+            b.append(pushed.filters().isEmpty() ? " WHERE " : " AND ").append(expression(restriction,
+                    (IntFunction<String>) i -> t + "." + dialect.quoteIdentifier(s.tableSchema().name(i))));
         }
         List<Integer> groups = pushed.aggregation().map(PlanNode.Aggregation::groupColumns).orElse(List.of());
         for (int i = 0; i < groups.size(); i++) {

@@ -107,7 +107,12 @@ public final class FyrQL implements AutoCloseable {
 
             @Override
             public Splits splits(PlanNode.Scan scan, QueryContext context) {
-                return FyrQL.this.splits(scan);
+                return FyrQL.this.splits(scan, 1);
+            }
+
+            @Override
+            public Splits splits(PlanNode.Scan scan, int threads, QueryContext context) {
+                return FyrQL.this.splits(scan, threads);
             }
 
             @Override
@@ -342,19 +347,19 @@ public final class FyrQL implements AutoCloseable {
 
     /**
      * Opens the reader of a scan, which reads its splits one after the
-     * other, see {@link Splits#sequential}.
+     * other on one thread, see {@link Splits#sequential}.
      */
     private BatchReader open(PlanNode.Scan scan, QueryContext context) {
-        return Splits.sequential(splits(scan), context);
+        return Splits.sequential(splits(scan, 1), context);
     }
 
     /**
      * Returns the splits of a scan: the connector plans it once more, with
      * the filters it took over and the hints, the same filters as when the
      * scan was negotiated, which must give what the scan carries as taken
-     * over.
+     * over; for at most {@code threads} threads that read them at a time.
      */
-    private Splits splits(PlanNode.Scan scan) {
+    private Splits splits(PlanNode.Scan scan, int threads) {
         Connector connector = connector(scan.table().source());
         PlanNode.Pushed pushed = scan.pushed();
         List<Expression> filters = new ArrayList<>(pushed.filters());
@@ -378,7 +383,7 @@ public final class FyrQL implements AutoCloseable {
             throw new IllegalStateException("The connector " + connector.name() + " plans " + plan.output()
                     + " for a scan of " + scan.schema());
         }
-        return Splits.of(connector.splits(plan), connector::open);
+        return Splits.of(connector.splits(plan, threads), connector::open);
     }
 
     /**

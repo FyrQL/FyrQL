@@ -35,6 +35,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -43,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.ServiceLoader;
+import java.util.function.Consumer;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -434,6 +436,200 @@ class JdbcConnectorTest {
         }
     }
 
+    /** A table {@code items} of the keys 1 to n in {@code id}, its primary key, and twice the key in {@code v}. */
+    private static TestDatabase items(JdbcDialect dialect, int n) {
+        TestDatabase db = TestDatabase.create(dialect);
+        StringBuilder insert = new StringBuilder("INSERT INTO \"items\" VALUES ");
+        for (int i = 1; i <= n; i++) {
+            insert.append(i > 1 ? ", " : "").append('(').append(i).append(", ").append(2 * i).append(')');
+        }
+        db.execute("CREATE TABLE \"items\" (\"id\" INTEGER PRIMARY KEY, \"v\" INTEGER)", insert.toString());
+        return db;
+    }
+
+    private static JdbcConnector splitting(TestDatabase db, long splitRows, Consumer<JdbcConnector.Builder> more) {
+        JdbcConnector.Builder b = JdbcConnector.builder("db").url(db.url()).recordStatements(true)
+                .splitRows(splitRows);
+        more.accept(b);
+        return b.build();
+    }
+
+    private static String qualified(JdbcDialect dialect, String table) {
+        return (dialect == JdbcDialect.H2 ? "\"PUBLIC\"." : "\"main\".") + "\"" + table + "\"";
+    }
+
+    private static List<Integer> ids(List<Object[]> rows) {
+        return rows.stream().map(r -> ((Number) r[0]).intValue()).toList();
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"H2", "SQLITE"})
+    void aLargeTableIsReadInRangesOfItsPrimaryKey(JdbcDialect dialect) {
+        TestDatabase db = items(dialect, 100);
+        JdbcConnector connector = splitting(db, 30, b -> {
+        });
+        TableRef table = TableRef.of("db", "items");
+        assertEquals(IntStream.rangeClosed(1, 100).boxed().toList(), ids(rows(readAll(connector, table))));
+        DataType type = connector.catalog().schema(table).type(0);
+        String select = "SELECT t.\"id\", t.\"v\" FROM " + qualified(dialect, "items") + " t WHERE ";
+        String id = "t.\"id\"";
+        List<String> expected = new ArrayList<>(List.of(
+                "SELECT min(" + id + "), max(" + id + ") FROM " + qualified(dialect, "items") + " t",
+                select + "(" + id + " < " + literal(dialect, 25, type) + ")",
+                select + "((" + id + " >= " + literal(dialect, 25, type) + ") AND (" + id + " < "
+                        + literal(dialect, 50, type) + "))",
+                select + "((" + id + " >= " + literal(dialect, 50, type) + ") AND (" + id + " < "
+                        + literal(dialect, 75, type) + "))",
+                select + "(" + id + " >= " + literal(dialect, 75, type) + ")"));
+        if (connector.catalog().schema(table).nullable(0)) {
+            // SQLite tells that a key of type INTEGER may be NULL.
+            expected.add(select + "(" + id + " IS NULL)");
+        }
+        assertEquals(expected, connector.statements());
+
+        // No more ranges than threads read them, and for one thread no range at all.
+        int nulls = expected.size() - 5;
+        ScanPlan plan = connector.plan(table, ScanRequest.columns(List.of(0, 1)));
+        connector.clearStatements();
+        assertEquals(1, connector.splits(plan, 1).size());
+        assertEquals(List.of(), connector.statements());
+        assertEquals(2 + nulls, connector.splits(plan, 2).size());
+        assertEquals(4 + nulls, connector.splits(plan, 12).size());
+
+        // The engine reads the splits on several threads, and one statement on one; the filter comes before the
+        // range.
+        for (int threads : new int[] {1, 4}) {
+            connector.clearStatements();
+            try (FyrQL engine = FyrQL.builder().register(connector).threads(threads).build()) {
+                assertEquals(IntStream.rangeClosed(51, 100).boxed().toList(),
+                        ids(engine.rows("SELECT \"id\" FROM items WHERE \"v\" > 100")).stream().sorted().toList());
+                assertEquals(threads > 1, engine.explain("SELECT \"id\" FROM items WHERE \"v\" > 100")
+                        .contains("[parallel]"));
+            }
+            List<String> sent = connector.statements();
+            assertEquals(threads > 1 ? 1 + 4 + nulls : 1, sent.size(), sent.toString());
+            String last = sent.get(sent.size() - 1);
+            assertTrue(last.contains(" WHERE (t.\"v\" > "), last);
+            assertEquals(threads > 1, last.contains(") AND (t.\"id\" "), last);
+        }
+    }
+
+    private static String literal(JdbcDialect dialect, long value, DataType type) {
+        Object v = type == DataType.INTEGER ? (Object) (int) value : (Object) value;
+        return dialect.sql().literal(v, type);
+    }
+
+    @Test
+    void rowsOutsideTheRangeAskedForAndRowsWithoutAKeyAreReadAsWell() {
+        TestDatabase db = TestDatabase.create(JdbcDialect.H2);
+        db.execute("CREATE TABLE \"loose\" (\"k\" BIGINT, \"s\" VARCHAR(10))",
+                "INSERT INTO \"loose\" SELECT X, 'r' || X FROM SYSTEM_RANGE(1, 100)",
+                "INSERT INTO \"loose\" VALUES (NULL, 'none'), (NULL, 'none')");
+        JdbcConnector connector = splitting(db, 26, b -> b.splitColumn("loose", "k"));
+        TableRef table = TableRef.of("db", "loose");
+        ScanPlan plan = connector.plan(table, ScanRequest.columns(List.of(0, 1)));
+        List<Split> splits = connector.splits(plan);
+        assertEquals(5, splits.size(), "four ranges and the keys that are NULL");
+        // Rows written after the range was asked for fall into the first and the last split.
+        db.execute("INSERT INTO \"loose\" VALUES (-7, 'low'), (1000, 'high')");
+        List<Object[]> rows = new ArrayList<>();
+        for (Split split : splits) {
+            try (BatchReader reader = connector.open(split)) {
+                for (Batch b = reader.next(); b != null; b = reader.next()) {
+                    rows.addAll(b.rows());
+                }
+            }
+        }
+        assertEquals(104, rows.size());
+        assertEquals(1L, rows.stream().filter(r -> "low".equals(r[1])).count());
+        assertEquals(1L, rows.stream().filter(r -> "high".equals(r[1])).count());
+        assertEquals("none", rows.get(103)[1]);
+        assertEquals(1L, rows.stream().filter(r -> "r50".equals(r[1])).count());
+    }
+
+    @Test
+    void aScanStaysOneStatementWhereSplitsWouldNotHelpOrCannotBeMade() throws SQLException {
+        TestDatabase db = items(JdbcDialect.H2, 100);
+        db.execute("CREATE TABLE \"empty\" (\"id\" INTEGER PRIMARY KEY)",
+                "CREATE TABLE \"plain\" (\"id\" INTEGER, \"v\" INTEGER)",
+                "INSERT INTO \"plain\" SELECT X, X FROM SYSTEM_RANGE(1, 100)",
+                "CREATE TABLE \"pair\" (\"a\" INTEGER, \"b\" INTEGER, PRIMARY KEY (\"a\", \"b\"))",
+                "INSERT INTO \"pair\" SELECT X, X FROM SYSTEM_RANGE(1, 100)",
+                "CREATE TABLE \"named\" (\"name\" VARCHAR(10) PRIMARY KEY)",
+                "INSERT INTO \"named\" SELECT 'n' || X FROM SYSTEM_RANGE(1, 100)",
+                "CREATE TABLE \"same\" (\"id\" INTEGER, \"v\" INTEGER)",
+                "INSERT INTO \"same\" SELECT 7, X FROM SYSTEM_RANGE(1, 100)");
+        // Not switched on, more rows asked for than the table has, an empty table, no key of one column of
+        // a type that has ranges.
+        JdbcConnector off = splitting(db, 0, b -> {
+        });
+        assertEquals(1, readAll(off, TableRef.of("db", "items")).size());
+        assertEquals(1, off.statements().size());
+        JdbcConnector few = splitting(db, 100, b -> {
+        });
+        readAll(few, TableRef.of("db", "items"));
+        assertEquals(1, few.statements().size());
+        JdbcConnector on = splitting(db, 10, b -> b.splitColumn("same", "id"));
+        for (String table : List.of("empty", "plain", "pair", "named")) {
+            on.clearStatements();
+            readAll(on, TableRef.of("db", table));
+            assertEquals(1, on.statements().size(), table);
+        }
+        // One key: its range is asked for, but there is nothing to split.
+        on.clearStatements();
+        assertEquals(100, rows(readAll(on, TableRef.of("db", "same"))).size());
+        assertEquals(2, on.statements().size());
+        assertTrue(on.statements().get(0).startsWith("SELECT min("), on.statements().get(0));
+
+        // What the database aggregates, orders or limits.
+        try (FyrQL engine = FyrQL.builder().register(on).threads(4).build()) {
+            on.clearStatements();
+            assertEquals(100L, engine.rows("SELECT count(*) FROM items").get(0)[0]);
+            assertEquals(List.of(1, 2, 3), ids(engine.rows("SELECT \"id\" FROM items ORDER BY \"id\" LIMIT 3")));
+            assertEquals(2, on.statements().size(), on.statements().toString());
+            assertTrue(on.statements().get(0).contains("count(*)"), on.statements().get(0));
+            assertTrue(on.statements().get(1).contains("LIMIT"), on.statements().get(1));
+        }
+
+        // A shared connection reads one statement at a time.
+        try (Connection c = db.connect()) {
+            JdbcConnector shared = JdbcConnector.builder("db").connection(c).recordStatements(true).splitRows(10)
+                    .build();
+            assertEquals(100, rows(readAll(shared, TableRef.of("db", "items"))).size());
+            assertEquals(1, shared.statements().size());
+        }
+    }
+
+    @Test
+    void theColumnSetForATableMustBeOneOfItWithRanges() {
+        TestDatabase db = items(JdbcDialect.H2, 100);
+        db.execute("CREATE TABLE \"days\" (\"d\" DATE, \"ts\" TIMESTAMP, \"s\" VARCHAR(10))",
+                "INSERT INTO \"days\" SELECT DATEADD('DAY', X, DATE '2020-01-01'), "
+                        + "DATEADD('HOUR', X, TIMESTAMP '2020-01-01 00:00:00'), 's' || X FROM SYSTEM_RANGE(0, 99)");
+        // By a column other than the primary key, the table named with its schema.
+        JdbcConnector byValue = splitting(db, 50, b -> b.splitColumn("main.items", "v"));
+        assertEquals(100, rows(readAll(byValue, TableRef.of("db", "items"))).size());
+        assertEquals("SELECT min(t.\"v\"), max(t.\"v\") FROM \"PUBLIC\".\"items\" t", byValue.statements().get(0));
+        assertEquals(4, byValue.statements().size(), "two ranges and the values that are NULL");
+
+        for (String column : List.of("d", "ts")) {
+            JdbcConnector byTime = splitting(db, 30, b -> b.splitColumn("days", column));
+            List<Object[]> rows = rows(readAll(byTime, TableRef.of("db", "days")));
+            assertEquals(100, rows.size(), column);
+            assertEquals(LocalDate.of(2020, 1, 1).toEpochDay(), ((Number) rows.get(0)[0]).longValue(), column);
+            assertEquals(6, byTime.statements().size(), column + ": " + byTime.statements());
+        }
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> readAll(splitting(db, 30, b -> b.splitColumn("days", "nope")), TableRef.of("db", "days")));
+        assertEquals("The JDBC source db splits db.main.days by nope, which is no column of it", e.getMessage());
+        e = assertThrows(IllegalArgumentException.class,
+                () -> readAll(splitting(db, 30, b -> b.splitColumn("days", "s")), TableRef.of("db", "days")));
+        assertTrue(e.getMessage().contains("by s of type VARCHAR; it takes an integral type"), e.getMessage());
+        assertThrows(IllegalArgumentException.class, () -> JdbcConnector.builder("db").splitRows(-1));
+        assertThrows(IllegalArgumentException.class, () -> JdbcConnector.builder("db").splitColumn(" ", "v"));
+    }
+
     @Test
     void theFactoryCreatesASourceFromOptions() {
         ConnectorFactory factory = ServiceLoader.load(ConnectorFactory.class).stream().map(ServiceLoader.Provider::get)
@@ -452,6 +648,15 @@ class JdbcConnectorTest {
         e = assertThrows(IllegalArgumentException.class,
                 () -> factory.create("db", Map.of("url", db.url(), "batchSize", "many")));
         assertTrue(e.getMessage().contains("batchSize"), e.getMessage());
+
+        TestDatabase items = items(JdbcDialect.H2, 100);
+        JdbcConnector split = (JdbcConnector) factory.create("db", Map.of("url", items.url(), "recordStatements",
+                "true", "splitRows", "50", "splitColumn.items", "v"));
+        assertEquals(100, rows(readAll(split, TableRef.of("db", "items"))).size());
+        assertEquals("SELECT min(t.\"v\"), max(t.\"v\") FROM \"PUBLIC\".\"items\" t", split.statements().get(0));
+        e = assertThrows(IllegalArgumentException.class,
+                () -> factory.create("db", Map.of("url", db.url(), "splitRows", "many")));
+        assertTrue(e.getMessage().contains("splitRows"), e.getMessage());
     }
 
     @Test

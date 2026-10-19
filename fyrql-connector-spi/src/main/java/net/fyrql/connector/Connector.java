@@ -55,6 +55,18 @@ public interface Connector extends AutoCloseable {
     /** Returns the parts of a scan that can be read independently; at least one. */
     List<Split> splits(ScanPlan plan);
 
+    /**
+     * Returns the parts of a scan that can be read independently, for a
+     * reader of at most {@code threads} threads at a time; at least one. A
+     * source whose parts cost something of their own, such as a statement
+     * and a connection each, may make no more parts than there are threads,
+     * and one part for one thread, which gains nothing from more. The
+     * default returns {@link #splits(ScanPlan)}.
+     */
+    default List<Split> splits(ScanPlan plan, int threads) {
+        return splits(plan);
+    }
+
     /** Opens a reader over one part of a scan. */
     BatchReader open(Split split);
 

@@ -34,6 +34,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.function.Consumer;
 
 /**
  * A database the tests of the JDBC connector run against: where it is,
@@ -60,7 +61,14 @@ public record TestDatabase(JdbcDialect dialect, String url, String user, String 
 
     /** A connector over the database under a name, which records its statements. */
     public JdbcConnector connector(String name) {
+        return connector(name, b -> {
+        });
+    }
+
+    /** A connector over the database under a name, which records its statements, with further settings. */
+    public JdbcConnector connector(String name, Consumer<JdbcConnector.Builder> settings) {
         JdbcConnector.Builder b = JdbcConnector.builder(name).url(url).dialect(dialect).recordStatements(true);
+        settings.accept(b);
         if (user != null) {
             b.user(user);
         }

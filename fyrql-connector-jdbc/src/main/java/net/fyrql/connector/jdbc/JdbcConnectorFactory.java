@@ -30,8 +30,10 @@ import java.util.Map;
  * ({@code h2}, {@code sqlite}, {@code postgresql} or {@code mysql}; by
  * default from the URL), {@code schemas} (a comma-separated list),
  * {@code defaultSchema}, {@code fetchSize}, {@code batchSize},
- * {@code recordStatements}, and {@code properties.<key>} for any property
- * of the driver. A relative path in the URL is resolved by the driver, not
+ * {@code recordStatements}, {@code splitRows} and
+ * {@code splitColumn.<table>} (see {@link JdbcConnector.Builder#splitRows}
+ * and {@link JdbcConnector.Builder#splitColumn}), and
+ * {@code properties.<key>} for any property of the driver. A relative path in the URL is resolved by the driver, not
  * against the directory of the configuration.
  */
 public final class JdbcConnectorFactory implements ConnectorFactory {
@@ -61,6 +63,8 @@ public final class JdbcConnectorFactory implements ConnectorFactory {
         o.integer("fetchSize").ifPresent(b::fetchSize);
         o.integer("batchSize").ifPresent(b::batchSize);
         o.bool("recordStatements").ifPresent(b::recordStatements);
+        o.get("splitRows", "a number of rows", v -> Long.parseLong(v.strip())).ifPresent(b::splitRows);
+        o.prefixed("splitColumn", "<table>").forEach(b::splitColumn);
         o.prefixed("properties", "<key>").forEach(b::property);
         o.rejectUnknown();
         return b.build();
