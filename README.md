@@ -1,38 +1,47 @@
 # FyrQL
 
-A small, embeddable, pure-JVM federated SQL engine with [DuckDB](https://duckdb.org)-like semantics, designed
-for Data Mesh deployments. Operating with no server footprint or native libraries, FyrQL
-provides a lightweight execution layer that implements three core design principles:
+FyrQL is an embeddable SQL engine for the JVM that queries data where it lives: the
+tables of databases, files, HTTP endpoints, OData services and the Java objects of an
+application, joined in one query, in the SQL dialect of [DuckDB](https://duckdb.org). It
+is a library in pure Java: no server to run, no native code, and nothing to copy into a
+warehouse first.
 
- - **Serverless Data Product Consumption**: The engine embeds as a standard Java library directly
-   inside the application process. It processes data using columnar batches and a vectorized
-   interpreter, utilizing Janino for runtime code generation of expressions, keys, and whole
-   pipelines of filters, projections, and joins.
-   Its query execution is verified by running all 22 TPC-H queries across federated sources.
- - **Polyglot Storage Abstraction**: FyrQL unifies heterogeneous data sources - including relational
-   databases (via JDBC), local files (CSV, JSON/gzip, Parquet), live JSON HTTP endpoints, and
-   OData services (versions 2 and 4) into a single logical mesh. It infers column types from data samples like DuckDB and handles
-   nested STRUCT, LIST, and MAP types natively, allowing cross-source subqueries and joins via
-   the same SQL dialect that is used by [DuckDB](https://duckdb.org).
- - **Zero-ETL / In-Place Analytics**: FyrQL queries decentralized data directly at the source.
-   The optimizer moves conditions toward the tables, orders joins by table size, and pushes
-   down filters, orders, limits, and aggregations into the connectors - running joins of tables
-   from the same database natively within that database.
+- **Heterogeneous sources, one query.** PostgreSQL, MySQL, SQLite and H2 over JDBC; CSV,
+  JSON and Parquet files; JSON from HTTP endpoints; OData services of versions 2 and 4;
+  and Java collections of records or beans. The columns of files and endpoints are
+  inferred from the data as DuckDB infers them, nested `STRUCT`, `LIST` and `MAP` values
+  included, so that no schema has to be declared.
+- **Federation that lets each source do its part.** A source receives what it evaluates
+  exactly as FyrQL would: the columns a query needs, and filters, sorts, limits and
+  aggregations; a database also runs the joins of its own tables, and a Parquet file skips
+  the row groups and pages no row of which can pass. What spans sources, such as a join of
+  a table of PostgreSQL with a CSV file and an OData service, runs in the engine.
+- **Analytical SQL.** Joins, grouping, subqueries that are turned into joins, also
+  correlated ones, window functions with all frames of DuckDB, set operations and nested
+  types, executed over columnar batches by a vectorized interpreter, with whole pipelines
+  compiled at run time by Janino, on all cores. All 22 TPC-H queries run at scale factor 1
+  over tables spread across Parquet, CSV, JSON, PostgreSQL and Java collections, on a
+  six-core laptop in about 17 s together, where DuckDB takes about 7 s over the same files
+  (see [Building](#building)).
+- **Embedded.** The engine runs inside the process of the application and is set up with
+  a builder or a YAML file; there is no server, cluster or installation. A JDBC driver,
+  also as one JAR, opens it to tools such as DBeaver.
+- **Pure Java.** No JNI, no native libraries, no Hadoop: Parquet is read with codecs in
+  pure Java, and code generation uses Janino. The same JARs run wherever Java 21 runs,
+  also in containers and application servers that do not allow native code.
+- **Simple to use.** A source is a few lines of a builder or of a YAML file; queries are
+  written in the SQL of DuckDB, which many know already; `explain` shows the plan that
+  runs, with what each source took over; errors name the line and column of the query.
+- **Checked against DuckDB.** Every test compares the types and rows of a result with
+  those of DuckDB over the same data; every build adds hundreds of random queries, each
+  also run on one thread and with compiled code, which must give the same results.
 
-
-FyrQL is in an *early stage*. There are data types with nested `STRUCT`, `LIST` and `MAP`,
-columnar batches, a vectorized interpreter, code generation with Janino for expressions,
-keys and pipelines of filters, projections and joins, connectors for Java collections, CSV,
-JSON and Parquet files, JSON from HTTP
-endpoints, OData services of versions 2 and 4 and databases over JDBC, an optimizer that moves conditions toward the
-tables, orders joins by the sizes of the tables and runs the joins of tables of one
-database in that database, parallel execution on all cores over the parts of the sources, a pushdown of filters, orders, limits and aggregations into
-the sources, an SQL front end with the names, types and forms of DuckDB, subqueries,
-also correlated ones, that become joins, window functions with all frames of DuckDB, a
-JDBC driver, also as one JAR for tools such as
-DBeaver, and a differential test harness that compares the results with DuckDB. All 22
-TPC-H queries run at scale factor 1 over tables spread across Parquet, CSV, JSON,
-PostgreSQL and Java collections.
+FyrQL is young: version 0.x, not yet used in production, and its API may still change.
+It reads and does not write; the hash tables and sorts of a query must fit into its
+memory budget, since nothing is spilled to disk yet; and where all data is in local files
+and native code is fine, DuckDB itself is faster. FyrQL is meant for the other case: data
+spread across databases, files and services, queried from a Java application or a JDBC
+tool, without moving it first.
 
 ## Using the engine
 
@@ -174,7 +183,9 @@ tables in the schema `main` unless it says otherwise.
   result is read in parts of the fetch size. A type FyrQL does not have, such as `TIME`,
   `INTERVAL`, JSON or an array, is read as `VARCHAR`; a timestamp with a time zone is
   its instant in UTC, and PostgreSQL's `numeric` without a precision is `DOUBLE`, as in
-  DuckDB. `recordStatements(true)` keeps every statement sent.
+  DuckDB. `recordStatements(true)` keeps every statement sent. With `splitRows(n)`, a
+  scan of a table of more than `n` rows is read in parts on several threads, see
+  [Parallel execution](#parallel-execution).
 
 A query over orders in PostgreSQL, customers in a CSV file and products from an HTTP
 endpoint:
@@ -460,6 +471,12 @@ and `rowCounts`, both `false` by default; with `rowCounts`, the catalog tells th
 optimizer the number of rows of each entity set by a request of `/$count`, which a tool
 that lists the tables, such as DBeaver through the JDBC driver, then sends for every
 entity set.
+
+A source of the type `jdbc` takes `url`, `user`, `password`, `dialect` (`h2`, `sqlite`,
+`postgresql` or `mysql`, by default from the URL), `schemas` (a comma-separated list),
+`defaultSchema`, `fetchSize`, `batchSize`, `recordStatements`, `splitRows` and
+`splitColumn.<table>` (see [Parallel execution](#parallel-execution)), and
+`properties.<key>` for any property of the driver.
 
 ## JDBC driver
 
@@ -859,7 +876,25 @@ The sources divide their tables into splits as follows:
   with `}` or `]` and before a line that starts with `{` or `[`, which in valid JSON lies
   between two records, also where records span several lines. An error names the line and
   the record that reading the whole file names.
-- Databases, HTTP endpoints and OData services: one split.
+- Databases: one split, unless `splitRows` is set for the source, an option of the builder
+  and of the configuration (`0`, the default, turns it off). Then a scan of a table of
+  more than `splitRows` rows, in a query on several threads, is read in parts of about
+  that many rows, at most eight and no more than there are threads, each one statement
+  over a range of a key column on a connection of its own. The key column is that of a
+  primary key of one column, or the one that `splitColumn(table, column)` of the builder
+  or `splitColumn.<table>` of the configuration names, of an integral type, a `DATE` or a
+  `TIMESTAMP` without time zone. The ranges are of equal width between the least and the
+  greatest key, which a statement asks for at every scan; the first and the last are
+  open, so that rows added since are read all the same, and the rows with a `NULL` key
+  are a part of their own. A scan stays one statement when the database aggregates,
+  orders or limits it, over a connection the application shares, and for a join that the
+  database runs. Without an index on the key column, the database reads the whole table
+  for every part. Each part is a transaction of its own and sees the table as it is when
+  the part starts, where one statement sees one state of the whole table: while others
+  write to the table, the parts may see different states of it, so that a sum over rows
+  of two parts may mix old and new values, and a row whose key column changes may be
+  missing or come twice.
+- HTTP endpoints and OData services: one split.
 
 The workers come from one pool of daemon threads of the JVM (`fyrql-worker-N`), created
 as needed; `threads` limits the workers of each query, and no task waits for another, so
@@ -883,11 +918,14 @@ cores and twelve threads, after a while under load, in milliseconds per run:
 | Window with `row_number` and a moving sum in 100,000 partitions | 6,987 | 3,371 | 2,699 |
 
 Batches that are already in memory are read as fast as the memory delivers them, so
-that six cores gain little beyond four threads. With 100,000 groups in random order, each
-worker holds a table of nearly all groups, twelve such tables no longer fit into the
-caches, and the merge adds them up once more: such an aggregation gains little, and on
-twelve threads nothing. Dividing the groups among the workers by their hashes from the
-start, as DuckDB does, would avoid that; it is not done yet.
+that six cores gain little beyond four threads. The figures are those of version 0.5.5,
+in which each worker held a table of nearly all of 100,000 groups in random order, twelve
+such tables no longer fitted into the caches, and the aggregation in 100,000 groups
+gained nothing on twelve threads. Since then a worker passes such rows on into the
+partitions, as described above: in runs of the old and the new version in turn, that
+aggregation took 136 to 167 ms on twelve threads instead of about 200 ms. It still does
+not take half the time of one thread, since the merge compares the keys of every group
+once more.
 
 ## Supported SQL
 
@@ -1028,6 +1066,9 @@ Known differences from DuckDB:
 - On several threads, the last binary digits of `sum` and `avg` over `FLOAT` and
   `DOUBLE`, and which error is reported when rows of several parts of a source fail, may
   change from run to run, as in DuckDB; see [Parallel execution](#parallel-execution).
+- A JDBC source with `splitRows` reads the parts of a table in transactions of their
+  own, each with its own state of the table; while others write to the table, a result
+  may mix states, and a row whose key column changes may be missing or come twice.
 - `INTERVAL '90' DAY` (also `INTERVAL 1 year` and `INTERVAL '3 months'`) exists only
   as a constant added to or subtracted from a constant date or timestamp, such as
   `DATE '1998-12-01' - INTERVAL '90' DAY`, and is computed when the query is bound.
@@ -1172,7 +1213,8 @@ request to a public service.
 
 The 22 TPC-H queries, in the text of the specification with its parameters of
 validation, run over the tables of TPC-H spread across the connectors: `lineitem` as a
-Parquet file, `partsupp` as a CSV file, `orders` and `customer` in PostgreSQL, `part` and
+Parquet file, `partsupp` as a CSV file, `orders` and `customer` in PostgreSQL with their
+primary keys, read in parts of 250,000 rows (`splitRows`), `part` and
 `supplier` as JSON lines, `nation` and `region` as Java collections. The data comes from
 `io.trino.tpch`, a Java port of the TPC-H generator, and DuckDB reads the same files for
 the comparison; it also writes the Parquet file from a CSV file of the generator, in row
@@ -1190,7 +1232,8 @@ plans with code generation into `fyrql-test/target/tpch-report.md`:
 The files take about 0.6 GB in `fyrql-test/target/tpch` and are written once; loading
 PostgreSQL takes about 30 s. On a laptop with an AMD Ryzen 5 5600H (six cores, twelve
 threads) and JDK 21, all 22 queries give the rows of DuckDB in all four ways, with a peak
-of the heap between 0.4 and 1.9 GB; in seconds, the fastest of three runs:
+of the heap between 0.4 and 1.9 GB; in seconds, the fastest of three runs, with version
+0.5.5, which read the tables of PostgreSQL in one part:
 
 | Query | Interpreted, 1 thread | Interpreted, 12 threads | Compiled, 1 thread | Compiled, 12 threads | DuckDB |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -1223,8 +1266,11 @@ After a while under load, the same laptop takes up to half as long again for eve
 query, DuckDB included, so that only times of one run compare. On twelve threads, Q1 and
 Q6, which read `lineitem` and aggregate it into few groups, take less than a quarter of
 the time of one thread, and most other queries a third to two thirds. Q13 and Q22 read
-only the orders and customers of PostgreSQL, which a database gives as one split, and
-gain nothing; Q18 and Q21 read the orders in a chain with joins on one thread. Run once
+only the orders and customers of PostgreSQL and gained nothing in one part. Read in parts,
+in runs without and with them in turn, compiled on twelve threads, Q13 takes 1.2 to 1.3 s
+instead of 1.7 to 2.0 s, Q18 1.2 to 1.3 s instead of 1.7 s, and all 22 queries 16.0 s
+instead of 17.2 s; Q22 still gains little, since PostgreSQL runs its `NOT EXISTS` over
+the customers and orders on one core. Run once
 and cold on one thread, before queries ran on several threads, the 22 queries took 47.7 s
 in the interpreter and 41.4 s compiled; with `lineitem` as a CSV file, 79.4 s, 74.7 s and
 45.4 s in DuckDB, and before the CSV files were read into typed columns, joins and

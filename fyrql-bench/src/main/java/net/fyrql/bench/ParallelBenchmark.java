@@ -122,7 +122,7 @@ public class ParallelBenchmark {
     }
 
     /** The batches of the tables in splits. */
-    private record InSplits(Map<TableRef, List<List<Batch>>> tables) implements TableSource {
+    record InSplits(Map<TableRef, List<List<Batch>>> tables) implements TableSource {
         @Override
         public BatchReader open(PlanNode.Scan scan) {
             return Splits.sequential(splits(scan, QueryContext.NONE), QueryContext.NONE);
