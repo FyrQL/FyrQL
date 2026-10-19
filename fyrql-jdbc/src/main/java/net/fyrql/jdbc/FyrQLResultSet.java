@@ -44,7 +44,6 @@ import java.sql.SQLXML;
 import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
-import java.time.LocalDate;
 import java.util.Calendar;
 import java.util.Map;
 import java.util.concurrent.locks.Lock;
@@ -74,6 +73,7 @@ final class FyrQLResultSet implements ResultSet {
     private boolean afterLast;
     private volatile boolean exhausted;
     private boolean wasNull;
+    private DateCache dates;
     private int fetchSize;
     private volatile boolean closed;
 
@@ -126,6 +126,9 @@ final class FyrQLResultSet implements ResultSet {
         batch = b;
         row = 0;
         rowNumber++;
+        if (dates != null) {
+            dates.check();
+        }
         return true;
     }
 
@@ -420,9 +423,17 @@ final class FyrQLResultSet implements ResultSet {
             return null;
         }
         if (cal == null && v instanceof IntVector i && i.type() == DataType.DATE) {
-            return Date.valueOf(LocalDate.ofEpochDay(i.getInt(row)));
+            return dates().date(i.getInt(row));
         }
         return JdbcValues.toDate(v.get(row), type(columnIndex), cal);
+    }
+
+    /** Returns the cache of the dates of this result set, created when a date is read first. */
+    private DateCache dates() {
+        if (dates == null) {
+            dates = new DateCache();
+        }
+        return dates;
     }
 
     @Override
@@ -475,8 +486,14 @@ final class FyrQLResultSet implements ResultSet {
 
     @Override
     public Object getObject(int columnIndex) throws SQLException {
-        Object v = value(columnIndex);
-        return v == null ? null : JdbcValues.toObject(v, type(columnIndex));
+        Vector v = vector(columnIndex);
+        if (wasNull) {
+            return null;
+        }
+        if (v instanceof IntVector i && i.type() == DataType.DATE) {
+            return dates().date(i.getInt(row));
+        }
+        return JdbcValues.toObject(v.get(row), type(columnIndex));
     }
 
     @Override
