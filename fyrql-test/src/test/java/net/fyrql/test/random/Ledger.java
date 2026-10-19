@@ -200,7 +200,13 @@ final class Ledger {
             new Entry("duckdb-unstable-rows", "DuckDB gives other rows for the same query over the same tables"
                     + " on another run, rarely, as for a LIMIT in a subquery below a join; the rows of a second run"
                     + " agree with FyrQL.", "1.5.6", null,
-                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.report().startsWith(TwoEngines.UNSTABLE)));
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.report().startsWith(TwoEngines.UNSTABLE)),
+            new Entry("duckdb-optimizer-rows", "DuckDB gives other rows than FyrQL on two runs, and DuckDB without"
+                    + " its optimizer agrees with FyrQL, as when a LIMIT below a join keeps rows that it would not"
+                    + " keep: the rows lie between the least and the greatest key of the build side, as if DuckDB"
+                    + " had moved the filter on these keys that the join passes to its probe side below the LIMIT."
+                    + " Seen in the build on Linux, not on Windows.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.unoptimized() == Outcome.Kind.SAME));
 
     /** The two types of a set operation that FyrQL does not unite. */
     private static final Pattern SET_OPERATION_TYPES = Pattern.compile(

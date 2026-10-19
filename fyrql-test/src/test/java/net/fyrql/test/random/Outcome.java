@@ -21,9 +21,9 @@ import net.fyrql.core.plan.PlanNode;
  * @param fyrqlError FyrQL's error, {@code null} if it ran the query
  * @param duckError DuckDB's error, {@code null} if it ran the query
  * @param report the differing types or rows, empty if there are none
- * @param unoptimized for a query that fails in one engine only, how the
- *        results relate with the optimizer of DuckDB switched off;
- *        {@code null} otherwise
+ * @param unoptimized for a query that fails in one engine only or whose
+ *        rows differ, how the results relate with the optimizer of DuckDB
+ *        switched off; {@code null} otherwise
  * @param bound for a plan whose results differ, how they relate when
  *        FyrQL binds the plan's SQL instead of running the plan itself;
  *        {@code null} otherwise

@@ -143,7 +143,10 @@ final class TwoEngines implements AutoCloseable {
             return new Outcome(Outcome.Kind.FYRQL_CRASHES, sql, fyrqlError, outcome.duckError(), "")
                     .withPlan(plan, optimized);
         }
-        if (outcome.kind() == Outcome.Kind.FYRQL_FAILS || outcome.kind() == Outcome.Kind.DUCKDB_FAILS) {
+        // DuckDB's optimizer may also change the rows, as when it moves the
+        // filter that a join takes from its build side below a LIMIT.
+        if (outcome.kind() == Outcome.Kind.FYRQL_FAILS || outcome.kind() == Outcome.Kind.DUCKDB_FAILS
+                || outcome.kind() == Outcome.Kind.ROWS_DIFFER && !outcome.report().startsWith(UNSTABLE)) {
             duck.execute("PRAGMA disable_optimizer");
             try {
                 return outcome.withUnoptimized(compare(sql, schema, actual, fyrqlError, ordered, ulps).kind());
