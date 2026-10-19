@@ -1233,4 +1233,4 @@ and Q21 three times.
 
 ## License
 
-Apache License 2.0, see `LICENSE`.
+Mozilla Public License 2.0, see `LICENSE`.
