@@ -18,7 +18,7 @@ import java.util.Arrays;
 /** A {@code DOUBLE} vector over a {@code double[]}. */
 public final class DoubleVector implements Vector {
 
-    private final double[] values;
+    final double[] values;
     private final boolean[] nulls;
 
     DoubleVector(double[] values, boolean[] nulls) {
@@ -54,6 +54,11 @@ public final class DoubleVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Returns the value at a row, which must not be {@code NULL}. */

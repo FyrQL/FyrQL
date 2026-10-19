@@ -25,8 +25,8 @@ import java.util.Arrays;
 public final class DecimalVector implements Vector {
 
     private final Decimal type;
-    private final long[] small;
-    private final BigInteger[] big;
+    final long[] small;
+    final BigInteger[] big;
     private final boolean[] nulls;
 
     DecimalVector(Decimal type, long[] small, BigInteger[] big, boolean[] nulls) {
@@ -62,6 +62,11 @@ public final class DecimalVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Tells whether the unscaled values are {@code long}s. */

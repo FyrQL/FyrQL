@@ -208,7 +208,9 @@ final class PipelineOperator extends AbstractOperator {
                 functions = compiled;
             }
         }
-        return new JoinTable(j.right().schema(), batches, keys, functions);
+        KeyFunctions hash = functions;
+        return JoinBuild.table(batches, keys.length > 0, joinLabels.get(p), budget, reserved,
+                () -> new JoinTable(j.right().schema(), batches, keys, hash));
     }
 
     private static QueryException failure(String label, RuntimeException e) {

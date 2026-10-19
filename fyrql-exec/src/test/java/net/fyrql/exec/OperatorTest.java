@@ -56,6 +56,10 @@ class OperatorTest {
     private final Map<TableRef, List<Batch>> tables = new HashMap<>();
 
     private Executor executor() {
+        return executor(MemoryBudget.unlimited());
+    }
+
+    private Executor executor(MemoryBudget budget) {
         return new Executor(scan -> {
             List<Batch> batches = tables.get(scan.table());
             List<Batch> projected = new ArrayList<>();
@@ -63,7 +67,7 @@ class OperatorTest {
                 projected.add(b.project(scan.columns()));
             }
             return Batches.reader(projected);
-        }, MemoryBudget.unlimited(), 3);
+        }, budget, 3);
     }
 
     private PlanNode.Scan table(String name, Schema schema, List<Object[]> rows, int batchSize) {
@@ -400,5 +404,25 @@ class OperatorTest {
         QueryException budget = assertThrows(QueryException.class,
                 () -> tight.rows(new PlanNode.Sort(o, List.of(SortKey.asc(0)))));
         assertTrue(budget.getMessage().contains("Memory budget"));
+    }
+
+    @Test
+    void theTableOfAJoinCountsInTheBudget() {
+        List<Object[]> many = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            many.add(new Object[] {i, "c" + i});
+        }
+        PlanNode.Scan c = table("customers", CUSTOMERS, many, 100);
+        PlanNode join = new PlanNode.Join(orders(), c, List.of(1), List.of(0), JoinType.INNER);
+        long batches = tables.get(c.table()).stream().mapToLong(Batches::estimateBytes).sum();
+        long index = JoinTable.indexBytes(1000, true);
+        // The batches of the build side fit, the slots and chains of the table over them do not.
+        QueryException e = assertThrows(QueryException.class,
+                () -> executor(new MemoryBudget(batches + index / 2)).rows(join));
+        assertTrue(e.getMessage().contains("Memory budget"), e::getMessage);
+        // While the batches are copied into one, both count.
+        MemoryBudget enough = new MemoryBudget(2 * batches + index);
+        assertEquals(4, executor(enough).rows(join).size());
+        assertEquals(0, enough.used());
     }
 }

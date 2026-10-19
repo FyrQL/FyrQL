@@ -27,7 +27,7 @@ public final class BytesVector implements Vector {
 
     private final DataType type;
     private final byte[] data;
-    private final int[] offsets;
+    final int[] offsets;
     private final boolean[] nulls;
 
     BytesVector(DataType type, byte[] data, int[] offsets, boolean[] nulls) {
@@ -62,6 +62,11 @@ public final class BytesVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Returns the shared buffer; the bytes of a row lie between its offsets. */

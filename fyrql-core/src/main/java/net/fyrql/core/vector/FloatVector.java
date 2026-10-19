@@ -18,7 +18,7 @@ import java.util.Arrays;
 /** A {@code FLOAT} vector over a {@code float[]}. */
 public final class FloatVector implements Vector {
 
-    private final float[] values;
+    final float[] values;
     private final boolean[] nulls;
 
     FloatVector(float[] values, boolean[] nulls) {
@@ -54,6 +54,11 @@ public final class FloatVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Returns the value at a row, which must not be {@code NULL}. */

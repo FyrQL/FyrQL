@@ -19,7 +19,7 @@ import java.util.Arrays;
 public final class BigIntVector implements Vector {
 
     private final DataType type;
-    private final long[] values;
+    final long[] values;
     private final boolean[] nulls;
 
     BigIntVector(DataType type, long[] values, boolean[] nulls) {
@@ -59,6 +59,11 @@ public final class BigIntVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Returns the value at a row, which must not be {@code NULL}. */

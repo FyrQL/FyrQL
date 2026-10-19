@@ -22,8 +22,8 @@ public final class HugeIntVector implements Vector {
 
     private static final BigInteger LOW_MASK = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE);
 
-    private final long[] high;
-    private final long[] low;
+    final long[] high;
+    final long[] low;
     private final boolean[] nulls;
 
     HugeIntVector(long[] high, long[] low, boolean[] nulls) {
@@ -58,6 +58,11 @@ public final class HugeIntVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Returns the upper 64 bits of the value at a row, which must not be {@code NULL}. */

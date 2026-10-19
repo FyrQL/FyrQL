@@ -221,9 +221,12 @@ class VectorsTest {
                 Vector all = Vectors.concat(type, columns);
                 assertEquals(type, all.type());
                 assertEquals(expected.size(), all.size(), type + " concat");
+                boolean anyNull = false;
                 for (int r = 0; r < expected.size(); r++) {
                     assertSame(expected.get(r)[c], all, r, type + " concat row " + r);
+                    anyNull |= expected.get(r)[c] == null;
                 }
+                assertEquals(anyNull, all.hasNulls(), type + " concat has NULLs");
                 Vector v = batch.column(c);
                 int[] gathered = new int[random.nextInt(60)];
                 for (int i = 0; i < gathered.length; i++) {
@@ -244,6 +247,29 @@ class VectorsTest {
                 List.of(IntVector.of(1), BigIntVector.of(2L))));
         Vector none = Vectors.gather(Vectors.of(DataType.listOf(DataType.INTEGER)), new int[] {-1, -1});
         assertTrue(none.isNull(0) && none.isNull(1));
+    }
+
+    @Test
+    void concatTakesMasksOnlyFromVectorsWithNullsAndBytesAtAnyOffset() {
+        // A mask that marks nothing is no NULL.
+        IntVector unmarked = new IntVector(DataType.INTEGER, new int[] {1, 2}, new boolean[2]);
+        assertFalse(unmarked.hasNulls());
+        Vector plain = Vectors.concat(DataType.INTEGER, List.of(unmarked, IntVector.of(3)));
+        assertFalse(plain.hasNulls());
+        assertEquals(List.of(1, 2, 3), List.of(plain.get(0), plain.get(1), plain.get(2)));
+        Vector withNull = Vectors.concat(DataType.INTEGER, List.of(unmarked, Vectors.of(DataType.INTEGER, 4, null)));
+        assertTrue(withNull.hasNulls());
+        assertEquals(Arrays.asList(1, 2, 4, null), Arrays.asList(withNull.get(0), withNull.get(1), withNull.get(2),
+                withNull.get(3)));
+        // The bytes of a vector need not start at the beginning of its buffer.
+        byte[] buffer = "xxabcdyy".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        BytesVector inner = new BytesVector(DataType.VARCHAR, buffer, new int[] {2, 4, 6}, null);
+        BytesVector empty = new BytesVector(DataType.VARCHAR, buffer, new int[] {7}, null);
+        Vector strings = Vectors.concat(DataType.VARCHAR, List.of(inner, empty, BytesVector.ofStrings("e", ""),
+                inner));
+        assertEquals(List.of("ab", "cd", "e", "", "ab", "cd"), Arrays.asList(strings.get(0), strings.get(1),
+                strings.get(2), strings.get(3), strings.get(4), strings.get(5)));
+        assertFalse(strings.hasNulls());
     }
 
     private static void assertSame(Object expected, Vector v, int row, String what) {

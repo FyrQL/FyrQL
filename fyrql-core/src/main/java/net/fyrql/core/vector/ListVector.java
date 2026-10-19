@@ -52,6 +52,11 @@ public final class ListVector implements Vector {
         return nulls != null && nulls[row];
     }
 
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
+    }
+
     /** Returns the vector of all elements. */
     public Vector child() {
         return child;

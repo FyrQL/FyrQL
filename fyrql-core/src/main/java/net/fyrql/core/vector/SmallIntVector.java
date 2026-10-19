@@ -18,7 +18,7 @@ import java.util.Arrays;
 /** A {@code SMALLINT} vector over a {@code short[]}. */
 public final class SmallIntVector implements Vector {
 
-    private final short[] values;
+    final short[] values;
     private final boolean[] nulls;
 
     SmallIntVector(short[] values, boolean[] nulls) {
@@ -54,6 +54,11 @@ public final class SmallIntVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Returns the value at a row, which must not be {@code NULL}. */

@@ -205,7 +205,7 @@ final class Ledger {
                     + " its optimizer agrees with FyrQL, as when a LIMIT below a join keeps rows that it would not"
                     + " keep: the rows lie between the least and the greatest key of the build side, as if DuckDB"
                     + " had moved the filter on these keys that the join passes to its probe side below the LIMIT."
-                    + " Seen in the build on Linux, not on Windows.", "1.5.6", null,
+                    + " Seen rarely, in the build on Linux.", "1.5.6", null,
                     o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.unoptimized() == Outcome.Kind.SAME));
 
     /** The two types of a set operation that FyrQL does not unite. */

@@ -94,7 +94,8 @@ public final class Vectors {
 
     /**
      * Concatenates vectors of one type into one, without boxing; a single
-     * vector comes back as it is.
+     * vector comes back as it is. Flat values are copied array by array, the
+     * mask of {@code NULL}s only from the vectors that have one.
      */
     public static Vector concat(DataType type, List<Vector> parts) {
         if (parts.size() == 1) {
@@ -113,12 +114,12 @@ public final class Vectors {
         boolean[] nulls = null;
         int at = 0;
         for (Vector p : parts) {
-            for (int i = 0; i < p.size(); i++) {
-                if (p.isNull(i)) {
-                    if (nulls == null) {
-                        nulls = new boolean[n];
-                    }
-                    nulls[at + i] = true;
+            if (p.hasNulls()) {
+                if (nulls == null) {
+                    nulls = new boolean[n];
+                }
+                for (int i = 0; i < p.size(); i++) {
+                    nulls[at + i] = p.isNull(i);
                 }
             }
             at += p.size();
@@ -128,50 +129,45 @@ public final class Vectors {
             case BooleanVector x -> {
                 boolean[] values = new boolean[n];
                 for (Vector p : parts) {
-                    BooleanVector y = (BooleanVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getBoolean(i);
-                    }
+                    boolean[] y = ((BooleanVector) p).values;
+                    System.arraycopy(y, 0, values, k, y.length);
+                    k += y.length;
                 }
                 return new BooleanVector(values, nulls);
             }
             case TinyIntVector x -> {
                 byte[] values = new byte[n];
                 for (Vector p : parts) {
-                    TinyIntVector y = (TinyIntVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getByte(i);
-                    }
+                    byte[] y = ((TinyIntVector) p).values;
+                    System.arraycopy(y, 0, values, k, y.length);
+                    k += y.length;
                 }
                 return new TinyIntVector(values, nulls);
             }
             case SmallIntVector x -> {
                 short[] values = new short[n];
                 for (Vector p : parts) {
-                    SmallIntVector y = (SmallIntVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getShort(i);
-                    }
+                    short[] y = ((SmallIntVector) p).values;
+                    System.arraycopy(y, 0, values, k, y.length);
+                    k += y.length;
                 }
                 return new SmallIntVector(values, nulls);
             }
             case IntVector x -> {
                 int[] values = new int[n];
                 for (Vector p : parts) {
-                    IntVector y = (IntVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getInt(i);
-                    }
+                    int[] y = ((IntVector) p).values;
+                    System.arraycopy(y, 0, values, k, y.length);
+                    k += y.length;
                 }
                 return new IntVector(type, values, nulls);
             }
             case BigIntVector x -> {
                 long[] values = new long[n];
                 for (Vector p : parts) {
-                    BigIntVector y = (BigIntVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getLong(i);
-                    }
+                    long[] y = ((BigIntVector) p).values;
+                    System.arraycopy(y, 0, values, k, y.length);
+                    k += y.length;
                 }
                 return new BigIntVector(type, values, nulls);
             }
@@ -180,30 +176,27 @@ public final class Vectors {
                 long[] low = new long[n];
                 for (Vector p : parts) {
                     HugeIntVector y = (HugeIntVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        high[k] = y.getHigh(i);
-                        low[k++] = y.getLow(i);
-                    }
+                    System.arraycopy(y.high, 0, high, k, y.high.length);
+                    System.arraycopy(y.low, 0, low, k, y.low.length);
+                    k += y.high.length;
                 }
                 return new HugeIntVector(high, low, nulls);
             }
             case FloatVector x -> {
                 float[] values = new float[n];
                 for (Vector p : parts) {
-                    FloatVector y = (FloatVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getFloat(i);
-                    }
+                    float[] y = ((FloatVector) p).values;
+                    System.arraycopy(y, 0, values, k, y.length);
+                    k += y.length;
                 }
                 return new FloatVector(values, nulls);
             }
             case DoubleVector x -> {
                 double[] values = new double[n];
                 for (Vector p : parts) {
-                    DoubleVector y = (DoubleVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getDouble(i);
-                    }
+                    double[] y = ((DoubleVector) p).values;
+                    System.arraycopy(y, 0, values, k, y.length);
+                    k += y.length;
                 }
                 return new DoubleVector(values, nulls);
             }
@@ -211,8 +204,13 @@ public final class Vectors {
                 long[] values = new long[n];
                 for (Vector p : parts) {
                     DecimalVector y = (DecimalVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getUnscaledLong(i);
+                    if (y.small != null) {
+                        System.arraycopy(y.small, 0, values, k, y.small.length);
+                        k += y.small.length;
+                    } else {
+                        for (int i = 0; i < y.size(); i++) {
+                            values[k++] = y.getUnscaledLong(i);
+                        }
                     }
                 }
                 return new DecimalVector(x.type(), values, null, nulls);
@@ -221,8 +219,13 @@ public final class Vectors {
                 BigInteger[] values = new BigInteger[n];
                 for (Vector p : parts) {
                     DecimalVector y = (DecimalVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        values[k++] = y.getUnscaled(i);
+                    if (y.big != null) {
+                        System.arraycopy(y.big, 0, values, k, y.big.length);
+                        k += y.big.length;
+                    } else {
+                        for (int i = 0; i < y.size(); i++) {
+                            values[k++] = y.getUnscaled(i);
+                        }
                     }
                 }
                 return new DecimalVector(x.type(), null, values, nulls);
@@ -230,22 +233,22 @@ public final class Vectors {
             case BytesVector x -> {
                 int bytes = 0;
                 for (Vector p : parts) {
-                    BytesVector y = (BytesVector) p;
-                    bytes += y.size() == 0 ? 0 : y.end(y.size() - 1) - y.start(0);
+                    int[] o = ((BytesVector) p).offsets;
+                    bytes += o[o.length - 1] - o[0];
                 }
                 byte[] data = new byte[bytes];
                 int[] offsets = new int[n + 1];
                 int used = 0;
                 for (Vector p : parts) {
                     BytesVector y = (BytesVector) p;
-                    if (y.size() == 0) {
-                        continue;
-                    }
-                    int from = y.start(0);
-                    int length = y.end(y.size() - 1) - from;
+                    int[] o = y.offsets;
+                    int m = o.length - 1;
+                    int from = o[0];
+                    int length = o[m] - from;
                     System.arraycopy(y.data(), from, data, used, length);
-                    for (int i = 0; i < y.size(); i++) {
-                        offsets[k++] = used + y.start(i) - from;
+                    int shift = used - from;
+                    for (int i = 0; i < m; i++) {
+                        offsets[k++] = o[i] + shift;
                     }
                     used += length;
                 }
@@ -257,10 +260,9 @@ public final class Vectors {
                 long[] least = new long[n];
                 for (Vector p : parts) {
                     UuidVector y = (UuidVector) p;
-                    for (int i = 0; i < y.size(); i++) {
-                        most[k] = y.getMost(i);
-                        least[k++] = y.getLeast(i);
-                    }
+                    System.arraycopy(y.most, 0, most, k, y.most.length);
+                    System.arraycopy(y.least, 0, least, k, y.least.length);
+                    k += y.most.length;
                 }
                 return new UuidVector(most, least, nulls);
             }

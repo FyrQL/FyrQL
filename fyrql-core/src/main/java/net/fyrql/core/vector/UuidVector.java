@@ -19,8 +19,8 @@ import java.util.UUID;
 /** A {@code UUID} vector: the most and least significant 64 bits per row. */
 public final class UuidVector implements Vector {
 
-    private final long[] most;
-    private final long[] least;
+    final long[] most;
+    final long[] least;
     private final boolean[] nulls;
 
     UuidVector(long[] most, long[] least, boolean[] nulls) {
@@ -42,6 +42,11 @@ public final class UuidVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     public long getMost(int row) {

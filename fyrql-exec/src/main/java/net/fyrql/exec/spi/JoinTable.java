@@ -98,7 +98,7 @@ public final class JoinTable {
         if (hashes.length != n) {
             throw new IllegalArgumentException(hashes.length + " hashes for " + n + " rows");
         }
-        int capacity = Integer.highestOneBit(Math.max(16, n * 2 - 1)) << 1;
+        int capacity = capacity(n);
         heads = new int[capacity];
         Arrays.fill(heads, -1);
         chain = new int[n];
@@ -114,6 +114,24 @@ public final class JoinTable {
             heads[slot] = i;
         }
         hasNullKey = nullKey;
+    }
+
+    /** Returns the number of slots for a number of rows: a power of two, at least twice as many. */
+    private static int capacity(int rows) {
+        return Integer.highestOneBit(Math.max(16, rows * 2 - 1)) << 1;
+    }
+
+    /**
+     * Estimates the bytes a table over a number of rows holds besides the
+     * rows: the marks of the matched rows and, with keys, the hashes, the
+     * slots and the chain.
+     */
+    public static long indexBytes(int rows, boolean keyed) {
+        long bytes = rows + 16L;
+        if (keyed) {
+            bytes += 8L * rows + 4L * capacity(rows) + 48;
+        }
+        return bytes;
     }
 
     private static Batch concat(Schema schema, List<Batch> batches) {

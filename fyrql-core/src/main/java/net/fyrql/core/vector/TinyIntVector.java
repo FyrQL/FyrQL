@@ -18,7 +18,7 @@ import java.util.Arrays;
 /** A {@code TINYINT} vector over a {@code byte[]}. */
 public final class TinyIntVector implements Vector {
 
-    private final byte[] values;
+    final byte[] values;
     private final boolean[] nulls;
 
     TinyIntVector(byte[] values, boolean[] nulls) {
@@ -54,6 +54,11 @@ public final class TinyIntVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Returns the value at a row, which must not be {@code NULL}. */

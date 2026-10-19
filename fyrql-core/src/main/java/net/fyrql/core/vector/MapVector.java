@@ -54,6 +54,11 @@ public final class MapVector implements Vector {
         return nulls != null && nulls[row];
     }
 
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
+    }
+
     /** Returns the vector of all keys. */
     public Vector keys() {
         return keys;

@@ -52,6 +52,11 @@ public final class StructVector implements Vector {
         return nulls != null && nulls[row];
     }
 
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
+    }
+
     /** Returns the vector of a field. */
     public Vector child(int field) {
         return children.get(field);

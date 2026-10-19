@@ -174,7 +174,8 @@ final class HashJoinOperator extends AbstractOperator {
                 rowsSeen += b.rowCount();
             }
             compileKeys();
-            table = new JoinTable(join.right().schema(), batches, rightKeys, keys);
+            table = JoinBuild.table(batches, rightKeys.length > 0, label(), budget, reserved,
+                    () -> new JoinTable(join.right().schema(), batches, rightKeys, keys));
         }
         build = table.batch();
     }

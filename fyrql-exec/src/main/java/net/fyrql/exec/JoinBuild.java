@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Reads the build side of a join into a {@link JoinTable}, each batch
@@ -32,7 +33,8 @@ import java.util.function.Function;
  * the concatenated batches would give, since every key function hashes
  * alike; each reader switches to compiled key functions once
  * {@link Codegen#due} says so for the rows it has hashed. The memory of
- * each batch is reserved under the label of the join.
+ * each batch, and then of the table, is reserved under the label of the
+ * join.
  */
 final class JoinBuild {
 
@@ -73,7 +75,33 @@ final class JoinBuild {
             batches.add(p.batch());
             hashes.add(p.hashes());
         }
-        return new JoinTable(join.right().schema(), batches, hashes, keys);
+        return table(batches, keys.length > 0, label, budget, reserved,
+                () -> new JoinTable(join.right().schema(), batches, hashes, keys));
+    }
+
+    /**
+     * Builds a table over batches whose memory is reserved already. Before,
+     * it reserves what the table holds besides them, and their copy into one
+     * batch if there are several; after, it gives back the batches that the
+     * copy replaces.
+     *
+     * @param keyed tells whether the join has keys
+     */
+    static JoinTable table(List<Batch> batches, boolean keyed, String label, MemoryBudget budget,
+            AtomicLong reserved, Supplier<JoinTable> build) {
+        int rows = 0;
+        long copy = 0;
+        for (Batch b : batches) {
+            rows += b.rowCount();
+            copy += batches.size() > 1 ? Batches.estimateBytes(b) : 0;
+        }
+        long bytes = copy + JoinTable.indexBytes(rows, keyed);
+        budget.reserve(bytes, label);
+        reserved.addAndGet(bytes);
+        JoinTable table = build.get();
+        budget.release(copy);
+        reserved.addAndGet(-copy);
+        return table;
     }
 
     /** Reserves the memory of the batches of one reader and hashes their keys. */

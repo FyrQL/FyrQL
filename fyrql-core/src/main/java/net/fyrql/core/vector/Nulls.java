@@ -24,6 +24,19 @@ final class Nulls {
     private Nulls() {
     }
 
+    /** Tells whether a mask marks any of the first rows; without a mask, at once. */
+    static boolean any(boolean[] nulls, int size) {
+        if (nulls == null) {
+            return false;
+        }
+        for (int i = 0; i < size; i++) {
+            if (nulls[i]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Returns the mask for the selected rows, or {@code null} if none of them is {@code NULL}. */
     static boolean[] select(boolean[] nulls, int[] rows) {
         if (nulls == null) {

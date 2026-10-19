@@ -18,7 +18,7 @@ import java.util.Arrays;
 /** A {@code BOOLEAN} vector over a {@code boolean[]}. */
 public final class BooleanVector implements Vector {
 
-    private final boolean[] values;
+    final boolean[] values;
     private final boolean[] nulls;
 
     BooleanVector(boolean[] values, boolean[] nulls) {
@@ -54,6 +54,11 @@ public final class BooleanVector implements Vector {
     @Override
     public boolean isNull(int row) {
         return nulls != null && nulls[row];
+    }
+
+    @Override
+    public boolean hasNulls() {
+        return Nulls.any(nulls, size());
     }
 
     /** Returns the value at a row, which must not be {@code NULL}. */
