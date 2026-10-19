@@ -24,7 +24,9 @@ import net.fyrql.exec.spi.KeyFunctions;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -51,21 +53,23 @@ import java.util.concurrent.atomic.AtomicLong;
  * every aggregate is {@link #mergeable}, each worker groups the rows it
  * reads by itself, and the groups of all workers are merged at the end, in
  * {@value #PARTITIONS} partitions by the hashes of their keys, which run in
- * parallel. A worker that holds more than {@value #MAX_LOCAL_GROUPS} groups
- * keeps its further rows as they are, for the merge to group, once more
- * than half of the rows of a window of as many rows have made new groups:
- * its groups then hold fewer than two rows each, where grouping does not
- * pay. Over the rows of the window, not over all rows so far, so that keys
- * in a random order, of which the first rows find few groups to join, are
- * not mistaken for such keys. Each row knows its place among the rows of one
- * thread, by its morsel and its place in it, so that the groups come out in
- * the order of their first rows and with the keys of these rows, and the
- * group that fails is the first one, as on one thread; unless the order of
- * the output does not matter, then the groups come partition by partition.
- * What differs from one thread: sums of {@code FLOAT}s and {@code DOUBLE}s
- * add up in another order, and {@code min} and {@code max} may keep another
- * one of equal values, e.g. {@code 0.0} instead of {@code -0.0}. Otherwise
- * the operator reads the segment as any other input.
+ * parallel. Once a worker holds more than {@value #MAX_LOCAL_GROUPS} groups,
+ * and again whenever their number has doubled since, it checks the rows per
+ * new group since the last check: below {@value #MIN_ROWS_PER_GROUP}
+ * grouping does not pay, as the table of each worker outgrows the caches
+ * while it holds most keys of all, and the worker keeps its further rows as
+ * they are, for the merge to group. It scatters them at once, while they
+ * are still in the caches, into the partitions by the hashes of their keys,
+ * with the key columns and the columns of the aggregates only, so that the
+ * merge reads them as they are. Each row knows its place among the rows of
+ * one thread, by its morsel and its place in it, so that the groups come
+ * out in the order of their first rows and with the keys of these rows, the
+ * group that fails is the first one, and {@code min} and {@code max} keep
+ * the first of equal values, e.g. {@code -0.0} before {@code 0.0}, as on
+ * one thread; unless the order of the output does not matter, then the
+ * groups come partition by partition. What differs from one thread: sums of
+ * {@code FLOAT}s and {@code DOUBLE}s add up in another order. Otherwise the
+ * operator reads the segment as any other input.
  */
 final class HashAggregateOperator extends AbstractOperator {
 
@@ -78,17 +82,28 @@ final class HashAggregateOperator extends AbstractOperator {
     static final int PARTITIONED_MERGE = 16_384;
 
     /**
-     * The groups of a worker from which on it stops grouping once more than
-     * half of the rows of a window of as many rows make new groups.
+     * The groups of a worker from which on it checks whether grouping pays,
+     * see {@link #MIN_ROWS_PER_GROUP}.
      */
-    static final int MAX_LOCAL_GROUPS = 65_536;
+    static final int MAX_LOCAL_GROUPS = 16_384;
 
     /** {@link #MAX_LOCAL_GROUPS}, which tests lower. */
     static volatile int maxLocalGroups = MAX_LOCAL_GROUPS;
 
-    /** The highest morsel and the highest row in a morsel that a place tells apart. */
+    /**
+     * The rows per new group since the last check below which a worker
+     * stops grouping; at four rows per group, as the orders of TPC-H have
+     * line items, grouping still pays.
+     */
+    static final int MIN_ROWS_PER_GROUP = 2;
+
+    /** {@link #MIN_ROWS_PER_GROUP}, which tests raise. */
+    static volatile int minRowsPerGroup = MIN_ROWS_PER_GROUP;
+
+    /** The bits of a place for the row in its morsel, the highest morsel and the highest row it tells apart. */
+    private static final int ROW_BITS = 40;
     private static final long MAX_MORSEL = (1L << 23) - 1;
-    private static final long MAX_ROW = (1L << 40) - 1;
+    private static final long MAX_ROW = (1L << ROW_BITS) - 1;
 
     private final PlanNode.Aggregate aggregate;
     private final Operator input;
@@ -101,6 +116,11 @@ final class HashAggregateOperator extends AbstractOperator {
     private final boolean ordered;
     private final List<Integer> keyColumnList;
     private final int[] keyColumns;
+    /** The columns of the rows a worker scatters, the key columns among them, and the aggregates over them. */
+    private final List<Integer> scatteredColumns;
+    private final Schema scatteredSchema;
+    private final List<Integer> scatteredKeys;
+    private final List<AggregateCall> scatteredCalls;
     private List<Batch> output;
     private final AtomicLong reserved = new AtomicLong();
 
@@ -138,6 +158,20 @@ final class HashAggregateOperator extends AbstractOperator {
         this.ordered = ordered;
         this.keyColumnList = List.copyOf(aggregate.groupColumns());
         this.keyColumns = keyColumnList.stream().mapToInt(Integer::intValue).toArray();
+        TreeSet<Integer> used = new TreeSet<>(keyColumnList);
+        for (AggregateCall call : aggregate.aggregates()) {
+            if (call.column() >= 0) {
+                used.add(call.column());
+            }
+        }
+        this.scatteredColumns = List.copyOf(used);
+        this.scatteredSchema = inputSchema.select(scatteredColumns);
+        this.scatteredKeys = keyColumnList.stream().map(scatteredColumns::indexOf).toList();
+        // Only the aggregates of a merge, without DISTINCT and ORDER BY, read scattered rows.
+        this.scatteredCalls = !mergeable(aggregate) ? List.of() : aggregate.aggregates().stream()
+                .map(c -> c.column() < 0 ? c
+                        : new AggregateCall(c.function(), scatteredColumns.indexOf(c.column()), false, c.name()))
+                .toList();
     }
 
     /**
@@ -182,7 +216,7 @@ final class HashAggregateOperator extends AbstractOperator {
     private List<Batch> aggregateParallel(ParallelSegment segment) {
         List<Partial> parts = segment.drain(workers -> new Partial(workers == 1));
         Partial first = parts.get(0);
-        if (parts.size() == 1 && first.raw == null) {
+        if (parts.size() == 1 && first.scattered == null) {
             return output(first);
         }
         if (keyColumns.length == 0) {
@@ -230,10 +264,13 @@ final class HashAggregateOperator extends AbstractOperator {
      */
     private List<Batch> merge(List<Partial> parts) {
         long total = 0;
+        boolean scattered = false;
         for (Partial p : parts) {
             total += p.groups + p.rawRows;
+            scattered |= p.scattered != null;
         }
-        int partitions = total < PARTITIONED_MERGE ? 1 : PARTITIONS;
+        // Scattered rows are in partitions already.
+        int partitions = total < PARTITIONED_MERGE && !scattered ? 1 : PARTITIONS;
         Piece[][] pieces = new Piece[parts.size()][];
         Workers.run(parts.size(), threads, w -> pieces[w] = parts.get(w).pieces(partitions));
         Merged[] merged = new Merged[partitions];
@@ -270,78 +307,81 @@ final class HashAggregateOperator extends AbstractOperator {
      * and computes the results of the groups in their order.
      */
     private Merged mergePartition(List<Partial> parts, Piece[][] pieces, int partition) {
-        Schema keySchema = inputSchema.select(keyColumnList);
-        List<Batch> keyParts = new ArrayList<>();
-        List<long[]> runs = new ArrayList<>();
+        List<Segment> segments = new ArrayList<>();
         int m = 0;
-        for (Piece[] ofPart : pieces) {
-            Piece piece = ofPart[partition];
-            keyParts.add(piece.keys());
-            keyParts.add(piece.raw().project(keyColumnList));
-            runs.add(piece.places());
-            m += piece.places().length;
+        for (int w = 0; w < pieces.length; w++) {
+            Piece piece = pieces[w][partition];
+            int entry = cut(segments, w, piece.keys(), piece.places(), 0);
+            for (Batch raw : piece.raw()) {
+                entry = cut(segments, w, raw.project(scatteredKeys), piece.places(), entry);
+            }
+            m += entry;
         }
         if (m == 0) {
             return new Merged(null, null, null, 0);
         }
-        int[] hashes = new int[m];
-        long[] places = new long[m];
-        int at = 0;
-        for (Piece[] ofPart : pieces) {
-            Piece piece = ofPart[partition];
-            System.arraycopy(piece.hashes(), 0, hashes, at, piece.hashes().length);
-            System.arraycopy(piece.places(), 0, places, at, piece.places().length);
-            at += piece.places().length;
-        }
-        int[] order = mergeOrder(runs);
-        Batch keys = Batches.concat(keySchema, keyParts).select(order);
-        int[] sortedHashes = new int[m];
-        for (int i = 0; i < m; i++) {
-            sortedHashes[i] = hashes[order[i]];
-        }
-        int[] storedColumns = new int[keyColumns.length];
         List<Integer> stored = new ArrayList<>();
-        for (int k = 0; k < storedColumns.length; k++) {
-            storedColumns[k] = k;
+        for (int k = 0; k < keyColumns.length; k++) {
             stored.add(k);
         }
         GroupTable table = new GroupTable(stored);
-        int[] groupOf = table.groups(keys, sortedHashes, InterpretedKeys.INSTANCE,
-                b -> reserve(Batches.estimateBytes(b)));
-        int groups = table.size();
-        reserve(BYTES_PER_GROUP * groups);
-        long[] firstPlaces = new long[groups];
-        int[] groupAt = new int[m];
-        for (int i = 0, next = 0; i < m; i++) {
-            int g = groupOf[i];
-            if (g == next) {
-                firstPlaces[next++] = places[order[i]];
-            }
-            groupAt[order[i]] = g;
+        // The key functions of the workers, compiled once they were due, hash as the interpreted ones.
+        KeyFunctions keys = parts.get(0).keys;
+        long[] storedBytes = new long[1];
+        int[][] groupAt = new int[pieces.length][];
+        for (int w = 0; w < pieces.length; w++) {
+            groupAt[w] = new int[pieces[w][partition].places().length];
         }
-        AggregateState[] states = newStates();
-        at = 0;
+        long[] firstPlaces = new long[16];
+        int groups = 0;
+        int done = 0;
+        List<long[]> runs = new ArrayList<>();
+        for (Piece[] ofPart : pieces) {
+            runs.add(ofPart[partition].places());
+        }
+        for (Segment segment : inOrder(segments, runs)) {
+            if ((done++ & (CHECK_INTERVAL - 1)) == 0) {
+                checkCancelled();
+            }
+            Piece piece = pieces[segment.part()][partition];
+            int[] groupOf = table.groups(segment.keys(), segment.from(), segment.to(), piece.hashes(),
+                    segment.entry(), keys, b -> storedBytes[0] += Batches.estimateBytes(b));
+            int[] at = groupAt[segment.part()];
+            for (int i = 0; i < groupOf.length; i++) {
+                int g = groupOf[i];
+                if (g == groups) {
+                    firstPlaces = AggregateState.grow(firstPlaces, groups + 1);
+                    firstPlaces[groups++] = piece.places()[segment.entry() + i];
+                }
+                at[segment.entry() + i] = g;
+            }
+        }
+        reserve(storedBytes[0] + BYTES_PER_GROUP * groups);
+        firstPlaces = Arrays.copyOf(firstPlaces, groups);
+        // Given the places of the rows, min and max keep the first of equal values in whatever order the parts come.
+        AggregateState[] states = newStates(scatteredCalls, scatteredSchema);
         for (int w = 0; w < pieces.length; w++) {
             Piece piece = pieces[w][partition];
             AggregateState[] own = parts.get(w).states;
             int[] local = piece.groups();
+            int[] at = groupAt[w];
             for (int j = 0; j < local.length; j++) {
                 if ((j & (CHECK_INTERVAL - 1)) == 0) {
                     checkCancelled();
                 }
                 for (int c = 0; c < states.length; c++) {
-                    states[c].combine(groupAt[at + j], own[c], local[j]);
+                    states[c].combine(at[j], own[c], local[j]);
                 }
             }
-            at += local.length;
-            int rows = piece.raw().rowCount();
-            if (rows > 0) {
+            int from = local.length;
+            for (Batch raw : piece.raw()) {
                 checkCancelled();
-                int[] rawGroups = Arrays.copyOfRange(groupAt, at, at + rows);
+                int rows = raw.rowCount();
+                int[] rawGroups = Arrays.copyOfRange(at, from, from + rows);
                 for (AggregateState state : states) {
-                    state.add(piece.raw(), rawGroups, rows, groups);
+                    state.add(raw, rawGroups, rows, groups, piece.places(), from);
                 }
-                at += rows;
+                from += rows;
             }
         }
         for (AggregateState state : states) {
@@ -372,6 +412,86 @@ final class HashAggregateOperator extends AbstractOperator {
     }
 
     /**
+     * Rows of a run, all of one morsel: the rows {@code from} to {@code to} of
+     * the keys of a source of the run, the first of them its entry
+     * {@code entry}, and the places of the first and the last of them.
+     */
+    record Segment(int part, Batch keys, int from, int to, int entry, long first, long last) {
+    }
+
+    /**
+     * Cuts the keys of a source of the run of a part, whose first row is the
+     * entry {@code entry} of the run, into segments of one morsel each, and
+     * returns the entry after them.
+     */
+    static int cut(List<Segment> segments, int part, Batch keys, long[] places, int entry) {
+        int n = keys.rowCount();
+        for (int from = 0, to; from < n; from = to) {
+            long morsel = places[entry + from] >>> ROW_BITS;
+            to = from + 1;
+            while (to < n && places[entry + to] >>> ROW_BITS == morsel) {
+                to++;
+            }
+            segments.add(new Segment(part, keys, from, to, entry + from, places[entry + from],
+                    places[entry + to - 1]));
+        }
+        return entry + n;
+    }
+
+    /**
+     * Returns the segments of runs of places in the order of the places of
+     * their rows. A morsel is read by one worker, so that the segments of
+     * different runs do not interleave and sorting them by their first
+     * places suffices; should they interleave nonetheless, each row becomes a
+     * segment of its own, in the order of {@link #mergeOrder}.
+     *
+     * @param segments the segments of all runs, those of each run in its order, as {@link #cut} cuts them
+     */
+    static List<Segment> inOrder(List<Segment> segments, List<long[]> runs) {
+        List<Segment> sorted = new ArrayList<>(segments);
+        sorted.sort(Comparator.comparingLong(Segment::first).thenComparingInt(Segment::part));
+        boolean apart = true;
+        for (int i = 1; i < sorted.size() && apart; i++) {
+            Segment a = sorted.get(i - 1);
+            Segment b = sorted.get(i);
+            apart = a.last() < b.first() || a.last() == b.first() && a.part() < b.part();
+        }
+        if (apart) {
+            return sorted;
+        }
+        int[] start = new int[runs.size() + 1];
+        for (int w = 0; w < runs.size(); w++) {
+            start[w + 1] = start[w] + runs.get(w).length;
+        }
+        // The segments of a run, in the order of its entries, as they were cut.
+        List<List<Segment>> ofRun = new ArrayList<>();
+        for (int w = 0; w < runs.size(); w++) {
+            ofRun.add(new ArrayList<>());
+        }
+        for (Segment segment : segments) {
+            ofRun.get(segment.part()).add(segment);
+        }
+        int[] next = new int[runs.size()];
+        List<Segment> rows = new ArrayList<>(start[runs.size()]);
+        for (int index : mergeOrder(runs)) {
+            int w = 0;
+            while (start[w + 1] <= index) {
+                w++;
+            }
+            int entry = index - start[w];
+            while (ofRun.get(w).get(next[w]).entry() + ofRun.get(w).get(next[w]).to()
+                    - ofRun.get(w).get(next[w]).from() <= entry) {
+                next[w]++;
+            }
+            Segment of = ofRun.get(w).get(next[w]);
+            int row = of.from() + entry - of.entry();
+            long place = runs.get(w)[entry];
+            rows.add(new Segment(w, of.keys(), row, row + 1, entry, place, place));
+        }
+        return rows;
+    }
+
+    /**
      * The result of the merge of a partition: the results of its groups and
      * the places of their first rows, both {@code null} without groups, or
      * the failure of the first group whose result fails, and its place.
@@ -382,20 +502,24 @@ final class HashAggregateOperator extends AbstractOperator {
     /**
      * What a part holds of a partition: the keys of its groups, their
      * numbers in the part and the hashes and places of their keys, then its
-     * rows as they are with the hashes and places of their keys; the places
-     * of the groups are those of their first rows, all in the order of the
-     * places.
+     * rows as they are, of the columns of {@link #scatteredSchema}, with the
+     * hashes and places of their keys; the places of the groups are those of
+     * their first rows, all in the order of the places.
      */
-    private record Piece(Batch keys, int[] groups, Batch raw, int[] hashes, long[] places) {
+    private record Piece(Batch keys, int[] groups, List<Batch> raw, int[] hashes, long[] places) {
     }
 
     /** Returns the states of the aggregates for new groups. */
     private AggregateState[] newStates() {
-        List<AggregateCall> calls = aggregate.aggregates();
+        return newStates(aggregate.aggregates(), inputSchema);
+    }
+
+    /** Returns the states of aggregates over the columns of a schema for new groups. */
+    private AggregateState[] newStates(List<AggregateCall> calls, Schema schema) {
         AggregateState[] states = new AggregateState[calls.size()];
         for (int i = 0; i < states.length; i++) {
-            AggregateState state = unboxed ? AggregateState.of(calls.get(i), inputSchema) : null;
-            states[i] = state != null ? state : new Accumulators(calls.get(i));
+            AggregateState state = unboxed ? AggregateState.of(calls.get(i), schema) : null;
+            states[i] = state != null ? state : new Accumulators(calls.get(i), schema);
         }
         return states;
     }
@@ -408,7 +532,7 @@ final class HashAggregateOperator extends AbstractOperator {
 
     /** Returns the place of a row: its morsel and its place in the morsel, which order the rows as one thread. */
     private static long place(int morsel, long row) {
-        return Math.min(morsel, MAX_MORSEL) << 40 | Math.min(row, MAX_ROW);
+        return Math.min(morsel, MAX_MORSEL) << ROW_BITS | Math.min(row, MAX_ROW);
     }
 
     /**
@@ -416,20 +540,21 @@ final class HashAggregateOperator extends AbstractOperator {
      * indexes of the places in the runs one after the other, in the order of
      * the places; of equal places, the one of the earlier run comes first.
      */
-    static int[] mergeOrder(List<long[]> runs) {
-        int r = runs.size();
+    static int[] mergeOrder(List<long[]> places) {
+        long[][] runs = places.toArray(new long[0][]);
+        int r = runs.length;
         int[] start = new int[r];
         int[] at = new int[r];
         int n = 0;
         for (int i = 0; i < r; i++) {
             start[i] = n;
-            n += runs.get(i).length;
+            n += runs[i].length;
         }
         // A binary heap of the runs that have places left, by their next place.
         int[] heap = new int[r];
         int size = 0;
         for (int i = 0; i < r; i++) {
-            if (runs.get(i).length > 0) {
+            if (runs[i].length > 0) {
                 heap[size++] = i;
                 siftUp(heap, size - 1, runs, at);
             }
@@ -439,7 +564,7 @@ final class HashAggregateOperator extends AbstractOperator {
             int i = heap[0];
             order[k] = start[i] + at[i];
             at[i]++;
-            if (at[i] == runs.get(i).length) {
+            if (at[i] == runs[i].length) {
                 heap[0] = heap[--size];
             }
             siftDown(heap, size, runs, at);
@@ -447,13 +572,13 @@ final class HashAggregateOperator extends AbstractOperator {
         return order;
     }
 
-    private static boolean before(int x, int y, List<long[]> runs, int[] at) {
-        long a = runs.get(x)[at[x]];
-        long b = runs.get(y)[at[y]];
+    private static boolean before(int x, int y, long[][] runs, int[] at) {
+        long a = runs[x][at[x]];
+        long b = runs[y][at[y]];
         return a < b || a == b && x < y;
     }
 
-    private static void siftUp(int[] heap, int i, List<long[]> runs, int[] at) {
+    private static void siftUp(int[] heap, int i, long[][] runs, int[] at) {
         while (i > 0) {
             int parent = (i - 1) / 2;
             if (!before(heap[i], heap[parent], runs, at)) {
@@ -466,7 +591,7 @@ final class HashAggregateOperator extends AbstractOperator {
         }
     }
 
-    private static void siftDown(int[] heap, int size, List<long[]> runs, int[] at) {
+    private static void siftDown(int[] heap, int size, long[][] runs, int[] at) {
         int i = 0;
         while (true) {
             int least = i;
@@ -492,33 +617,52 @@ final class HashAggregateOperator extends AbstractOperator {
 
     /**
      * The groups of the rows of one worker, or of all rows, with the places
-     * of their first rows; or, once grouping does not pay, its further rows
-     * as they are.
+     * of their first rows; once grouping does not pay, its further rows as
+     * they are, scattered into the partitions.
      */
     private final class Partial implements ParallelSegment.Sink {
         /** Whether the part takes all rows. */
         private final boolean alone;
         private final GroupTable table;
         private final AggregateState[] states;
+        /** Whether the states are given the places of the rows, which the part that takes all rows does not need. */
+        private final boolean placed;
         private int groups;
         private long[] places = new long[16];
         private KeyFunctions keys = InterpretedKeys.INSTANCE;
         private boolean keysAsked;
         private long rowsSeen;
         private int[] noKeys = new int[0];
+        private long[] rowPlaces = new long[0];
         private int morsel = -1;
         private long row;
-        /** The rows kept as they are, with the hashes of their keys and the place of their first row. */
-        private List<Raw> raw;
+        /** The groups beyond which grouping is checked next, and the rows and groups at the last check. */
+        private int nextCheck = maxLocalGroups;
+        private long checkedRows;
+        private int checkedGroups;
+        /**
+         * The rows kept as they are, per partition: of the columns of
+         * {@link #scatteredSchema}, with the hashes and places of their keys,
+         * in the order of the places; {@code null} while the part groups.
+         */
+        private List<List<Batch>> scattered;
+        private int[][] scatteredHashes;
+        private long[][] scatteredPlaces;
+        private int[] scatteredRows;
         private long rawRows;
-        /** The rows and groups at the start of the window of rows in which new groups are counted; -1 before. */
-        private long windowRows = -1;
-        private int windowGroups;
+        private int[] hashes = new int[0];
+        private int[] partitionOf = new int[0];
+        private int[] byPartition = new int[0];
 
         Partial(boolean alone) {
             this.alone = alone;
             this.table = keyColumns.length == 0 ? null : new GroupTable(keyColumnList);
             this.states = newStates();
+            boolean keepsPlaces = false;
+            for (AggregateState state : states) {
+                keepsPlaces |= state.keepsPlaces();
+            }
+            this.placed = !alone && keepsPlaces;
             // Without keys there is always the one group, even without rows.
             this.groups = table == null ? 1 : 0;
         }
@@ -532,8 +676,8 @@ final class HashAggregateOperator extends AbstractOperator {
             long first = place(morsel, row);
             int n = b.rowCount();
             row += n;
-            if (raw != null) {
-                keep(b, first);
+            if (scattered != null) {
+                scatter(b, first);
                 return;
             }
             int[] groupOf;
@@ -558,20 +702,34 @@ final class HashAggregateOperator extends AbstractOperator {
                     groups = table.size();
                 }
             }
-            for (AggregateState state : states) {
-                state.add(b, groupOf, n, groups);
-            }
-            if (!alone && table != null && groups > maxLocalGroups) {
-                if (windowRows < 0) {
-                    windowRows = rowsSeen;
-                    windowGroups = groups;
-                } else if (rowsSeen - windowRows >= maxLocalGroups) {
-                    if ((groups - windowGroups) * 2L > rowsSeen - windowRows) {
-                        raw = new ArrayList<>();
-                    }
-                    windowRows = rowsSeen;
-                    windowGroups = groups;
+            if (placed) {
+                if (rowPlaces.length < n) {
+                    rowPlaces = new long[n];
                 }
+                for (int r = 0; r < n; r++) {
+                    rowPlaces[r] = first + r;
+                }
+                for (AggregateState state : states) {
+                    state.add(b, groupOf, n, groups, rowPlaces, 0);
+                }
+            } else {
+                for (AggregateState state : states) {
+                    state.add(b, groupOf, n, groups);
+                }
+            }
+            if (!alone && table != null && groups > nextCheck) {
+                if (rowsSeen - checkedRows < (long) minRowsPerGroup * (groups - checkedGroups)) {
+                    scattered = new ArrayList<>();
+                    for (int p = 0; p < PARTITIONS; p++) {
+                        scattered.add(new ArrayList<>());
+                    }
+                    scatteredHashes = new int[PARTITIONS][16];
+                    scatteredPlaces = new long[PARTITIONS][16];
+                    scatteredRows = new int[PARTITIONS];
+                }
+                checkedRows = rowsSeen;
+                checkedGroups = groups;
+                nextCheck = (int) Math.min(Integer.MAX_VALUE, 2L * groups);
             }
         }
 
@@ -585,25 +743,70 @@ final class HashAggregateOperator extends AbstractOperator {
             }
         }
 
-        /** Keeps the rows of a batch as they are, with the hashes of their keys. */
-        private void keep(Batch b, long first) {
+        /**
+         * Scatters the rows of a batch as they are into the partitions by the
+         * hashes of their keys, with the hashes and the places of the rows.
+         */
+        private void scatter(Batch b, long first) {
             int n = b.rowCount();
             askKeys();
             rowsSeen += n;
-            int[] hashes = new int[n];
+            if (hashes.length < n) {
+                hashes = new int[n];
+                partitionOf = new int[n];
+                byPartition = new int[n];
+            }
             keys.hash(b, keyColumns, hashes);
-            reserve(Batches.estimateBytes(b) + 4L * n);
-            raw.add(new Raw(b, hashes, first));
+            // The rows of each partition, in their order, one partition after the other.
+            int[] start = new int[PARTITIONS + 1];
+            for (int r = 0; r < n; r++) {
+                int p = partition(hashes[r], PARTITIONS);
+                partitionOf[r] = p;
+                start[p + 1]++;
+            }
+            for (int p = 0; p < PARTITIONS; p++) {
+                start[p + 1] += start[p];
+            }
+            int[] next = Arrays.copyOf(start, PARTITIONS);
+            for (int r = 0; r < n; r++) {
+                byPartition[next[partitionOf[r]]++] = r;
+            }
+            Batch columns = b.project(scatteredColumns);
+            long bytes = 0;
+            for (int p = 0; p < PARTITIONS; p++) {
+                int count = start[p + 1] - start[p];
+                if (count == 0) {
+                    continue;
+                }
+                int[] own = Arrays.copyOfRange(byPartition, start[p], start[p + 1]);
+                Batch rows = count == n ? columns : columns.select(own);
+                bytes += Batches.estimateBytes(rows) + 12L * count;
+                scattered.get(p).add(rows);
+                int at = scatteredRows[p];
+                if (scatteredHashes[p].length < at + count) {
+                    int size = Math.max(at + count, scatteredHashes[p].length * 2);
+                    scatteredHashes[p] = Arrays.copyOf(scatteredHashes[p], size);
+                    scatteredPlaces[p] = Arrays.copyOf(scatteredPlaces[p], size);
+                }
+                int[] h = scatteredHashes[p];
+                long[] placesOf = scatteredPlaces[p];
+                for (int i = 0; i < count; i++) {
+                    h[at + i] = hashes[own[i]];
+                    placesOf[at + i] = first + own[i];
+                }
+                scatteredRows[p] = at + count;
+            }
+            reserve(bytes);
             rawRows += n;
         }
 
         /** Divides the groups and the rows of the part into partitions by the hashes of their keys. */
         Piece[] pieces(int partitions) {
             int[] counts = new int[partitions];
-            int[] partitionOf = new int[groups];
+            int[] partitionOfGroup = new int[groups];
             for (int g = 0; g < groups; g++) {
-                partitionOf[g] = partition(table.hash(g), partitions);
-                counts[partitionOf[g]]++;
+                partitionOfGroup[g] = partition(table.hash(g), partitions);
+                counts[partitionOfGroup[g]]++;
             }
             int[][] ofPartition = new int[partitions][];
             for (int p = 0; p < partitions; p++) {
@@ -611,98 +814,55 @@ final class HashAggregateOperator extends AbstractOperator {
                 counts[p] = 0;
             }
             for (int g = 0; g < groups; g++) {
-                int p = partitionOf[g];
+                int p = partitionOfGroup[g];
                 ofPartition[p][counts[p]++] = g;
             }
             Batch all = groups == 0 ? null : table.keys();
+            if (all != null) {
+                reserve(Batches.estimateBytes(all));
+            }
             Schema keySchema = inputSchema.select(keyColumnList);
-            // The rows kept as they are, partition by partition.
-            List<List<Batch>> rawBatches = new ArrayList<>();
-            List<List<int[]>> rawHashes = new ArrayList<>();
-            List<List<long[]>> rawPlaces = new ArrayList<>();
-            for (int p = 0; p < partitions; p++) {
-                rawBatches.add(new ArrayList<>());
-                rawHashes.add(new ArrayList<>());
-                rawPlaces.add(new ArrayList<>());
-            }
-            if (raw != null) {
-                for (Raw r : raw) {
-                    int n = r.batch().rowCount();
-                    int[] partOfRow = new int[n];
-                    int[] rowCounts = new int[partitions];
-                    for (int i = 0; i < n; i++) {
-                        partOfRow[i] = partition(r.hashes()[i], partitions);
-                        rowCounts[partOfRow[i]]++;
-                    }
-                    int[][] rows = new int[partitions][];
-                    for (int p = 0; p < partitions; p++) {
-                        rows[p] = new int[rowCounts[p]];
-                        rowCounts[p] = 0;
-                    }
-                    for (int i = 0; i < n; i++) {
-                        int p = partOfRow[i];
-                        rows[p][rowCounts[p]++] = i;
-                    }
-                    for (int p = 0; p < partitions; p++) {
-                        int[] own = rows[p];
-                        if (own.length == 0) {
-                            continue;
-                        }
-                        int[] h = new int[own.length];
-                        long[] at = new long[own.length];
-                        for (int i = 0; i < own.length; i++) {
-                            h[i] = r.hashes()[own[i]];
-                            at[i] = r.first() + own[i];
-                        }
-                        rawBatches.get(p).add(own.length == n ? r.batch() : r.batch().select(own));
-                        rawHashes.get(p).add(h);
-                        rawPlaces.get(p).add(at);
-                    }
-                }
-            }
             Piece[] pieces = new Piece[partitions];
             for (int p = 0; p < partitions; p++) {
                 int[] own = ofPartition[p];
-                Batch keysOf = all == null ? Batch.empty(keySchema)
-                        : own.length == groups ? all : all.select(own);
-                Batch rawOf = Batches.concat(inputSchema, rawBatches.get(p));
-                int m = own.length + rawOf.rowCount();
-                int[] hashes = new int[m];
+                Batch keysOf = all == null ? Batch.empty(keySchema) : own.length == groups ? all : all.select(own);
+                if (keysOf != all && all != null) {
+                    reserve(Batches.estimateBytes(keysOf));
+                }
+                // The rows kept as they are are in the partitions already; there are then as many partitions.
+                int raw = scattered == null ? 0 : scatteredRows[p];
+                int m = own.length + raw;
+                int[] hashesOf = new int[m];
                 long[] at = new long[m];
                 for (int i = 0; i < own.length; i++) {
-                    hashes[i] = table.hash(own[i]);
+                    hashesOf[i] = table.hash(own[i]);
                     at[i] = places[own[i]];
                 }
-                int i = own.length;
-                for (int k = 0; k < rawHashes.get(p).size(); k++) {
-                    int[] h = rawHashes.get(p).get(k);
-                    System.arraycopy(h, 0, hashes, i, h.length);
-                    System.arraycopy(rawPlaces.get(p).get(k), 0, at, i, h.length);
-                    i += h.length;
+                if (raw > 0) {
+                    System.arraycopy(scatteredHashes[p], 0, hashesOf, own.length, raw);
+                    System.arraycopy(scatteredPlaces[p], 0, at, own.length, raw);
                 }
-                pieces[p] = new Piece(keysOf, own, rawOf, hashes, at);
+                pieces[p] = new Piece(keysOf, own, scattered == null ? List.of() : scattered.get(p), hashesOf, at);
             }
             return pieces;
         }
     }
 
-    /** Rows kept as they are, the hashes of their keys and the place of the first of them. */
-    private record Raw(Batch batch, int[] hashes, long first) {
-    }
-
     /** The state of an aggregate as one accumulator object per group. */
     private final class Accumulators extends AggregateState {
         private final AggregateCall call;
+        private final Schema schema;
         private final List<ValueAccumulator> groups = new ArrayList<>();
         private Vector.Builder out;
 
-        Accumulators(AggregateCall call) {
+        Accumulators(AggregateCall call, Schema schema) {
             this.call = call;
+            this.schema = schema;
         }
 
         private void grow(int n) {
             while (groups.size() < n) {
-                groups.add(new ValueAccumulator(call, inputSchema, HashAggregateOperator.this::reserve));
+                groups.add(new ValueAccumulator(call, schema, HashAggregateOperator.this::reserve));
             }
         }
 
@@ -727,7 +887,7 @@ final class HashAggregateOperator extends AbstractOperator {
         @Override
         void startResult(int n) {
             grow(n);
-            out = Vectors.builder(call.type(inputSchema), n);
+            out = Vectors.builder(call.type(schema), n);
         }
 
         @Override

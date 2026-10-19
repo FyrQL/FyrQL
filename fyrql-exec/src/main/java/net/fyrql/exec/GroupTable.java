@@ -76,13 +76,22 @@ final class GroupTable {
      * does, with the hashes of their keys given, which {@code keys} would compute.
      */
     int[] groups(Batch b, int[] hashes, KeyFunctions keys, Consumer<Batch> newKeys) {
-        int n = b.rowCount();
-        int[] result = new int[n];
-        int[] newRows = new int[n];
+        return groups(b, 0, b.rowCount(), hashes, 0, keys, newKeys);
+    }
+
+    /**
+     * Finds the groups of the rows {@code from} to {@code to} of a batch as
+     * {@link #groups(Batch, KeyFunctions, Consumer)} does, the hash of row
+     * {@code from + i} at {@code hashes[hashFrom + i]}, and returns the group
+     * numbers of these rows.
+     */
+    int[] groups(Batch b, int from, int to, int[] hashes, int hashFrom, KeyFunctions keys, Consumer<Batch> newKeys) {
+        int[] result = new int[to - from];
+        int[] newRows = new int[to - from];
         int added = 0;
         int first = size;
-        for (int row = 0; row < n; row++) {
-            int h = hashes[row];
+        for (int row = from; row < to; row++) {
+            int h = hashes[hashFrom + row - from];
             int mask = slots.length - 1;
             int slot = h & mask;
             int group = -1;
@@ -103,7 +112,7 @@ final class GroupTable {
                     grow();
                 }
             }
-            result[row] = group;
+            result[row - from] = group;
         }
         if (added > 0) {
             Batch stored = b.project(keyColumnList).select(Arrays.copyOf(newRows, added));

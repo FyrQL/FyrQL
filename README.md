@@ -819,10 +819,11 @@ the rows of its workers:
 - An aggregation whose aggregates are `count`, `sum`, `avg`, `min`, `max`, `bool_and`
   and `bool_or` without `DISTINCT` and without an order lets each worker group its own
   rows, then divides the groups into 16 partitions by their hashes and merges the
-  partitions on several threads. A worker that holds more than 65,536 groups with fewer
-  than two rows each on average passes its further rows on as they are, so that many
-  groups do not cost the memory of every worker. The groups come out in the order of
-  their first rows, as on one thread. Other aggregates, such as `string_agg`, `list` or
+  partitions on several threads. A worker that holds more than 16,384 groups, of whose
+  recent rows fewer than two fall on each new group, passes its further rows on as they
+  are, scattered into the partitions at once, so that many groups do not cost the
+  memory and the caches of every worker. The groups come out in the order of their first
+  rows, as on one thread. Other aggregates, such as `string_agg`, `list` or
   `first`, read the rows in the order of the splits on the thread of the query.
 - A sort and a window keep the rows of the workers in the order of the splits; the sort
   sorts runs on several threads and merges them, stably, and the window computes its
@@ -833,11 +834,12 @@ the rows of its workers:
   workers deliver them, and an aggregation directly below gives its groups partition by
   partition; this changes only the order of a result without `ORDER BY`.
 
-The results are those of one thread, with three exceptions, which DuckDB has as well: the
+The results are those of one thread, with two exceptions, which DuckDB has as well: the
 last binary digits of `sum` and `avg` over `FLOAT` and `DOUBLE`, which add the partial
-sums of the workers; which of the values `-0.0` and `0.0` a `min` or `max` keeps; and,
-when rows of several splits fail, which of the errors is reported (that of the earliest
-split among those that failed before the query stopped). The tests run every random query
+sums of the workers; and, when rows of several splits fail, which of the errors is
+reported (that of the earliest split among those that failed before the query stopped).
+Of equal values, such as `-0.0` and `0.0`, a `min` or `max` keeps the first, as on one
+thread. The tests run every random query
 and every TPC-H query on several threads and on one and compare them.
 
 The sources divide their tables into splits as follows:
@@ -1024,9 +1026,8 @@ Known differences from DuckDB:
 
 - `now()` is a `TIMESTAMP` without time zone.
 - On several threads, the last binary digits of `sum` and `avg` over `FLOAT` and
-  `DOUBLE`, which of `-0.0` and `0.0` a `min` or `max` keeps, and which error is reported
-  when rows of several parts of a source fail may change from run to run, as in DuckDB;
-  see [Parallel execution](#parallel-execution).
+  `DOUBLE`, and which error is reported when rows of several parts of a source fail, may
+  change from run to run, as in DuckDB; see [Parallel execution](#parallel-execution).
 - `INTERVAL '90' DAY` (also `INTERVAL 1 year` and `INTERVAL '3 months'`) exists only
   as a constant added to or subtracted from a constant date or timestamp, such as
   `DATE '1998-12-01' - INTERVAL '90' DAY`, and is computed when the query is bound.

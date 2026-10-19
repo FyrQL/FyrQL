@@ -59,11 +59,33 @@ abstract class AggregateState {
     abstract void add(Batch b, int[] groupOf, int rows, int groups);
 
     /**
+     * Accumulates the rows of a batch as {@link #add(Batch, int[], int, int)}
+     * does, row {@code r} at the place {@code places[from + r]} among the
+     * rows of one thread. A state that {@link #keepsPlaces} keeps the place
+     * of the row each group took its value from.
+     */
+    void add(Batch b, int[] groupOf, int rows, int groups, long[] places, int from) {
+        add(b, groupOf, rows, groups);
+    }
+
+    /**
+     * Tells whether the result depends on which of equal values comes
+     * first, so that the state keeps the places of its rows: {@code min}
+     * and {@code max} over {@code FLOAT} and {@code DOUBLE}, which tell
+     * {@code -0.0} from {@code 0.0}.
+     */
+    boolean keepsPlaces() {
+        return false;
+    }
+
+    /**
      * Adds what a group of another state of the same aggregate holds to a
      * group of this one, as if the rows of the other group came after those
      * of this one; the other state stays as it is. Sums of {@code FLOAT}s
-     * and {@code DOUBLE}s add up in another order than row by row, and of
-     * equal values, {@code min} and {@code max} keep the one of this group.
+     * and {@code DOUBLE}s add up in another order than row by row. Of equal
+     * values, {@code min} and {@code max} keep the one of the earlier row if
+     * both states were given the places of their rows, otherwise the one of
+     * this group.
      */
     abstract void combine(int group, AggregateState other, int otherGroup);
 
@@ -606,13 +628,19 @@ abstract class AggregateState {
         }
     }
 
-    /** {@code min} and {@code max} over {@code FLOAT} and {@code DOUBLE}. */
+    /**
+     * {@code min} and {@code max} over {@code FLOAT} and {@code DOUBLE}; of
+     * equal values the first, given the places of the rows also over rows
+     * that come in another order.
+     */
     private static final class DoubleExtreme extends AggregateState {
         private final int column;
         private final DataType type;
         private final boolean max;
         private double[] best = new double[16];
         private boolean[] has = new boolean[16];
+        /** The place of the row of the value of each group, once rows come with places. */
+        private long[] at;
         private double[] values = new double[0];
         private boolean[] nulls = new boolean[0];
         private int groups;
@@ -651,6 +679,37 @@ abstract class AggregateState {
         }
 
         @Override
+        void add(Batch b, int[] groupOf, int rows, int groups, long[] places, int from) {
+            best = grow(best, groups);
+            has = grow(has, groups);
+            at = grow(at == null ? new long[0] : at, groups);
+            if (values.length < rows) {
+                values = new double[rows];
+                nulls = new boolean[rows];
+            }
+            readDoubles(b.column(column), rows, values, nulls);
+            for (int r = 0; r < rows; r++) {
+                if (nulls[r]) {
+                    continue;
+                }
+                int g = groupOf[r];
+                double x = values[r];
+                long place = places[from + r];
+                int c = has[g] ? Vectors.compare(x, best[g]) : 0;
+                if (!has[g] || (max ? c > 0 : c < 0) || c == 0 && place < at[g]) {
+                    best[g] = x;
+                    has[g] = true;
+                    at[g] = place;
+                }
+            }
+        }
+
+        @Override
+        boolean keepsPlaces() {
+            return true;
+        }
+
+        @Override
         void combine(int group, AggregateState other, int otherGroup) {
             DoubleExtreme o = (DoubleExtreme) other;
             if (!o.has[otherGroup]) {
@@ -658,11 +717,18 @@ abstract class AggregateState {
             }
             best = grow(best, group + 1);
             has = grow(has, group + 1);
+            boolean placed = o.at != null;
+            if (placed) {
+                at = grow(at == null ? new long[0] : at, group + 1);
+            }
             double x = o.best[otherGroup];
             int c = has[group] ? Vectors.compare(x, best[group]) : 0;
-            if (!has[group] || (max ? c > 0 : c < 0)) {
+            if (!has[group] || (max ? c > 0 : c < 0) || c == 0 && placed && o.at[otherGroup] < at[group]) {
                 best[group] = x;
                 has[group] = true;
+                if (placed) {
+                    at[group] = o.at[otherGroup];
+                }
             }
         }
 

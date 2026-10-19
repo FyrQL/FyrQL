@@ -23,6 +23,7 @@ import net.fyrql.core.plan.PlanNode.FrameBound;
 import net.fyrql.core.plan.PlanNode.FrameExclusion;
 import net.fyrql.core.plan.PlanNode.FrameUnit;
 import net.fyrql.core.plan.PlanNode.JoinType;
+import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.PlanNode.SortKey;
 import net.fyrql.core.plan.PlanNode.WindowCall;
 import net.fyrql.core.plan.PlanNode.WindowFunction;
@@ -54,6 +55,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import static net.fyrql.core.expr.Expressions.add;
+import static net.fyrql.core.expr.Expressions.col;
+import static net.fyrql.core.expr.Expressions.lit;
+import static net.fyrql.core.expr.Expressions.mul;
+import static net.fyrql.core.expr.Expressions.rem;
+
 /**
  * The operators of the executor on one and on several threads, over the
  * rows of {@link CodegenBenchmark} in splits of 32 batches, about 65,000
@@ -79,7 +86,6 @@ public class ParallelBenchmark {
     private Executor executor;
     private PlanNode scanFilter;
     private PlanNode groupByFew;
-    private PlanNode groupByMany;
     private PlanNode joinProbe;
     private PlanNode sort;
     private PlanNode window;
@@ -103,9 +109,6 @@ public class ParallelBenchmark {
                 new AggregateCall(AggregateFunction.AVG, 3, false, "avg_disc"),
                 new AggregateCall(AggregateFunction.SUM, 4, false, "sum_tax"),
                 new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "count_order")));
-        groupByMany = new PlanNode.Aggregate(lineitem, List.of(0), List.of(
-                new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"),
-                new AggregateCall(AggregateFunction.SUM, 1, false, "quantity")));
         joinProbe = new PlanNode.Aggregate(new PlanNode.Join(lineitem, customer, List.of(0), List.of(0),
                 JoinType.INNER), List.of(9), List.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"),
                 new AggregateCall(AggregateFunction.SUM, 1, false, "quantity")));
@@ -147,10 +150,41 @@ public class ParallelBenchmark {
         return run(groupByFew, bh);
     }
 
-    /** {@code count(*)} and {@code sum} in 100,000 groups of a {@code BIGINT} key. */
+    /**
+     * The keys of {@link #groupByMany}: the key of a row modulo 10,000, the
+     * key itself, or ten times the key plus the last digit of the quantity,
+     * for about 10,000, 100,000 or 980,000 groups.
+     */
+    @State(Scope.Benchmark)
+    public static class Keys {
+
+        @Param({"10000", "100000", "1000000"})
+        public int keys;
+
+        private PlanNode plan;
+
+        @Setup
+        public void setUp() {
+            PlanNode.Scan lineitem = PlanNode.Scan.all(TableRef.of("mem", "lineitem"), CodegenBenchmark.LINEITEM);
+            Expression key = col(CodegenBenchmark.LINEITEM, 0);
+            Expression quantity = col(CodegenBenchmark.LINEITEM, 1);
+            Expression grouped = switch (keys) {
+                case 10_000 -> rem(key, lit(10_000L));
+                case 100_000 -> key;
+                case 1_000_000 -> add(mul(key, lit(10L)), rem(quantity, lit(10)));
+                default -> throw new IllegalArgumentException("keys: " + keys);
+            };
+            plan = new PlanNode.Aggregate(new PlanNode.Project(lineitem, List.of(
+                    new NamedExpression("key", grouped), new NamedExpression("quantity", quantity))), List.of(0),
+                    List.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"),
+                            new AggregateCall(AggregateFunction.SUM, 1, false, "quantity")));
+        }
+    }
+
+    /** {@code count(*)} and {@code sum} in as many groups of a {@code BIGINT} key as {@link Keys} says. */
     @Benchmark
-    public long groupByMany(Blackhole bh) {
-        return run(groupByMany, bh);
+    public long groupByMany(Keys keys, Blackhole bh) {
+        return run(keys.plan, bh);
     }
 
     /** A hash join with the 100,000 customers and the count and the units per nation. */

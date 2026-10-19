@@ -18,6 +18,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.DataGenerator;
 import net.fyrql.core.value.EdgeValues;
+import net.fyrql.core.vector.Batch;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -39,8 +40,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * Aggregations over segments, on several threads, against one thread: the
  * same groups in the same order with the keys of their first rows, the same
  * results, and the same failure, that of the first group whose result
- * fails; also once the workers keep their rows as they are, and when the
- * groups are merged in partitions.
+ * fails; also once the workers keep their rows as they are, scattered into
+ * the partitions, and when the groups are merged in partitions. Of equal
+ * values, {@code min} and {@code max} keep the first, as on one thread.
  */
 class ParallelAggregateTest {
 
@@ -57,6 +59,9 @@ class ParallelAggregateTest {
     private static final Schema SCHEMA = schema();
 
     private static final int KEYS = 4;
+
+    /** For {@link #run}: all columns exact, {@code -0.0} apart from {@code 0.0}. */
+    private static final int EXACT = Integer.MAX_VALUE;
 
     private final SplitTables source = new SplitTables();
 
@@ -75,6 +80,13 @@ class ParallelAggregateTest {
     @AfterEach
     void restore() {
         HashAggregateOperator.maxLocalGroups = HashAggregateOperator.MAX_LOCAL_GROUPS;
+        HashAggregateOperator.minRowsPerGroup = HashAggregateOperator.MIN_ROWS_PER_GROUP;
+    }
+
+    /** Makes a worker keep its rows as they are once it holds more than a number of groups. */
+    private static void scatterBeyond(int groups) {
+        HashAggregateOperator.maxLocalGroups = groups;
+        HashAggregateOperator.minRowsPerGroup = Integer.MAX_VALUE;
     }
 
     /** Rows with keys and values that are random, edge values or {@code NULL}. */
@@ -212,19 +224,19 @@ class ParallelAggregateTest {
             PlanNode.Aggregate aggregate = new PlanNode.Aggregate(input, keys, calls);
             boolean raw = random.nextBoolean();
             if (raw) {
-                HashAggregateOperator.maxLocalGroups = random.nextInt(4);
+                scatterBeyond(random.nextInt(4));
                 rawRounds++;
             }
             String what = "round " + round + " keys " + keys + " calls " + calls + " raw " + raw;
             try {
-                Object expected = run(aggregate, 1, true, keys.size());
+                Object expected = run(aggregate, 1, true, EXACT);
                 if (expected instanceof RuntimeException) {
                     failures++;
                 }
                 for (int threads : new int[] {2, 3, 8}) {
-                    assertSame(expected, run(aggregate, threads, true, keys.size()), threads + " threads, " + what);
+                    assertSame(expected, run(aggregate, threads, true, EXACT), threads + " threads, " + what);
                 }
-                Object unordered = run(aggregate, 4, false, keys.size());
+                Object unordered = run(aggregate, 4, false, EXACT);
                 if (expected instanceof List<?> e && unordered instanceof List<?> u) {
                     assertEquals(sorted(e), sorted(u), "unordered, " + what);
                 } else {
@@ -273,6 +285,7 @@ class ParallelAggregateTest {
         Object expected = run(aggregate, 1, true, 2);
         assertTrue(((List<?>) expected).size() > HashAggregateOperator.PARTITIONED_MERGE);
         assertSame(expected, run(aggregate, 4, true, 2), "grouped on the workers");
+        // Most keys are new, so that the workers stop grouping by themselves, in the middle of a morsel.
         HashAggregateOperator.maxLocalGroups = 100;
         assertSame(expected, run(aggregate, 4, true, 2), "rows kept as they are");
         assertTrue(source.threads.stream().anyMatch(t -> t.startsWith("fyrql-worker-")), source.threads::toString);
@@ -334,9 +347,39 @@ class ParallelAggregateTest {
                 expected);
         for (int run = 0; run < 20; run++) {
             assertSame(expected, run(aggregate, 4, true, 1), "run " + run);
-            HashAggregateOperator.maxLocalGroups = 0;
+            scatterBeyond(0);
             assertSame(expected, run(aggregate, 4, true, 1), "rows kept as they are, run " + run);
             restore();
+        }
+    }
+
+    @Test
+    void minAndMaxKeepTheFirstOfEqualValues() {
+        SplittableRandom random = new SplittableRandom(20261019);
+        Schema schema = Schema.of(new Schema.Field("k", DataType.INTEGER), new Schema.Field("d", DataType.DOUBLE),
+                new Schema.Field("f", DataType.FLOAT));
+        List<Object[]> rows = new ArrayList<>();
+        for (int r = 0; r < 4000; r++) {
+            // Zeros of both signs in every group, which a later split may bring first to its worker.
+            double d = random.nextInt(4) == 0 ? 1.0 : random.nextBoolean() ? -0.0 : 0.0;
+            rows.add(new Object[] {r % 37, d, random.nextInt(4) == 0 ? null : (float) -d});
+        }
+        PlanNode.Scan scan = source.table("signed zeros", schema, rows, splits(random, rows.size()));
+        List<AggregateCall> calls = List.of(new AggregateCall(AggregateFunction.MIN, 1, false, "min_d"),
+                new AggregateCall(AggregateFunction.MAX, 1, false, "max_d"),
+                new AggregateCall(AggregateFunction.MIN, 2, false, "min_f"),
+                new AggregateCall(AggregateFunction.MAX, 2, false, "max_f"));
+        for (List<Integer> keys : List.of(List.of(0), List.<Integer>of())) {
+            PlanNode.Aggregate aggregate = new PlanNode.Aggregate(scan, keys, calls);
+            Object expected = run(aggregate, 1, true, EXACT);
+            for (int run = 0; run < 10; run++) {
+                for (int threads : new int[] {2, 3, 8}) {
+                    assertSame(expected, run(aggregate, threads, true, EXACT), threads + " threads, run " + run);
+                }
+                scatterBeyond(run % 3);
+                assertSame(expected, run(aggregate, 4, true, EXACT), "rows kept as they are, run " + run);
+                restore();
+            }
         }
     }
 
@@ -381,6 +424,55 @@ class ParallelAggregateTest {
         for (int c : counts) {
             assertTrue(c > 800 && c < 1200, Arrays.toString(counts));
         }
+    }
+
+    @Test
+    void segmentsComeInTheOrderOfTheirPlaces() {
+        for (boolean interleaved : new boolean[] {false, true}) {
+            // The places of two runs, the morsel in the high bits; the first run of two sources.
+            long[] first = {place(0, 1), place(0, 4), place(2, 0)};
+            long[] second = interleaved ? new long[] {place(0, 2), place(1, 0), place(1, 5)}
+                    : new long[] {place(1, 0), place(1, 5), place(3, 2)};
+            List<HashAggregateOperator.Segment> segments = new ArrayList<>();
+            int entry = HashAggregateOperator.cut(segments, 0, keys(first, 0, 2), first, 0);
+            HashAggregateOperator.cut(segments, 0, keys(first, 2, 3), first, entry);
+            HashAggregateOperator.cut(segments, 1, keys(second, 0, 3), second, 0);
+            List<HashAggregateOperator.Segment> ordered = HashAggregateOperator.inOrder(segments,
+                    List.of(first, second));
+            List<Long> places = new ArrayList<>();
+            for (HashAggregateOperator.Segment s : ordered) {
+                long[] run = s.part() == 0 ? first : second;
+                for (int r = s.from(); r < s.to(); r++) {
+                    long place = (Long) s.keys().column(0).get(r);
+                    assertEquals(run[s.entry() + r - s.from()], place, "the entry of a row");
+                    places.add(place);
+                }
+            }
+            List<Long> expected = new ArrayList<>();
+            for (long p : first) {
+                expected.add(p);
+            }
+            for (long p : second) {
+                expected.add(p);
+            }
+            expected.sort(Comparator.naturalOrder());
+            assertEquals(expected, places, "interleaved " + interleaved);
+            // Apart, there is a segment per source and morsel; interleaved, one per row.
+            assertEquals(interleaved ? 6 : 4, ordered.size(), "interleaved " + interleaved);
+        }
+    }
+
+    private static long place(int morsel, int row) {
+        return (long) morsel << 40 | row;
+    }
+
+    /** The places of the entries {@code from} to {@code to} of a run as the keys of its source. */
+    private static Batch keys(long[] places, int from, int to) {
+        List<Object[]> rows = new ArrayList<>();
+        for (int i = from; i < to; i++) {
+            rows.add(new Object[] {places[i]});
+        }
+        return Batch.ofRows(Schema.of(DataType.BIGINT), rows);
     }
 
     @Test
