@@ -13,6 +13,7 @@ package net.fyrql.jdbc;
 
 import net.fyrql.core.type.DataType;
 import net.fyrql.jdbc.JdbcValues.Typed;
+import net.fyrql.sql.parse.Parameters;
 import net.fyrql.sql.parse.TypeNames;
 import net.fyrql.sql.render.DuckDbDialect;
 
@@ -46,10 +47,11 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.List;
 
 /**
  * A prepared statement: a query text with {@code ?} for its parameters, see
- * {@link ParameterizedSql}. A setter turns its value into a literal of
+ * {@link Parameters}. A setter turns its value into a literal of
  * FyrQL with an explicit type, such as {@code CAST(42 AS INTEGER)} or
  * {@code DATE '2024-02-29'}, and a run puts the literals in place of the
  * parameters, so that the engine plans the text anew each time. The values
@@ -60,20 +62,35 @@ import java.util.Calendar;
  * {@code setNull} with a type name of FyrQL, such as {@code INTEGER[]},
  * makes a {@code NULL} of that type. FyrQL has no {@code TIME}:
  * {@code setTime} is {@code 0A000}. A stream or reader is read whole when
- * it is set.
+ * it is set. {@link #getParameterMetaData()} tells the types the engine
+ * gives the parameters, where it can; a value keeps the type of its setter.
  */
 final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedStatement {
 
     /** The literal of a {@code NULL} without a type. */
     private static final String UNTYPED_NULL = "NULL";
 
-    private final ParameterizedSql sql;
+    private final Parameters sql;
     private final String[] literals;
 
     FyrQLPreparedStatement(FyrQLConnection connection, int holdability, String sql) {
         super(connection, holdability);
-        this.sql = ParameterizedSql.parse(sql);
+        this.sql = Parameters.parse(sql);
         this.literals = new String[this.sql.count()];
+    }
+
+    /**
+     * Returns the text with the literals in place of the parameters.
+     *
+     * @throws SQLException {@code 07001} if a parameter has no value
+     */
+    private String rendered() throws SQLException {
+        for (int i = 0; i < literals.length; i++) {
+            if (literals[i] == null) {
+                throw new SQLException("No value is set for parameter " + (i + 1), SqlStates.PARAMETER_NOT_SET);
+            }
+        }
+        return sql.render(literals);
     }
 
     /** Throws {@code HY010} if the statement is closed, {@code 22023} if there is no such parameter. */
@@ -92,7 +109,7 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
      * there is no literal of one.
      */
     private void put(int index, Typed value) throws SQLException {
-        if (hasMap(value.type())) {
+        if (Parameters.hasMap(value.type())) {
             throw SqlStates.create("FyrQL does not take a parameter of type " + value.type().sqlName()
                     + ": there is no literal of a MAP", SqlStates.FEATURE_NOT_SUPPORTED, null);
         }
@@ -102,15 +119,6 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
     /** Sets a value of a type; {@code null} is a {@code NULL} of the type. */
     private void put(int index, Object value, DataType type) throws SQLException {
         put(index, new Typed(value, type));
-    }
-
-    private static boolean hasMap(DataType type) {
-        return switch (type) {
-            case DataType.MapType m -> true;
-            case DataType.ListType l -> hasMap(l.element());
-            case DataType.Struct s -> s.fields().stream().anyMatch(f -> hasMap(f.type()));
-            default -> false;
-        };
     }
 
     /** Fails for a method of {@code Statement} with a query text: a prepared statement runs its own. */
@@ -123,7 +131,7 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
     @Override
     public ResultSet executeQuery() throws SQLException {
         checkOpen();
-        return run(sql.render(literals));
+        return run(rendered());
     }
 
     @Override
@@ -176,13 +184,20 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
                 return null;
             }
         }
-        return new FyrQLResultSetMetaData(connection.describe(sql.render(literals)));
+        return new FyrQLResultSetMetaData(connection.describe(rendered()));
     }
 
+    /**
+     * Returns the parameters with the types the engine gives them when it
+     * prepares the query; if it cannot, as for {@code SELECT ?}, their types
+     * are unknown, see {@link FyrQLParameterMetaData}.
+     */
     @Override
     public ParameterMetaData getParameterMetaData() throws SQLException {
         checkOpen();
-        return new UnknownParameterMetaData(literals.length);
+        List<DataType> types = connection.parameterTypes(sql.sql());
+        return types != null && types.size() == literals.length ? FyrQLParameterMetaData.of(types)
+                : FyrQLParameterMetaData.unknown(literals.length);
     }
 
     @Override

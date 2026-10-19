@@ -300,6 +300,8 @@ final class QueryShrinker {
             }
             case SqlExpr.Identifier i -> {
             }
+            case SqlExpr.Parameter p -> {
+            }
             case SqlExpr.Binary b -> {
                 c.add(b.left());
                 c.add(b.right());
@@ -363,6 +365,7 @@ final class QueryShrinker {
         return switch (e) {
             case SqlExpr.Literal l -> l;
             case SqlExpr.Identifier i -> i;
+            case SqlExpr.Parameter p -> p;
             case SqlExpr.Binary b -> new SqlExpr.Binary(b.op(), c.get(0), c.get(1), P);
             case SqlExpr.Unary u -> new SqlExpr.Unary(u.op(), c.get(0), P);
             case SqlExpr.Between b -> new SqlExpr.Between(c.get(0), c.get(1), c.get(2), b.negated(), P);

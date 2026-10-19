@@ -1,4 +1,6 @@
-FyrQL is licensed under the Apache License 2.0, see apache-2.0-LICENSE.txt.
+FyrQL is licensed under the Mozilla Public License 2.0, see
+https://mozilla.org/MPL/2.0/; its source code is at
+https://github.com/stefan-zobel/fyrql.
 
 This JAR includes the following software, renamed into packages under
 net.fyrql.internal:

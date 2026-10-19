@@ -321,6 +321,26 @@ class SqlParserTest {
     }
 
     @Test
+    void parametersAreNumberedInTheOrderOfTheText() {
+        String sql = "SELECT ? + a, '?' AS \"?\" FROM t -- ?\nWHERE b = ? AND c IN (SELECT ? FROM u) LIMIT 1";
+        SqlParser.Parameterized parsed = SqlParser.parseWithParameters(sql);
+        assertEquals(List.of(new SqlExpr.Parameter(1, new Position(1, 8)), new SqlExpr.Parameter(2, new Position(2, 11)),
+                new SqlExpr.Parameter(3, new Position(2, 30))), parsed.parameters());
+        assertEquals(Parameters.parse(sql).count(), parsed.parameters().size());
+        SqlExpr.Binary first = assertInstanceOf(SqlExpr.Binary.class,
+                ((SelectItem.ExpressionItem) ((QueryBody.Select) parsed.query().body()).items().get(0)).expression());
+        assertEquals(parsed.parameters().get(0), first.left());
+        assertEquals("SELECT (? + a), '?' AS \"?\" FROM t WHERE ((b = ?) AND (c IN (SELECT ? FROM u))) LIMIT 1",
+                SqlPrinter.print(parsed.query()));
+        assertEquals(List.of(), SqlParser.parseWithParameters("SELECT 1").parameters());
+        for (String named : List.of("SELECT :x", "SELECT ?1", "SELECT $1")) {
+            SqlException e = assertThrows(SqlException.class, () -> SqlParser.parseWithParameters(named), named);
+            assertTrue(e.reason().startsWith("Not supported: ") && e.reason().endsWith(" parameters")
+                    || e.reason().startsWith("Syntax error"), named + ": " + e.reason());
+        }
+    }
+
+    @Test
     void subqueriesAreExistsInAndScalars() {
         assertEquals("SELECT a FROM t WHERE ((EXISTS (SELECT 1 FROM u WHERE (u.a = t.a))) AND (NOT EXISTS (SELECT * FROM w)))",
                 print("SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a) AND NOT EXISTS (SELECT * FROM w)"));
@@ -482,7 +502,7 @@ class SqlParserTest {
                 Map.entry("SELECT a SIMILAR TO 'x'", "Not supported: SIMILAR_TO@1:8"),
                 Map.entry("SELECT a ^ 2", "Not supported: the operator ^@1:8"),
                 Map.entry("SELECT a & b", "Not supported: the operator &@1:8"),
-                Map.entry("SELECT x = ?", "Not supported: parameters@1:12"),
+                Map.entry("SELECT x = ?", "Not supported: parameters outside a prepared query@1:12"),
                 Map.entry("SELECT (1, 2)", "Not supported: row values@1:8"),
                 Map.entry("SELECT * EXCEPT (a) FROM t", "Not supported: * EXCEPT@1:8"),
                 Map.entry("SELECT E'a'", "Not supported: a string with a prefix@1:8"),

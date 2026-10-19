@@ -54,6 +54,8 @@ import java.util.regex.Pattern;
  * engine:
  *   defaultSource: shop
  *   pushdown: true
+ * server:
+ *   port: 32010
  * }</pre>
  * Each source has a name, a type and the options of its type, which are
  * read flat: a nested key becomes the keys on its path joined by dots, such
@@ -64,16 +66,21 @@ import java.util.regex.Pattern;
  * {@code ${sys:name}}, either with a default as {@code ${env:NAME:-default}},
  * so that a secret need not be in the file; <code>$${</code> stands for the
  * text <code>${</code>. The settings of the engine are those of
- * {@link FyrQLConfig#builder(EngineConfig)}.
+ * {@link FyrQLConfig#builder(EngineConfig)}. The section {@code server}
+ * holds the settings of the Flight SQL server of the module
+ * {@code fyrql-flight-sql}, read flat as the options of a source; the
+ * engine does not read them.
  * <p>
  * A file is YAML, or JSON if its name ends in {@code .json}. Relative paths
  * in the options are resolved against the directory of the file.
  *
  * @param sources the sources in the order of the file
  * @param settings the settings of the engine, flat as the options of a source
+ * @param server the settings of a server for the engine, flat as the options of a source
  * @param directory the directory against which relative paths are resolved
  */
-public record EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Path directory) {
+public record EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Map<String, String> server,
+        Path directory) {
 
     private static final Pattern VARIABLE = Pattern.compile("\\$\\$\\{|\\$\\{(?:([a-z]+):([^}]*)})?");
     private static final String DEFAULT = ":-";
@@ -81,7 +88,13 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
     public EngineConfig {
         sources = List.copyOf(sources);
         settings = Collections.unmodifiableMap(new LinkedHashMap<>(settings));
+        server = Collections.unmodifiableMap(new LinkedHashMap<>(server));
         Objects.requireNonNull(directory, "directory");
+    }
+
+    /** A configuration without settings of a server. */
+    public EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Path directory) {
+        this(sources, settings, Map.of(), directory);
     }
 
     /**
@@ -153,27 +166,33 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
                 throw new ConfigException(where(0) + "the configuration cannot be read: " + e, e);
             }
             if (!(root.value() instanceof Map<?, ?> top)) {
-                throw failure(root.line(), "the configuration must be a mapping with the keys sources and engine");
+                throw failure(root.line(), "the configuration must be a mapping with the keys sources, engine and"
+                        + " server");
             }
             List<SourceConfig> sources = new ArrayList<>();
             Map<String, String> settings = new LinkedHashMap<>();
+            Map<String, String> server = new LinkedHashMap<>();
             for (Map.Entry<String, Node> e : entries(top)) {
                 Node n = e.getValue();
                 switch (e.getKey()) {
                     case "sources" -> sources = sources(n);
-                    case "engine" -> {
-                        if (n.value() != null && !(n.value() instanceof Map)) {
-                            throw failure(n.line(), "engine must be a mapping of settings");
-                        }
-                        if (n.value() != null) {
-                            flatten("", n, settings, "the engine");
-                        }
-                    }
-                    default -> throw failure(n.line(), "the key " + e.getKey() + " is unknown; known are sources"
-                            + " and engine");
+                    case "engine" -> section(n, settings, "engine", "the engine");
+                    case "server" -> section(n, server, "server", "the server");
+                    default -> throw failure(n.line(), "the key " + e.getKey() + " is unknown; known are sources,"
+                            + " engine and server");
                 }
             }
-            return new EngineConfig(sources, settings, directory);
+            return new EngineConfig(sources, settings, server, directory);
+        }
+
+        /** Adds the settings of a section that is a mapping of settings, or empty. */
+        private void section(Node n, Map<String, String> settings, String key, String owner) {
+            if (n.value() != null && !(n.value() instanceof Map)) {
+                throw failure(n.line(), key + " must be a mapping of settings");
+            }
+            if (n.value() != null) {
+                flatten("", n, settings, owner);
+            }
         }
 
         private List<SourceConfig> sources(Node n) {

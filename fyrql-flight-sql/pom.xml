@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  This Source Code Form is "Incompatible With Secondary Licenses", as
+  defined by the Mozilla Public License, v. 2.0.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.github.stefan-zobel</groupId>
+		<artifactId>fyrql</artifactId>
+		<version>0.6.5</version>
+	</parent>
+
+	<artifactId>fyrql-flight-sql</artifactId>
+	<name>FyrQL Flight SQL server</name>
+	<description>An Arrow Flight SQL server for an engine of FyrQL, for clients in Python, Java and other languages.</description>
+
+	<properties>
+		<fyrql.module.name>net.fyrql.flight</fyrql.module.name>
+		<fyrql.native.skip>false</fyrql.native.skip>
+	</properties>
+
+	<dependencies>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-arrow</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-config</artifactId>
+		</dependency>
+		<!--
+		  Without native code: TLS comes from the JDK instead of the OpenSSL of netty-tcnative, and the allocator of the
+		  Arrow module works on Unsafe instead of Netty.
+		-->
+		<dependency>
+			<groupId>org.apache.arrow</groupId>
+			<artifactId>flight-sql</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>io.netty</groupId>
+					<artifactId>netty-tcnative-boringssl-static</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.apache.arrow</groupId>
+					<artifactId>arrow-memory-netty</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<!--
+		  flight-sql excludes this JAR from flight-core, but the TLS handler of Netty 4.2 loads its classes; the JAR
+		  without classifier holds classes only, the native code of Netty comes in JARs with a classifier.
+		-->
+		<dependency>
+			<groupId>io.netty</groupId>
+			<artifactId>netty-transport-native-unix-common</artifactId>
+		</dependency>
+		<!-- The command line drops the warning of gRPC about streams that clients closed. -->
+		<dependency>
+			<groupId>io.netty</groupId>
+			<artifactId>netty-codec-http2</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-jdbc</artifactId>
+			<type>test-jar</type>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-memory</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- The binding of the logging API of Arrow and gRPC, which is 2.x and does not find the binding 1.7 of the build. -->
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-simple</artifactId>
+			<version>${arrow.slf4j.version}</version>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<resources>
+			<!-- The versions of the server and of Arrow, which the server reports to its clients. -->
+			<resource>
+				<directory>src/main/resources</directory>
+				<filtering>true</filtering>
+			</resource>
+		</resources>
+		<plugins>
+			<!-- The JARs the server runs with, for the test that none of them holds native code. -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-dependency-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>runtime-classpath</id>
+						<phase>generate-test-resources</phase>
+						<goals>
+							<goal>build-classpath</goal>
+						</goals>
+						<configuration>
+							<includeScope>runtime</includeScope>
+							<outputFile>${project.build.testOutputDirectory}/net/fyrql/flight/runtime-classpath.txt</outputFile>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<argLine>${arrow.add-opens}</argLine>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+</project>

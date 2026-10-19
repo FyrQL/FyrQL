@@ -1,0 +1,112 @@
+FyrQL is licensed under the Mozilla Public License 2.0, see
+https://mozilla.org/MPL/2.0/; its source code is at
+https://github.com/stefan-zobel/fyrql.
+
+This JAR includes the following software, renamed into packages under
+net.fyrql.internal:
+
+- Jackson 2.22.3 (jackson-core, jackson-databind, jackson-annotations,
+  jackson-datatype-jsr310, jackson-dataformat-yaml), the parser of JSON files
+  and of the configuration file, and of the schemas of Arrow
+  https://github.com/FasterXML/jackson
+  Apache License 2.0, see apache-2.0-LICENSE.txt and jackson-NOTICE.txt.
+  jackson-core includes FastDoubleParser and Schubfach, see
+  META-INF/FastDoubleParser-LICENSE, META-INF/FastDoubleParser-ThirdParty-LICENSE
+  and META-INF/Schubfach-LICENSE.
+
+- SnakeYAML 2.5, which Jackson reads YAML with
+  https://bitbucket.org/snakeyaml/snakeyaml
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- JSqlParser 5.4, the parser of SQL
+  https://github.com/JSQLParser/JSqlParser
+  Dual-licensed under the GNU Lesser General Public License 2.1 and the
+  Apache License 2.0; used here under the Apache License 2.0, see
+  apache-2.0-LICENSE.txt.
+
+- FastCSV 4.4.0, the reader of CSV files
+  https://github.com/osiegmar/FastCSV
+  MIT License, see fastcsv-LICENSE.txt.
+
+- Janino 3.1.20 of janino-lts (janino, commons-compiler), which compiles
+  expressions
+  https://github.com/janino-lts/janino
+  BSD 3-Clause License, see janino-LICENSE.txt.
+
+- Apache Parquet Java 1.18.1 (parquet-hadoop, parquet-column, parquet-common,
+  parquet-encoding, parquet-format-structures, parquet-jackson)
+  https://parquet.apache.org/
+  Apache License 2.0, see parquet-java-LICENSE.txt and parquet-java-NOTICE.txt.
+  parquet-jackson includes FastDoubleParser and Schubfach, see the files of
+  jackson-core above.
+
+- parquet-floor 2.4, only its stub classes of Hadoop types
+  https://github.com/strategicblue/parquet-floor
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- aircompressor 2.0.3
+  https://github.com/airlift/aircompressor
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- JTS Topology Suite 1.20.0, which parquet-java needs for geometry types
+  https://github.com/locationtech/jts
+  Eclipse Distribution License 1.0, see jts-LICENSE.txt.
+
+- SLF4J API and SLF4J NOP binding 1.7.36, which parquet-java logs with
+  https://www.slf4j.org/
+  MIT License, see slf4j-LICENSE.txt.
+
+This JAR includes the following software in its own packages, which the
+server speaks to its clients with:
+
+- Apache Arrow Java 19.0.0 (arrow-format, arrow-vector, arrow-memory-core,
+  arrow-memory-unsafe, flight-core, flight-sql)
+  https://arrow.apache.org/
+  Apache License 2.0, see apache-2.0-LICENSE.txt and arrow-NOTICE.txt.
+
+- gRPC Java 1.79.0 (grpc-api, grpc-context, grpc-core, grpc-netty,
+  grpc-protobuf, grpc-protobuf-lite, grpc-stub, grpc-util)
+  https://grpc.io/
+  Apache License 2.0, see apache-2.0-LICENSE.txt and grpc-NOTICE.txt.
+
+- Netty 4.2.9.Final (netty-buffer, netty-codec-base, netty-codec-compression,
+  netty-codec-http, netty-codec-http2, netty-codec-socks, netty-common,
+  netty-handler, netty-handler-proxy, netty-resolver, netty-transport,
+  netty-transport-native-unix-common without native code)
+  https://netty.io/
+  Apache License 2.0, see apache-2.0-LICENSE.txt and netty-NOTICE.txt.
+
+- Protocol Buffers for Java 4.33.4 (protobuf-java, protobuf-java-util)
+  https://protobuf.dev/
+  BSD 3-Clause License, see protobuf-LICENSE.txt.
+
+- proto-google-common-protos 2.63.2
+  https://github.com/googleapis/sdk-platform-java
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- Guava 33.4.8-jre and failureaccess 1.0.3
+  https://github.com/google/guava
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- Gson 2.12.1
+  https://github.com/google/gson
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- PerfMark 0.27.0 (perfmark-api)
+  https://github.com/perfmark/perfmark
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- FlatBuffers for Java 25.2.10
+  https://flatbuffers.dev/
+  Apache License 2.0, see apache-2.0-LICENSE.txt.
+
+- Apache Commons Codec 1.21.0
+  https://commons.apache.org/proper/commons-codec/
+  Apache License 2.0, see apache-2.0-LICENSE.txt and commons-codec-NOTICE.txt.
+
+- SLF4J API and SLF4J Simple binding 2.0.17, which Arrow and Netty log with
+  https://www.slf4j.org/
+  MIT License, see slf4j-LICENSE.txt.
+
+The JAR does not include the JDBC drivers of the databases that JDBC sources
+read; they are put on the class path next to it.

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  This Source Code Form is "Incompatible With Secondary Licenses", as
+  defined by the Mozilla Public License, v. 2.0.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.github.stefan-zobel</groupId>
+		<artifactId>fyrql</artifactId>
+		<version>0.6.5</version>
+	</parent>
+
+	<artifactId>fyrql-arrow</artifactId>
+	<name>FyrQL Arrow</name>
+	<description>Results of FyrQL as Apache Arrow vectors, and Arrow vectors as batches of FyrQL.</description>
+
+	<properties>
+		<fyrql.module.name>net.fyrql.arrow</fyrql.module.name>
+		<fyrql.native.skip>false</fyrql.native.skip>
+	</properties>
+
+	<dependencies>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-engine</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.arrow</groupId>
+			<artifactId>arrow-vector</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.arrow</groupId>
+			<artifactId>arrow-memory-core</artifactId>
+		</dependency>
+		<!-- The allocator on Unsafe, without Netty; an application may bring another one instead. -->
+		<dependency>
+			<groupId>org.apache.arrow</groupId>
+			<artifactId>arrow-memory-unsafe</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-jdbc</artifactId>
+			<type>test-jar</type>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-memory</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- The binding of the logging API of Arrow, which is 2.x and does not find the binding 1.7 of the build. -->
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-simple</artifactId>
+			<version>${arrow.slf4j.version}</version>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<argLine>${arrow.add-opens}</argLine>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+</project>

@@ -12,6 +12,7 @@
 package net.fyrql.jdbc;
 
 import net.fyrql.FyrQL;
+import net.fyrql.sql.parse.Parameters;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -76,16 +77,16 @@ class PreparedStatementTest {
     @Test
     void aParameterIsAQuestionMarkOutsideOfStringsIdentifiersAndComments() throws SQLException {
         String sql = "SELECT ? AS \"?\", '?' AS a, 'it''s ?' AS b, -- ?\n /* ? */ $$ ? $$ AS c, ? AS d";
-        ParameterizedSql p = ParameterizedSql.parse(sql);
+        Parameters p = Parameters.parse(sql);
         assertEquals(2, p.count());
         assertEquals(sql.replaceFirst("\\?", "1").replace("? AS d", "2 AS d"), p.render(new String[] {"1", "2"}));
-        assertEquals(0, ParameterizedSql.parse("SELECT '?").count(), "an unterminated string runs to the end");
-        assertEquals(0, ParameterizedSql.parse("SELECT 1 /* ?").count());
-        assertEquals(1, ParameterizedSql.parse("SELECT x$$ ? $$ FROM t WHERE y = ?").count(),
+        assertEquals(0, Parameters.parse("SELECT '?").count(), "an unterminated string runs to the end");
+        assertEquals(0, Parameters.parse("SELECT 1 /* ?").count());
+        assertEquals(1, Parameters.parse("SELECT x$$ ? $$ FROM t WHERE y = ?").count(),
                 "a $ in an identifier starts no string");
-        assertEquals("SELECT 1 WHERE x =7 AND y", ParameterizedSql.parse("SELECT 1 WHERE x =?AND y")
+        assertEquals("SELECT 1 WHERE x =7 AND y", Parameters.parse("SELECT 1 WHERE x =?AND y")
                 .render(new String[] {"7"}));
-        assertEquals("SELECT a 7 b", ParameterizedSql.parse("SELECT a?b").render(new String[] {"7"}));
+        assertEquals("SELECT a 7 b", Parameters.parse("SELECT a?b").render(new String[] {"7"}));
         try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setInt(1, 1);
             ps.setInt(2, 2);
@@ -461,7 +462,40 @@ class PreparedStatementTest {
     }
 
     @Test
-    void theParametersHaveOnlyACount() throws SQLException {
+    void theParametersHaveTheTypesTheEngineGivesThem() throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT i FROM t WHERE i = ? AND v LIKE ? AND dec > ? "
+                + "AND dt < CAST(? AS DATE)")) {
+            ParameterMetaData pm = ps.getParameterMetaData();
+            assertEquals(4, pm.getParameterCount());
+            List<String> types = new ArrayList<>();
+            for (int i = 1; i <= 4; i++) {
+                types.add(pm.getParameterTypeName(i) + " " + pm.getParameterType(i) + " " + pm.getPrecision(i) + " "
+                        + pm.getScale(i) + " " + pm.isSigned(i) + " " + pm.getParameterClassName(i));
+                assertEquals(ParameterMetaData.parameterModeIn, pm.getParameterMode(i));
+                assertEquals(ParameterMetaData.parameterNullableUnknown, pm.isNullable(i));
+            }
+            ResultSetMetaData md = c.createStatement().executeQuery("SELECT i, v, dec, dt FROM t").getMetaData();
+            List<String> columns = new ArrayList<>();
+            for (int i = 1; i <= 4; i++) {
+                columns.add(md.getColumnTypeName(i) + " " + md.getColumnType(i) + " " + md.getPrecision(i) + " "
+                        + md.getScale(i) + " " + md.isSigned(i) + " " + md.getColumnClassName(i));
+            }
+            assertEquals(columns, types);
+            // A value keeps the type of its setter.
+            ps.setLong(1, 3);
+            ps.setString(2, "%");
+            ps.setInt(3, -100);
+            ps.setString(4, "2100-01-01");
+            assertEquals(1, StatementTest.rows(ps.executeQuery()).size());
+            assertEquals("22023", assertThrows(SQLException.class, () -> pm.getParameterType(5)).getSQLState());
+        }
+        try (PreparedStatement ps = c.prepareStatement("EXPLAIN SELECT i FROM t WHERE i = ?")) {
+            assertEquals("INTEGER", ps.getParameterMetaData().getParameterTypeName(1));
+        }
+    }
+
+    @Test
+    void theParametersOfAQueryTheEngineCannotPrepareHaveOnlyACount() throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("SELECT ? AS a, '?' AS b, ? AS c")) {
             ParameterMetaData pm = ps.getParameterMetaData();
             assertEquals(2, pm.getParameterCount());

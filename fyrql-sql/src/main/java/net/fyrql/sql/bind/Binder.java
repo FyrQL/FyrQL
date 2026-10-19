@@ -13,11 +13,15 @@ package net.fyrql.sql.bind;
 
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.type.DataType;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.Query;
+import net.fyrql.sql.ast.SqlExpr;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -50,6 +54,8 @@ import java.util.Objects;
  * as {@code VARCHAR} if one side is text, otherwise as the common type.</li>
  * <li>{@code current_date} and {@code now()} stand for the time of the
  * binding, as a {@code DATE} and a {@code TIMESTAMP} without time zone.</li>
+ * <li>A parameter {@code ?} of a prepared query takes the type its context
+ * gives a bare {@code NULL}, see {@link #prepare}.</li>
  * </ul>
  * Every error is a {@link SqlException} with the position of the part of the
  * query it concerns. A binder holds no state between queries.
@@ -79,7 +85,70 @@ public final class Binder {
      * @throws SqlException if the query does not bind
      */
     public PlanNode bind(Query query, LocalDateTime now) {
-        BindContext context = new BindContext(functions, new HashSet<>(functions.names()), now);
-        return new QueryBinder(catalog, context).query(query);
+        return new QueryBinder(catalog, context(now, ParameterTypes.none())).query(query);
+    }
+
+    /**
+     * A query with parameters, bound.
+     *
+     * @param plan the plan, whose schema is that of the result; it is not
+     *        run, as its parameters have no values
+     * @param parameterTypes the type of each parameter, from the first
+     */
+    public record Prepared(PlanNode plan, List<DataType> parameterTypes) {
+        public Prepared {
+            Objects.requireNonNull(plan, "plan");
+            parameterTypes = List.copyOf(parameterTypes);
+        }
+    }
+
+    /**
+     * Binds a query with parameters at the current time, see
+     * {@link #prepare(Query, List, LocalDateTime)}.
+     *
+     * @throws SqlException if the query does not bind, or the type of a parameter cannot be inferred
+     */
+    public Prepared prepare(Query query, List<SqlExpr.Parameter> parameters) {
+        return prepare(query, parameters, LocalDateTime.now());
+    }
+
+    /**
+     * Binds a query with parameters. A parameter takes the type that its
+     * context gives a bare {@code NULL}: the type of the other side of a
+     * comparison or of arithmetic, of the other values of {@code IN},
+     * {@code BETWEEN}, {@code CASE} and {@code COALESCE}, {@code BOOLEAN}
+     * as a condition, the type of {@code CAST(? AS type)}, the first
+     * type that a function takes, trying {@code BIGINT}, {@code DOUBLE},
+     * {@code INTEGER}, ... and {@code VARCHAR} last. From then on it is a
+     * value of that type that is no constant. Once every parameter has its
+     * type, the query is bound once more with the types from the start,
+     * which gives the plan: so the query binds to the types it binds to
+     * with any value. A parameter that only a bare {@code NULL} would stand
+     * in for, such as {@code SELECT ?}, has no type, which is an error. A
+     * parameter in a place that needs a constant, such as {@code LIMIT}, is
+     * not supported.
+     *
+     * @param parameters the parameters of the query, the one numbered
+     *        {@code n} at index {@code n - 1}
+     * @throws SqlException if the query does not bind, or the type of a parameter cannot be inferred
+     */
+    public Prepared prepare(Query query, List<SqlExpr.Parameter> parameters, LocalDateTime now) {
+        ParameterTypes types = ParameterTypes.inferred();
+        new QueryBinder(catalog, context(now, types)).query(query);
+        List<DataType> result = new ArrayList<>();
+        for (SqlExpr.Parameter p : parameters) {
+            DataType type = types.type(p.index());
+            if (type == null) {
+                throw new SqlException("The type of parameter " + p.index() + " cannot be inferred; write CAST(? AS"
+                        + " type)", p.position());
+            }
+            result.add(type);
+        }
+        PlanNode plan = new QueryBinder(catalog, context(now, ParameterTypes.fixed(types.types()))).query(query);
+        return new Prepared(plan, result);
+    }
+
+    private BindContext context(LocalDateTime now, ParameterTypes parameters) {
+        return new BindContext(functions, new HashSet<>(functions.names()), now, parameters);
     }
 }

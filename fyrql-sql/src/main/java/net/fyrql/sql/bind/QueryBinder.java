@@ -219,12 +219,16 @@ final class QueryBinder {
     /**
      * Rejects a string, a {@code NULL} or a number that is no integer, also
      * with a minus, in {@code ORDER BY}, as DuckDB does, also inside an
-     * aggregate; booleans, dates and casts pass.
+     * aggregate; booleans, dates and casts pass. A parameter is rejected too.
      */
     static void checkOrderLiteral(SqlExpr e) {
         SqlExpr x = e;
         while (x instanceof SqlExpr.Unary u && u.op() == SqlExpr.UnaryOp.MINUS) {
             x = u.operand();
+        }
+        if (x instanceof SqlExpr.Parameter p) {
+            // Neither a position nor an expression to sort by.
+            throw new SqlException("Not supported: a parameter as a term of ORDER BY", p.position());
         }
         if (x instanceof SqlExpr.Literal l && (l.kind() == SqlExpr.LiteralKind.STRING
                 || l.kind() == SqlExpr.LiteralKind.NULL && x == e
@@ -241,6 +245,11 @@ final class QueryBinder {
     }
 
     private PlanNode limit(PlanNode plan, SqlExpr limit, SqlExpr offset) {
+        for (SqlExpr e : new SqlExpr[] {limit, offset}) {
+            if (e != null) {
+                SqlTrees.noParameter(e, "in LIMIT or OFFSET");
+            }
+        }
         long count = limit == null ? Long.MAX_VALUE : constantCount(limit, Long.MAX_VALUE);
         long skip = offset == null ? 0 : constantCount(offset, 0);
         return count == Long.MAX_VALUE && skip == 0 ? plan : new PlanNode.Limit(plan, count, skip);
@@ -251,6 +260,7 @@ final class QueryBinder {
      * {@code VARCHAR}, evaluated now; {@code null} for {@code NULL}.
      */
     private String separator(SqlExpr e, DataType argument) {
+        SqlTrees.noParameter(e, "as the separator of string_agg");
         ExpressionBinder.Bound separator;
         try {
             separator = new ExpressionBinder(context, Scope.none(), Map.of(),
@@ -444,10 +454,12 @@ final class QueryBinder {
                         "The arguments of a table function cannot contain aggregates", null);
                 List<Object> arguments = new ArrayList<>();
                 for (SqlExpr a : f.arguments()) {
+                    SqlTrees.noParameter(a, "as an argument of a table function");
                     arguments.add(Literals.evaluate(binder.bind(a), a.position()));
                 }
                 Map<String, Object> named = new LinkedHashMap<>();
                 for (Map.Entry<String, SqlExpr> a : f.namedArguments().entrySet()) {
+                    SqlTrees.noParameter(a.getValue(), "as an argument of a table function");
                     named.put(SqlTrees.key(a.getKey()), Literals.evaluate(binder.bind(a.getValue()),
                             a.getValue().position()));
                 }
@@ -1620,10 +1632,11 @@ final class QueryBinder {
                 ExpressionBinder.Bound b = arguments.bound(a);
                 Expression e;
                 if (function == PlanNode.WindowFunction.NTILE || i == 1) {
-                    e = as(b, b.type().isIntegral() && b.type() != DataType.HUGEINT && !b.isNull() ? b.type()
-                            : DataType.BIGINT, function, a);
+                    DataType count = b.type().isIntegral() && b.type() != DataType.HUGEINT && !b.isNull() ? b.type()
+                            : DataType.BIGINT;
+                    e = as(arguments, b, count, function, a);
                 } else if (i == 2) {
-                    e = as(b, value, function, a);
+                    e = as(arguments, b, value, function, a);
                 } else {
                     e = b.expression();
                     value = e.type();
@@ -1633,11 +1646,11 @@ final class QueryBinder {
             return columns;
         }
 
-        /** An argument as a value of a type, cast if it has another. */
-        private static Expression as(ExpressionBinder.Bound b, DataType type, PlanNode.WindowFunction function,
-                SqlExpr a) {
+        /** An argument as a value of a type, cast if it has another; a parameter takes the type. */
+        private static Expression as(ExpressionBinder binder, ExpressionBinder.Bound b, DataType type,
+                PlanNode.WindowFunction function, SqlExpr a) {
             if (b.isNull()) {
-                return new Expression.Literal(type, null);
+                return binder.typed(b, type).expression();
             }
             if (b.type().equals(type)) {
                 return b.expression();
@@ -1694,6 +1707,7 @@ final class QueryBinder {
             if (SqlTrees.containsNameOutsideAggregates(x)) {
                 throw new SqlException("Not supported: a frame offset that is not a constant", x.position());
             }
+            SqlTrees.noParameter(x, "as the offset of a frame");
             ExpressionBinder.Bound v = new ExpressionBinder(context, Scope.none(), Map.of(),
                     "Frame offsets cannot contain aggregates", null).bound(x);
             if (v.isNull()) {
@@ -2021,6 +2035,9 @@ final class QueryBinder {
             }
         } else if (groupBy != null) {
             for (SqlExpr g : groupBy.expressions()) {
+                if (g instanceof SqlExpr.Parameter p) {
+                    throw new SqlException("Not supported: a parameter as a term of GROUP BY", p.position());
+                }
                 long position = SqlTrees.signedPosition(g);
                 if (position != Long.MIN_VALUE) {
                     if (position < 1 || position > items.size()) {

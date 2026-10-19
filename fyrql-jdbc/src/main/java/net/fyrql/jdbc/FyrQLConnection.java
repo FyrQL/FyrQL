@@ -16,6 +16,7 @@ import net.fyrql.catalog.SearchPath;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.exec.QueryContext;
+import net.fyrql.sql.SqlException;
 
 import java.sql.Array;
 import java.sql.Blob;
@@ -151,6 +152,27 @@ final class FyrQLConnection implements Connection {
         try {
             checkOpen();
             return EXPLAIN.matcher(sql).matches() ? PLAN : engine.plan(sql, searchPath).schema();
+        } catch (RuntimeException e) {
+            throw SqlStates.map(e);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Prepares a query with parameters without running it and returns the
+     * types of its parameters, or {@code null} if the engine cannot prepare
+     * it, e.g. for {@code SELECT ?}; for {@code EXPLAIN} and a query, those
+     * of the query.
+     */
+    List<DataType> parameterTypes(String sql) throws SQLException {
+        lock.lock();
+        try {
+            checkOpen();
+            Matcher m = EXPLAIN.matcher(sql);
+            return engine.prepare(m.matches() ? m.group(1) : sql, searchPath).parameterTypes();
+        } catch (SqlException e) {
+            return null;
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
         } finally {

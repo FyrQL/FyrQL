@@ -332,6 +332,7 @@ public final class SqlPrinter {
                     case TIMESTAMP -> b.append("TIMESTAMP ").append(string(l.text()));
                 }
             }
+            case SqlExpr.Parameter p -> b.append('?');
             case SqlExpr.Identifier id -> qualified(b, id.parts());
             case SqlExpr.Binary x -> {
                 b.append('(');

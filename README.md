@@ -24,10 +24,14 @@ warehouse first.
   six-core laptop in about 17 s together, where DuckDB takes about 7 s over the same files
   (see [Building](#building)).
 - **Embedded.** The engine runs inside the process of the application and is set up with
-  a builder or a YAML file; there is no server, cluster or installation. A JDBC driver,
-  also as one JAR, opens it to tools such as DBeaver.
+  a builder or a YAML file; there is no cluster or installation. A JDBC driver, also as
+  one JAR, opens it to tools such as DBeaver.
+- **Arrow.** Results come as vectors of Apache Arrow, in the process or from a Flight SQL
+  server in one executable JAR, which Python reads through ADBC into pyarrow and pandas,
+  and other clients of Flight SQL alike.
 - **Pure Java.** No JNI, no native libraries, no Hadoop: Parquet is read with codecs in
-  pure Java, and code generation uses Janino. The same JARs run wherever Java 21 runs,
+  pure Java, code generation uses Janino, and Arrow allocates its memory without Netty
+  or native code. The same JARs run wherever Java 21 runs,
   also in containers and application servers that do not allow native code.
 - **Simple to use.** A source is a few lines of a builder or of a YAML file; queries are
   written in the SQL of DuckDB, which many know already; `explain` shows the plan that
@@ -98,6 +102,18 @@ on several threads when its source has several parts; see
 `engine.rows(sql)` all rows at once. A query
 that does not parse or bind throws an `SqlException` with the position in the text, for
 example `Referenced column "x" not found in FROM clause! at line 1, column 33`.
+
+A query with parameters `?` is prepared once and run with values: `engine.prepare(sql)`
+parses and binds it, without running it, into a `PreparedQuery` with the columns of the
+result and the types of the parameters, and `engine.execute(prepared, values)` or
+`engine.rows(prepared, values)` runs it with a literal of each value in place of its
+parameter. A parameter takes the type that a bare `NULL` takes in its place: that of the
+other side of a comparison or of arithmetic, of the other values of `IN`, `BETWEEN`,
+`CASE` and `COALESCE`, `BOOLEAN` as a condition, and that of `CAST(? AS type)`; as an
+argument of a function, the first type the function takes of `BIGINT`, `DOUBLE`,
+`INTEGER` and so on, `VARCHAR` last. A parameter without such a context, as in
+`SELECT ?`, is an error that asks for `CAST(? AS type)`, as is one where a constant is
+needed, such as in `LIMIT`, and one of a type with a `MAP`, which has no literal.
 
 Plans can also be built in Java from the nodes of `PlanNode`, starting with
 `engine.scan(TableRef.of("mem", "orders"))`, and run with `engine.execute(plan)`.
@@ -459,6 +475,8 @@ builder: `defaultSource`, `defaultSchema`, `batchSize`, `memoryBudget` (such as 
 `preserveOrder` (see [Parallel execution](#parallel-execution)). A file whose
 name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` returns the builder
 instead, so that an application can add sources of its own, such as tables in memory.
+A third section, `server`, holds the settings of the [Flight SQL server](#flight-sql-server),
+which the engine leaves aside.
 
 A source of the type `odata` names one service with `url`, whose schema is `main`, or
 several under `services`, each with its `url` and, if need be, `version` (`v2` or `v4`,
@@ -563,7 +581,10 @@ schemas, tables and columns, with the number of rows of a table, or an estimate,
 A statement runs one query: a `SELECT`, `WITH`, `VALUES` or set operation, or `EXPLAIN`
 followed by a query, which gives the plan as rows of one column `plan`. The parameters
 `?` of a `PreparedStatement` go into the text as literals of the values they are set to,
-before the text is parsed; a parameter of a `MAP` type is not supported. A query runs
+before the text is parsed; a parameter of a `MAP` type is not supported.
+`getParameterMetaData` gives the types the engine infers for the parameters (see
+[Using the engine](#using-the-engine)), and `OTHER` where it infers none, as in
+`SELECT ?` or `LIMIT ?`, which the driver still runs with the literal of the value. A query runs
 until its first rows while it is executed, as in the drivers of databases, and the rest
 while its result set is read. `cancel()` and a timeout from `setQueryTimeout` stop a
 running query, also one that waits for a database, with the SQLState `57014` or `HYT00`. The queries of one connection run one at a time. An
@@ -623,6 +644,204 @@ A connection with that driver then asks for the configuration file. DBeaver open
 connections to a database, for the metadata and for each editor, and each of them builds
 an engine; switching off the separate connections in the settings of the connection
 keeps it at one.
+
+## Arrow
+
+The module `fyrql-arrow` gives the results of an engine as vectors of
+[Apache Arrow](https://arrow.apache.org) 19, for libraries that take Arrow, and reads
+Arrow vectors as batches of FyrQL. A query runs as an `ArrowReader` of Arrow, which
+fills one `VectorSchemaRoot` with each batch of the result:
+
+```java
+try (BufferAllocator allocator = new RootAllocator();
+        FyrQLArrowReader reader = ArrowResults.reader(engine, "SELECT * FROM orders", allocator)) {
+    VectorSchemaRoot root = reader.getVectorSchemaRoot();
+    while (reader.loadNextBatch()) {
+        System.out.println(root.getRowCount() + " rows");
+    }
+}
+```
+
+`ArrowResults.reader` also takes a search path, a prepared query with its values, or a
+`QueryResult` that is already running; `cancel()` stops the query, and closing the reader
+closes the result. `BatchToArrow` writes a single batch into a root, and `ArrowToBatch`
+reads a root as a batch. The values are copied, since the vectors of FyrQL live on the
+heap and those of Arrow outside of it, in memory of `arrow-memory-unsafe`, without Netty
+or native code. Arrow needs the JVM option `--add-opens=java.base/java.nio=ALL-UNNAMED`,
+or `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED` on the module
+path.
+
+The types map as follows:
+
+| FyrQL | Arrow |
+| --- | --- |
+| `BOOLEAN` | `Bool` |
+| `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT` | `Int` of 8, 16, 32 and 64 bits, signed |
+| `HUGEINT` | `Decimal128(38, 0)`, marked with the field metadata `fyrql.type=HUGEINT` |
+| `FLOAT`, `DOUBLE` | `FloatingPoint(SINGLE)`, `FloatingPoint(DOUBLE)` |
+| `DECIMAL(p,s)` | `Decimal128(p, s)` |
+| `VARCHAR`, `BLOB` | `Utf8`, `Binary` |
+| `DATE` | `Date(DAY)` |
+| `TIMESTAMP` | `Timestamp(MICROSECOND)` without a time zone |
+| `UUID` | the extension type `arrow.uuid` over `FixedSizeBinary(16)` |
+| `T[]` | `List` with the element `item` |
+| `STRUCT(...)` | `Struct` |
+| `MAP(K, V)` | `Map` with the entries `key` and `value` |
+
+A `HUGEINT` of 39 digits does not fit and fails with an error that names the column.
+Read back from Arrow, the same types give the same values, and besides them: unsigned
+integers as the next larger type with a sign, up to `HUGEINT` for a `UInt64`; `Null` as
+`INTEGER`, `Float16` as `FLOAT`, `Decimal256` up to precision 38; `LargeUtf8`,
+`LargeBinary`, `Utf8View` and `BinaryView`, and any other `FixedSizeBinary` as `BLOB`;
+`Date(MILLISECOND)`; a `Timestamp` without a time zone in seconds, milliseconds or
+nanoseconds, cut to microseconds; `FixedSizeList` as a list; an extension type FyrQL
+does not know as its storage type; and a column encoded with a dictionary as its values.
+A time zone, `Time`, `Interval`, `Duration`, `Union`, `LargeList`, list views,
+`RunEndEncoded` and a dictionary inside a nested type are an error that names the field.
+
+## Flight SQL server
+
+The module `fyrql-flight-sql` is an
+[Arrow Flight SQL](https://arrow.apache.org/docs/format/FlightSql.html) server for an
+engine, through which clients in other languages query it over gRPC and receive the
+results as Arrow vectors, such as Python with the Flight SQL driver of
+[ADBC](https://arrow.apache.org/adbc/), and JDBC tools with the Flight SQL JDBC driver of
+Arrow. The JAR of `fyrql-flight-sql-all` holds the server with the engine, code
+generation and all connectors, and starts it from a configuration file. This builds it as
+`fyrql-flight-sql-all/target/fyrql-flight-sql-all-<version>.jar`:
+
+```
+./mvnw -B -ntp clean package -pl fyrql-flight-sql-all -am -DskipTests
+```
+
+and this starts it:
+
+```
+java -jar fyrql-flight-sql-all-<version>.jar fyrql.yaml [--host HOST] [--port PORT]
+```
+
+The sources and the section `engine` of the file build the engine, as for the
+[configuration file](#configuration-file), and its section `server` holds the settings
+of the server, all of them optional; `--host` and `--port` win over those of the file:
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 32010
+  tls:
+    certificate: server.pem
+    key: server.key
+  users:
+    alice: ${env:ALICE_PASSWORD}
+  token: ${env:FYRQL_TOKEN}
+  handleTimeout: 10m
+  maxQueries: 16
+```
+
+- `host` and `port`: where the server listens, by default `127.0.0.1` and 32010; port 0
+  takes a free one.
+- `users`: names with their passwords. A client signs in with a name and a password and
+  goes on with the bearer token the server gives it.
+- `token`: a bearer token that every client may send in the header `Authorization`.
+  Without `users` and `token`, the server takes every client, and must then listen on a
+  loopback address: another host without them is an error at the start.
+- `tls.certificate` and `tls.key`: the certificate chain and its private key as PEM, the
+  key in PKCS #8. TLS comes from the JDK, without native code; client certificates are
+  not supported.
+- `handleTimeout`: how long a statement or a prepared statement stays without use until
+  the server forgets it, by default 10 minutes.
+- `maxQueries`: the most queries that run at once, by default twice the threads of the
+  engine; another one fails with `RESOURCE_EXHAUSTED`.
+
+The server prints the line `FyrQL Flight SQL server <version> listening on
+grpc+tcp://127.0.0.1:32010`, or with `grpc+tls`, and runs until the JVM ends, as with
+Ctrl+C, and then closes the engine. It logs the warnings and errors of Arrow and gRPC to
+the standard error stream. The JAR has the same libraries renamed as the one of the
+[JDBC driver](#dbeaver), and Arrow, gRPC, Netty and protobuf in their own packages; its
+manifest sets the option of Arrow. The JDBC drivers of databases are not in it: for
+sources of the type `jdbc`, they go on the class path next to it, and the server then
+starts with its class name and that option (with `;` between the entries of the class
+path on Windows):
+
+```
+java --add-opens=java.base/java.nio=ALL-UNNAMED -cp "fyrql-flight-sql-all-<version>.jar:drivers/*" net.fyrql.flight.FlightSqlServerMain fyrql.yaml
+```
+
+An application starts the server over an engine of its own with
+`FlightSqlServer.builder(engine).config(ServerConfig.defaults()).build().start()`, and
+`ServerConfig.of(config)` reads the section `server` of a configuration file; closing the
+server leaves the engine open.
+
+The server runs queries as the JDBC driver does: a `SELECT`, `WITH`, `VALUES` or set
+operation, or `EXPLAIN` followed by a query, which gives the plan as rows of one column
+`plan`. A query is bound when the client asks for it, and its batches go out as the
+engine gives them, as fast as the client takes them; a client that cancels the query, or
+closes its stream before the end, stops it. A prepared statement tells the types of its
+parameters as their schema and takes one row of values. The calls for metadata give the
+sources as catalogs with their schemas, tables and columns, the table type `TABLE`, the
+name `FyrQL` and the version of the server, and the types. An error has the message of
+FyrQL, with the position in the text, and the status `INVALID_ARGUMENT` for a query that
+does not parse or bind, values out of range and a failed cast, `RESOURCE_EXHAUSTED` for
+the memory budget and `maxQueries`, `CANCELLED` for a cancelled query, and `INTERNAL` for
+an error of a source. Statements that write fail with `UNIMPLEMENTED`, and there are no
+transactions. All clients share the engine, with its threads and its memory budget.
+
+### Python
+
+With Python 3.10 or later, `pip install adbc-driver-flightsql pyarrow pandas` installs a
+client. With the files of the [JDBC example](#jdbc-driver), and the server started on
+`fyrql.yaml` without the section `server`, this runs the query of that example:
+
+```python
+import adbc_driver_flightsql.dbapi as flight_sql
+
+with flight_sql.connect("grpc://127.0.0.1:32010", autocommit=True) as conn, conn.cursor() as cur:
+    cur.execute("""
+        SELECT c.region, count(*) AS orders, sum(o.amount) AS revenue
+        FROM orders AS o JOIN customers AS c ON o.customer = c.id
+        WHERE o.amount > ?
+        GROUP BY ALL
+        ORDER BY revenue DESC""", parameters=(6.0,))
+    table = cur.fetch_arrow_table()
+    print(table.to_pandas())
+```
+
+```
+  region  orders  revenue
+0  south       1     20.0
+1  north       1     10.5
+```
+
+`autocommit=True` spares the warning of ADBC that it cannot turn auto-commit off, as the
+server has no transactions. `fetch_arrow_table()` gives a `pyarrow.Table` in the types of
+[Arrow](#arrow), with the
+type of FyrQL of each column in the field metadata `ARROW:FLIGHT:SQL:TYPE_NAME`; a
+`HUGEINT` comes as `decimal128(38, 0)`, a `TIMESTAMP` as `timestamp[us]`, a `UUID` as
+the extension type `arrow.uuid`, whose values pyarrow gives as `uuid.UUID`, and lists,
+structs and maps as those of pyarrow. With `users`, the client
+signs in with `db_kwargs={"username": "alice", "password": ...}`; with `token`, with
+`db_kwargs={adbc_driver_flightsql.DatabaseOptions.AUTHORIZATION_HEADER.value: "Bearer " + token}`.
+With TLS, the URI starts with `grpc+tls://`, and a certificate that no known authority
+signed is trusted with `adbc_driver_flightsql.DatabaseOptions.TLS_ROOT_CERTS.value` and
+its text as PEM. `adbc_get_objects()`, `adbc_get_table_schema()` and `adbc_get_info()`
+give the metadata. A parameter alone in the select list needs a cast, as in
+`SELECT CAST(? AS DATE)`, and `executemany` fails, since ADBC sends it as a statement
+that writes; `execute` runs a query with one row of values at a time. This was tried
+with pyarrow 26.0.0 and `adbc-driver-flightsql` 1.12.0.
+
+### JDBC tools
+
+The Flight SQL JDBC driver of Arrow (`org.apache.arrow:flight-sql-jdbc-driver`, one JAR)
+connects with a URL such as
+
+```
+jdbc:arrow-flight-sql://localhost:32010/?useEncryption=false&user=alice&password=secret
+```
+
+and the tests run the 22 TPC-H queries through it. It names the type of a column after
+its Arrow type, so that `DECIMAL(p,s)` and `HUGEINT` are both `DECIMAL`, returned as
+`BigDecimal`, and a `DATE` is a `java.sql.Date`; the types of FyrQL are in the type
+names of `getColumns` of its `DatabaseMetaData`.
 
 ## Code generation
 
@@ -955,6 +1174,10 @@ DuckDB 1.5.6.
 - Expressions: arithmetic with `+ - * / % //`, comparisons, `AND`, `OR`, `NOT`, `BETWEEN`,
   `IN (...)`, `LIKE`, `ILIKE`, `IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`, `CASE`, `CAST`,
   `TRY_CAST`, `::`, `||`, `EXTRACT(... FROM ...)`.
+- Parameters `?` in prepared queries, through `engine.prepare`, a `PreparedStatement` of
+  the JDBC driver or a prepared statement of the Flight SQL server, typed by their
+  context (see [Using the engine](#using-the-engine)); named parameters such as `:name`
+  are not taken.
 - Types: `BOOLEAN`, `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `HUGEINT`, `FLOAT`,
   `DOUBLE`, `DECIMAL(p,s)`, `VARCHAR`, `DATE`, `TIMESTAMP`, and nested to any depth
   `T[]`, `STRUCT(name T, ...)` and `MAP(K, V)`. Literals are typed as in DuckDB, and a
@@ -1135,6 +1358,10 @@ Known differences from DuckDB:
 - DuckDB 1.5.6 takes rows into a frame whose start lies after its end when the frame has
   an `EXCLUDE`, as in `GROUPS BETWEEN 0 PRECEDING AND 3 PRECEDING EXCLUDE TIES`, where it
   takes earlier groups; FyrQL keeps such a frame empty.
+- A parameter `?` gets its type from its context when the query is prepared, as a bare
+  `NULL` would; as the argument of a function, that is the first type the function takes
+  of `BIGINT`, `DOUBLE`, `INTEGER` and so on, where DuckDB may choose another, and alone
+  in the select list it has none and needs a cast.
 
 ## Modules
 
@@ -1157,8 +1384,11 @@ Known differences from DuckDB:
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application; read only |
 | `fyrql-jdbc-all` | the JDBC driver with the engine, code generation and all connectors in one JAR, for tools such as DBeaver; the drivers of the databases are not in it |
+| `fyrql-arrow` | results as Apache Arrow vectors through an `ArrowReader`, and Arrow vectors as batches |
+| `fyrql-flight-sql` | an Arrow Flight SQL server for an engine, read only |
+| `fyrql-flight-sql-all` | the Flight SQL server with the engine, code generation and all connectors in one executable JAR; the drivers of the databases are not in it |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
-| `fyrql-bench` | JMH benchmarks of the interpreter against compiled code, of the operators on one and on several threads, and of the scans of CSV and Parquet files; not published |
+| `fyrql-bench` | JMH benchmarks of the interpreter against compiled code, of the operators on one and on several threads, of the scans of CSV and Parquet files, and of the conversion to and from Arrow; not published |
 
 ## Building
 
@@ -1277,6 +1507,23 @@ in the interpreter and 41.4 s compiled; with `lineitem` as a CSV file, 79.4 s, 7
 aggregations kept their values in primitive arrays and pipelines were compiled, the
 interpreter took 287 s. Q15, Q17 and Q18 read `lineitem` twice, once for the subquery,
 and Q21 three times.
+
+The profile `tpch` also measures how rows leave the engine: `ArrowTransferScale1Test`
+reads all 16 columns of the 6,001,215 rows of `lineitem` at scale factor 1, 953 MB as
+Arrow vectors, from one engine on all threads, in four ways in turn, and writes the
+fastest run of each into `fyrql-test/target/arrow-report.md`:
+
+```
+./mvnw -B -ntp verify -P tpch -Dtest=ArrowTransferScale1Test -Dsurefire.failIfNoSpecifiedTests=false -Dfyrql.tpch.runs=5
+```
+
+On the same laptop, with version 0.6.5, they took 0.99 s as the batches of the engine,
+1.17 s through an `ArrowReader`, 2.69 s through the Flight SQL server on localhost, read
+with the `FlightSqlClient` of Arrow Java, and 4.67 s through the JDBC driver with
+`getObject` for every value. `ArrowBenchmark` in `fyrql-bench` converts four million rows
+on one thread: into Arrow in 40 ms with four columns of fixed width, in 116 ms with nine
+columns of which three are strings, and in 102 ms with a list and a struct; back from
+Arrow in 80, 344 and 467 ms.
 
 ## License
 

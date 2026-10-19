@@ -34,16 +34,16 @@ import java.util.UUID;
  * second row is {@code NULL} in every column, the third has empty lists and
  * maps and a struct of {@code NULL}s.
  */
-final class AllTypesTable {
+public final class AllTypesTable {
 
-    static final DataType.Struct AB = DataType.struct(new DataType.Struct.Field("a", DataType.INTEGER),
+    public static final DataType.Struct AB = DataType.struct(new DataType.Struct.Field("a", DataType.INTEGER),
             new DataType.Struct.Field("b", DataType.VARCHAR));
-    static final DataType.Struct XYZ = DataType.struct(new DataType.Struct.Field("x", DataType.INTEGER),
+    public static final DataType.Struct XYZ = DataType.struct(new DataType.Struct.Field("x", DataType.INTEGER),
             new DataType.Struct.Field("y", DataType.VARCHAR),
             new DataType.Struct.Field("z", DataType.listOf(DataType.DATE)));
-    static final DataType.Struct X = DataType.struct(new DataType.Struct.Field("x", DataType.DATE));
+    public static final DataType.Struct X = DataType.struct(new DataType.Struct.Field("x", DataType.DATE));
 
-    static final Schema SCHEMA = Schema.of(
+    public static final Schema SCHEMA = Schema.of(
             field("b", DataType.BOOLEAN),
             field("ti", DataType.TINYINT),
             field("si", DataType.SMALLINT),
@@ -66,7 +66,7 @@ final class AllTypesTable {
             field("m", DataType.mapOf(DataType.VARCHAR, X)),
             field("ll", DataType.listOf(DataType.listOf(DataType.INTEGER))));
 
-    static final List<Object[]> ROWS = List.of(
+    public static final List<Object[]> ROWS = List.of(
             new Object[] {true, (byte) 1, (short) 2, 3, 4L, new BigInteger("170141183460469231731687303715884105727"),
                     1.5f, 2.5, new BigDecimal("1234567890123456789012345678.0123456789"), "abc",
                     new byte[] {(byte) 0xAA, 0}, day("2024-02-29"), micros("2024-02-29T12:34:56.123456"),
@@ -87,7 +87,7 @@ final class AllTypesTable {
     }
 
     /** Returns a source of the name with the table {@code t}. */
-    static MemoryConnector connector(String name) {
+    public static MemoryConnector connector(String name) {
         return MemoryConnector.builder(name).table("t", SCHEMA, ROWS).build();
     }
 

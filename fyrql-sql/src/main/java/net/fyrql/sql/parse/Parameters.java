@@ -9,32 +9,38 @@
  * defined by the Mozilla Public License, v. 2.0.
  */
 
-package net.fyrql.jdbc;
+package net.fyrql.sql.parse;
 
-import java.sql.SQLException;
+import net.fyrql.core.type.DataType;
+import net.fyrql.core.type.Values;
+import net.fyrql.sql.render.DuckDbDialect;
+
 import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * A query text with {@code ?} for its parameters. A {@code ?} is a
  * parameter unless it is inside a string {@code '...'}, a quoted identifier
  * {@code "..."}, a line comment from {@code --}, a block comment or a
  * string {@code $$...$$}; the text is split the way the parser of FyrQL
- * reads it. {@link #render} puts the literals of the values in place of
- * the parameters.
+ * reads it, so that the parameters are those
+ * {@link SqlParser#parseWithParameters} numbers, in the same order.
+ * {@link #render} puts literals in place of the parameters.
  */
-final class ParameterizedSql {
+public final class Parameters {
 
     private final String sql;
     /** The offsets of the parameters in the text. */
     private final int[] positions;
 
-    private ParameterizedSql(String sql, int[] positions) {
+    private Parameters(String sql, int[] positions) {
         this.sql = sql;
         this.positions = positions;
     }
 
     /** Finds the parameters of a query text. */
-    static ParameterizedSql parse(String sql) {
+    public static Parameters parse(String sql) {
+        Objects.requireNonNull(sql, "sql");
         int[] positions = new int[8];
         int count = 0;
         int n = sql.length();
@@ -67,7 +73,7 @@ final class ParameterizedSql {
                 i++;
             }
         }
-        return new ParameterizedSql(sql, Arrays.copyOf(positions, count));
+        return new Parameters(sql, Arrays.copyOf(positions, count));
     }
 
     /** Returns the end of a quoted string or identifier; a doubled quote stays inside. */
@@ -101,12 +107,12 @@ final class ParameterizedSql {
     }
 
     /** Returns the query text as it was given. */
-    String sql() {
+    public String sql() {
         return sql;
     }
 
     /** Returns the number of parameters. */
-    int count() {
+    public int count() {
         return positions.length;
     }
 
@@ -116,15 +122,20 @@ final class ParameterizedSql {
      * {@code ?AND} does not run into one word.
      *
      * @param literals the literal of every parameter, from the first
-     * @throws SQLException {@code 07001} if a parameter has no value
+     * @throws IllegalArgumentException if the number of literals differs
+     *         from that of the parameters, or a literal is {@code null}
      */
-    String render(String[] literals) throws SQLException {
+    public String render(String[] literals) {
+        if (literals.length != positions.length) {
+            throw new IllegalArgumentException("The query has " + positions.length + " parameters, not "
+                    + literals.length);
+        }
         StringBuilder b = new StringBuilder(sql.length() + 16 * positions.length);
         int from = 0;
         for (int i = 0; i < positions.length; i++) {
             String literal = literals[i];
             if (literal == null) {
-                throw new SQLException("No value is set for parameter " + (i + 1), SqlStates.PARAMETER_NOT_SET);
+                throw new IllegalArgumentException("No value is set for parameter " + (i + 1));
             }
             int p = positions[i];
             b.append(sql, from, p);
@@ -138,5 +149,37 @@ final class ParameterizedSql {
             from = p + 1;
         }
         return b.append(sql, from, sql.length()).toString();
+    }
+
+    /**
+     * Returns the literal of a value that the binder takes as a value of
+     * exactly its type, as it takes a parameter of that type: a cast, a
+     * {@code DATE '...'}, a {@code TIMESTAMP '...'} or {@code TRUE} and
+     * {@code FALSE}, never a bare string, number or {@code NULL}, whose
+     * types adapt to their context.
+     *
+     * @param value the value as {@link Values} holds it, or {@code null}
+     * @throws IllegalArgumentException if the value is none of the type, or
+     *         the type has a {@code MAP} in it: the parser of FyrQL reads
+     *         no cast to a map type, so there is no literal of one
+     */
+    public static String literal(Object value, DataType type) {
+        if (hasMap(type)) {
+            throw new IllegalArgumentException("There is no literal of the type " + type.sqlName()
+                    + ": FyrQL parses no cast to a MAP");
+        }
+        Values.require(type, value);
+        String literal = DuckDbDialect.INSTANCE.literal(value, type);
+        return value != null && type == DataType.VARCHAR ? "CAST(" + literal + " AS VARCHAR)" : literal;
+    }
+
+    /** Tells whether a type is a {@code MAP} or has one in it. */
+    public static boolean hasMap(DataType type) {
+        return switch (type) {
+            case DataType.MapType m -> true;
+            case DataType.ListType l -> hasMap(l.element());
+            case DataType.Struct s -> s.fields().stream().anyMatch(f -> hasMap(f.type()));
+            default -> false;
+        };
     }
 }

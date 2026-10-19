@@ -17,12 +17,12 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.6.0</version>
+		<version>0.6.5</version>
 	</parent>
 
 	<artifactId>fyrql-bench</artifactId>
 	<name>FyrQL benchmarks</name>
-	<description>JMH benchmarks of the interpreter against compiled code and of the CSV and Parquet scans; never published.</description>
+	<description>JMH benchmarks of the interpreter against compiled code, of the CSV and Parquet scans and of the conversion to and from Arrow; never published.</description>
 
 	<properties>
 		<fyrql.module.name>net.fyrql.bench</fyrql.module.name>
@@ -53,6 +53,10 @@
 					<artifactId>*</artifactId>
 				</exclusion>
 			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-arrow</artifactId>
 		</dependency>
 		<!-- Writes the Parquet file of ParquetScanBenchmark, as it writes the files of the TPC-H tests. -->
 		<dependency>

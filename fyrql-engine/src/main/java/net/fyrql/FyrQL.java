@@ -24,6 +24,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
+import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.Codegen;
@@ -37,7 +38,9 @@ import net.fyrql.exec.TableSource;
 import net.fyrql.optimizer.Optimizer;
 import net.fyrql.exec.spi.CodegenStatistics;
 import net.fyrql.sql.SqlException;
+import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.bind.Binder;
+import net.fyrql.sql.parse.Parameters;
 import net.fyrql.sql.parse.SqlParser;
 
 import java.util.ArrayList;
@@ -55,7 +58,9 @@ import java.util.Objects;
  * resolves names along the search path of the builder, or along one given
  * with a query, see {@link #plan(String, SearchPath)}, and binds table
  * functions such as {@code read_csv}; the scalar functions come from the
- * {@link FunctionRegistry} of the builder. With the module
+ * {@link FunctionRegistry} of the builder. A query with parameters
+ * {@code ?} is prepared once with {@link #prepare(String)} and run with
+ * values for them with {@link #execute(PreparedQuery, List)}. With the module
  * {@code fyrql-codegen} on the class path, the engine compiles the
  * expressions, filters and keys of operators that process many rows; see
  * {@link Builder#codegen}.
@@ -229,8 +234,152 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public PlanNode plan(String sql, SearchPath searchPath) {
+        return binder(searchPath).bind(SqlParser.parse(sql));
+    }
+
+    private Binder binder(SearchPath searchPath) {
         EngineCatalog c = catalog.withSearchPath(searchPath);
-        return (c == catalog ? binder : new Binder(c, functions)).bind(SqlParser.parse(sql));
+        return c == catalog ? binder : new Binder(c, functions);
+    }
+
+    /**
+     * Parses and binds a query with parameters {@code ?}, without running
+     * it: the types of the parameters and the columns of the result. A
+     * parameter takes the type that its context gives a bare {@code NULL}:
+     * the type of the other side of a comparison or of arithmetic, of the
+     * other values of {@code IN}, {@code BETWEEN}, {@code CASE} and
+     * {@code COALESCE}, {@code BOOLEAN} as a condition, the type of
+     * {@code CAST(? AS type)}, and as an argument of a function the first
+     * type it takes of {@code BIGINT}, {@code DOUBLE}, {@code INTEGER} and
+     * so on, {@code VARCHAR} last. A parameter without such a context, as
+     * in {@code SELECT ?}, is an error, as is a parameter where a constant
+     * is needed, such as in {@code LIMIT}, or one of a type with a
+     * {@code MAP}, which has no literal.
+     *
+     * @throws SqlException if the query cannot be parsed or bound, or a
+     *         parameter has no type or one with a {@code MAP}
+     */
+    public PreparedQuery prepare(String sql) {
+        return prepare(sql, catalog.searchPath());
+    }
+
+    /**
+     * Prepares a query, see {@link #prepare(String)}, with names looked up
+     * along a search path, see {@link #plan(String, SearchPath)}.
+     *
+     * @throws SqlException             if the query cannot be parsed or bound, or a parameter has no type
+     *                                  or one with a {@code MAP}
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public PreparedQuery prepare(String sql, SearchPath searchPath) {
+        SqlParser.Parameterized parsed = SqlParser.parseWithParameters(sql);
+        Binder.Prepared bound = binder(searchPath).prepare(parsed.query(), parsed.parameters());
+        List<DataType> types = bound.parameterTypes();
+        for (int i = 0; i < types.size(); i++) {
+            if (Parameters.hasMap(types.get(i))) {
+                SqlExpr.Parameter p = parsed.parameters().get(i);
+                throw new SqlException("Not supported: parameter " + p.index() + " of the type "
+                        + types.get(i).sqlName() + ", which has no literal; cast it from a type without a MAP",
+                        p.position());
+            }
+        }
+        return new PreparedQuery(sql, searchPath, bound.plan().schema(), types);
+    }
+
+    /**
+     * Binds a prepared query with values for its parameters: the query
+     * text with a literal of each value in place of its parameter, typed
+     * as the parameter, bound anew. The result has the columns of the
+     * prepared query, also where a {@code NULL} would make a column a bare
+     * {@code NULL} of another type.
+     *
+     * @param values one value per parameter, a Java value of its type as
+     *        {@link QueryResult#rows()} gives them, {@code null} for {@code NULL}
+     * @throws IllegalArgumentException if the number of values differs from
+     *         that of the parameters, or a value is none of its type
+     * @throws SqlException if the query does not bind any more, e.g. after
+     *         a change of a source
+     */
+    public PlanNode plan(PreparedQuery query, List<?> values) {
+        List<DataType> types = query.parameterTypes();
+        if (values.size() != types.size()) {
+            throw new IllegalArgumentException("The query has " + types.size() + " parameters, not " + values.size()
+                    + " values");
+        }
+        String[] literals = new String[types.size()];
+        for (int i = 0; i < literals.length; i++) {
+            try {
+                literals[i] = Parameters.literal(values.get(i), types.get(i));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Parameter " + (i + 1) + ": " + e.getMessage(), e);
+            }
+        }
+        Parameters text = Parameters.parse(query.sql());
+        PlanNode plan = plan(text.render(literals), query.searchPath());
+        return conform(plan, query.schema());
+    }
+
+    /**
+     * Gives the plan of a prepared query with values the names and types of
+     * the columns of the prepared query. The types differ only where a
+     * {@code NULL} folds an expression into a bare {@code NULL}, typed
+     * {@code INTEGER}.
+     */
+    private static PlanNode conform(PlanNode plan, Schema schema) {
+        Schema actual = plan.schema();
+        if (actual.size() != schema.size()) {
+            throw new IllegalStateException("The query has the columns " + actual + ", not " + schema);
+        }
+        boolean same = true;
+        for (int i = 0; i < schema.size() && same; i++) {
+            same = actual.name(i).equals(schema.name(i)) && actual.type(i).equals(schema.type(i));
+        }
+        if (same) {
+            return plan;
+        }
+        List<PlanNode.NamedExpression> columns = new ArrayList<>();
+        for (int i = 0; i < schema.size(); i++) {
+            Expression column = new Expression.Column(i, actual.type(i));
+            if (!actual.type(i).equals(schema.type(i))) {
+                column = new Expression.Cast(column, schema.type(i));
+            }
+            columns.add(new PlanNode.NamedExpression(schema.name(i), column));
+        }
+        return new PlanNode.Project(plan, columns);
+    }
+
+    /**
+     * Runs a prepared query with values for its parameters, see
+     * {@link #plan(PreparedQuery, List)}; the caller closes the result.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the query does not bind any more
+     */
+    public QueryResult execute(PreparedQuery query, List<?> values) {
+        return execute(plan(query, values));
+    }
+
+    /**
+     * Runs a prepared query with values for its parameters, for a query
+     * that a context of the caller cancels, see
+     * {@link #execute(PlanNode, QueryContext)}.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the query does not bind any more
+     */
+    public QueryResult execute(PreparedQuery query, List<?> values, QueryContext context) {
+        return execute(plan(query, values), context);
+    }
+
+    /**
+     * Runs a prepared query with values for its parameters and collects all
+     * rows as Java values.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the query does not bind any more
+     */
+    public List<Object[]> rows(PreparedQuery query, List<?> values) {
+        return rows(plan(query, values));
     }
 
     /**

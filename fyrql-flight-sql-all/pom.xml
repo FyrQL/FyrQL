@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  This Source Code Form is "Incompatible With Secondary Licenses", as
+  defined by the Mozilla Public License, v. 2.0.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.github.stefan-zobel</groupId>
+		<artifactId>fyrql</artifactId>
+		<version>0.6.5</version>
+	</parent>
+
+	<artifactId>fyrql-flight-sql-all</artifactId>
+	<name>FyrQL Flight SQL server in one JAR</name>
+	<description>The Flight SQL server with the engine, the configuration, code generation and all connectors in one executable JAR; the drivers of the databases of JDBC sources are not in it.</description>
+
+	<properties>
+		<fyrql.module.name>net.fyrql.flight.all</fyrql.module.name>
+		<fyrql.native.skip>false</fyrql.native.skip>
+	</properties>
+
+	<!--
+	  Everything goes into the JAR of this module, which starts the server with java -jar. As in fyrql-jdbc-all, Jackson,
+	  SnakeYAML, JSqlParser and FastCSV are renamed into packages under net.fyrql.internal. Arrow, gRPC, Netty and
+	  protobuf keep their packages: the server speaks them to its clients, and the option add-opens names the package
+	  of the JDK that Arrow needs.
+	-->
+	<dependencies>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-flight-sql</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-codegen</artifactId>
+			<!-- In the reactor the dependencies the module renames into its own JAR would come along. -->
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-memory</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-csv</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-json</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-parquet</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-http</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-odata</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-jdbc</artifactId>
+		</dependency>
+		<!-- The server logs warnings of Arrow and gRPC to the standard error stream. -->
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-simple</artifactId>
+			<version>${arrow.slf4j.version}</version>
+			<scope>runtime</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<!-- Without a clean the JAR of the last build would be the shaded one, whose old classes
+				     the shade would keep over the new ones of the server. -->
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-jar-plugin</artifactId>
+				<configuration>
+					<forceCreation>true</forceCreation>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-shade-plugin</artifactId>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<createDependencyReducedPom>false</createDependencyReducedPom>
+							<artifactSet>
+								<!--
+								  Annotations for compilers and checkers only, which the JVM does without when it
+								  loads the classes that carry them.
+								-->
+								<excludes>
+									<exclude>com.google.code.findbugs:jsr305</exclude>
+									<exclude>com.google.errorprone:error_prone_annotations</exclude>
+									<exclude>com.google.j2objc:j2objc-annotations</exclude>
+									<exclude>com.google.android:annotations</exclude>
+									<exclude>org.codehaus.mojo:animal-sniffer-annotations</exclude>
+									<exclude>org.jspecify:jspecify</exclude>
+									<exclude>javax.annotation:javax.annotation-api</exclude>
+									<exclude>com.google.guava:listenablefuture</exclude>
+								</excludes>
+							</artifactSet>
+							<relocations>
+								<relocation>
+									<pattern>com.fasterxml.jackson</pattern>
+									<shadedPattern>net.fyrql.internal.jackson</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.yaml.snakeyaml</pattern>
+									<shadedPattern>net.fyrql.internal.snakeyaml</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>net.sf.jsqlparser</pattern>
+									<shadedPattern>net.fyrql.internal.jsqlparser</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>de.siegmar.fastcsv</pattern>
+									<shadedPattern>net.fyrql.internal.fastcsv</shadedPattern>
+								</relocation>
+							</relocations>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+										<exclude>META-INF/maven/**</exclude>
+										<exclude>META-INF/LICENSE*</exclude>
+										<exclude>META-INF/NOTICE*</exclude>
+										<exclude>META-INF/DEPENDENCIES*</exclude>
+										<exclude>META-INF/INDEX.LIST</exclude>
+										<exclude>META-INF/native-image/**</exclude>
+										<exclude>META-INF/proguard/**</exclude>
+										<exclude>module-info.class</exclude>
+										<!-- Classes for newer JDKs, which the shade plugin would not rename; the JAR is no multi-release JAR. -->
+										<exclude>META-INF/versions/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The JAR of the Parquet connector carries the same texts already. -->
+									<artifact>com.fasterxml.jackson.core:jackson-core</artifact>
+									<excludes>
+										<exclude>META-INF/FastDoubleParser-*</exclude>
+										<exclude>META-INF/Schubfach-*</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The style sheet of the railroad diagrams of the grammar. -->
+									<artifact>com.github.jsqlparser:jsqlparser</artifact>
+									<excludes>
+										<exclude>rr/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The list of this JAR names what the connector carries as well, and the license of SLF4J is the same. -->
+									<artifact>io.github.stefan-zobel:fyrql-connector-parquet</artifact>
+									<excludes>
+										<exclude>META-INF/licenses/THIRD-PARTY.txt</exclude>
+										<exclude>META-INF/licenses/slf4j-LICENSE.txt</exclude>
+									</excludes>
+								</filter>
+							</filters>
+							<transformers>
+								<!-- Merges the connector factories, the expression compiler, Janino's compiler factory and the providers of gRPC. -->
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+								<!-- The versions of the Netty JARs, which Netty reports. -->
+								<transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
+									<resource>META-INF/io.netty.versions.properties</resource>
+								</transformer>
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+									<mainClass>net.fyrql.flight.FlightSqlServerMain</mainClass>
+									<manifestEntries>
+										<Automatic-Module-Name>${fyrql.module.name}</Automatic-Module-Name>
+										<!-- Arrow reads the address of direct buffers; Netty selects faster with the second. -->
+										<Add-Opens>java.base/java.nio java.base/sun.nio.ch</Add-Opens>
+									</manifestEntries>
+								</transformer>
+							</transformers>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
+</project>

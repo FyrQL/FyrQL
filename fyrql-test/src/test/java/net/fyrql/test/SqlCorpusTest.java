@@ -48,9 +48,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * engines, FyrQL with the expected message; the known deviations fail in
  * FyrQL only.
  */
-class SqlCorpusTest {
+public class SqlCorpusTest {
 
-    static final List<String> QUERIES = List.of(
+    public static final List<String> QUERIES = List.of(
             // Columns, literals and operators
             "SELECT * FROM t",
             "SELECT a, b FROM t WHERE a > 2",

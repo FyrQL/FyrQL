@@ -18,17 +18,21 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * What every part of the binding of one query shares: the scalar functions
- * and the moment that {@code current_date} and {@code now()} stand for.
+ * What every part of the binding of one query shares: the scalar functions,
+ * the moment that {@code current_date} and {@code now()} stand for, and the
+ * types of the parameters.
  *
  * @param functions the scalar functions
  * @param functionNames the names of the scalar functions, in lower case
  * @param now the time of the query
+ * @param parameters the types of the parameters, which the binding adds to
  */
-record BindContext(FunctionRegistry functions, Set<String> functionNames, LocalDateTime now) {
+record BindContext(FunctionRegistry functions, Set<String> functionNames, LocalDateTime now,
+        ParameterTypes parameters) {
     BindContext {
         Objects.requireNonNull(functions, "functions");
         functionNames = Set.copyOf(functionNames);
         Objects.requireNonNull(now, "now");
+        Objects.requireNonNull(parameters, "parameters");
     }
 }

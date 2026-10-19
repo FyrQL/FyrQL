@@ -82,7 +82,26 @@ class EngineConfigTest {
                 config.sources().get(1).options());
         assertEquals(Map.of(), config.sources().get(2).options());
         assertEquals(Map.of("defaultSource", "shop", "batchSize", "1024", "pushdown", "off"), config.settings());
+        assertEquals(Map.of(), config.server());
         assertEquals(DIR, config.directory());
+    }
+
+    @Test
+    void theSettingsOfAServerAreReadFlatAndLeftToTheServer() {
+        EngineConfig config = parse("""
+                sources: []
+                server:
+                  port: 32010
+                  tls: {certificate: cert.pem, key: key.pem}
+                  users:
+                    alice: ${env:SHOP_PASSWORD}
+                """);
+        assertEquals(Map.of("port", "32010", "tls.certificate", "cert.pem", "tls.key", "key.pem", "users.alice",
+                "s3cret"), config.server());
+        assertEquals(Map.of(), config.settings());
+        assertEquals("line 1: server must be a mapping of settings", failure("server: [a]\n"));
+        assertEquals(Map.of(), parse("server:\n").server());
+        assertEquals(Map.of(), new EngineConfig(List.of(), Map.of(), DIR).server());
     }
 
     @Test
@@ -120,9 +139,9 @@ class EngineConfigTest {
     @Test
     void errorsNameTheLineAndNeverTheValue() {
         assertEquals("the configuration is empty", failure(""));
-        assertEquals("line 1: the configuration must be a mapping with the keys sources and engine",
+        assertEquals("line 1: the configuration must be a mapping with the keys sources, engine and server",
                 failure("- a\n- b\n"));
-        assertEquals("line 2: the key source is unknown; known are sources and engine",
+        assertEquals("line 2: the key source is unknown; known are sources, engine and server",
                 failure("sources: []\nsource: []\n"));
         assertEquals("line 2: a source has no name", failure("sources:\n  - type: csv\n"));
         assertEquals("line 2: the source s has no type", failure("sources:\n  - name: s\n"));

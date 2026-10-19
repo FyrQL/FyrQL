@@ -55,6 +55,9 @@ import java.util.function.Supplier;
  * {@code CASE}, {@code COALESCE} and similar takes that type if its value
  * fits, so {@code tinyint_column + 1} stays a {@code TINYINT}.</li>
  * <li>A condition that is not {@code BOOLEAN} is cast to it.</li>
+ * <li>A parameter {@code ?} takes the type its context gives a bare
+ * {@code NULL}, and is a value of that type from then on, see
+ * {@link ParameterTypes}.</li>
  * </ul>
  * A name that is no column of the scope may be the alias of an item of the
  * select list, whose expression then stands in for it.
@@ -70,14 +73,27 @@ final class ExpressionBinder {
         /** A string literal. */
         STRING,
         /** An integer literal. */
-        INTEGER
+        INTEGER,
+        /** A parameter, typed {@code INTEGER} like a bare {@code NULL} until the context decides. */
+        PARAMETER
     }
 
-    /** A bound expression with its {@link Kind}. */
-    record Bound(Expression expression, Kind kind) {
+    /**
+     * A bound expression with its {@link Kind}.
+     *
+     * @param parameter the parameter of the kind {@link Kind#PARAMETER}, else {@code null}
+     */
+    record Bound(Expression expression, Kind kind, SqlExpr.Parameter parameter) {
         Bound {
             Objects.requireNonNull(expression, "expression");
             Objects.requireNonNull(kind, "kind");
+            if ((kind == Kind.PARAMETER) != (parameter != null)) {
+                throw new IllegalArgumentException("a parameter is of the kind PARAMETER, and nothing else is");
+            }
+        }
+
+        Bound(Expression expression, Kind kind) {
+            this(expression, kind, null);
         }
 
         static Bound typed(Expression e) {
@@ -88,12 +104,17 @@ final class ExpressionBinder {
             return new Bound(new Expression.Literal(DataType.INTEGER, null), Kind.NULL);
         }
 
+        static Bound parameter(SqlExpr.Parameter p) {
+            return new Bound(new Expression.Literal(DataType.INTEGER, null), Kind.PARAMETER, p);
+        }
+
         DataType type() {
             return expression.type();
         }
 
+        /** Tells whether this is a bare {@code NULL} or an untyped parameter, whose type the context decides. */
         boolean isNull() {
-            return kind == Kind.NULL;
+            return kind == Kind.NULL || kind == Kind.PARAMETER;
         }
 
         Expression.Literal literal() {
@@ -184,6 +205,10 @@ final class ExpressionBinder {
         }
         return switch (e) {
             case SqlExpr.Literal l -> literal(l);
+            case SqlExpr.Parameter p -> {
+                DataType type = context.parameters().check(p);
+                yield type != null ? Bound.typed(ParameterTypes.placeholder(p, type)) : Bound.parameter(p);
+            }
             case SqlExpr.Identifier i -> identifier(i);
             case SqlExpr.Binary b -> binary(b);
             case SqlExpr.Unary u -> unary(u);
@@ -368,7 +393,7 @@ final class ExpressionBinder {
      * {@code NULL}, and a position given as a string literal is a
      * {@code BIGINT}.
      */
-    private static List<Bound> templateArguments(String name, List<Bound> args, Position position) {
+    private List<Bound> templateArguments(String name, List<Bound> args, Position position) {
         if (args.size() != 2) {
             return args;
         }
@@ -384,7 +409,7 @@ final class ExpressionBinder {
         if (target == null || !value.isNull() && value.kind() != Kind.STRING) {
             return args;
         }
-        Expression converted = value.isNull() ? new Expression.Literal(target, null)
+        Expression converted = value.isNull() ? typed(value, target).expression()
                 : target == DataType.VARCHAR ? value.expression() : Literals.lazily(value.literal(), target, position);
         return List.of(args.get(0), Bound.typed(converted));
     }
@@ -423,6 +448,13 @@ final class ExpressionBinder {
             case CONCAT -> {
                 Bound l = bound(b.left());
                 Bound r = bound(b.right());
+                // A parameter takes the type of text or bytes on the other side, and is text otherwise.
+                if (l.kind() == Kind.PARAMETER) {
+                    l = typed(l, concatenated(r));
+                }
+                if (r.kind() == Kind.PARAMETER) {
+                    r = typed(r, concatenated(l));
+                }
                 // DuckDB gives NULL's own type to a concatenation with a constant NULL.
                 yield constantNull(l.expression()) || constantNull(r.expression()) ? Bound.nullLiteral()
                         : call("||", List.of(l, r), p);
@@ -436,6 +468,11 @@ final class ExpressionBinder {
         };
     }
 
+    /** The type of a parameter concatenated with a value: that of text or bytes, else text. */
+    private static DataType concatenated(Bound other) {
+        return !other.isNull() && other.type() == DataType.BLOB ? DataType.BLOB : DataType.VARCHAR;
+    }
+
     private Bound arithmetic(ArithmeticOp op, SqlExpr.Binary b) {
         if (b.left() instanceof SqlExpr.Interval || b.right() instanceof SqlExpr.Interval) {
             return intervalArithmetic(op, b);
@@ -443,12 +480,12 @@ final class ExpressionBinder {
         Bound l = bound(b.left());
         Bound r = bound(b.right());
         if (l.isNull() && r.isNull()) {
-            l = nullOf(DataType.BIGINT);
-            r = nullOf(DataType.BIGINT);
+            l = typed(l, DataType.BIGINT);
+            r = typed(r, DataType.BIGINT);
         } else if (l.isNull()) {
-            l = nullOf(nullOperand(op, r.type()));
+            l = typed(l, nullOperand(op, r.type()));
         } else if (r.isNull()) {
-            r = nullOf(nullOperand(op, l.type()));
+            r = typed(r, nullOperand(op, l.type()));
         }
         l = adaptInteger(l, r.type());
         r = adaptInteger(r, l.type());
@@ -591,6 +628,15 @@ final class ExpressionBinder {
         return Bound.typed(new Expression.Literal(type, null));
     }
 
+    /**
+     * A bare {@code NULL} or a parameter as a value of a type: a
+     * {@code NULL} of the type, or the parameter, which takes the type.
+     */
+    Bound typed(Bound b, DataType type) {
+        return b.kind() == Kind.PARAMETER ? Bound.typed(context.parameters().typed(b.parameter(), type))
+                : nullOf(type);
+    }
+
     private Bound comparison(ComparisonOp op, SqlExpr.Binary b) {
         Bound l = bound(b.left());
         Bound r = bound(b.right());
@@ -610,9 +656,9 @@ final class ExpressionBinder {
      */
     private Expression[] comparable(Bound l, Bound r, boolean equality, Position position) {
         if (l.isNull() && !r.isNull()) {
-            l = nullOf(r.type());
+            l = typed(l, r.type());
         } else if (r.isNull() && !l.isNull()) {
-            r = nullOf(l.type());
+            r = typed(r, l.type());
         }
         if (l.kind() == Kind.STRING && r.kind() != Kind.STRING && r.type() != DataType.VARCHAR) {
             l = Bound.typed(Literals.lazily(l.literal(), r.type(), position));
@@ -675,6 +721,9 @@ final class ExpressionBinder {
                     yield Literals.number(l.text(), true, l.position());
                 }
                 Bound b = bound(u.operand());
+                if (b.kind() == Kind.PARAMETER) {
+                    yield Bound.typed(new Expression.Negate(typed(b, DataType.BIGINT).expression()));
+                }
                 if (b.isNull()) {
                     yield nullOf(DataType.BIGINT);
                 }
@@ -704,7 +753,7 @@ final class ExpressionBinder {
         List<Bound> operands = unifyInOrder(List.of(value, low, high), "BETWEEN clause", b.position());
         DataType type = check(() -> TypeRules.common(operands.stream().map(Bound::type).toList()), b.position(),
                 "Cannot mix values of the types of a BETWEEN clause - an explicit cast is required");
-        if (constantNull(value.expression())) {
+        if (value.kind() != Kind.PARAMETER && constantNull(value.expression())) {
             // As in DuckDB, a constant NULL value is NULL without evaluating the bounds, whose types still unite.
             return nullOf(DataType.BOOLEAN);
         }
@@ -752,9 +801,9 @@ final class ExpressionBinder {
      * Converts a literal, or casts a {@code VARCHAR} value or a boolean
      * compared with a fractional number, to a type; other values keep theirs.
      */
-    private static Expression to(Bound b, DataType target, Position position) {
+    private Expression to(Bound b, DataType target, Position position) {
         if (b.isNull()) {
-            return new Expression.Literal(target, null);
+            return typed(b, target).expression();
         }
         if (b.kind() == Kind.STRING) {
             return Literals.lazily(b.literal(), target, position);
@@ -774,8 +823,8 @@ final class ExpressionBinder {
     private Bound like(SqlExpr.Like l) {
         Bound value = bound(l.value());
         Bound pattern = bound(l.pattern());
-        Expression v = value.isNull() ? new Expression.Literal(DataType.VARCHAR, null) : value.expression();
-        Expression p = pattern.isNull() ? new Expression.Literal(DataType.VARCHAR, null) : pattern.expression();
+        Expression v = value.isNull() ? typed(value, DataType.VARCHAR).expression() : value.expression();
+        Expression p = pattern.isNull() ? typed(pattern, DataType.VARCHAR).expression() : pattern.expression();
         if (v.type() != DataType.VARCHAR || p.type() != DataType.VARCHAR) {
             throw new SqlException((l.caseInsensitive() ? "ILIKE" : "LIKE") + " needs VARCHAR operands, not "
                     + v.type() + " and " + p.type(), l.position());
@@ -881,7 +930,7 @@ final class ExpressionBinder {
         List<Bound> result = new ArrayList<>();
         for (Bound b : values) {
             result.add(switch (b.kind()) {
-                case NULL -> nullOf(target);
+                case NULL, PARAMETER -> typed(b, target);
                 case STRING -> target == DataType.VARCHAR ? b : Bound.typed(Literals.lazily(b.literal(), target,
                         position));
                 case INTEGER -> target.isIntegral() ? new Bound(Literals.convert(b.literal(), target, position),
@@ -955,7 +1004,7 @@ final class ExpressionBinder {
         for (int i = 0; i < values.size(); i++) {
             Bound b = values.get(i);
             if (b.isNull()) {
-                result.add(nullOf(type));
+                result.add(typed(b, type));
             } else if (b.kind() == Kind.STRING && type != DataType.VARCHAR) {
                 result.add(Bound.typed(Literals.lazily(b.literal(), type, position)));
             } else if (b.kind() == Kind.INTEGER && type.isIntegral() && !b.type().equals(type)
@@ -1002,7 +1051,7 @@ final class ExpressionBinder {
         List<Bound> result = new ArrayList<>();
         for (Bound b : values) {
             if (b.isNull()) {
-                result.add(nullOf(target));
+                result.add(typed(b, target));
             } else if (b.kind() == Kind.STRING && target != DataType.VARCHAR
                     || b.kind() == Kind.INTEGER && target.isIntegral() && !b.type().equals(target)) {
                 result.add(Bound.typed(Literals.convert(b.literal(), target, position)));
@@ -1029,7 +1078,7 @@ final class ExpressionBinder {
         }
         Bound operand = bound(c.operand());
         if (operand.isNull()) {
-            return Bound.typed(new Expression.Literal(c.type(), null));
+            return typed(operand, c.type());
         }
         if (!Casts.allowed(operand.type(), c.type())) {
             throw new SqlException("Cannot cast " + operand.type() + " to " + c.type(), c.position());
@@ -1038,12 +1087,12 @@ final class ExpressionBinder {
     }
 
     /** Converts a value to {@code BOOLEAN} for a condition. */
-    private static Expression toBoolean(Bound b, Position position) {
+    private Expression toBoolean(Bound b, Position position) {
         if (b.type() == DataType.BOOLEAN && !b.isNull()) {
             return b.expression();
         }
         if (b.isNull()) {
-            return new Expression.Literal(DataType.BOOLEAN, null);
+            return typed(b, DataType.BOOLEAN).expression();
         }
         if (b.kind() == Kind.STRING) {
             return Literals.lazily(b.literal(), DataType.BOOLEAN, position);
@@ -1192,7 +1241,10 @@ final class ExpressionBinder {
             DataType.INTEGER, DataType.decimal(18, 3), DataType.BOOLEAN, DataType.TINYINT, DataType.SMALLINT,
             DataType.FLOAT, DataType.DATE, DataType.HUGEINT, DataType.TIMESTAMP, DataType.VARCHAR);
 
-    /** Calls a scalar function of the catalog; bare {@code NULL} arguments take the first type that fits. */
+    /**
+     * Calls a scalar function of the catalog; bare {@code NULL} arguments
+     * and parameters take the first type that fits.
+     */
     private Bound call(String name, List<Bound> args, Position position) {
         if (!context.functionNames().contains(name)) {
             throw new SqlException("Function with name " + name + " does not exist", position);
@@ -1206,7 +1258,8 @@ final class ExpressionBinder {
         for (DataType candidate : candidates) {
             List<Expression> arguments = new ArrayList<>();
             for (Bound a : args) {
-                arguments.add(a.isNull() ? new Expression.Literal(candidate, null) : a.expression());
+                arguments.add(a.kind() == Kind.PARAMETER ? ParameterTypes.placeholder(a.parameter(), candidate)
+                        : a.isNull() ? new Expression.Literal(candidate, null) : a.expression());
             }
             List<DataType> types = arguments.stream().map(Expression::type).toList();
             ScalarFunction function;
@@ -1216,12 +1269,18 @@ final class ExpressionBinder {
                 continue;
             }
             ScalarFunction resolved = function;
-            return Bound.typed(new Expression.Call(check(() -> resolved.specialize(arguments), position, null),
-                    arguments));
+            Expression call = new Expression.Call(check(() -> resolved.specialize(arguments), position, null),
+                    arguments);
+            for (Bound a : args) {
+                if (a.kind() == Kind.PARAMETER) {
+                    typed(a, candidate);
+                }
+            }
+            return Bound.typed(call);
         }
         List<String> types = new ArrayList<>();
         for (Bound a : args) {
-            types.add(a.isNull() ? "NULL" : a.type().sqlName());
+            types.add(a.kind() == Kind.PARAMETER ? "?" : a.isNull() ? "NULL" : a.type().sqlName());
         }
         throw new SqlException("No function matches " + name + "(" + String.join(", ", types) + ")", position);
     }

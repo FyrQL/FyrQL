@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.6.0</version>
+		<version>0.6.5</version>
 	</parent>
 
 	<artifactId>fyrql-test</artifactId>
@@ -79,13 +79,47 @@
 			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-jdbc</artifactId>
 		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-jdbc</artifactId>
+			<type>test-jar</type>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-arrow</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-flight-sql</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- The Flight SQL JDBC driver of Arrow as a client of the server; its libraries are renamed inside its JAR. -->
+		<dependency>
+			<groupId>org.apache.arrow</groupId>
+			<artifactId>flight-sql-jdbc-driver</artifactId>
+			<scope>test</scope>
+		</dependency>
 		<!--
-		  Only for the order of the build: ShadedJdbcDriverTest loads the JAR in a class loader of its own, and surefire
-		  leaves it off the class path of the tests.
+		  Only for the order of the build: ShadedJdbcDriverTest loads the JAR in a class loader of its own,
+		  ShadedFlightSqlServerTest starts the other in a process of its own, and surefire leaves both off the class
+		  path of the tests.
 		-->
 		<dependency>
 			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-jdbc-all</artifactId>
+			<scope>test</scope>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-flight-sql-all</artifactId>
 			<scope>test</scope>
 			<exclusions>
 				<exclusion>
@@ -166,11 +200,14 @@
 				<configuration>
 					<classpathDependencyExcludes>
 						<classpathDependencyExclude>io.github.stefan-zobel:fyrql-jdbc-all</classpathDependencyExclude>
+						<classpathDependencyExclude>io.github.stefan-zobel:fyrql-flight-sql-all</classpathDependencyExclude>
 					</classpathDependencyExcludes>
+					<argLine>${arrow.add-opens}</argLine>
 					<systemPropertyVariables>
 						<fyrql.test.containers>${fyrql.test.containers}</fyrql.test.containers>
 						<fyrql.tpch.dir>${fyrql.tpch.dir}</fyrql.tpch.dir>
 						<fyrql.jdbc.all.jar>${project.basedir}/../fyrql-jdbc-all/target/fyrql-jdbc-all-${project.version}.jar</fyrql.jdbc.all.jar>
+						<fyrql.flight.all.jar>${project.basedir}/../fyrql-flight-sql-all/target/fyrql-flight-sql-all-${project.version}.jar</fyrql.flight.all.jar>
 						<org.slf4j.simpleLogger.defaultLogLevel>warn</org.slf4j.simpleLogger.defaultLogLevel>
 					</systemPropertyVariables>
 				</configuration>
@@ -248,7 +285,7 @@
 									<goal>test</goal>
 								</goals>
 								<configuration>
-									<argLine>-Xmx8g</argLine>
+									<argLine>-Xmx8g ${arrow.add-opens}</argLine>
 									<systemPropertyVariables>
 										<fyrql.tpch.sf>1</fyrql.tpch.sf>
 									</systemPropertyVariables>

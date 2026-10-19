@@ -86,6 +86,20 @@ public sealed interface SqlExpr {
         }
     }
 
+    /**
+     * A parameter {@code ?} of a prepared query, numbered from 1 in the
+     * order of the text. Its type comes from its context when the query is
+     * bound, as the type of a bare {@code NULL} does.
+     */
+    record Parameter(int index, Position position) implements SqlExpr {
+        public Parameter {
+            if (index < 1) {
+                throw new IllegalArgumentException("parameters are numbered from 1, not " + index);
+            }
+            Objects.requireNonNull(position, "position");
+        }
+    }
+
     /** A name of one or more parts, such as {@code a}, {@code t.a} or {@code s.t.a}. */
     record Identifier(List<String> parts, Position position) implements SqlExpr {
         public Identifier {

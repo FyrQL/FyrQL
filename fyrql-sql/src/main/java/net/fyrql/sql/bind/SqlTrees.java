@@ -12,6 +12,7 @@
 package net.fyrql.sql.bind;
 
 import net.fyrql.core.plan.PlanNode.AggregateFunction;
+import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.OrderItem;
 import net.fyrql.sql.ast.SqlExpr;
 
@@ -35,6 +36,7 @@ final class SqlTrees {
     static List<SqlExpr> children(SqlExpr e) {
         return switch (e) {
             case SqlExpr.Literal l -> List.of();
+            case SqlExpr.Parameter p -> List.of();
             case SqlExpr.Identifier i -> List.of();
             case SqlExpr.Binary b -> List.of(b.left(), b.right());
             case SqlExpr.Unary u -> List.of(u.operand());
@@ -133,6 +135,34 @@ final class SqlTrees {
             }
         }
         return null;
+    }
+
+    /** Returns the first parameter of an expression, outside its subqueries, or {@code null}. */
+    static SqlExpr.Parameter parameter(SqlExpr e) {
+        if (e instanceof SqlExpr.Parameter p) {
+            return p;
+        }
+        for (SqlExpr c : children(e)) {
+            SqlExpr.Parameter p = parameter(c);
+            if (p != null) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Rejects a parameter in a place that needs a constant when the query
+     * is bound.
+     *
+     * @param where the place, such as {@code in LIMIT or OFFSET}
+     * @throws SqlException if the expression has a parameter
+     */
+    static void noParameter(SqlExpr e, String where) {
+        SqlExpr.Parameter p = parameter(e);
+        if (p != null) {
+            throw new SqlException("Not supported: a parameter " + where, p.position());
+        }
     }
 
     /** Tells whether an expression is a call of {@code unnest}, in any case. */

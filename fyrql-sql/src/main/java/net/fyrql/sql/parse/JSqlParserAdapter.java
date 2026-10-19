@@ -135,9 +135,21 @@ import java.util.Set;
 final class JSqlParserAdapter {
 
     private final SourceText source;
+    /** The parameters met so far, or {@code null} for a query that takes none. */
+    private final List<SqlExpr.Parameter> parameters;
 
-    JSqlParserAdapter(SourceText source) {
+    /**
+     * @param parameters whether the query may have parameters; if not, a
+     *        {@code ?} is an error
+     */
+    JSqlParserAdapter(SourceText source, boolean parameters) {
         this.source = source;
+        this.parameters = parameters ? new ArrayList<>() : null;
+    }
+
+    /** Returns the parameters met, in the order of the tree, each as often as it was met. */
+    List<SqlExpr.Parameter> parameters() {
+        return parameters == null ? List.of() : List.copyOf(parameters);
     }
 
     Query statement(Statement statement) {
@@ -854,8 +866,11 @@ final class JSqlParserAdapter {
         if (e instanceof Function f) {
             return functionCall(f, position);
         }
-        if (e instanceof JdbcParameter || e instanceof JdbcNamedParameter) {
-            throw unsupported("parameters", e);
+        if (e instanceof JdbcParameter p) {
+            return parameter(p, position);
+        }
+        if (e instanceof JdbcNamedParameter) {
+            throw unsupported("named parameters", e);
         }
         if (e instanceof IntervalExpression iv) {
             return interval(iv, position);
@@ -867,6 +882,23 @@ final class JSqlParserAdapter {
             throw unsupported("* here", e);
         }
         throw unsupported("the expression " + e, e);
+    }
+
+    /**
+     * A {@code ?}, numbered as JSqlParser numbers it, from 1 in the order of
+     * the text. A numbered form such as {@code ?1} or {@code $1} is not
+     * supported.
+     */
+    private SqlExpr parameter(JdbcParameter p, Position position) {
+        if (parameters == null) {
+            throw unsupported("parameters outside a prepared query", p);
+        }
+        if (p.isUseFixedIndex() || !"?".equals(p.getParameterCharacter()) || p.getIndex() == null) {
+            throw unsupported("numbered parameters", p);
+        }
+        SqlExpr.Parameter parameter = new SqlExpr.Parameter(p.getIndex(), position);
+        parameters.add(parameter);
+        return parameter;
     }
 
     /**

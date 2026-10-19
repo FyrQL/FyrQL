@@ -39,6 +39,15 @@ public interface ScalarFunction {
     }
 
     /**
+     * Tells whether a call with constant arguments has its value when the
+     * query is bound, so that it is a constant itself; false for a function
+     * whose value comes later, such as a parameter of a prepared query.
+     */
+    default boolean foldable() {
+        return true;
+    }
+
+    /**
      * Tells whether the function reads the values of its arguments; a
      * function that does not, such as {@code typeof}, is called with
      * {@code null}s, and its arguments are not evaluated, as DuckDB never

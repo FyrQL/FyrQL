@@ -1,0 +1,41 @@
+Arrow Format
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Arrow Vectors
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Arrow Memory - Core
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Arrow Memory - Unsafe
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Arrow Flight Core
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Arrow Flight SQL
+Copyright 2026 The Apache Software Foundation
+
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).

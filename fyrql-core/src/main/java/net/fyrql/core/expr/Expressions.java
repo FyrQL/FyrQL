@@ -346,9 +346,14 @@ public final class Expressions {
                 ? new Expression.Column(c.index() + by, c.type()) : x);
     }
 
-    /** Tells whether an expression has no columns and no call of {@code random}. */
+    /**
+     * Tells whether an expression has no columns, no call of {@code random}
+     * and no call of a function that is not
+     * {@linkplain net.fyrql.core.function.ScalarFunction#foldable() foldable}.
+     */
     public static boolean isConstant(Expression e) {
-        return allMatch(e, x -> !(x instanceof Expression.Column) && !isRandom(x));
+        return allMatch(e, x -> !(x instanceof Expression.Column) && !isRandom(x)
+                && !(x instanceof Expression.Call c && !c.function().foldable()));
     }
 
     /** Tells whether an expression gives the same value for the same row: whether it has no call of {@code random}. */

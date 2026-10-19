@@ -14,6 +14,7 @@ package net.fyrql.sql.parse;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.ast.Query;
+import net.fyrql.sql.ast.SqlExpr;
 import net.sf.jsqlparser.parser.CCJSqlParser;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.parser.ParseException;
@@ -22,7 +23,10 @@ import net.sf.jsqlparser.parser.TokenMgrException;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,11 +46,40 @@ public final class SqlParser {
     }
 
     /**
+     * A query of a prepared statement with its parameters.
+     *
+     * @param query the query
+     * @param parameters the parameters, the one numbered {@code n} at index
+     *        {@code n - 1}
+     */
+    public record Parameterized(Query query, List<SqlExpr.Parameter> parameters) {
+        public Parameterized {
+            Objects.requireNonNull(query, "query");
+            parameters = List.copyOf(parameters);
+        }
+    }
+
+    /**
      * Parses a query; a trailing semicolon is allowed.
+     *
+     * @throws SqlException if the text is not one query of the supported
+     *         forms, or has a parameter
+     */
+    public static Query parse(String sql) {
+        return parse(sql, false).query();
+    }
+
+    /**
+     * Parses a query of a prepared statement, which may have parameters
+     * {@code ?}; a trailing semicolon is allowed.
      *
      * @throws SqlException if the text is not one query of the supported forms
      */
-    public static Query parse(String sql) {
+    public static Parameterized parseWithParameters(String sql) {
+        return parse(sql, true);
+    }
+
+    private static Parameterized parse(String sql, boolean parameters) {
         Objects.requireNonNull(sql, "sql");
         SourceText source = SourceText.of(sql);
         Statements statements = statements(source);
@@ -56,7 +89,20 @@ public final class SqlParser {
         if (statements.size() > 1) {
             throw new SqlException("Only one statement is supported", position(statements.get(1), source));
         }
-        return new JSqlParserAdapter(source).statement(statements.get(0));
+        JSqlParserAdapter adapter = new JSqlParserAdapter(source, parameters);
+        Query query = adapter.statement(statements.get(0));
+        TreeMap<Integer, SqlExpr.Parameter> byIndex = new TreeMap<>();
+        for (SqlExpr.Parameter p : adapter.parameters()) {
+            byIndex.putIfAbsent(p.index(), p);
+        }
+        List<SqlExpr.Parameter> numbered = new ArrayList<>(byIndex.values());
+        for (int i = 0; i < numbered.size(); i++) {
+            if (numbered.get(i).index() != i + 1) {
+                throw new IllegalStateException("The parameters are not numbered 1 to " + numbered.size() + ": "
+                        + byIndex.keySet());
+            }
+        }
+        return new Parameterized(query, numbered);
     }
 
     private static Statements statements(SourceText source) {
