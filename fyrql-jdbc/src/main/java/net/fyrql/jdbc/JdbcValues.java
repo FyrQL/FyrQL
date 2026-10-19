@@ -65,6 +65,10 @@ final class JdbcValues {
     private static final double LONG_MIN = -0x1p63;
     private static final double LONG_END = 0x1p63;
 
+    /** The powers of ten that are exact doubles, 10^0 to 10^22. */
+    private static final double[] DOUBLE_POWERS_OF_TEN = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10,
+            1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+
     private JdbcValues() {
     }
 
@@ -251,6 +255,23 @@ final class JdbcValues {
             }
             default -> throw cannotConvert(value, type, target, null);
         };
+    }
+
+    /**
+     * Returns the {@code double} nearest to an unscaled decimal and its
+     * scale, as {@link BigDecimal#doubleValue} does: one division of exact
+     * doubles where the unscaled value is an exact double and the scale is
+     * at most 22, otherwise through a {@code BigDecimal}.
+     */
+    static double toDouble(long unscaled, int scale) {
+        double v = unscaled;
+        if (scale == 0) {
+            return v;
+        }
+        if (scale > 0 && scale < DOUBLE_POWERS_OF_TEN.length && (long) v == unscaled && unscaled != Long.MAX_VALUE) {
+            return v / DOUBLE_POWERS_OF_TEN[scale];
+        }
+        return BigDecimal.valueOf(unscaled, scale).doubleValue();
     }
 
     /** Reads a value as a {@code double}. */

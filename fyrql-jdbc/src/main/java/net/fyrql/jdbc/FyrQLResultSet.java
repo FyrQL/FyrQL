@@ -14,6 +14,11 @@ package net.fyrql.jdbc;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.core.vector.BigIntVector;
+import net.fyrql.core.vector.BytesVector;
+import net.fyrql.core.vector.DecimalVector;
+import net.fyrql.core.vector.DoubleVector;
+import net.fyrql.core.vector.IntVector;
 import net.fyrql.core.vector.Vector;
 
 import java.io.ByteArrayInputStream;
@@ -39,6 +44,7 @@ import java.sql.SQLXML;
 import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.util.Calendar;
 import java.util.Map;
 import java.util.concurrent.locks.Lock;
@@ -49,7 +55,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * It reads one batch at a time; when the last row is read, or the maximum
  * number of rows of the statement, it releases the sources of the query
  * at once. The getters convert as {@link JdbcValues} describes; a column
- * label matches ignoring case, the first column of a name wins.
+ * label matches ignoring case, the first column of a name wins. The getters
+ * of a column of their own type read the vector without an object for the
+ * value in between.
  */
 final class FyrQLResultSet implements ResultSet {
 
@@ -229,6 +237,12 @@ final class FyrQLResultSet implements ResultSet {
 
     /** Returns the value of a column in the current row; {@code null} for {@code NULL}. */
     private Object value(int column) throws SQLException {
+        Vector v = vector(column);
+        return wasNull ? null : v.get(row);
+    }
+
+    /** Returns the vector of a column on the current row and notes whether its value is {@code NULL}. */
+    private Vector vector(int column) throws SQLException {
         checkOpen();
         checkColumn(column);
         if (batch == null) {
@@ -237,7 +251,7 @@ final class FyrQLResultSet implements ResultSet {
         }
         Vector v = batch.column(column - 1);
         wasNull = v.isNull(row);
-        return wasNull ? null : v.get(row);
+        return v;
     }
 
     private void checkColumn(int column) throws SQLException {
@@ -274,8 +288,14 @@ final class FyrQLResultSet implements ResultSet {
 
     @Override
     public String getString(int columnIndex) throws SQLException {
-        Object v = value(columnIndex);
-        return v == null ? null : JdbcValues.toText(v, type(columnIndex));
+        Vector v = vector(columnIndex);
+        if (wasNull) {
+            return null;
+        }
+        if (v instanceof BytesVector b && b.type() == DataType.VARCHAR) {
+            return b.getString(row);
+        }
+        return JdbcValues.toText(v.get(row), type(columnIndex));
     }
 
     @Override
@@ -300,15 +320,30 @@ final class FyrQLResultSet implements ResultSet {
 
     @Override
     public int getInt(int columnIndex) throws SQLException {
-        Object v = value(columnIndex);
-        return v == null ? 0 : (int) JdbcValues.toLong(v, type(columnIndex), Integer.MIN_VALUE, Integer.MAX_VALUE,
+        Vector v = vector(columnIndex);
+        if (wasNull) {
+            return 0;
+        }
+        if (v instanceof IntVector i && i.type() == DataType.INTEGER) {
+            return i.getInt(row);
+        }
+        return (int) JdbcValues.toLong(v.get(row), type(columnIndex), Integer.MIN_VALUE, Integer.MAX_VALUE,
                 "an int");
     }
 
     @Override
     public long getLong(int columnIndex) throws SQLException {
-        Object v = value(columnIndex);
-        return v == null ? 0 : JdbcValues.toLong(v, type(columnIndex), Long.MIN_VALUE, Long.MAX_VALUE, "a long");
+        Vector v = vector(columnIndex);
+        if (wasNull) {
+            return 0;
+        }
+        if (v instanceof BigIntVector b && b.type() == DataType.BIGINT) {
+            return b.getLong(row);
+        }
+        if (v instanceof IntVector i && i.type() == DataType.INTEGER) {
+            return i.getInt(row);
+        }
+        return JdbcValues.toLong(v.get(row), type(columnIndex), Long.MIN_VALUE, Long.MAX_VALUE, "a long");
     }
 
     @Override
@@ -319,8 +354,23 @@ final class FyrQLResultSet implements ResultSet {
 
     @Override
     public double getDouble(int columnIndex) throws SQLException {
-        Object v = value(columnIndex);
-        return v == null ? 0 : JdbcValues.toDouble(v, type(columnIndex));
+        Vector v = vector(columnIndex);
+        if (wasNull) {
+            return 0;
+        }
+        if (v instanceof DoubleVector d) {
+            return d.getDouble(row);
+        }
+        if (v instanceof DecimalVector d && d.isSmall()) {
+            return JdbcValues.toDouble(d.getUnscaledLong(row), d.type().scale());
+        }
+        if (v instanceof BigIntVector b && b.type() == DataType.BIGINT) {
+            return b.getLong(row);
+        }
+        if (v instanceof IntVector i && i.type() == DataType.INTEGER) {
+            return i.getInt(row);
+        }
+        return JdbcValues.toDouble(v.get(row), type(columnIndex));
     }
 
     @Override
@@ -332,8 +382,14 @@ final class FyrQLResultSet implements ResultSet {
 
     @Override
     public BigDecimal getBigDecimal(int columnIndex) throws SQLException {
-        Object v = value(columnIndex);
-        return v == null ? null : JdbcValues.toBigDecimal(v, type(columnIndex));
+        Vector v = vector(columnIndex);
+        if (wasNull) {
+            return null;
+        }
+        if (v instanceof DecimalVector d) {
+            return d.getBigDecimal(row);
+        }
+        return JdbcValues.toBigDecimal(v.get(row), type(columnIndex));
     }
 
     @Override
@@ -359,8 +415,14 @@ final class FyrQLResultSet implements ResultSet {
 
     @Override
     public Date getDate(int columnIndex, Calendar cal) throws SQLException {
-        Object v = value(columnIndex);
-        return v == null ? null : JdbcValues.toDate(v, type(columnIndex), cal);
+        Vector v = vector(columnIndex);
+        if (wasNull) {
+            return null;
+        }
+        if (cal == null && v instanceof IntVector i && i.type() == DataType.DATE) {
+            return Date.valueOf(LocalDate.ofEpochDay(i.getInt(row)));
+        }
+        return JdbcValues.toDate(v.get(row), type(columnIndex), cal);
     }
 
     @Override

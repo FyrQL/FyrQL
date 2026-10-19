@@ -42,6 +42,7 @@ import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
 import java.util.Map;
+import java.util.SplittableRandom;
 import java.util.TimeZone;
 import java.util.UUID;
 
@@ -225,6 +226,30 @@ class TypeRoundTripTest {
             assertEquals("22018", assertThrows(SQLException.class, () -> rs.getBytes("i")).getSQLState());
             assertEquals(42, rs.getInt("n"), "text that spells a number is one");
             assertTrue(rs.getBoolean("t"));
+        }
+    }
+
+    @Test
+    void aDecimalReadsAsTheNearestDouble() throws SQLException {
+        long[] edges = {0, 1, -1, 5, 12_345, (1L << 53) - 1, 1L << 53, (1L << 53) + 1, -(1L << 53) - 1,
+                999_999_999_999_999_999L, Long.MAX_VALUE, Long.MIN_VALUE};
+        SplittableRandom random = new SplittableRandom(20261020);
+        for (int scale = 0; scale <= 25; scale++) {
+            for (long u : edges) {
+                assertEquals(BigDecimal.valueOf(u, scale).doubleValue(), JdbcValues.toDouble(u, scale),
+                        u + "e-" + scale);
+            }
+            for (int i = 0; i < 10_000; i++) {
+                long u = random.nextLong() >> random.nextInt(64);
+                assertEquals(BigDecimal.valueOf(u, scale).doubleValue(), JdbcValues.toDouble(u, scale),
+                        u + "e-" + scale);
+            }
+        }
+        try (ResultSet rs = s.executeQuery("SELECT CAST('0.1' AS DECIMAL(18,1)) AS a,"
+                + " CAST('-123456789012.345678' AS DECIMAL(18,6)) AS b")) {
+            assertTrue(rs.next());
+            assertEquals(0.1, rs.getDouble("a"));
+            assertEquals(-123456789012.345678, rs.getDouble("b"));
         }
     }
 
