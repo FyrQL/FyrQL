@@ -25,6 +25,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.QueryContext;
+import net.fyrql.sql.bind.BoundStatement;
 import net.fyrql.sql.parse.Parameters;
 import org.apache.arrow.flight.CallStatus;
 import org.apache.arrow.flight.CancelFlightInfoRequest;
@@ -70,7 +71,16 @@ import java.util.regex.Pattern;
  * once, and the batches go out as they come from the engine, as fast as
  * the client takes them. A prepared statement takes one row of values,
  * which keep their Arrow types as the setters of the JDBC driver keep
- * theirs. The server reads and does not write, and has no transactions.
+ * theirs.
+ * <p>
+ * A statement that writes runs to its end when a client sends it as an
+ * update, and the answer is the number of rows written; a prepared one runs
+ * once for each row of values sent with the update. A client that asks for
+ * the flight info of such a statement as for a query runs it then, and
+ * the ticket gives the row of the column {@code Count}. A prepared
+ * statement that writes has a result without columns, as clients such as
+ * the JDBC driver of Arrow take it for an update. Each statement that
+ * writes counts as a query while it runs; the server has no transactions.
  */
 final class FyrQLFlightSqlProducer implements FlightSqlProducer {
 
@@ -78,7 +88,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     private static final Schema PLAN = Schema.of(new Schema.Field("plan", DataType.VARCHAR, false));
     private static final Pattern EXPLAIN = Pattern.compile("\\s*EXPLAIN\\s+(.*)",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final String READ_ONLY = "FyrQL reads and does not write";
+    private static final String NOT_AN_UPDATE = "A query returns rows, not a number of rows written; run it"
+            + " as a query";
     private static final long WAIT_MILLIS = 100;
     private static final Duration MIN_EXPIRY_PERIOD = Duration.ofSeconds(1);
     private static final Duration MAX_EXPIRY_PERIOD = Duration.ofMinutes(1);
@@ -151,7 +162,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     private record Values(List<Object> values, List<DataType> types) {
     }
 
-    /** A prepared statement: its query, or the query it explains, and the values bound last. */
+    /** A prepared statement: its statement, or the statement it explains, and the values bound last. */
     private static final class Prepared {
         final PreparedQuery query;
         final String explained;
@@ -164,7 +175,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             this.query = query;
             this.explained = explained;
             this.parameters = query == null ? null : Parameters.parse(query.sql());
-            this.schema = Metadata.resultSchema(query == null ? PLAN : query.schema());
+            this.schema = Metadata.resultSchema(query == null ? PLAN
+                    : query.writes() ? new Schema(List.of()) : query.schema());
             List<Schema.Field> fields = new ArrayList<>();
             List<DataType> types = parameterTypes();
             for (int i = 0; i < types.size(); i++) {
@@ -178,39 +190,34 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
 
         /**
-         * Binds the query with the values bound last: with values of the
+         * Binds the statement with a row of values: with values of the
          * types of the parameters, or {@code NULL}, as the engine prepared
          * it; otherwise with literals of the types of the values.
+         *
+         * @param v the values, {@code null} if none were bound
          */
-        Statement statement(FyrQL engine) {
-            if (query == null) {
-                return explain(engine, explained);
-            }
-            Values v = values;
+        BoundStatement bind(FyrQL engine, Values v) {
             List<DataType> types = parameterTypes();
             if (v == null) {
                 if (!types.isEmpty()) {
                     throw FlightErrors.invalid("The prepared statement has " + types.size() + " parameters and no"
                             + " values; bind a row of values first");
                 }
-                return new Statement(query.schema(), engine.plan(query, List.of()), null);
+                return engine.statement(query, List.of());
             }
             boolean fit = true;
             for (int i = 0; i < types.size() && fit; i++) {
                 fit = v.values().get(i) == null || v.types().get(i).equals(types.get(i));
             }
-            PlanNode plan;
             if (fit) {
-                plan = engine.plan(query, v.values());
-            } else {
-                String[] literals = new String[types.size()];
-                for (int i = 0; i < literals.length; i++) {
-                    Object value = v.values().get(i);
-                    literals[i] = Parameters.literal(value, value == null ? types.get(i) : v.types().get(i));
-                }
-                plan = engine.plan(parameters.render(literals), query.searchPath());
+                return engine.statement(query, v.values());
             }
-            return new Statement(plan.schema(), plan, null);
+            String[] literals = new String[types.size()];
+            for (int i = 0; i < literals.length; i++) {
+                Object value = v.values().get(i);
+                literals[i] = Parameters.literal(value, value == null ? types.get(i) : v.types().get(i));
+            }
+            return engine.statement(parameters.render(literals), query.searchPath());
         }
     }
 
@@ -329,14 +336,82 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
     }
 
-    /** Binds a query, or explains it for {@code EXPLAIN} and a query. */
+    /**
+     * Binds a query, or explains a statement for {@code EXPLAIN} and a
+     * statement; a statement that writes runs now, see {@link #run(BoundStatement)}.
+     */
     private Statement statement(String sql) {
         Matcher m = EXPLAIN.matcher(sql);
         if (m.matches()) {
             return explain(engine, m.group(1));
         }
-        PlanNode plan = engine.plan(sql);
-        return new Statement(plan.schema(), plan, null);
+        return run(engine.statement(sql));
+    }
+
+    /** Binds a prepared statement with the values bound last, or explains it; a statement that writes runs now. */
+    private Statement statement(Prepared p) {
+        return p.query == null ? explain(engine, p.explained) : run(p.bind(engine, p.values));
+    }
+
+    /**
+     * Returns the statement of a query; a statement that writes runs to its
+     * end, and its result is the row of its count.
+     */
+    private Statement run(BoundStatement bound) {
+        if (bound instanceof BoundStatement.Query q) {
+            return new Statement(q.plan().schema(), q.plan(), null);
+        }
+        Object[] count = {update(bound)};
+        return new Statement(BoundStatement.COUNT, null, Batch.ofRows(BoundStatement.COUNT, List.<Object[]>of(count)));
+    }
+
+    /**
+     * Runs a statement that writes to its end, unless more queries than
+     * allowed run already, and returns the rows it wrote.
+     */
+    private long update(BoundStatement statement) {
+        if (!queries.tryAcquire()) {
+            throw busy();
+        }
+        try {
+            return engine.update(statement, new QueryContext());
+        } finally {
+            queries.release();
+        }
+    }
+
+    private FlightRuntimeException busy() {
+        return CallStatus.RESOURCE_EXHAUSTED.withDescription("The server runs " + maxQueries
+                + " queries, the most it runs at once (maxQueries); try again later").toRuntimeException();
+    }
+
+    /** Answers a put with one message and completes it. */
+    private void complete(StreamListener<PutResult> ackStream, Message message) {
+        byte[] result = message.toByteArray();
+        try (ArrowBuf buffer = allocator.buffer(result.length)) {
+            buffer.writeBytes(result);
+            ackStream.onNext(PutResult.metadata(buffer));
+        }
+        ackStream.onCompleted();
+    }
+
+    /**
+     * Returns the types of a row of values for the parameters: the types of
+     * the columns, but a column of the Arrow type {@code Null}, such as
+     * pyarrow makes of {@code None}, has the type of its parameter.
+     */
+    private static List<DataType> types(VectorSchemaRoot root, Batch batch, List<DataType> parameterTypes) {
+        List<Field> fields = root.getSchema().getFields();
+        if (fields.size() != parameterTypes.size()) {
+            throw FlightErrors.invalid("The query has " + parameterTypes.size() + " parameters, not "
+                    + fields.size() + " values");
+        }
+        List<DataType> types = new ArrayList<>(fields.size());
+        for (int i = 0; i < fields.size(); i++) {
+            boolean untyped = fields.get(i).getType() instanceof ArrowType.Null;
+            types.add(untyped ? parameterTypes.get(i) : batch.schema().type(i));
+        }
+        return types;
     }
 
     private static Statement explain(FyrQL engine, String sql) {
@@ -354,8 +429,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             return;
         }
         if (!queries.tryAcquire()) {
-            listener.error(CallStatus.RESOURCE_EXHAUSTED.withDescription("The server runs " + maxQueries
-                    + " queries, the most it runs at once (maxQueries); try again later").toRuntimeException());
+            listener.error(busy());
             return;
         }
         QueryContext context = new QueryContext();
@@ -409,12 +483,15 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
     }
 
+    /** Returns the schema of the result, {@code Count} for a statement that writes, which does not run. */
     @Override
     public SchemaResult getSchemaStatement(FlightSql.CommandStatementQuery command, CallContext context,
             FlightDescriptor descriptor) {
         try {
             noTransaction(command.hasTransactionId());
-            return new SchemaResult(statement(command.getQuery()).schema);
+            Matcher m = EXPLAIN.matcher(command.getQuery());
+            return new SchemaResult(m.matches() ? explain(engine, m.group(1)).schema
+                    : Metadata.resultSchema(engine.statement(command.getQuery()).schema()));
         } catch (RuntimeException e) {
             throw FlightErrors.of(e);
         }
@@ -462,10 +539,24 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         listener.onCompleted();
     }
 
+    /** Runs a statement that writes and answers with the rows it wrote; a query fails. */
     @Override
     public Runnable acceptPutStatement(FlightSql.CommandStatementUpdate command, CallContext context,
             FlightStream flightStream, StreamListener<PutResult> ackStream) {
-        return () -> ackStream.onError(FlightErrors.unimplemented(READ_ONLY));
+        return () -> {
+            try {
+                noTransaction(command.hasTransactionId());
+                BoundStatement statement = EXPLAIN.matcher(command.getQuery()).matches() ? null
+                        : engine.statement(command.getQuery());
+                if (statement == null || statement instanceof BoundStatement.Query) {
+                    throw FlightErrors.invalid(NOT_AN_UPDATE);
+                }
+                long count = update(statement);
+                complete(ackStream, FlightSql.DoPutUpdateResult.newBuilder().setRecordCount(count).build());
+            } catch (RuntimeException e) {
+                ackStream.onError(FlightErrors.of(e));
+            }
+        };
     }
 
     // ---------------------------------------------------------------- prepared statements
@@ -526,34 +617,18 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                     rows += root.getRowCount();
                     if (rows > 1) {
                         throw FlightErrors.invalid("A prepared statement of FyrQL takes one row of values, not "
-                                + rows + " or more");
-                    }
-                    List<Field> fields = root.getSchema().getFields();
-                    if (fields.size() != parameterTypes.size()) {
-                        throw FlightErrors.invalid("The query has " + parameterTypes.size() + " parameters, not "
-                                + fields.size() + " values");
+                                + rows + " or more; send the rows of a statement that writes as an update");
                     }
                     Batch batch = ArrowToBatch.batch(root, flightStream.getDictionaryProvider());
-                    Object[] row = batch.row(0);
-                    List<DataType> types = new ArrayList<>(row.length);
-                    for (int i = 0; i < row.length; i++) {
-                        boolean untyped = fields.get(i).getType() instanceof ArrowType.Null;
-                        types.add(untyped ? parameterTypes.get(i) : batch.schema().type(i));
-                    }
-                    bound = new Values(Arrays.asList(row), types);
+                    bound = new Values(Arrays.asList(batch.row(0)), types(root, batch, parameterTypes));
                 }
                 if (bound == null && !parameterTypes.isEmpty()) {
                     throw FlightErrors.invalid("The query has " + parameterTypes.size() + " parameters, not 0"
                             + " values");
                 }
                 p.values = bound;
-                byte[] result = FlightSql.DoPutPreparedStatementResult.newBuilder().setPreparedStatementHandle(handle)
-                        .build().toByteArray();
-                try (ArrowBuf buffer = allocator.buffer(result.length)) {
-                    buffer.writeBytes(result);
-                    ackStream.onNext(PutResult.metadata(buffer));
-                }
-                ackStream.onCompleted();
+                complete(ackStream, FlightSql.DoPutPreparedStatementResult.newBuilder()
+                        .setPreparedStatementHandle(handle).build());
             } catch (RuntimeException e) {
                 ackStream.onError(FlightErrors.of(e));
             }
@@ -564,7 +639,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     public FlightInfo getFlightInfoPreparedStatement(FlightSql.CommandPreparedStatementQuery command,
             CallContext context, FlightDescriptor descriptor) {
         try {
-            Statement s = prepared.get(command.getPreparedStatementHandle(), owner(context)).statement(engine);
+            Statement s = statement(prepared.get(command.getPreparedStatementHandle(), owner(context)));
             ByteString handle = statements.add(owner(context), s);
             return info(s.schema, descriptor, ticket(FlightSql.TicketStatementQuery.newBuilder()
                     .setStatementHandle(handle).build()));
@@ -584,7 +659,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             ServerStreamListener listener) {
         Statement s;
         try {
-            s = prepared.get(command.getPreparedStatementHandle(), owner(context)).statement(engine);
+            s = statement(prepared.get(command.getPreparedStatementHandle(), owner(context)));
         } catch (RuntimeException e) {
             listener.error(FlightErrors.of(e));
             return;
@@ -592,10 +667,53 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         run(s, listener);
     }
 
+    /**
+     * Runs a prepared statement that writes once for each row of values
+     * the client sends, or once if it has no parameters, and answers with
+     * the rows written by all runs; a column of the Arrow type {@code Null}
+     * is a {@code NULL} of the type of its parameter. Each run writes on its
+     * own: the runs before one that fails keep what they wrote. A query
+     * fails.
+     */
     @Override
     public Runnable acceptPutPreparedStatementUpdate(FlightSql.CommandPreparedStatementUpdate command,
             CallContext context, FlightStream flightStream, StreamListener<PutResult> ackStream) {
-        return () -> ackStream.onError(FlightErrors.unimplemented(READ_ONLY));
+        return () -> {
+            try {
+                Prepared p = prepared.get(command.getPreparedStatementHandle(), owner(context));
+                if (p.query == null || !p.query.writes()) {
+                    throw FlightErrors.invalid(NOT_AN_UPDATE);
+                }
+                List<DataType> parameterTypes = p.parameterTypes();
+                long count = 0;
+                long rows = 0;
+                while (flightStream.next()) {
+                    VectorSchemaRoot root = flightStream.getRoot();
+                    if (root.getRowCount() == 0 || parameterTypes.isEmpty()) {
+                        continue;
+                    }
+                    Batch batch = ArrowToBatch.batch(root, flightStream.getDictionaryProvider());
+                    List<DataType> types = types(root, batch, parameterTypes);
+                    for (int r = 0; r < batch.rowCount(); r++) {
+                        rows++;
+                        try {
+                            count += update(p.bind(engine, new Values(Arrays.asList(batch.row(r)), types)));
+                        } catch (RuntimeException e) {
+                            FlightRuntimeException f = FlightErrors.of(e);
+                            throw f.status().withDescription("Row " + rows + " of the values fails, after "
+                                    + count + " rows written: " + f.status().description()).withCause(e)
+                                    .toRuntimeException();
+                        }
+                    }
+                }
+                if (parameterTypes.isEmpty()) {
+                    count = update(p.bind(engine, null));
+                }
+                complete(ackStream, FlightSql.DoPutUpdateResult.newBuilder().setRecordCount(count).build());
+            } catch (RuntimeException e) {
+                ackStream.onError(FlightErrors.of(e));
+            }
+        };
     }
 
     // ---------------------------------------------------------------- metadata

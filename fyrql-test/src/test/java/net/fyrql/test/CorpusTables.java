@@ -32,16 +32,16 @@ import java.util.Map;
  * The tables {@code t}, {@code u} and {@code w} of the SQL corpus, and {@code n} with nested columns, in a
  * memory source named {@code memory}.
  */
-final class CorpusTables {
+public final class CorpusTables {
 
-    static final String SOURCE = "memory";
-    static final List<String> NAMES = List.of("t", "u", "w", "n");
+    public static final String SOURCE = "memory";
+    public static final List<String> NAMES = List.of("t", "u", "w", "n");
 
     private CorpusTables() {
     }
 
     /** The source with the four tables; the caller may add settings before building it. */
-    static MemoryConnector.Builder builder() {
+    public static MemoryConnector.Builder builder() {
         return builder(SOURCE, true);
     }
 

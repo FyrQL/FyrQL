@@ -17,6 +17,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.Query;
 import net.fyrql.sql.ast.SqlExpr;
+import net.fyrql.sql.ast.Statement;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -56,6 +57,9 @@ import java.util.Objects;
  * binding, as a {@code DATE} and a {@code TIMESTAMP} without time zone.</li>
  * <li>A parameter {@code ?} of a prepared query takes the type its context
  * gives a bare {@code NULL}, see {@link #prepare}.</li>
+ * <li>A statement that writes binds to the plan of the rows it writes,
+ * see {@link BoundStatement}; {@code INSERT} brings them to the columns of
+ * the table.</li>
  * </ul>
  * Every error is a {@link SqlException} with the position of the part of the
  * query it concerns. A binder holds no state between queries.
@@ -135,6 +139,74 @@ public final class Binder {
     public Prepared prepare(Query query, List<SqlExpr.Parameter> parameters, LocalDateTime now) {
         ParameterTypes types = ParameterTypes.inferred();
         new QueryBinder(catalog, context(now, types)).query(query);
+        List<DataType> result = parameterTypes(types, parameters);
+        PlanNode plan = new QueryBinder(catalog, context(now, ParameterTypes.fixed(types.types()))).query(query);
+        return new Prepared(plan, result);
+    }
+
+    /**
+     * Binds a statement at the current time: a query, or a statement that
+     * writes.
+     *
+     * @throws SqlException if the statement does not bind
+     */
+    public BoundStatement bind(Statement statement) {
+        return bind(statement, LocalDateTime.now());
+    }
+
+    /**
+     * Binds a statement with {@code current_date} and {@code now()} at a
+     * given time.
+     *
+     * @throws SqlException if the statement does not bind
+     */
+    public BoundStatement bind(Statement statement, LocalDateTime now) {
+        return new StatementBinder(catalog, context(now, ParameterTypes.none())).statement(statement);
+    }
+
+    /**
+     * A statement with parameters, bound.
+     *
+     * @param statement the statement, which is not run, as its parameters
+     *        have no values
+     * @param parameterTypes the type of each parameter, from the first
+     */
+    public record PreparedStatement(BoundStatement statement, List<DataType> parameterTypes) {
+        public PreparedStatement {
+            Objects.requireNonNull(statement, "statement");
+            parameterTypes = List.copyOf(parameterTypes);
+        }
+    }
+
+    /**
+     * Binds a statement with parameters at the current time, see
+     * {@link #prepare(Statement, List, LocalDateTime)}.
+     *
+     * @throws SqlException if the statement does not bind, or the type of a parameter cannot be inferred
+     */
+    public PreparedStatement prepare(Statement statement, List<SqlExpr.Parameter> parameters) {
+        return prepare(statement, parameters, LocalDateTime.now());
+    }
+
+    /**
+     * Binds a statement with parameters, as
+     * {@link #prepare(Query, List, LocalDateTime)} binds a query. In
+     * {@code VALUES} of an {@code INSERT}, a parameter takes the type of
+     * the column its value goes to.
+     *
+     * @throws SqlException if the statement does not bind, or the type of a parameter cannot be inferred
+     */
+    public PreparedStatement prepare(Statement statement, List<SqlExpr.Parameter> parameters, LocalDateTime now) {
+        ParameterTypes types = ParameterTypes.inferred();
+        new StatementBinder(catalog, context(now, types)).statement(statement);
+        List<DataType> result = parameterTypes(types, parameters);
+        BoundStatement bound = new StatementBinder(catalog, context(now, ParameterTypes.fixed(types.types())))
+                .statement(statement);
+        return new PreparedStatement(bound, result);
+    }
+
+    /** Returns the types the first binding found for the parameters, in their order. */
+    private static List<DataType> parameterTypes(ParameterTypes types, List<SqlExpr.Parameter> parameters) {
         List<DataType> result = new ArrayList<>();
         for (SqlExpr.Parameter p : parameters) {
             DataType type = types.type(p.index());
@@ -144,8 +216,7 @@ public final class Binder {
             }
             result.add(type);
         }
-        PlanNode plan = new QueryBinder(catalog, context(now, ParameterTypes.fixed(types.types()))).query(query);
-        return new Prepared(plan, result);
+        return result;
     }
 
     private BindContext context(LocalDateTime now, ParameterTypes parameters) {

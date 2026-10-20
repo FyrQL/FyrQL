@@ -14,6 +14,7 @@ package net.fyrql.sql.bind;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.SqlException;
+import net.fyrql.sql.ast.Position;
 
 import java.util.List;
 import java.util.Locale;
@@ -34,6 +35,29 @@ public interface CatalogView {
      * @throws SqlException if there is no such table or the name is ambiguous
      */
     TableRef resolve(List<String> name);
+
+    /**
+     * Resolves the name of a table that may not exist, for
+     * {@code DROP TABLE IF EXISTS}. The default writes no tables.
+     *
+     * @return the table, or empty if there is none of the name
+     * @throws SqlException if the name is ambiguous
+     */
+    default Optional<TableRef> find(List<String> name) {
+        throw new SqlException("Not supported: writing tables", Position.UNKNOWN);
+    }
+
+    /**
+     * Returns where a new table of a name of one to three parts goes, for
+     * {@code CREATE TABLE}: in a registered source and an existing schema
+     * of it, as the engine resolves the parts; the table itself need not
+     * exist. The default writes no tables.
+     *
+     * @throws SqlException if the name names no source or schema
+     */
+    default TableRef resolveNew(List<String> name) {
+        throw new SqlException("Not supported: writing tables", Position.UNKNOWN);
+    }
 
     /** Returns the columns of a resolved table. */
     Schema schema(TableRef table);

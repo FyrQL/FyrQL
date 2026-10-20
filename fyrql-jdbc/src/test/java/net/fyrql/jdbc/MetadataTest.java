@@ -469,7 +469,8 @@ class MetadataTest {
             assertEquals(new FyrQLDriver().getMajorVersion(), md.getDriverMajorVersion());
             assertEquals(4, md.getJDBCMajorVersion());
             assertEquals(2, md.getJDBCMinorVersion());
-            assertTrue(md.isReadOnly());
+            assertFalse(md.isReadOnly());
+            assertTrue(md.supportsBatchUpdates());
             assertEquals("\\", md.getSearchStringEscape());
             assertTrue(md.isCatalogAtStart());
             assertTrue(md.supportsCatalogsInDataManipulation());

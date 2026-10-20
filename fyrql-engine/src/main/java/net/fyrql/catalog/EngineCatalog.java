@@ -12,6 +12,7 @@
 package net.fyrql.catalog;
 
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
@@ -24,18 +25,21 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * The catalog of an engine for the binder: names through the
  * {@link NameResolver}, and table functions from the connectors that offer
  * them. A function offered by several connectors is taken from the default
- * source if it offers it, otherwise from the first one registered.
+ * source if it offers it, otherwise from the first one registered; so are
+ * the writers of file formats.
  */
 public final class EngineCatalog implements CatalogView {
 
     private final Map<String, Connector> sources;
     private final NameResolver resolver;
     private final Map<String, TableFunctionProvider> functions = new LinkedHashMap<>();
+    private final Map<String, FileWriterProvider> fileWriters = new LinkedHashMap<>();
 
     /** A catalog over sources by name, in the order of their registration. */
     public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath) {
@@ -47,10 +51,20 @@ public final class EngineCatalog implements CatalogView {
                 functions.put(f.toLowerCase(Locale.ROOT), p);
             }
         }
+        if (preferred instanceof FileWriterProvider p) {
+            for (String f : p.fileFormats()) {
+                fileWriters.put(f.toLowerCase(Locale.ROOT), p);
+            }
+        }
         for (Connector c : sources.values()) {
             if (c instanceof TableFunctionProvider p) {
                 for (String f : p.tableFunctions()) {
                     functions.putIfAbsent(f.toLowerCase(Locale.ROOT), p);
+                }
+            }
+            if (c instanceof FileWriterProvider p) {
+                for (String f : p.fileFormats()) {
+                    fileWriters.putIfAbsent(f.toLowerCase(Locale.ROOT), p);
                 }
             }
         }
@@ -76,9 +90,38 @@ public final class EngineCatalog implements CatalogView {
         return List.copyOf(functions.keySet());
     }
 
+    /** Returns the formats of files that {@code COPY ... TO} writes, in lower case. */
+    public List<String> fileFormats() {
+        return List.copyOf(fileWriters.keySet());
+    }
+
+    /** Returns the writer of a format of files, given in any case. */
+    public Optional<FileWriterProvider> fileWriter(String format) {
+        return Optional.ofNullable(fileWriters.get(format.toLowerCase(Locale.ROOT)));
+    }
+
     @Override
     public TableRef resolve(List<String> name) {
         return resolver.resolve(name);
+    }
+
+    @Override
+    public Optional<TableRef> find(List<String> name) {
+        return resolver.find(name);
+    }
+
+    /**
+     * Returns where a new table goes, see {@link NameResolver#resolveNew}.
+     *
+     * @throws SqlException if the name names no source or schema, or the source writes no tables
+     */
+    @Override
+    public TableRef resolveNew(List<String> name) {
+        TableRef table = resolver.resolveNew(name);
+        if (sources.get(table.source()).writer().isEmpty()) {
+            throw new SqlException("Source " + table.source() + " does not write tables", Position.UNKNOWN);
+        }
+        return table;
     }
 
     @Override

@@ -19,6 +19,7 @@ import net.fyrql.connector.RemotePlan;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Split;
+import net.fyrql.connector.Writer;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.PlanNode;
@@ -82,6 +83,11 @@ import java.util.function.Predicate;
  * statement. Each part is a transaction of its own, so the parts
  * may see different states of a table that changes while it is read.
  * <p>
+ * The connector writes tables, see {@link #writer()}: it creates them in
+ * the types of its dialect, appends rows through a prepared statement in
+ * batches of {@link Builder#batchRows} and drops them, each statement of
+ * FyrQL one transaction of the database.
+ * <p>
  * Connections come from a URL or a data source, one per statement, closed
  * when its result is read; or the application shares one connection,
  * which it closes itself, e.g. for an in-memory database that lives as
@@ -97,6 +103,9 @@ public final class JdbcConnector implements Connector {
     /** The rows of a batch unless set. */
     public static final int DEFAULT_BATCH_SIZE = 2048;
 
+    /** The rows a write sends at a time unless set. */
+    public static final int DEFAULT_BATCH_ROWS = 1000;
+
     /**
      * The most parts a scan is read in, see {@link Builder#splitRows}: the
      * database works for every part at once, and on one machine more
@@ -109,6 +118,7 @@ public final class JdbcConnector implements Connector {
     private final JdbcDialect dialect;
     private final Dialect sql;
     private final JdbcCatalog catalog;
+    private final JdbcWriter writer;
     private final int fetchSize;
     private final int batchSize;
     private final Consumer<String> listener;
@@ -137,6 +147,7 @@ public final class JdbcConnector implements Connector {
         this.batchSize = b.batchSize;
         this.listener = b.listener;
         this.statements = b.recordStatements ? new ArrayList<>() : null;
+        this.writer = new JdbcWriter(b.name, connections, dialect, sql, catalog, b.batchRows, this::record);
         this.splitRows = b.splitRows;
         this.splitColumns = Map.copyOf(b.splitColumns);
     }
@@ -178,6 +189,20 @@ public final class JdbcConnector implements Connector {
     /** Forgets the schemas, tables and columns read so far, so that changes of the database become visible. */
     public void refresh() {
         catalog.refresh();
+    }
+
+    /**
+     * Returns the writer, which creates tables in the types the dialect
+     * writes, see {@link Dialect#typeName}, appends rows to tables and
+     * drops them; the catalog reads the database again after each write.
+     * A write is one transaction over a connection of its own; over a
+     * shared connection its commit or rollback ends a transaction the
+     * application began on it as well. Its statements are recorded as those
+     * of the scans are.
+     */
+    @Override
+    public Optional<Writer> writer() {
+        return Optional.of(writer);
     }
 
     /**
@@ -594,6 +619,7 @@ public final class JdbcConnector implements Connector {
         private String defaultSchema;
         private int fetchSize = DEFAULT_FETCH_SIZE;
         private int batchSize = DEFAULT_BATCH_SIZE;
+        private int batchRows = DEFAULT_BATCH_ROWS;
         private boolean recordStatements;
         private Consumer<String> listener;
         private long splitRows;
@@ -694,6 +720,19 @@ public final class JdbcConnector implements Connector {
                 throw new IllegalArgumentException("batchSize: " + rows);
             }
             this.batchSize = rows;
+            return this;
+        }
+
+        /**
+         * Sets the rows a write sends to the database at a time, with
+         * {@code executeBatch}; {@value JdbcConnector#DEFAULT_BATCH_ROWS} by
+         * default.
+         */
+        public Builder batchRows(int rows) {
+            if (rows < 1) {
+                throw new IllegalArgumentException("batchRows: " + rows);
+            }
+            this.batchRows = rows;
             return this;
         }
 

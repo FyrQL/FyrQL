@@ -38,7 +38,7 @@ import java.util.Set;
  * {@code timestamp} and {@code boolean}), {@code schemas} (a
  * comma-separated list),
  * {@code defaultSchema}, {@code fetchSize}, {@code batchSize},
- * {@code recordStatements}, {@code splitRows} and
+ * {@code batchRows}, {@code recordStatements}, {@code splitRows} and
  * {@code splitColumn.<table>} (see {@link JdbcConnector.Builder#splitRows}
  * and {@link JdbcConnector.Builder#splitColumn}), and
  * {@code properties.<key>} for any property of the driver. A relative path in the URL is resolved by the driver, not
@@ -76,6 +76,7 @@ public final class JdbcConnectorFactory implements ConnectorFactory {
         o.string("defaultSchema").ifPresent(b::defaultSchema);
         o.integer("fetchSize").ifPresent(b::fetchSize);
         o.integer("batchSize").ifPresent(b::batchSize);
+        o.integer("batchRows").ifPresent(b::batchRows);
         o.bool("recordStatements").ifPresent(b::recordStatements);
         o.get("splitRows", "a number of rows", v -> Long.parseLong(v.strip())).ifPresent(b::splitRows);
         o.prefixed("splitColumn", "<table>").forEach(b::splitColumn);

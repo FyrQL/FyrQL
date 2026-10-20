@@ -24,6 +24,9 @@ warehouse first.
   over tables spread across Parquet, CSV, JSON, PostgreSQL and Java collections, on a
   six-core laptop in about 17 s together, where DuckDB takes about 7 s over the same files
   (see [Building](#building)).
+- **Moving data.** `COPY ... TO` writes the result of a query into a CSV, JSON or Parquet
+  file, and `CREATE TABLE ... AS` and `INSERT INTO` write it into tables in memory and in
+  databases, so that data moves between sources, such as from PostgreSQL into Parquet.
 - **Embedded.** The engine runs inside the process of the application and is set up with
   a builder or a YAML file; there is no cluster or installation. A JDBC driver, also as
   one JAR, opens it to tools such as DBeaver.
@@ -42,8 +45,8 @@ warehouse first.
   also run on one thread and with compiled code, which must give the same results.
 
 FyrQL is young: version 0.x, not yet used in production, and its API may still change.
-It reads and does not write; the hash tables and sorts of a query must fit into its
-memory budget, since nothing is spilled to disk yet; and where all data is in local files
+It writes results into files, tables in memory and databases, but does not update or
+delete rows; the hash tables and sorts of a query must fit into its memory budget, since nothing is spilled to disk yet; and where all data is in local files
 and native code is fine, DuckDB itself is faster. FyrQL is meant for the other case: data
 spread across databases, files and services, queried from a Java application or a JDBC
 tool, without moving it first.
@@ -134,10 +137,12 @@ agree.
 ## Connectors
 
 Each kind of source is a connector in a module of its own, and every connector serves its
-tables in the schema `main` unless it says otherwise.
+tables in the schema `main` unless it says otherwise. The connectors of CSV, JSON and
+Parquet also write files, and those of memory and JDBC tables; see [Writing](#writing).
 
 - `fyrql-connector-memory`: Java collections of records, beans or rows; records and
-  nested collections become `STRUCT`, `LIST` and `MAP` values.
+  nested collections become `STRUCT`, `LIST` and `MAP` values. The tables that SQL creates
+  in it hold their rows as batches, until the engine closes.
 - `fyrql-connector-csv`: CSV and TSV files of a directory or one by one, with the types
   inferred from a sample as DuckDB's `read_csv` infers them. A scan reads integers,
   decimals of up to 18 digits, dates, booleans and ASCII strings straight from the
@@ -360,6 +365,139 @@ fields. What the `$metadata` forbids, by the vocabulary `Capabilities` of versio
 the attributes `sap:filterable`, `sap:sortable`, `sap:pageable` and `sap:countable` of
 version 2, is not asked for.
 
+## Writing
+
+Four statements write, and each gives one row with the number of rows written in a
+column `Count` of the type `BIGINT`, as in DuckDB:
+
+- `COPY (query) TO 'file' [(option value, ...)]`, or `COPY table TO 'file'`, writes the
+  rows of a query into a CSV, JSON or Parquet file;
+- `CREATE TABLE t AS query` creates a table with the columns of the query and its rows,
+  and `CREATE TABLE t (a INTEGER NOT NULL, b VARCHAR)` an empty one; `CREATE OR REPLACE
+  TABLE` drops a table of the name first, and `CREATE TABLE IF NOT EXISTS` does nothing if
+  there is one;
+- `INSERT INTO t [(columns)] query` and `INSERT INTO t [(columns)] VALUES (...), ...` add
+  rows;
+- `DROP TABLE [IF EXISTS] t` drops a table.
+
+`engine.update(sql)` runs such a statement and returns the number; `engine.sql`,
+`engine.rows` and the [JDBC driver](#jdbc-driver) run it too and give the row. With the
+sources of the [first example](#using-the-engine), this writes the orders with the
+regions of their customers into a CSV file, and the revenue of each region, read back
+from that file, into a new table in memory:
+
+```java
+long written = engine.update("""
+        COPY (SELECT o.id, c.region, o.amount
+              FROM orders AS o JOIN customers AS c ON o.customerId = c.id)
+        TO 'data/orders-by-region.csv'""");
+engine.update("CREATE TABLE mem.regions (region VARCHAR NOT NULL, revenue DECIMAL(12,2))");
+engine.update("INSERT INTO mem.regions SELECT region, sum(amount) FROM 'data/orders-by-region.csv' GROUP BY ALL");
+System.out.println(written + " " + engine.rows("SELECT * FROM regions ORDER BY region").stream()
+        .map(Arrays::toString).toList());
+```
+
+```
+4 [[north, 15.75], [south, 20.00]]
+```
+
+A statement runs while it is executed and returns when its rows are written. It reads
+its rows as a query does, with pushdown, compiled code and several threads, and
+`explain` shows its plan below a line such as `Insert into mem.main.regions` or
+`Copy to 'data/orders-by-region.csv' [format: csv]`. The values of `INSERT INTO` go to
+the columns in the list, by default all columns in their order; a column left out gets
+`NULL`, and a value of another type is cast to the type of its column, where a cast
+between the two types is allowed. A `NULL` in a column `NOT NULL` fails with
+`NOT NULL constraint failed: regions.region`. `CREATE TABLE ... AS` gives the table the
+names and types of the columns of the query, which must be unique, all of them without
+`NOT NULL`, as DuckDB does. `engine.prepare` prepares a statement with parameters `?` as
+it does a query, and `engine.update(prepared, values)` runs it; a parameter in `VALUES`
+takes the type of its column. A cancelled statement, or one that fails, leaves no file
+and no new rows behind, within the limits of the sources below.
+
+A name of a new table of one part goes to the default source and schema, of two parts
+to the schema `main` of the source of that name or else to the schema of that name in
+the default source, and of three parts to `source.schema.table`. Each statement is a
+transaction of its own in the source it writes to; there is no transaction over several
+statements or sources, and `CREATE OR REPLACE` drops the old table and then creates the
+new one in two steps. `UPDATE`, `DELETE`, `ALTER TABLE`, constraints and keys,
+`COPY ... FROM` (for which `INSERT INTO t SELECT * FROM read_csv('file')` reads a file)
+and scripts of several statements are not supported.
+
+**Files.** `COPY` takes the format from the option `FORMAT` (`csv`, `json` or
+`parquet`), or else from the end of the name of the file: `.csv` and `.tsv`, `.json`,
+`.jsonl` and `.ndjson`, or `.parquet`, CSV and JSON also with `.gz`, which compresses
+them with gzip. A relative path is resolved against the working directory of the
+process. The rows go into a temporary file `<name>.<random>.tmp` next to the file, which
+takes its name when the last row is written and replaces a file of that name, so that a
+reader never sees half a file; the directory must exist. The writer of a format comes
+from a source of that type, which must be registered, if without tables, as
+`CsvConnector.builder("csv").build()` or a source `type: parquet` without options in the
+[configuration file](#configuration-file); otherwise the statement fails with
+`No source writes files of the format parquet`. The options, all optional, with their
+defaults:
+
+| Format | Options |
+| --- | --- |
+| CSV | `header` (`true`), `delimiter`, `delim` or `sep` (`,`, or a tab for `.tsv`), `quote` (`"`), `escape` (the quote), `nullstr` or `null` (empty), `dateformat` and `timestampformat` (as in `strftime`), `compression` (`gzip` or `none`, by default from the name) |
+| JSON | `array` (`false`: one record per line, `true`: one array of records), `dateformat`, `timestampformat`, `compression` |
+| Parquet | `compression` or `codec` (`zstd`, `snappy`, `gzip`, `lz4_raw` or `uncompressed`; `zstd`), `row_group_size` (122,880 rows), `row_group_size_bytes` (128 MB), `parquet_version` (`v1` or `v2`; `v1`) |
+
+An unknown option fails with a message that lists the known ones. A CSV file is written
+as DuckDB writes it, byte for byte: in UTF-8 with line feeds, a field in quotes only
+where it holds the delimiter, the quote or a line break or equals the null string, so
+that an empty string is `""` and a `NULL` is nothing, and a nested value as its text,
+such as `[1, NULL]`. A JSON file holds numbers as numbers, `NaN` and `Infinity` as
+DuckDB writes them, dates and timestamps as strings, a `BLOB` as a string with `\x`
+escapes, structs and maps as objects and lists as arrays. Neither keeps the types: read
+back, the types are inferred anew, so that a `TINYINT` comes back as a `BIGINT` and a
+`DECIMAL` from a CSV file as a `DOUBLE`, and DuckDB reads a number with a fraction from
+JSON as a `DOUBLE`. A Parquet file holds the types that DuckDB's `read_parquet` reads
+back as they were, nested ones to any depth, with a `TIMESTAMP` in microseconds not
+adjusted to UTC and a `UUID` of the logical type `UUID`, except for `HUGEINT`, which it
+holds as a `DECIMAL(38,0)`: a value of 39 digits fails with the name of its column, where
+DuckDB writes a `HUGEINT` as a `DOUBLE`. Its metadata has the key `writer.model.name`
+with the value `fyrql`.
+
+**Tables.** The memory connector and the JDBC connector create, fill and drop tables. In
+memory, a table that SQL created holds the batches of its rows and shows the rows of a
+statement when the statement ends; a query that runs at that time goes on with the rows
+it started with. A table registered from Java objects can be read and dropped, but not
+written. A source of the type `memory` in the configuration file starts without tables,
+and the [JDBC driver](#jdbc-driver) has one without a configuration file.
+
+A JDBC source creates a table with the types of its dialect, and sends the rows as
+`INSERT INTO t ("a", "b") VALUES (?, ?)` in batches of `batchRows` rows (1,000 by
+default), in a transaction that commits when the last batch is sent and rolls back when
+a row or the query fails. Where the database commits a `CREATE TABLE` at once, as H2 and
+MySQL do, the source drops the table it created after a rollback. The catalog of the
+source learns of a new or dropped table at once.
+
+| FyrQL | H2 | PostgreSQL | MySQL | SQLite | generic |
+| --- | --- | --- | --- | --- | --- |
+| `BOOLEAN` | `BOOLEAN` | `BOOLEAN` | `BOOLEAN` | `BOOLEAN` | `BOOLEAN` |
+| `TINYINT` | `TINYINT` | `SMALLINT` | `TINYINT` | `TINYINT` | `SMALLINT` |
+| `SMALLINT`, `BIGINT` | the same | the same | the same | the same | the same |
+| `INTEGER` | `INTEGER` | `INTEGER` | `INT` | `INT4` | `INTEGER` |
+| `HUGEINT` | `NUMERIC(39)` | `NUMERIC(39)` | `DECIMAL(39,0)` | none | none |
+| `FLOAT` | `REAL` | `REAL` | `FLOAT` | `FLOAT` | `REAL` |
+| `DOUBLE` | `DOUBLE PRECISION` | `DOUBLE PRECISION` | `DOUBLE` | `DOUBLE` | `DOUBLE PRECISION` |
+| `DECIMAL(p,s)` | `NUMERIC(p,s)` | `NUMERIC(p,s)` | `DECIMAL(p,s)` | `DECIMAL(p,s)` | `DECIMAL(p,s)` |
+| `VARCHAR` | `VARCHAR` | `VARCHAR` | `TEXT` | `VARCHAR` | `VARCHAR(4000)` |
+| `BLOB` | `VARBINARY` | `BYTEA` | `BLOB` | `BLOB` | `BLOB` |
+| `DATE` | `DATE` | `DATE` | `DATE` | `DATE` | `DATE` |
+| `TIMESTAMP` | `TIMESTAMP(6)` | `TIMESTAMP` | `DATETIME(6)` | `TIMESTAMP` | `TIMESTAMP` |
+| `UUID` | `UUID` | `UUID` | `CHAR(36)` | `UUID` | `CHAR(36)` |
+
+A column of a type without a name in the dialect, such as a `HUGEINT` in SQLite or a
+`STRUCT`, `LIST` or `MAP` in any database, fails the statement before it creates the
+table, with the column and the dialect. Read back, a table may have other types than
+those it was created with, as the database reports them: PostgreSQL has no `TINYINT`,
+SQLite keeps the declared names only as its affinities, and MySQL and the generic dialect
+store a `UUID` as text. A database through the generic dialect takes strings of up to
+4,000 characters. With MySQL, `rewriteBatchedStatements=true` in the URL sends a batch
+as one statement, which is much faster.
+
 ## Optimizer
 
 Subqueries are joins by the time the optimizer sees the plan. The binder turns an
@@ -509,7 +647,7 @@ engine:
 ```
 
 The `type` of a source picks its connector, which must be on the class path: `csv`,
-`json`, `parquet`, `http`, `odata` or `jdbc`; a connector of an application joins them through a
+`json`, `parquet`, `http`, `odata`, `jdbc` or `memory`; a connector of an application joins them through a
 `ConnectorFactory` listed in `META-INF/services`. The other keys of a source are the
 options of its type, read as text with nested keys joined by dots (`tables.products.url`);
 an unknown or misspelled option is an error that lists the known ones. Relative paths
@@ -540,9 +678,15 @@ A source of the type `jdbc` takes `url`, `user`, `password`, `dialect` (`h2`, `s
 `postgresql`, `mysql` or `generic`, by default from the URL or else the database, and
 `generic` for any other), for the generic dialect `pushdown`, `quote`, `limit` and
 `trust` (see [Connectors](#connectors)), `schemas` (a comma-separated list),
-`defaultSchema`, `fetchSize`, `batchSize`, `recordStatements`, `splitRows` and
-`splitColumn.<table>` (see [Parallel execution](#parallel-execution)), and
-`properties.<key>` for any property of the driver.
+`defaultSchema`, `fetchSize`, `batchSize`, `batchRows` (the rows of a batch of
+[`INSERT`](#writing)), `recordStatements`, `splitRows` and `splitColumn.<table>` (see
+[Parallel execution](#parallel-execution)), and `properties.<key>` for any property of
+the driver.
+
+A source of the type `memory` starts without tables, for those that SQL
+[creates](#writing), and takes `batchSize` and `splitRows`, the rows of the parts that
+a scan of a table reads on several threads. A source of the type `csv`, `json` or
+`parquet` without options has no tables, but gives `COPY` its format.
 
 ## JDBC driver
 
@@ -614,7 +758,9 @@ the connection with `08001`, as does a file with an error. A relative path of th
 resolved against the working directory, and the paths in the file against its directory.
 Without `config`, the engine has the sources `csv`, `json` and `parquet` without tables,
 so that file names and table functions can be queried, as in
-`SELECT * FROM 'data/orders.csv'` or `SELECT * FROM read_parquet('lake/events.parquet')`.
+`SELECT * FROM 'data/orders.csv'` or `SELECT * FROM read_parquet('lake/events.parquet')`,
+and files written, and the source `memory`, in which `CREATE TABLE memory.t AS ...`
+creates tables that live as long as the connection.
 
 Every connection builds an engine of its own and closes it when the connection closes; an
 application with an engine of its own opens a connection over it with
@@ -626,8 +772,9 @@ where names of fewer than three parts are looked up, for this connection only. T
 schemas, tables and columns, with the number of rows of a table, or an estimate, in
 `REMARKS` if the source has one; it reads only the sources the catalog in the call matches.
 
-A statement runs one query: a `SELECT`, `WITH`, `VALUES` or set operation, or `EXPLAIN`
-followed by a query, which gives the plan as rows of one column `plan`. The parameters
+A statement runs one query: a `SELECT`, `WITH`, `VALUES` or set operation; or one
+statement that [writes](#writing); or `EXPLAIN` followed by either, which gives the plan as
+rows of one column `plan`. The parameters
 `?` of a `PreparedStatement` go into the text as literals of the values they are set to,
 before the text is parsed; a parameter of a `MAP` type is not supported.
 `getParameterMetaData` gives the types the engine infers for the parameters (see
@@ -635,10 +782,12 @@ before the text is parsed; a parameter of a `MAP` type is not supported.
 `SELECT ?` or `LIMIT ?`, which the driver still runs with the literal of the value. A query runs
 until its first rows while it is executed, as in the drivers of databases, and the rest
 while its result set is read. `cancel()` and a timeout from `setQueryTimeout` stop a
-running query, also one that waits for a database, with the SQLState `57014` or `HYT00`. The queries of one connection run one at a time. An
+running query or statement, also one that waits for a database, with the SQLState
+`57014` or `HYT00`. The queries of one connection run one at a time. An
 error has the message of FyrQL, with the position in the text or the node of the plan,
 and the exception of FyrQL as its cause; its SQLState tells the kind, such as `42601` for
-the syntax, `42P01` for an unknown table, `42703` for an unknown column, `0A000` for what
+the syntax, `42P01` for an unknown table, `42703` for an unknown column, `42P07` for a
+table that exists already, `23502` for a `NULL` in a column `NOT NULL`, `0A000` for what
 FyrQL does not support, `22003`, `22012` and `22018` for values out of range, a division
 by zero and a failed cast, and `58030` for an error of a source.
 
@@ -666,10 +815,17 @@ DuckDB writes it, such as `[1, NULL]` or `{'a': 1}`:
 `getObject(i, LocalDate.class)`, `LocalDateTime`, `BigInteger` and `String` work as
 well, and the elements of arrays, structs and maps are converted alike.
 
-The driver only reads. `executeUpdate` and statements other than queries fail with
-`0A000`; there are no transactions: a connection is read-only and in auto-commit, and
-`commit` and `rollback` do nothing. Results are read forward only, a call runs one
-statement and not a script, and there are no stored procedures.
+A statement that writes runs with `executeUpdate`, `executeLargeUpdate` or `execute`,
+which returns `false` and leaves the number of rows written to `getUpdateCount`.
+`executeQuery` runs only queries and `executeUpdate` only statements that write; each
+fails with `42809` before it runs the other kind. `addBatch` and `executeBatch` run a
+list of statements, or a `PreparedStatement` with several sets of values, one after the
+other, and stop at the first that fails with a `BatchUpdateException`, which holds the
+counts of those before it, whose rows stay written. A connection is in auto-commit, and
+each statement is a transaction of its own in the source it writes to: `commit` and
+`rollback` do nothing. `setReadOnly(true)` makes a statement that writes fail with
+`25006`. Results are read forward only, a call runs one statement and not a script, and
+there are no stored procedures and no generated keys.
 
 ### DBeaver
 
@@ -691,7 +847,11 @@ In DBeaver, a new driver in the Driver Manager gets
 A connection with that driver then asks for the configuration file. DBeaver opens several
 connections to a database, for the metadata and for each editor, and each of them builds
 an engine; switching off the separate connections in the settings of the connection
-keeps it at one.
+keeps it at one. DBeaver runs a statement that writes with `execute` and shows the
+number of rows written. Its navigator shows a new table after a refresh only with a
+single connection: a table in memory exists only in the engine of the connection that
+created it, and the engine of another connection learns of a table created in a
+database only when that connection opens anew, as with Invalidate/Reconnect.
 
 ## Arrow
 
@@ -827,12 +987,17 @@ engine gives them, as fast as the client takes them; a client that cancels the q
 closes its stream before the end, stops it. A prepared statement tells the types of its
 parameters as their schema and takes one row of values. The calls for metadata give the
 sources as catalogs with their schemas, tables and columns, the table type `TABLE`, the
-name `FyrQL` and the version of the server, and the types. An error has the message of
-FyrQL, with the position in the text, and the status `INVALID_ARGUMENT` for a query that
-does not parse or bind, values out of range and a failed cast, `RESOURCE_EXHAUSTED` for
-the memory budget and `maxQueries`, `CANCELLED` for a cancelled query, and `INTERNAL` for
-an error of a source. Statements that write fail with `UNIMPLEMENTED`, and there are no
-transactions. All clients share the engine, with its threads and its memory budget.
+name `FyrQL` and the version of the server, and the types. A statement that
+[writes](#writing) runs as an update, whose answer is the number of rows written, or,
+sent as a query, when the client asks for its flight info, which then gives the row of
+`Count`. A prepared statement that writes has a result without columns, as the Flight SQL
+JDBC driver of Arrow expects, and runs once for each row of values the client sends; at
+a row that fails, the rows before it stay written. Each statement is a transaction of
+its own, and there is no bulk ingestion. An error has the message of FyrQL, with the
+position in the text, and the status `INVALID_ARGUMENT` for a statement that does not
+parse or bind, values out of range, a failed cast and a write the target refuses,
+`RESOURCE_EXHAUSTED` for the memory budget and `maxQueries`, which counts statements that
+write too, `CANCELLED` for a cancelled query, and `INTERNAL` for an error of a source. All clients share the engine, with its threads and its memory budget.
 
 ### Python
 
@@ -873,9 +1038,18 @@ With TLS, the URI starts with `grpc+tls://`, and a certificate that no known aut
 signed is trusted with `adbc_driver_flightsql.DatabaseOptions.TLS_ROOT_CERTS.value` and
 its text as PEM. `adbc_get_objects()`, `adbc_get_table_schema()` and `adbc_get_info()`
 give the metadata. A parameter alone in the select list needs a cast, as in
-`SELECT CAST(? AS DATE)`, and `executemany` fails, since ADBC sends it as a statement
-that writes; `execute` runs a query with one row of values at a time. This was tried
-with pyarrow 26.0.0 and `adbc-driver-flightsql` 1.12.0.
+`SELECT CAST(? AS DATE)`, and `execute` runs a query with one row of values at a time.
+`executemany` runs a statement that writes once for each row of values; with a source
+`mem` of the type `memory` in the file, this prints 3 with the cursor of the example:
+
+```python
+cur.execute("CREATE TABLE mem.notes (id INTEGER NOT NULL, text VARCHAR)")
+cur.executemany("INSERT INTO mem.notes VALUES (?, ?)", [(1, "a"), (2, "b"), (3, None)])
+print(cur.rowcount)
+```
+
+`adbc_ingest` is not supported. This was tried with pyarrow 26.0.0 and
+`adbc-driver-flightsql` 1.12.0.
 
 ### JDBC tools
 
@@ -886,7 +1060,9 @@ connects with a URL such as
 jdbc:arrow-flight-sql://localhost:32010/?useEncryption=false&user=alice&password=secret
 ```
 
-and the tests run the 22 TPC-H queries through it. It names the type of a column after
+and the tests run the 22 TPC-H queries and statements that write through it. Its
+`executeBatch` of a `PreparedStatement` sends all sets of values at once and gives one
+count, the sum. It names the type of a column after
 its Arrow type, so that `DECIMAL(p,s)` and `HUGEINT` are both `DECIMAL`, returned as
 `BigDecimal`, and a `DATE` is a `java.sql.Date`; the types of FyrQL are in the type
 names of `getColumns` of its `DatabaseMetaData`.
@@ -1196,8 +1372,8 @@ once more.
 
 ## Supported SQL
 
-Queries only; there is no DDL or DML. Names, types and the meaning of the forms follow
-DuckDB 1.5.6.
+Queries, and the statements of [Writing](#writing). Names, types and the meaning of the
+forms follow DuckDB 1.5.6.
 
 - `SELECT [DISTINCT]` with `*`, `t.*`, `* EXCLUDE (...)` and `* REPLACE (...)`; an alias
   of the select list can be used by later items, in `WHERE`, `GROUP BY`, `HAVING` and
@@ -1406,6 +1582,8 @@ Known differences from DuckDB:
 - DuckDB 1.5.6 takes rows into a frame whose start lies after its end when the frame has
   an `EXCLUDE`, as in `GROUPS BETWEEN 0 PRECEDING AND 3 PRECEDING EXCLUDE TIES`, where it
   takes earlier groups; FyrQL keeps such a frame empty.
+- A Parquet file that `COPY` writes holds a `HUGEINT` as a `DECIMAL(38,0)`, where DuckDB
+  writes a `DOUBLE`; `CREATE OR REPLACE TABLE` drops and creates in two transactions.
 - A parameter `?` gets its type from its context when the query is prepared, as a bare
   `NULL` would; as the argument of a function, that is the first type the function takes
   of `BIGINT`, `DOUBLE`, `INTEGER` and so on, where DuckDB may choose another, and alone
@@ -1421,19 +1599,19 @@ Known differences from DuckDB:
 | `fyrql-codegen` | code generation with Janino, which it carries renamed; optional |
 | `fyrql-sql` | the SQL parser, the binder, which turns subqueries into joins, and the rendering of plans as SQL per dialect |
 | `fyrql-optimizer` | the folding of constants, the moving of conditions toward the tables and into join keys, the order of inner joins by the row counts of the catalogs, the narrowing of scans to the columns and fields in use, joins in a database and the pushdown into sources |
-| `fyrql-connector-memory` | Java collections, records and POJOs as tables |
-| `fyrql-connector-csv` | CSV and TSV files as tables |
-| `fyrql-connector-json` | JSON files as tables, with the columns inferred as DuckDB infers them |
-| `fyrql-connector-parquet` | Parquet files as tables, read with parquet-java without Hadoop, which it carries renamed |
+| `fyrql-connector-memory` | Java collections, records and POJOs as tables, and the tables that SQL creates |
+| `fyrql-connector-csv` | CSV and TSV files as tables, and their writer |
+| `fyrql-connector-json` | JSON files as tables, with the columns inferred as DuckDB infers them, and their writer |
+| `fyrql-connector-parquet` | Parquet files as tables, read and written with parquet-java without Hadoop, which it carries renamed |
 | `fyrql-connector-http` | JSON from HTTP endpoints as tables |
 | `fyrql-connector-odata` | the entity sets of OData services of versions 2 and 4 as tables, with filters, orders, limits and `count(*)` pushed to the service |
-| `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC, and of any other database through a generic dialect |
+| `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC, and of any other database through a generic dialect, read and written |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
-| `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application; read only |
+| `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application |
 | `fyrql-jdbc-all` | the JDBC driver with the engine, code generation and all connectors in one JAR, for tools such as DBeaver; the drivers of the databases are not in it |
 | `fyrql-arrow` | results as Apache Arrow vectors through an `ArrowReader`, and Arrow vectors as batches |
-| `fyrql-flight-sql` | an Arrow Flight SQL server for an engine, read only |
+| `fyrql-flight-sql` | an Arrow Flight SQL server for an engine |
 | `fyrql-flight-sql-all` | the Flight SQL server with the engine, code generation and all connectors in one executable JAR; the drivers of the databases are not in it |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
 | `fyrql-bench` | JMH benchmarks of the interpreter against compiled code, of the operators on one and on several threads, of the scans of CSV and Parquet files, and of the conversion to and from Arrow; not published |

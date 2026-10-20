@@ -38,8 +38,10 @@ import net.fyrql.exec.TableSource;
 import net.fyrql.optimizer.Optimizer;
 import net.fyrql.exec.spi.CodegenStatistics;
 import net.fyrql.sql.SqlException;
+import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.bind.Binder;
+import net.fyrql.sql.bind.BoundStatement;
 import net.fyrql.sql.parse.Parameters;
 import net.fyrql.sql.parse.SqlParser;
 
@@ -64,6 +66,15 @@ import java.util.Objects;
  * {@code fyrql-codegen} on the class path, the engine compiles the
  * expressions, filters and keys of operators that process many rows; see
  * {@link Builder#codegen}.
+ * <p>
+ * Besides queries, {@link #sql(String)} runs the statements that write:
+ * {@code COPY ... TO} a file, {@code CREATE TABLE [AS]},
+ * {@code INSERT INTO} and {@code DROP TABLE} in a source that writes
+ * tables. Such a statement runs to its end before {@code sql} returns, and
+ * its result is one row with the column {@code Count}, the number of rows
+ * written, as in DuckDB; {@link #update(String)} returns the number
+ * alone. Each statement is a transaction of its own in the source it
+ * writes, as far as the source allows.
  *
  * <pre>{@code
  * try (FyrQL engine = FyrQL.builder().register(memory).register(csv).build()) {
@@ -83,6 +94,7 @@ public final class FyrQL implements AutoCloseable {
     private final Optimizer optimizer;
     private final Executor executor;
     private final Codegen codegen;
+    private final Writes writes;
 
     private FyrQL(Map<String, Connector> connectors, SearchPath searchPath, FunctionRegistry functions,
             MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options, int threads,
@@ -94,6 +106,7 @@ public final class FyrQL implements AutoCloseable {
         this.binder = new Binder(catalog, functions);
         this.optimizer = new Optimizer(this::connector, options);
         this.codegen = codegen;
+        this.writes = new Writes(this);
         this.executor = new Executor(new TableSource() {
             @Override
             public BatchReader open(PlanNode.Scan scan) {
@@ -216,10 +229,11 @@ public final class FyrQL implements AutoCloseable {
 
     /**
      * Parses and binds a query; {@code current_date} and {@code now()} stand
-     * for the time of this call.
+     * for the time of this call. A statement that writes has no plan of its
+     * own, see {@link #statement(String)}.
      *
-     * @throws SqlException if the query cannot be parsed or bound; the
-     *         message names the position in the text
+     * @throws SqlException if the query cannot be parsed or bound, or is no
+     *         query; the message names the position in the text
      */
     public PlanNode plan(String sql) {
         return binder.bind(SqlParser.parse(sql));
@@ -243,6 +257,31 @@ public final class FyrQL implements AutoCloseable {
     }
 
     /**
+     * Parses and binds a statement: a query, or a statement that writes,
+     * with the plan of the rows it writes. Whether a table to create
+     * exists, or one to write or drop, is checked when the statement runs.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound; the
+     *         message names the position in the text
+     */
+    public BoundStatement statement(String sql) {
+        return binder.bind(SqlParser.parseStatement(sql));
+    }
+
+    /**
+     * Parses and binds a statement with names looked up along a search
+     * path, see {@link #plan(String, SearchPath)}; a table to create goes
+     * to the default source and schema of the path if its name does not
+     * say otherwise.
+     *
+     * @throws SqlException             if the statement cannot be parsed or bound
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public BoundStatement statement(String sql, SearchPath searchPath) {
+        return binder(searchPath).bind(SqlParser.parseStatement(sql));
+    }
+
+    /**
      * Parses and binds a query with parameters {@code ?}, without running
      * it: the types of the parameters and the columns of the result. A
      * parameter takes the type that its context gives a bare {@code NULL}:
@@ -251,10 +290,12 @@ public final class FyrQL implements AutoCloseable {
      * {@code COALESCE}, {@code BOOLEAN} as a condition, the type of
      * {@code CAST(? AS type)}, and as an argument of a function the first
      * type it takes of {@code BIGINT}, {@code DOUBLE}, {@code INTEGER} and
-     * so on, {@code VARCHAR} last. A parameter without such a context, as
-     * in {@code SELECT ?}, is an error, as is a parameter where a constant
-     * is needed, such as in {@code LIMIT}, or one of a type with a
-     * {@code MAP}, which has no literal.
+     * so on, {@code VARCHAR} last; in {@code VALUES} of an {@code INSERT},
+     * the type of the column its value goes to. A parameter without such a
+     * context, as in {@code SELECT ?}, is an error, as is a parameter where
+     * a constant is needed, such as in {@code LIMIT}, or one of a type with
+     * a {@code MAP}, which has no literal. A statement that writes is
+     * prepared as well; its result has the column {@code Count}.
      *
      * @throws SqlException if the query cannot be parsed or bound, or a
      *         parameter has no type or one with a {@code MAP}
@@ -272,8 +313,8 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public PreparedQuery prepare(String sql, SearchPath searchPath) {
-        SqlParser.Parameterized parsed = SqlParser.parseWithParameters(sql);
-        Binder.Prepared bound = binder(searchPath).prepare(parsed.query(), parsed.parameters());
+        SqlParser.ParameterizedStatement parsed = SqlParser.parseStatementWithParameters(sql);
+        Binder.PreparedStatement bound = binder(searchPath).prepare(parsed.statement(), parsed.parameters());
         List<DataType> types = bound.parameterTypes();
         for (int i = 0; i < types.size(); i++) {
             if (Parameters.hasMap(types.get(i))) {
@@ -283,7 +324,8 @@ public final class FyrQL implements AutoCloseable {
                         p.position());
             }
         }
-        return new PreparedQuery(sql, searchPath, bound.plan().schema(), types);
+        return new PreparedQuery(sql, searchPath, bound.statement().schema(), types,
+                !(bound.statement() instanceof BoundStatement.Query));
     }
 
     /**
@@ -298,9 +340,28 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the number of values differs from
      *         that of the parameters, or a value is none of its type
      * @throws SqlException if the query does not bind any more, e.g. after
-     *         a change of a source
+     *         a change of a source, or is no query
      */
     public PlanNode plan(PreparedQuery query, List<?> values) {
+        return conform(plan(render(query, values), query.searchPath()), query.schema());
+    }
+
+    /**
+     * Binds a prepared statement with values for its parameters, as
+     * {@link #plan(PreparedQuery, List)} binds a query; a query comes with
+     * the columns of the prepared query.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the statement does not bind any more
+     */
+    public BoundStatement statement(PreparedQuery query, List<?> values) {
+        BoundStatement statement = statement(render(query, values), query.searchPath());
+        return statement instanceof BoundStatement.Query q
+                ? new BoundStatement.Query(conform(q.plan(), query.schema())) : statement;
+    }
+
+    /** Returns the text of a prepared statement with a literal of each value in place of its parameter. */
+    private static String render(PreparedQuery query, List<?> values) {
         List<DataType> types = query.parameterTypes();
         if (values.size() != types.size()) {
             throw new IllegalArgumentException("The query has " + types.size() + " parameters, not " + values.size()
@@ -314,9 +375,7 @@ public final class FyrQL implements AutoCloseable {
                 throw new IllegalArgumentException("Parameter " + (i + 1) + ": " + e.getMessage(), e);
             }
         }
-        Parameters text = Parameters.parse(query.sql());
-        PlanNode plan = plan(text.render(literals), query.searchPath());
-        return conform(plan, query.schema());
+        return Parameters.parse(query.sql()).render(literals);
     }
 
     /**
@@ -349,14 +408,14 @@ public final class FyrQL implements AutoCloseable {
     }
 
     /**
-     * Runs a prepared query with values for its parameters, see
-     * {@link #plan(PreparedQuery, List)}; the caller closes the result.
+     * Runs a prepared statement with values for its parameters, see
+     * {@link #statement(PreparedQuery, List)}; the caller closes the result.
      *
      * @throws IllegalArgumentException if the values do not fit the parameters
-     * @throws SqlException             if the query does not bind any more
+     * @throws SqlException             if the statement does not bind any more, or a write fails
      */
     public QueryResult execute(PreparedQuery query, List<?> values) {
-        return execute(plan(query, values));
+        return execute(statement(query, values), new QueryContext());
     }
 
     /**
@@ -365,10 +424,10 @@ public final class FyrQL implements AutoCloseable {
      * {@link #execute(PlanNode, QueryContext)}.
      *
      * @throws IllegalArgumentException if the values do not fit the parameters
-     * @throws SqlException             if the query does not bind any more
+     * @throws SqlException             if the statement does not bind any more, or a write fails
      */
     public QueryResult execute(PreparedQuery query, List<?> values, QueryContext context) {
-        return execute(plan(query, values), context);
+        return execute(statement(query, values), context);
     }
 
     /**
@@ -379,36 +438,106 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException             if the query does not bind any more
      */
     public List<Object[]> rows(PreparedQuery query, List<?> values) {
-        return rows(plan(query, values));
+        try (QueryResult result = execute(query, values)) {
+            return result.rows();
+        }
     }
 
     /**
-     * Runs a query; the caller closes the result.
+     * Runs a prepared statement that writes with values for its parameters
+     * and returns the number of rows written.
      *
-     * @throws SqlException if the query cannot be parsed or bound
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the statement does not bind any more, is a query, or fails
+     */
+    public long update(PreparedQuery query, List<?> values) {
+        return update(statement(query, values), new QueryContext());
+    }
+
+    /**
+     * Runs a statement; the caller closes the result. A statement that
+     * writes has run to its end when this returns.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound, or a write fails
      */
     public QueryResult sql(String sql) {
-        return execute(plan(sql));
+        return execute(statement(sql), new QueryContext());
     }
 
     /**
-     * Runs a query with names looked up along a search path, see
-     * {@link #plan(String, SearchPath)}; the caller closes the result.
+     * Runs a statement with names looked up along a search path, see
+     * {@link #statement(String, SearchPath)}; the caller closes the result.
      *
-     * @throws SqlException             if the query cannot be parsed or bound
+     * @throws SqlException             if the statement cannot be parsed or bound, or a write fails
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public QueryResult sql(String sql, SearchPath searchPath) {
-        return execute(plan(sql, searchPath));
+        return execute(statement(sql, searchPath), new QueryContext());
     }
 
     /**
-     * Runs a query and collects all rows as Java values.
+     * Runs a statement and collects all rows as Java values.
      *
-     * @throws SqlException if the query cannot be parsed or bound
+     * @throws SqlException if the statement cannot be parsed or bound, or a write fails
      */
     public List<Object[]> rows(String sql) {
-        return rows(plan(sql));
+        try (QueryResult result = sql(sql)) {
+            return result.rows();
+        }
+    }
+
+    /**
+     * Runs a statement that writes and returns the number of rows written:
+     * by {@code COPY}, {@code CREATE TABLE ... AS} and {@code INSERT}, and
+     * 0 for {@code CREATE TABLE} with columns and {@code DROP TABLE}.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound, is a query, or fails
+     */
+    public long update(String sql) {
+        return update(statement(sql), new QueryContext());
+    }
+
+    /**
+     * Runs a statement that writes with names looked up along a search
+     * path, see {@link #statement(String, SearchPath)}, and returns the
+     * number of rows written.
+     *
+     * @throws SqlException             if the statement cannot be parsed or bound, is a query, or fails
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public long update(String sql, SearchPath searchPath) {
+        return update(statement(sql, searchPath), new QueryContext());
+    }
+
+    /**
+     * Runs a bound statement that writes, to its end, and returns the
+     * number of rows written; a context of the caller cancels it, which
+     * abandons what was written.
+     *
+     * @throws SqlException if the statement is a query, or the write fails
+     */
+    public long update(BoundStatement statement, QueryContext context) {
+        if (statement instanceof BoundStatement.Query) {
+            throw new SqlException("A query returns rows, not a number of rows written; run it with sql",
+                    Position.UNKNOWN);
+        }
+        return writes.run(statement, context);
+    }
+
+    /**
+     * Runs a bound statement: a query as {@link #execute(PlanNode, QueryContext)}
+     * does, a statement that writes to its end, with a result of one row
+     * of the column {@code Count}. The caller closes the result.
+     *
+     * @throws SqlException if the write fails
+     */
+    public QueryResult execute(BoundStatement statement, QueryContext context) {
+        if (statement instanceof BoundStatement.Query q) {
+            return execute(q.plan(), context);
+        }
+        long count = writes.run(statement, context);
+        return execute(new PlanNode.Values(BoundStatement.COUNT, List.<Object[]>of(new Object[] {count})),
+                context);
     }
 
     /**
@@ -428,11 +557,14 @@ public final class FyrQL implements AutoCloseable {
      * side they probe) over a scan, or of a union of such chains without
      * joins, is marked {@code [parallel]}: the chain runs on several threads
      * if the scan has more than one split.
+     * <p>
+     * A statement that writes is a line of what it writes, with the plan
+     * of the rows below it, indented.
      *
-     * @throws SqlException if the query cannot be parsed or bound
+     * @throws SqlException if the statement cannot be parsed or bound
      */
     public String explain(String sql) {
-        return explain(plan(sql));
+        return explain(statement(sql));
     }
 
     /**
@@ -440,16 +572,36 @@ public final class FyrQL implements AutoCloseable {
      * see {@link #plan(String, SearchPath)}, as text in the form of
      * {@link #explain(String)}.
      *
-     * @throws SqlException             if the query cannot be parsed or bound
+     * @throws SqlException             if the statement cannot be parsed or bound
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public String explain(String sql, SearchPath searchPath) {
-        return explain(plan(sql, searchPath));
+        return explain(statement(sql, searchPath));
     }
 
     /** Returns a plan as the engine runs it, as text in the form of {@link #explain(String)}. */
     public String explain(PlanNode plan) {
         return Explain.print(optimize(plan), codegen, optimizer.estimator(), executor.threads());
+    }
+
+    /** Returns a statement as the engine runs it, as text in the form of {@link #explain(String)}. */
+    public String explain(BoundStatement statement) {
+        if (statement instanceof BoundStatement.Query q) {
+            return explain(q.plan());
+        }
+        StringBuilder sb = new StringBuilder(Explain.header(statement)).append('\n');
+        PlanNode input = switch (statement) {
+            case BoundStatement.Copy c -> c.input();
+            case BoundStatement.Create c -> c.input();
+            case BoundStatement.Insert i -> i.input();
+            default -> null;
+        };
+        if (input != null) {
+            for (String line : explain(input).split("\n")) {
+                sb.append("  ").append(line).append('\n');
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -467,8 +619,12 @@ public final class FyrQL implements AutoCloseable {
      * {@link net.fyrql.exec.QueryCancelledException}.
      */
     public QueryResult execute(PlanNode plan, QueryContext context) {
-        Operator op = executor.open(optimize(plan), optimizer.estimator(), context);
-        return new QueryResult(op, context);
+        return new QueryResult(open(plan, context), context);
+    }
+
+    /** Opens the operator of a plan, after {@link #optimize}. */
+    Operator open(PlanNode plan, QueryContext context) {
+        return executor.open(optimize(plan), optimizer.estimator(), context);
     }
 
     /** Runs a plan and collects all rows as Java values. */

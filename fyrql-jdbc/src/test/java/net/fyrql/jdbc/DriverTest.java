@@ -81,7 +81,7 @@ class DriverTest {
         Path json = Files.writeString(dir.resolve("t.json"), "[{\"a\": 1}, {\"a\": 5}]", StandardCharsets.UTF_8);
         try (Connection c = driver.connect("jdbc:fyrql:", null)) {
             FyrQL engine = c.unwrap(FyrQL.class);
-            assertEquals(List.of("csv", "json", "parquet"), engine.sources());
+            assertEquals(List.of("csv", "json", "parquet", "memory"), engine.sources());
             assertNull(c.getCatalog());
             assertEquals("main", c.getSchema());
             assertEquals(List.of(2L), first(c, "SELECT count(*) FROM read_csv('" + path(csv) + "')"));

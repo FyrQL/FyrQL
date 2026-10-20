@@ -24,8 +24,10 @@ import de.siegmar.fastcsv.reader.RecordType;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.plan.TableRef;
@@ -73,9 +75,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>
  * The connector also offers the table functions {@code read_csv} and
  * {@code read_csv_auto} for any file; built without files it serves only
- * them. See {@link #bind}.
+ * them. See {@link #bind}. It writes CSV files for {@code COPY ... TO}, see
+ * {@link #openFile}.
  */
-public final class CsvConnector implements Connector, TableFunctionProvider {
+public final class CsvConnector implements Connector, TableFunctionProvider, FileWriterProvider {
 
     /** The split size by default, see {@link Builder#splitSize}. */
     public static final long SPLIT_SIZE = 4L << 20;
@@ -85,6 +88,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
             DataType.DATE, DataType.TIMESTAMP);
 
     private static final List<String> TABLE_FUNCTIONS = List.of("read_csv", "read_csv_auto");
+
+    private static final List<String> FILE_FORMATS = List.of("csv");
 
     /** The prefix of the names of the tables of table function calls, which no registered file gets. */
     private static final String CALL_PREFIX = "#";
@@ -256,6 +261,46 @@ public final class CsvConnector implements Connector, TableFunctionProvider {
             return generated;
         });
         return TableRef.of(name, table);
+    }
+
+    @Override
+    public List<String> fileFormats() {
+        return FILE_FORMATS;
+    }
+
+    /**
+     * Opens a sink that writes a CSV file as DuckDB's {@code COPY ... TO}
+     * writes one: UTF-8 without a byte order mark, lines ended by a line
+     * feed, a header with the names of the columns, a value as its cast to
+     * {@code VARCHAR}, {@code NULL} as the null string, and a value in
+     * quotes if it holds the delimiter, the quote, the escape or a line
+     * break, or if it equals the null string, such as an empty string by
+     * default. A quote or an escape in a quoted value gets the escape
+     * before it. The options, with those of DuckDB's names that apply:
+     * <ul>
+     * <li>{@code header}: whether to write the header, {@code true} by
+     * default;</li>
+     * <li>{@code delimiter}, {@code delim} or {@code sep}: one character, or
+     * {@code 	} for a tab; a comma, or a tab for a name that ends in
+     * {@code .tsv} or {@code .tsv.gz}, by default;</li>
+     * <li>{@code quote}: one character, {@code "} by default;
+     * {@code escape}: one character, the quote by default;</li>
+     * <li>{@code nullstr} or {@code null}: the text of {@code NULL}, empty
+     * by default;</li>
+     * <li>{@code dateformat} and {@code timestampformat}: formats of
+     * {@code strftime} for the columns of type {@code DATE} and
+     * {@code TIMESTAMP};</li>
+     * <li>{@code compression}: {@code gzip}, {@code none} or {@code auto},
+     * the default, which compresses a file whose name ends in
+     * {@code .gz}.</li>
+     * </ul>
+     */
+    @Override
+    public Sink openFile(String format, Path file, Schema schema, Map<String, String> options) {
+        if (!FILE_FORMATS.contains(format)) {
+            throw new IllegalArgumentException("The CSV source " + name + " writes no files of the format " + format);
+        }
+        return CsvFileWriter.open(file, schema, options);
     }
 
     private static String string(String function, String key, Object value) {

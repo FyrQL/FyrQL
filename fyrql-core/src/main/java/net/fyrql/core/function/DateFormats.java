@@ -17,6 +17,7 @@ import net.fyrql.core.value.Dates;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.LongFunction;
 import java.util.function.ToLongFunction;
 
 /**
@@ -89,6 +90,20 @@ public final class DateFormats {
     public static ToLongFunction<String> reader(String format) {
         Format parsed = parse(format);
         return s -> parse(parsed, s);
+    }
+
+    /**
+     * Returns a writer of timestamps in a format, as {@code strftime} writes
+     * them, for writers of files that format many values in one format. The
+     * writer takes the microseconds since 1970-01-01 00:00:00; a date is the
+     * first microsecond of its day.
+     *
+     * @throws IllegalArgumentException if the format is not valid, see
+     *         {@link #check}
+     */
+    public static LongFunction<String> writer(String format) {
+        Format parsed = parse(format);
+        return micros -> format(parsed, Dates.dayOf(micros), Dates.timeOf(micros));
     }
 
     /**

@@ -19,6 +19,7 @@ import net.fyrql.core.value.Casts;
 import net.fyrql.exec.Codegen;
 import net.fyrql.exec.PipelinePlanner;
 import net.fyrql.exec.SegmentPlanner;
+import net.fyrql.sql.bind.BoundStatement;
 import net.fyrql.sql.render.DuckDbDialect;
 import net.fyrql.sql.render.SqlRenderer;
 
@@ -44,7 +45,8 @@ import java.util.regex.Pattern;
  * see {@link SegmentPlanner}, is marked {@code [parallel]}: it runs on
  * several threads if its scans have more than one split. A part of the
  * plan that a source runs is a line {@code Remote source [what it runs]},
- * with the part below it, each line after a {@code |}.
+ * with the part below it, each line after a {@code |}. A statement that
+ * writes is a line of its own, see {@link #header}.
  */
 final class Explain {
 
@@ -52,6 +54,37 @@ final class Explain {
     private static final Pattern PLAIN = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
     private Explain() {
+    }
+
+    /**
+     * Returns the line of a statement that writes, above the plan of its
+     * rows: {@code Copy to 'file' [format: csv, header: true]},
+     * {@code Create table source.schema.t (a INTEGER NOT NULL, b VARCHAR)}
+     * with {@code [or replace]} or {@code [if not exists]},
+     * {@code Insert into source.schema.t} or
+     * {@code Drop table [if exists] source.schema.t}.
+     */
+    static String header(BoundStatement statement) {
+        return switch (statement) {
+            case BoundStatement.Copy c -> {
+                StringBuilder sb = new StringBuilder("Copy to '").append(c.path().replace("'", "''"))
+                        .append("' [format: ").append(c.format());
+                c.options().forEach((k, v) -> sb.append(", ").append(k).append(": ").append(v));
+                yield sb.append(']').toString();
+            }
+            case BoundStatement.Create c -> "Create table " + c.table() + " ("
+                    + String.join(", ", c.schema().fields().stream().map(Schema.Field::toString).toList()) + ")"
+                    + switch (c.mode()) {
+                        case CREATE -> "";
+                        case OR_REPLACE -> " [or replace]";
+                        case IF_NOT_EXISTS -> " [if not exists]";
+                    };
+            case BoundStatement.Insert i -> "Insert into " + i.table();
+            case BoundStatement.Drop d -> d.table() == null
+                    ? "Drop table if exists " + String.join(".", d.name()) + " [no such table]"
+                    : "Drop table " + (d.ifExists() ? "if exists " : "") + d.table();
+            case BoundStatement.Query q -> throw new IllegalArgumentException("A query has a plan, not a header");
+        };
     }
 
     /** Prints a plan that an engine with a number of threads runs. */

@@ -106,8 +106,8 @@ class JsonRecordReaderTest {
         try (JsonRecordReader r = open(broken, A, null, "/d/results", 10, Set.of("__next"))) {
             ConversionException e = assertThrows(ConversionException.class, () -> rest(r));
             assertEquals("Malformed JSON in src at line 1, column 36, in record 1: Unexpected character (']' (code"
-                    + " 93)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or"
-                    + " 'false')", e.getMessage());
+                    + " 93)): expected a valid value (JSON String, Number (or 'NaN'/'+INF'/'-INF'), Array, Object or"
+                    + " token 'null', 'true' or 'false')", e.getMessage());
         }
     }
 

@@ -32,7 +32,8 @@ class ConnectorsTest {
     @Test
     void findsTheFactoriesOfTheConnectorsOnTheClassPath() {
         Map<String, ConnectorFactory> factories = Connectors.factories();
-        assertEquals(List.of("csv", "http", "jdbc", "json", "odata", "parquet"), List.copyOf(factories.keySet()));
+        assertEquals(List.of("csv", "http", "jdbc", "json", "memory", "odata", "parquet"),
+                List.copyOf(factories.keySet()));
         try (Connector c = Connectors.create(new SourceConfig("files", "CSV", Map.of()), factories, DIR)) {
             assertInstanceOf(CsvConnector.class, c);
             assertEquals("files", c.name());
@@ -48,15 +49,15 @@ class ConnectorsTest {
     void anUnknownTypeOrAMissingOptionNamesTheSource() {
         Map<String, ConnectorFactory> factories = Connectors.factories();
         assertEquals("The source mongo has the type mongodb, which no connector on the class path has; known are csv,"
-                + " http, jdbc, json, odata, parquet", assertThrows(ConfigException.class, () -> Connectors.create(
+                + " http, jdbc, json, memory, odata, parquet", assertThrows(ConfigException.class, () -> Connectors.create(
                         new SourceConfig("mongo", "mongodb", Map.of()), factories, DIR)).getMessage());
         assertEquals("Cannot create the source shop: The JDBC source shop needs the option url",
                 assertThrows(ConfigException.class, () -> Connectors.create(
                         new SourceConfig("shop", "jdbc", Map.of("user", "sa")), factories, DIR)).getMessage());
         assertEquals("Cannot create the source shop: The JDBC source shop has an unknown option usr; known are url,"
-                + " user, password, dialect, pushdown, quote, limit, trust, schemas, defaultSchema, fetchSize, batchSize, recordStatements,"
-                + " splitRows, splitColumn.<table>, properties.<key>",assertThrows(ConfigException.class, () -> Connectors.create(
-                        new SourceConfig("shop", "jdbc", Map.of("url", "jdbc:h2:mem:x", "usr", "sa")), factories, DIR))
-                .getMessage());
+                + " user, password, dialect, pushdown, quote, limit, trust, schemas, defaultSchema, fetchSize,"
+                + " batchSize, batchRows, recordStatements, splitRows, splitColumn.<table>, properties.<key>",
+                assertThrows(ConfigException.class, () -> Connectors.create(new SourceConfig("shop", "jdbc",
+                        Map.of("url", "jdbc:h2:mem:x", "usr", "sa")), factories, DIR)).getMessage());
     }
 }

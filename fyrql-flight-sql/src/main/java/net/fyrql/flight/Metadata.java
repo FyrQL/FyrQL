@@ -270,7 +270,7 @@ final class Metadata {
                 .withFlightSqlServerName("FyrQL")
                 .withFlightSqlServerVersion(version)
                 .withFlightSqlServerArrowVersion(arrowVersion)
-                .withFlightSqlServerReadOnly(true)
+                .withFlightSqlServerReadOnly(false)
                 .withFlightSqlServerSql(true)
                 .withFlightSqlServerSubstrait(false)
                 .withFlightSqlServerTransaction(FlightSql.SqlSupportedTransaction.SQL_SUPPORTED_TRANSACTION_NONE)
@@ -279,7 +279,7 @@ final class Metadata {
                 .withFlightSqlServerStatementTimeout(0)
                 .withSqlDdlCatalog(false)
                 .withSqlDdlSchema(false)
-                .withSqlDdlTable(false)
+                .withSqlDdlTable(true)
                 .withSqlIdentifierCase(FlightSql.SqlSupportedCaseSensitivity.SQL_CASE_SENSITIVITY_CASE_INSENSITIVE)
                 .withSqlQuotedIdentifierCase(
                         FlightSql.SqlSupportedCaseSensitivity.SQL_CASE_SENSITIVITY_CASE_INSENSITIVE)

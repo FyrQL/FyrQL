@@ -31,9 +31,11 @@ import java.util.Optional;
  * Builds the engine of a connection from its settings: from the
  * configuration file the settings name, whose settings of the engine they
  * overlay, or, without a file, with a source without tables for each of
- * the types {@code csv}, {@code json} and {@code parquet} whose connector
- * is there, so that table functions such as {@code read_csv} and file
- * names in {@code FROM} work. The factories of the connectors are found
+ * the types {@code csv}, {@code json}, {@code parquet} and {@code memory}
+ * whose connector is there, so that table functions such as
+ * {@code read_csv} and file names in {@code FROM} work, {@code COPY}
+ * writes files and {@code CREATE TABLE memory.t AS ...} keeps a table for
+ * as long as the connection. The factories of the connectors are found
  * with a given class loader, that of the driver, not with the one of the
  * current thread: a tool that loads the driver in a class loader of its
  * own, as DBeaver does, leaves the class loader of the thread without
@@ -42,7 +44,7 @@ import java.util.Optional;
 final class EngineFactory {
 
     /** The types of the sources of an engine without a configuration file, each a source of the same name. */
-    static final List<String> IMPLICIT_SOURCES = List.of("csv", "json", "parquet");
+    static final List<String> IMPLICIT_SOURCES = List.of("csv", "json", "parquet", "memory");
 
     private EngineFactory() {
     }

@@ -353,9 +353,10 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
         return "";
     }
 
+    /** Returns whether the connection is read-only, see {@link Connection#setReadOnly}. */
     @Override
     public boolean isReadOnly() {
-        return true;
+        return connection.readOnly();
     }
 
     @Override
@@ -816,7 +817,7 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
 
     @Override
     public boolean supportsBatchUpdates() {
-        return false;
+        return true;
     }
 
     @Override

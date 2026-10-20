@@ -480,14 +480,15 @@ public final class Conversions {
     }
 
     /**
-     * Formats a {@code BLOB} as DuckDB does: printable ASCII bytes as
-     * themselves, every other byte as {@code \xHH}.
+     * Formats a {@code BLOB} as DuckDB does: printable ASCII bytes but the
+     * backslash and the quotes as themselves, every other byte as
+     * {@code \xHH}.
      */
     public static String formatBlob(byte[] bytes) {
         StringBuilder b = new StringBuilder(bytes.length);
         for (byte x : bytes) {
             int c = x & 0xFF;
-            if (c >= 0x20 && c < 0x7F && c != '\\' && c != '\'') {
+            if (c >= 0x20 && c < 0x7F && c != '\\' && c != '\'' && c != '"') {
                 b.append((char) c);
             } else {
                 b.append("\\x").append(Character.toUpperCase(Character.forDigit(c >> 4, 16)))

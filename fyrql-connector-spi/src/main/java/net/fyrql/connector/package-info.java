@@ -57,7 +57,20 @@
  * as the engine, and with an output of the types of the part. The engine
  * asks when it plans a query and again when it opens the part.</li>
  * </ul>
- * Later versions add methods with defaults, e.g. a sink for writing, so
- * that connectors written against this version keep compiling.
+ * The conventions of writing:
+ * <ul>
+ * <li>A source that holds tables that can be written offers a
+ * {@link net.fyrql.connector.Writer} through
+ * {@link net.fyrql.connector.Connector#writer()}; a source that writes
+ * files offers formats as a {@link net.fyrql.connector.FileWriterProvider}.
+ * Both write through a {@link net.fyrql.connector.Sink}.</li>
+ * <li>The engine writes the batches of a sink in the schema it opened the
+ * sink with, from one thread, and then commits it or closes it without a
+ * commit, which abandons the write.</li>
+ * <li>Each statement is a transaction of its own in one source; there is
+ * no transaction over several statements or sources.</li>
+ * </ul>
+ * Later versions add methods with defaults, so that connectors written
+ * against this version keep compiling.
  */
 package net.fyrql.connector;

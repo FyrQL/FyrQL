@@ -174,8 +174,12 @@ class ConnectionTest {
             c.rollback();
             c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
             assertEquals(Connection.TRANSACTION_NONE, c.getTransactionIsolation());
-            c.setReadOnly(false);
+            assertFalse(c.isReadOnly());
+            c.setReadOnly(true);
             assertTrue(c.isReadOnly());
+            assertTrue(c.getMetaData().isReadOnly());
+            c.setReadOnly(false);
+            assertFalse(c.isReadOnly());
             assertEquals(ResultSet.CLOSE_CURSORS_AT_COMMIT, c.getHoldability());
             c.setHoldability(ResultSet.HOLD_CURSORS_OVER_COMMIT);
             assertEquals(ResultSet.HOLD_CURSORS_OVER_COMMIT, c.getHoldability());

@@ -21,6 +21,7 @@ import java.io.UncheckedIOException;
 import java.sql.SQLDataException;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLIntegrityConstraintViolationException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLSyntaxErrorException;
 import java.sql.SQLTimeoutException;
@@ -49,8 +50,12 @@ final class SqlStates {
     static final String INVALID_CAST = "22018";
     /** A value of an argument the method does not take. */
     static final String INVALID_PARAMETER = "22023";
+    /** A {@code NULL} for a column that is {@code NOT NULL}. */
+    static final String NOT_NULL_VIOLATION = "23502";
     /** A result set that is not on a row. */
     static final String INVALID_CURSOR_STATE = "24000";
+    /** A statement that writes on a read-only connection. */
+    static final String READ_ONLY = "25006";
     /** An unknown catalog, which is a source of the engine. */
     static final String INVALID_CATALOG = "3D000";
     /** An unknown schema of the default source. */
@@ -73,6 +78,8 @@ final class SqlStates {
     static final String UNDEFINED_TABLE = "42P01";
     /** An ambiguous table name. */
     static final String AMBIGUOUS_TABLE = "42712";
+    /** A table to create that exists. */
+    static final String DUPLICATE_TABLE = "42P07";
     /** The memory budget of the engine is exceeded. */
     static final String OUT_OF_MEMORY = "53200";
     /** The query was canceled on request. */
@@ -126,6 +133,7 @@ final class SqlStates {
             case "08" -> new SQLNonTransientConnectionException(message, state, cause);
             case "0A" -> new SQLFeatureNotSupportedException(message, state, cause);
             case "22" -> new SQLDataException(message, state, cause);
+            case "23" -> new SQLIntegrityConstraintViolationException(message, state, cause);
             case "42" -> new SQLSyntaxErrorException(message, state, cause);
             case "HY" -> state.equals(TIMEOUT) ? new SQLTimeoutException(message, state, cause)
                     : new SQLException(message, state, cause);
@@ -183,6 +191,12 @@ final class SqlStates {
         if (r.startsWith("Query is nested too deeply")) {
             return STATEMENT_TOO_COMPLEX;
         }
+        if (r.startsWith("Table with name") && r.endsWith(" already exists")) {
+            return DUPLICATE_TABLE;
+        }
+        if (r.startsWith("NOT NULL constraint failed")) {
+            return NOT_NULL_VIOLATION;
+        }
         if (r.startsWith("Table with name") || r.startsWith("No source ") || r.startsWith("Table function with name")
                 || r.startsWith("Referenced table")) {
             return UNDEFINED_TABLE;
@@ -207,7 +221,7 @@ final class SqlStates {
         if (r.startsWith("Cannot cast") || r.startsWith("Could not convert") || r.startsWith("Invalid number")) {
             return INVALID_CAST;
         }
-        if (r.startsWith("Not supported") || r.startsWith("Only queries are supported")
+        if (r.startsWith("Not supported") || r.startsWith("Only queries")
                 || r.contains("not supported")) {
             return FEATURE_NOT_SUPPORTED;
         }

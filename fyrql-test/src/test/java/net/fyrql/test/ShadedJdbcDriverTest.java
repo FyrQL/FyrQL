@@ -232,7 +232,8 @@ class ShadedJdbcDriverTest {
                     "net.fyrql.connector.parquet.ParquetConnectorFactory",
                     "net.fyrql.connector.http.HttpConnectorFactory",
                     "net.fyrql.connector.odata.ODataConnectorFactory",
-                    "net.fyrql.connector.jdbc.JdbcConnectorFactory"),
+                    "net.fyrql.connector.jdbc.JdbcConnectorFactory",
+                    "net.fyrql.connector.memory.MemoryConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),
                     services(jar, "net.fyrql.exec.spi.ExpressionCompiler"));

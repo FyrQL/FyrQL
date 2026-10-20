@@ -69,7 +69,8 @@ class SqlStatesTest {
                 new String[] {"42803", "SELECT id, count(*) FROM shop.t", "column \"id\" must appear in the GROUP BY"},
                 new String[] {"42883", "SELECT nothing(1)", "Function with name nothing does not exist"},
                 new String[] {"42883", "SELECT substring(1)", "No function matches"},
-                new String[] {"0A000", "INSERT INTO shop.t VALUES (1, 'x')", "Only queries are supported, not INSERT"},
+                new String[] {"0A000", "DELETE FROM shop.t", "Only queries, COPY, CREATE TABLE, INSERT INTO and"
+                        + " DROP TABLE are supported, not DELETE"},
                 new String[] {"0A000", "WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r",
                         "WITH RECURSIVE is not supported"});
         try (Statement s = c.createStatement()) {

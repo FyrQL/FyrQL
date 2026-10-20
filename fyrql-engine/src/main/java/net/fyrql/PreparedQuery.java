@@ -21,14 +21,17 @@ import java.util.Objects;
 /**
  * A query with parameters {@code ?}, parsed and bound by
  * {@link FyrQL#prepare(String)}, which {@link FyrQL#execute(PreparedQuery, List)}
- * runs with values for its parameters.
+ * runs with values for its parameters; or a statement that writes, which
+ * {@link FyrQL#update(PreparedQuery, List)} runs as well.
  *
  * @param sql the text of the query
  * @param searchPath the search path the names of the query are looked up along
- * @param schema the columns of the result
+ * @param schema the columns of the result, {@code Count} for a statement that writes
  * @param parameterTypes the type of each parameter, from the first
+ * @param writes whether the statement writes
  */
-public record PreparedQuery(String sql, SearchPath searchPath, Schema schema, List<DataType> parameterTypes) {
+public record PreparedQuery(String sql, SearchPath searchPath, Schema schema, List<DataType> parameterTypes,
+        boolean writes) {
 
     public PreparedQuery {
         Objects.requireNonNull(sql, "sql");

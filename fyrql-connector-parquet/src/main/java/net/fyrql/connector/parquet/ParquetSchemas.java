@@ -18,7 +18,9 @@ import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Type;
+import org.apache.parquet.schema.Types;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -50,6 +52,8 @@ import java.util.TreeMap;
  * </ul>
  * Any other annotation, such as {@code INTERVAL} or {@code VARIANT}, falls
  * back to the physical type. A {@code required} column is not nullable.
+ * <p>
+ * {@link #message} maps the other way, for the files that FyrQL writes.
  */
 final class ParquetSchemas {
 
@@ -68,6 +72,94 @@ final class ParquetSchemas {
             fields.add(new Schema.Field(t.getName(), fieldType(t, t.getName()), t.isRepetition(Type.Repetition.OPTIONAL)));
         }
         return new Schema(fields);
+    }
+
+    /**
+     * Returns the Parquet schema of columns, as DuckDB writes them, except
+     * for {@code HUGEINT}:
+     * <ul>
+     * <li>{@code BOOLEAN}, {@code INTEGER}, {@code BIGINT}, {@code FLOAT}
+     * and {@code DOUBLE} are {@code BOOLEAN}, {@code INT32},
+     * {@code INT64}, {@code FLOAT} and {@code DOUBLE}; {@code TINYINT} and
+     * {@code SMALLINT} are {@code INT32} with {@code INT(8)} and
+     * {@code INT(16)};</li>
+     * <li>{@code HUGEINT} is {@code DECIMAL(38,0)} on a
+     * {@code FIXED_LEN_BYTE_ARRAY} of 16 bytes, which holds all values of
+     * up to 38 digits (DuckDB writes a {@code DOUBLE}); {@code DECIMAL(p,s)}
+     * is {@code DECIMAL(p,s)} on {@code INT32} up to 9 digits, on
+     * {@code INT64} up to 18 and on 16 bytes beyond;</li>
+     * <li>{@code VARCHAR} is {@code BINARY} with {@code STRING}, {@code BLOB}
+     * is {@code BINARY}, {@code UUID} is {@code UUID} on 16 bytes,
+     * {@code DATE} is {@code DATE} on {@code INT32} and {@code TIMESTAMP} is
+     * {@code TIMESTAMP(MICROS)} on {@code INT64}, not adjusted to UTC;</li>
+     * <li>a {@code STRUCT} is a group, a {@code LIST} a {@code LIST} in the
+     * three-level form and a {@code MAP} a {@code MAP}, with optional fields,
+     * elements and values and required keys.</li>
+     * </ul>
+     * A nullable column is {@code optional}, any other {@code required}.
+     */
+    static MessageType message(Schema schema) {
+        List<Type> fields = new ArrayList<>();
+        for (Schema.Field f : schema.fields()) {
+            fields.add(parquetType(f.name(), f.type(), f.nullable() ? Type.Repetition.OPTIONAL
+                    : Type.Repetition.REQUIRED));
+        }
+        return new MessageType("fyrql_schema", fields);
+    }
+
+    private static Type parquetType(String name, DataType type, Type.Repetition repetition) {
+        return switch (type) {
+            case DataType.Decimal d -> {
+                PrimitiveTypeName physical = d.precision() <= 9 ? PrimitiveTypeName.INT32
+                        : d.precision() <= 18 ? PrimitiveTypeName.INT64 : PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
+                Types.PrimitiveBuilder<PrimitiveType> b = Types.primitive(physical, repetition);
+                if (physical == PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY) {
+                    b = b.length(16);
+                }
+                yield b.as(LogicalTypeAnnotation.decimalType(d.scale(), d.precision())).named(name);
+            }
+            case DataType.Struct s -> {
+                Types.GroupBuilder<GroupType> b = Types.buildGroup(repetition);
+                for (DataType.Struct.Field f : s.fields()) {
+                    b = b.addField(parquetType(f.name(), f.type(), Type.Repetition.OPTIONAL));
+                }
+                yield b.named(name);
+            }
+            case DataType.ListType l -> Types.buildGroup(repetition).as(LogicalTypeAnnotation.listType())
+                    .addField(Types.repeatedGroup()
+                            .addField(parquetType("element", l.element(), Type.Repetition.OPTIONAL))
+                            .named("list"))
+                    .named(name);
+            case DataType.MapType m -> Types.buildGroup(repetition).as(LogicalTypeAnnotation.mapType())
+                    .addField(Types.repeatedGroup()
+                            .addField(parquetType("key", m.key(), Type.Repetition.REQUIRED))
+                            .addField(parquetType("value", m.value(), Type.Repetition.OPTIONAL))
+                            .named("key_value"))
+                    .named(name);
+            case DataType.Scalar s -> switch (s) {
+                case BOOLEAN -> Types.primitive(PrimitiveTypeName.BOOLEAN, repetition).named(name);
+                case TINYINT -> Types.primitive(PrimitiveTypeName.INT32, repetition)
+                        .as(LogicalTypeAnnotation.intType(8, true)).named(name);
+                case SMALLINT -> Types.primitive(PrimitiveTypeName.INT32, repetition)
+                        .as(LogicalTypeAnnotation.intType(16, true)).named(name);
+                case INTEGER -> Types.primitive(PrimitiveTypeName.INT32, repetition).named(name);
+                case BIGINT -> Types.primitive(PrimitiveTypeName.INT64, repetition).named(name);
+                case HUGEINT -> Types.primitive(PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY, repetition).length(16)
+                        .as(LogicalTypeAnnotation.decimalType(0, DataType.MAX_DECIMAL_PRECISION)).named(name);
+                case FLOAT -> Types.primitive(PrimitiveTypeName.FLOAT, repetition).named(name);
+                case DOUBLE -> Types.primitive(PrimitiveTypeName.DOUBLE, repetition).named(name);
+                case VARCHAR -> Types.primitive(PrimitiveTypeName.BINARY, repetition)
+                        .as(LogicalTypeAnnotation.stringType()).named(name);
+                case BLOB -> Types.primitive(PrimitiveTypeName.BINARY, repetition).named(name);
+                case DATE -> Types.primitive(PrimitiveTypeName.INT32, repetition)
+                        .as(LogicalTypeAnnotation.dateType()).named(name);
+                case TIMESTAMP -> Types.primitive(PrimitiveTypeName.INT64, repetition)
+                        .as(LogicalTypeAnnotation.timestampType(false, LogicalTypeAnnotation.TimeUnit.MICROS))
+                        .named(name);
+                case UUID -> Types.primitive(PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY, repetition).length(16)
+                        .as(LogicalTypeAnnotation.uuidType()).named(name);
+            };
+        };
     }
 
     /** Returns the type of a column of a file, or of the part of it a scan reads. */

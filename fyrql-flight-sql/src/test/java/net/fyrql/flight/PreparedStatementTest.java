@@ -216,11 +216,10 @@ class PreparedStatementTest {
                 () -> client.prepare("SELECT ?"));
         TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "Not supported: a parameter in LIMIT or OFFSET",
                 () -> client.prepare("SELECT k FROM tiny LIMIT ?"));
-        TestServer.fails(FlightStatusCode.UNIMPLEMENTED, "FyrQL reads and does not write", () -> {
-            try (FlightSqlClient.PreparedStatement p = client.prepare("SELECT k FROM tiny")) {
-                p.executeUpdate();
-            }
-        });
+        try (FlightSqlClient.PreparedStatement p = client.prepare("SELECT k FROM tiny")) {
+            TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "A query returns rows, not a number of rows written",
+                    p::executeUpdate);
+        }
     }
 
     @Test

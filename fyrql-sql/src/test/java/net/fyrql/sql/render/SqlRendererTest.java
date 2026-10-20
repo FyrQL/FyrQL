@@ -141,5 +141,6 @@ class SqlRendererTest {
         assertEquals("INSERT INTO x VALUES (CAST(1 AS INTEGER), CAST('2.50' AS DECIMAL(10,2))), (CAST(NULL AS INTEGER), "
                 + "CAST(NULL AS DECIMAL(10,2)))", renderer.insert("x", orders, List.of(new Object[] {1, new BigDecimal("2.50")},
                 new Object[] {null, null})));
+        assertEquals("INSERT INTO x (\"id\", \"amount\") VALUES (?, ?)", renderer.insertPrepared("x", orders));
     }
 }

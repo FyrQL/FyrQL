@@ -12,6 +12,7 @@
 package net.fyrql.test.tpch;
 
 import net.fyrql.FyrQL;
+import net.fyrql.connector.Connector;
 import net.fyrql.connector.csv.CsvConnector;
 import net.fyrql.connector.json.JsonConnector;
 import net.fyrql.connector.json.JsonFormat;
@@ -153,6 +154,11 @@ final class TpchEngine {
      * {@code threads} threads, or as many as its builder chooses if that is 0.
      */
     FyrQL open(Boolean pushdown, CodegenMode codegen, int threads) {
+        return open(pushdown, codegen, threads, List.of());
+    }
+
+    /** Opens an engine over the five sources and further ones, as {@link #open(Boolean, CodegenMode, int)} does. */
+    FyrQL open(Boolean pushdown, CodegenMode codegen, int threads, List<Connector> more) {
         long splitSize = scaleFactor <= SMALL ? SMALL_SPLIT_SIZE : CsvConnector.SPLIT_SIZE;
         CsvConnector.Builder csv = CsvConnector.builder("files").delimiter(TpchData.DELIMITER).header(true)
                 .splitSize(splitSize);
@@ -182,6 +188,7 @@ final class TpchEngine {
         FyrQL.Builder b = FyrQL.builder().register(csv.build()).register(json.build()).register(memory.build())
                 .register(files).register(database.connector("db",
                         db -> db.splitRows(scaleFactor <= SMALL ? SMALL_SPLIT_ROWS : SPLIT_ROWS)));
+        more.forEach(b::register);
         if (pushdown != null) {
             b.pushdown(pushdown);
         }

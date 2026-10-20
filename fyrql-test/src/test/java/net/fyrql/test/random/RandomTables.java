@@ -12,6 +12,7 @@
 package net.fyrql.test.random;
 
 import net.fyrql.FyrQL;
+import net.fyrql.connector.Connector;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
@@ -38,12 +39,12 @@ import java.util.SplittableRandom;
  * table {@code e} holds the edge values of every type. The column
  * {@code k} of all three is a join key between 0 and 9.
  */
-final class RandomTables {
+public final class RandomTables {
 
-    static final String SOURCE = "memory";
+    public static final String SOURCE = "memory";
 
     /** The tables by name. */
-    static final Map<String, Schema> SCHEMAS = new LinkedHashMap<>();
+    public static final Map<String, Schema> SCHEMAS = new LinkedHashMap<>();
 
     static {
         SCHEMAS.put("p", Schema.of(field("k", DataType.INTEGER), field("i", DataType.INTEGER),
@@ -73,7 +74,7 @@ final class RandomTables {
     }
 
     /** Generates the rows of the tables from a seed. */
-    static Map<String, List<Object[]>> rows(long seed) {
+    public static Map<String, List<Object[]>> rows(long seed) {
         Map<String, List<Object[]>> rows = new LinkedHashMap<>();
         rows.put("p", small(SCHEMAS.get("p"), 40, new SplittableRandom(seed)));
         rows.put("q", small(SCHEMAS.get("q"), 30, new SplittableRandom(seed + 1)));
@@ -138,11 +139,18 @@ final class RandomTables {
      * segments of a query run on several threads.
      */
     static FyrQL engine(Map<String, List<Object[]>> rows, CodegenMode codegen, int threads) {
+        return engine(rows, codegen, threads, List.of());
+    }
+
+    /** Builds an engine over the tables and further sources as {@link #engine(Map, CodegenMode, int)} does. */
+    static FyrQL engine(Map<String, List<Object[]>> rows, CodegenMode codegen, int threads, List<Connector> more) {
         MemoryConnector.Builder memory = MemoryConnector.builder(SOURCE).batchSize(16).splitRows(16);
         for (Map.Entry<String, List<Object[]>> table : rows.entrySet()) {
             memory.table(table.getKey(), SCHEMAS.get(table.getKey()), table.getValue());
         }
-        return FyrQL.builder().register(memory.build()).batchSize(16).codegen(codegen).threads(threads).build();
+        FyrQL.Builder b = FyrQL.builder().register(memory.build());
+        more.forEach(b::register);
+        return b.batchSize(16).codegen(codegen).threads(threads).build();
     }
 
     /** Copies the tables of an engine into DuckDB under their plain names. */

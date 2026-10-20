@@ -59,9 +59,10 @@ import static net.fyrql.core.expr.Expressions.mul;
 
 /**
  * The examples of the README: the query, with the data it describes, whose
- * printed rows and plan are those of the README, the window functions over
- * the same data, the same query through the JDBC driver, and the generated
- * code of a filter and of the pipeline of TPC-H Q6, which the README shows.
+ * printed rows and plan are those of the README, the window functions and
+ * the statements that write over the same data, the same query through the
+ * JDBC driver, and the generated code of a filter and of the pipeline of
+ * TPC-H Q6, which the README shows.
  */
 class ReadmeExampleTest {
 
@@ -124,6 +125,42 @@ class ReadmeExampleTest {
                             Scan mem.main.orders (customerId INTEGER, amount DECIMAL(10,2))
                           Scan csv.main.customers (id BIGINT, region VARCHAR)%s
                 """.formatted(pipeline, parallel, parallel), plan);
+    }
+
+    @Test
+    void theWritingExampleRuns() throws IOException {
+        Files.writeString(data.resolve("customers.csv"), "id,region\n1,north\n2,south\n3,north\n",
+                StandardCharsets.UTF_8);
+        List<Order> orders = List.of(new Order(1, 1, new BigDecimal("10.50")), new Order(2, 2, new BigDecimal("20.00")),
+                new Order(3, 3, new BigDecimal("5.25")), new Order(4, 1, null), new Order(5, null, new BigDecimal("7.00")));
+        String file = data.resolve("orders-by-region.csv").toString().replace('\\', '/');
+        String printed;
+
+        try (FyrQL engine = FyrQL.builder()
+                .register(CsvConnector.builder("csv").directory(data).build())
+                .register(MemoryConnector.builder("mem")
+                        .table("orders", Order.class, orders, Map.of("amount", DataType.decimal(10, 2)))
+                        .build())
+                .build()) {
+            // From here on as in the README, with the directory of the test for "data".
+            long written = engine.update("""
+                    COPY (SELECT o.id, c.region, o.amount
+                          FROM orders AS o JOIN customers AS c ON o.customerId = c.id)
+                    TO '%s'""".formatted(file));
+            engine.update("CREATE TABLE mem.regions (region VARCHAR NOT NULL, revenue DECIMAL(12,2))");
+            engine.update("INSERT INTO mem.regions SELECT region, sum(amount) FROM '" + file + "' GROUP BY ALL");
+            printed = written + " " + engine.rows("SELECT * FROM regions ORDER BY region").stream()
+                    .map(Arrays::toString).toList();
+
+            assertTrue(engine.explain("INSERT INTO mem.regions SELECT region, 0 FROM customers")
+                    .startsWith("Insert into mem.main.regions\n"));
+            assertTrue(engine.explain("COPY regions TO '" + file + "'").startsWith("Copy to '" + file
+                    + "' [format: csv]\n"));
+            RuntimeException e = assertThrows(RuntimeException.class,
+                    () -> engine.update("INSERT INTO mem.regions VALUES (NULL, 1)"));
+            assertTrue(e.getMessage().startsWith("NOT NULL constraint failed: regions.region"), e.getMessage());
+        }
+        assertEquals("4 [[north, 15.75], [south, 20.00]]", printed);
     }
 
     @Test

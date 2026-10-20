@@ -13,7 +13,10 @@ package net.fyrql.sql.parse;
 
 import net.fyrql.core.type.DataType;
 import net.fyrql.sql.SqlException;
+import net.fyrql.sql.ast.CreateTable.ColumnDefinition;
+import net.fyrql.sql.ast.DropTable;
 import net.fyrql.sql.ast.FromItem;
+import net.fyrql.sql.ast.InsertInto;
 import net.fyrql.sql.ast.OrderItem;
 import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.ast.Query;
@@ -93,6 +96,9 @@ import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.create.table.CreateTable;
+import net.sf.jsqlparser.statement.drop.Drop;
+import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
 import net.sf.jsqlparser.statement.select.Distinct;
@@ -131,6 +137,10 @@ import java.util.Set;
  * and FyrQL dropped would change the meaning of the query. Names are taken
  * from the tokens of the query text, since JSqlParser splits quoted names
  * that contain a dot.
+ * <p>
+ * Besides queries, it translates {@code CREATE TABLE}, {@code INSERT INTO}
+ * and {@code DROP TABLE}, with the same care: a constraint, a default, a
+ * clause of a conflict or a table option is an error, not dropped.
  */
 final class JSqlParserAdapter {
 
@@ -152,11 +162,140 @@ final class JSqlParserAdapter {
         return parameters == null ? List.of() : List.copyOf(parameters);
     }
 
-    Query statement(Statement statement) {
+    /**
+     * Translates a statement.
+     *
+     * @param writes whether the statements that write are allowed, or only queries
+     */
+    net.fyrql.sql.ast.Statement statement(Statement statement, boolean writes) {
         if (statement instanceof Select select) {
             return query(select);
         }
-        throw new SqlException("Only queries are supported, not " + words(statement), position(statement));
+        if (!writes) {
+            throw new SqlException("Only queries are supported, not " + words(statement), position(statement));
+        }
+        return switch (statement) {
+            case CreateTable c -> createTable(c);
+            case Insert i -> insert(i);
+            case Drop d when "TABLE".equalsIgnoreCase(d.getType()) -> drop(d);
+            case Drop d -> throw new SqlException("Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are"
+                    + " supported, not DROP " + d.getType().toUpperCase(Locale.ROOT), position(d.getName()));
+            default -> throw new SqlException("Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are"
+                    + " supported, not " + words(statement), position(statement));
+        };
+    }
+
+    // ---- statements that write
+
+    private net.fyrql.sql.ast.CreateTable createTable(CreateTable c) {
+        Table table = c.getTable();
+        Position position = position(table);
+        reject(c.isUnlogged(), "UNLOGGED", table);
+        if (c.getCreateOptionsStrings() != null && !c.getCreateOptionsStrings().isEmpty()) {
+            throw unsupported(String.join(" ", c.getCreateOptionsStrings()).toUpperCase(Locale.ROOT) + " TABLE",
+                    table);
+        }
+        reject(c.getTableOptionsStrings(), "table options", table);
+        reject(c.getIndexes(), "constraints", table);
+        reject(c.getLikeTable(), "CREATE TABLE ... LIKE", table);
+        reject(c.getTrailingLikeTable(), "CREATE TABLE ... LIKE", table);
+        reject(c.getOfType(), "CREATE TABLE ... OF", table);
+        reject(c.getPartitioning(), "PARTITION BY", table);
+        reject(c.getPartitionOf(), "PARTITION OF", table);
+        reject(c.getPartitionBound(), "PARTITION OF", table);
+        reject(c.getRowMovement(), "ROW MOVEMENT", table);
+        reject(c.getSpannerInterleaveIn(), "INTERLEAVE IN", table);
+        reject(c.getColumns(), "column names before AS", table);
+        if (c.isOrReplace() && c.isIfNotExists()) {
+            throw new SqlException("OR REPLACE and IF NOT EXISTS cannot be used together", position);
+        }
+        List<ColumnDefinition> columns = new ArrayList<>();
+        Query query = null;
+        if (c.getSelect() != null) {
+            query = query(c.getSelect());
+        } else if (c.getColumnDefinitions() == null || c.getColumnDefinitions().isEmpty()) {
+            throw new SqlException("Syntax error: CREATE TABLE needs columns, or AS and a query", position);
+        } else {
+            for (net.sf.jsqlparser.statement.create.table.ColumnDefinition d : c.getColumnDefinitions()) {
+                columns.add(column(d, table));
+            }
+        }
+        return new net.fyrql.sql.ast.CreateTable(nameParts(table), columns, query, c.isOrReplace(),
+                c.isIfNotExists(), position);
+    }
+
+    /** {@code name type [NOT NULL | NULL]}; any other part of a column definition is an error. */
+    private ColumnDefinition column(net.sf.jsqlparser.statement.create.table.ColumnDefinition d, Table table) {
+        Position position = position(table);
+        String name = unquote(d.getColumnName(), table);
+        reject(d.isWithOptions(), "WITH OPTIONS", table);
+        reject(d.getForeignKeyReference(), "REFERENCES", table);
+        DataType type;
+        try {
+            type = TypeNames.parse(d.getColDataType().toString());
+        } catch (IllegalArgumentException e) {
+            throw new SqlException(e.getMessage() + " (column " + name + ")", position);
+        }
+        boolean nullable = true;
+        List<String> specs = d.getColumnSpecs() == null ? List.of() : d.getColumnSpecs();
+        for (int i = 0; i < specs.size(); i++) {
+            if (specs.get(i).equalsIgnoreCase("NOT") && i + 1 < specs.size()
+                    && specs.get(i + 1).equalsIgnoreCase("NULL")) {
+                nullable = false;
+                i++;
+            } else if (!specs.get(i).equalsIgnoreCase("NULL")) {
+                throw new SqlException("Not supported: " + String.join(" ", specs.subList(i, specs.size()))
+                        + " (column " + name + "); a column has a name, a type and NOT NULL", position);
+            }
+        }
+        return new ColumnDefinition(name, type, nullable);
+    }
+
+    private InsertInto insert(Insert i) {
+        Table table = i.getTable();
+        reject(i.getWithItemsList(), "WITH before INSERT", table);
+        reject(i.getOracleHint(), "hints", table);
+        reject(i.getModifierPriority(), "INSERT " + i.getModifierPriority(), table);
+        reject(i.isModifierIgnore(), "INSERT IGNORE", table);
+        reject(i.isOverwrite(), "INSERT OVERWRITE", table);
+        reject(i.isOracleMultiInsert(), "INSERT ALL", table);
+        reject(i.getPartitions(), "PARTITION", table);
+        reject(i.isOverriding(), "OVERRIDING", table);
+        reject(i.getRowAlias(), "an alias of the row", table);
+        reject(table.getAlias(), "an alias of the table", table);
+        reject(i.isUseSet(), "INSERT ... SET", table);
+        reject(i.getSetUpdateSets(), "INSERT ... SET", table);
+        reject(i.isUseDuplicate(), "ON DUPLICATE KEY UPDATE", table);
+        reject(i.getDuplicateUpdateSets(), "ON DUPLICATE KEY UPDATE", table);
+        reject(i.getDuplicateAction(), "ON DUPLICATE KEY UPDATE", table);
+        reject(i.getConflictTarget(), "ON CONFLICT", table);
+        reject(i.getConflictAction(), "ON CONFLICT", table);
+        reject(i.getReturningClause(), "RETURNING", table);
+        reject(i.getOutputClause(), "OUTPUT", table);
+        if (i.isOnlyDefaultValues() || i.getSelect() == null) {
+            throw unsupported("DEFAULT VALUES", table);
+        }
+        List<String> columns = new ArrayList<>();
+        if (i.getColumns() != null) {
+            for (Column column : i.getColumns()) {
+                columns.add(simpleName(column));
+            }
+        }
+        return new InsertInto(nameParts(table), columns, query(i.getSelect()), position(table));
+    }
+
+    private DropTable drop(Drop d) {
+        Table table = d.getName();
+        if (d.getNames() != null && d.getNames().size() > 1) {
+            throw unsupported("DROP TABLE of more than one table", d.getNames().get(1));
+        }
+        if (d.getParameters() != null && !d.getParameters().isEmpty()) {
+            throw unsupported(String.join(" ", d.getParameters()).toUpperCase(Locale.ROOT), table);
+        }
+        reject(d.getTypeToParameters(), "these options of DROP", table);
+        reject(d.isUsingTemporary(), "DROP TEMPORARY", table);
+        reject(d.isMaterialized(), "DROP MATERIALIZED", table);
+        return new DropTable(nameParts(table), d.isIfExists(), position(table));
     }
 
     // ---- queries
@@ -1377,10 +1516,14 @@ final class JSqlParserAdapter {
         return node.getClass().getSimpleName().replaceAll("([a-z])([A-Z])", "$1 $2").toUpperCase(Locale.ROOT);
     }
 
-    /** Rejects a clause that is present: not {@code null}, not {@code false}, not an empty collection or string. */
+    /**
+     * Rejects a clause that is present: not {@code null}, not {@code false},
+     * not an empty collection, map or string.
+     */
     private void reject(Object value, String what, Object node) {
         boolean present = value != null && !Boolean.FALSE.equals(value)
                 && !(value instanceof Collection<?> c && c.isEmpty())
+                && !(value instanceof Map<?, ?> m && m.isEmpty())
                 && !(value instanceof String s && s.isBlank());
         if (present) {
             throw unsupported(what, node);

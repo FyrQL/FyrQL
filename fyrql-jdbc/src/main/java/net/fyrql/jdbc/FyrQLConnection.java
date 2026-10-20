@@ -17,6 +17,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.exec.QueryContext;
 import net.fyrql.sql.SqlException;
+import net.fyrql.sql.bind.BoundStatement;
 
 import java.sql.Array;
 import java.sql.Blob;
@@ -52,9 +53,12 @@ import java.util.regex.Pattern;
 /**
  * A connection to an engine, which it owns and closes, unless it was
  * opened over an engine of the application with
- * {@link FyrQLDriver#connect(FyrQL, boolean)}. The connection only reads:
- * it is always read-only and in auto-commit; the methods of transactions
- * are accepted and do nothing. The catalog is the default source and the
+ * {@link FyrQLDriver#connect(FyrQL, boolean)}. The connection is always in
+ * auto-commit: a statement that writes is one transaction of the source
+ * it writes to, if the source has transactions; the methods of
+ * transactions are accepted and do nothing. A connection set read-only
+ * refuses statements that write with {@code 25006}. The catalog is the
+ * default source and the
  * schema the default schema in which the queries of the connection look up
  * names of fewer than three parts, at first those of the engine; changing
  * them affects only this connection. The connection unwraps to the
@@ -78,6 +82,7 @@ final class FyrQLConnection implements Connection {
     private final Set<FyrQLStatement> statements = ConcurrentHashMap.newKeySet();
     private final Properties clientInfo = new Properties();
     private volatile SearchPath searchPath;
+    private volatile boolean readOnly;
     private SQLWarning warnings;
     private int holdability = ResultSet.CLOSE_CURSORS_AT_COMMIT;
     private int networkTimeout;
@@ -118,24 +123,59 @@ final class FyrQLConnection implements Connection {
         return lock;
     }
 
+    /** The kinds of statements a method of a statement runs. */
+    enum Kind {
+        /** A query or a statement that writes, as {@code execute} runs them. */
+        ANY,
+        /** A query, as {@code executeQuery} runs it. */
+        QUERY,
+        /** A statement that writes, as {@code executeUpdate} runs it. */
+        UPDATE
+    }
+
     /**
-     * Starts a query that a context cancels: {@code EXPLAIN} and a query
-     * gives its plan, anything else goes to the engine. A query canceled
-     * while it is planned fails with its first batch.
+     * What a statement gives: the rows of a query, or the number of rows a
+     * statement that writes wrote.
+     *
+     * @param rows the rows of a query, {@code null} for a statement that writes
+     * @param count the rows written, {@code -1} for a query
      */
-    BatchSource query(String sql, QueryContext context) throws SQLException {
+    record Outcome(BatchSource rows, long count) {
+    }
+
+    /**
+     * Runs a statement that a context cancels: {@code EXPLAIN} and a
+     * statement gives its plan, a query starts and gives its rows, and a
+     * statement that writes runs to its end and gives the rows it wrote.
+     * A statement of another kind than the one expected fails with
+     * {@code 42809} before it runs, and one that writes fails with
+     * {@code 25006} if the connection is read-only. A query canceled while
+     * it is planned fails with its first batch.
+     */
+    Outcome run(String sql, QueryContext context, Kind expected) throws SQLException {
         lock.lock();
         try {
             checkOpen();
             Matcher m = EXPLAIN.matcher(sql);
             if (m.matches()) {
+                expect(expected, Kind.QUERY);
                 List<Object[]> rows = new ArrayList<>();
                 for (String line : engine.explain(m.group(1), searchPath).split("\n")) {
                     rows.add(new Object[] {line});
                 }
-                return BatchSource.of(PLAN, rows);
+                return new Outcome(BatchSource.of(PLAN, rows), -1);
             }
-            return BatchSource.of(engine.execute(engine.plan(sql, searchPath), context), context);
+            BoundStatement statement = engine.statement(sql, searchPath);
+            if (statement instanceof BoundStatement.Query q) {
+                expect(expected, Kind.QUERY);
+                return new Outcome(BatchSource.of(engine.execute(q.plan(), context), context), -1);
+            }
+            expect(expected, Kind.UPDATE);
+            if (readOnly) {
+                throw SqlStates.create("The connection is read-only and runs no statement that writes",
+                        SqlStates.READ_ONLY, null);
+            }
+            return new Outcome(null, engine.update(statement, context));
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
         } finally {
@@ -143,20 +183,41 @@ final class FyrQLConnection implements Connection {
         }
     }
 
+    /** Fails with {@code 42809} if a statement is of another kind than the one a method runs. */
+    private static void expect(Kind expected, Kind actual) throws SQLException {
+        if (expected == Kind.QUERY && actual == Kind.UPDATE) {
+            throw SqlStates.create("executeQuery runs queries; run a statement that writes with executeUpdate or"
+                    + " execute", SqlStates.WRONG_OBJECT_TYPE, null);
+        }
+        if (expected == Kind.UPDATE && actual == Kind.QUERY) {
+            throw SqlStates.create("A query returns rows, not a number of rows written; run it with executeQuery or"
+                    + " execute", SqlStates.WRONG_OBJECT_TYPE, null);
+        }
+    }
+
     /**
-     * Plans a query without running it and returns the columns of its
-     * result; {@code EXPLAIN} and a query has the column {@code plan}.
+     * Binds a statement without running it and returns the columns of its
+     * result, or {@code null} for a statement that writes; {@code EXPLAIN}
+     * and a statement has the column {@code plan}.
      */
     Schema describe(String sql) throws SQLException {
         lock.lock();
         try {
             checkOpen();
-            return EXPLAIN.matcher(sql).matches() ? PLAN : engine.plan(sql, searchPath).schema();
+            if (EXPLAIN.matcher(sql).matches()) {
+                return PLAN;
+            }
+            return engine.statement(sql, searchPath) instanceof BoundStatement.Query q ? q.plan().schema() : null;
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
         } finally {
             lock.unlock();
         }
+    }
+
+    /** Returns whether the connection is read-only, without the check of {@link #isReadOnly()}. */
+    boolean readOnly() {
+        return readOnly;
     }
 
     /**
@@ -386,16 +447,21 @@ final class FyrQLConnection implements Connection {
         return new FyrQLDatabaseMetaData(this);
     }
 
-    /** Accepts either value; the connection is always read-only. */
+    /**
+     * Sets whether the connection refuses statements that write, with
+     * {@code 25006}; it does not at first. Queries and {@code EXPLAIN} run
+     * either way.
+     */
     @Override
     public void setReadOnly(boolean readOnly) throws SQLException {
         checkOpen();
+        this.readOnly = readOnly;
     }
 
     @Override
     public boolean isReadOnly() throws SQLException {
         checkOpen();
-        return true;
+        return readOnly;
     }
 
     /**

@@ -29,6 +29,8 @@ import java.util.Optional;
  * exactly the semantics of the engine; a filter that the source would
  * evaluate differently, e.g. under a collation that ignores case, must stay
  * in the plan of the engine.
+ * <p>
+ * A source that can be written to offers a {@link #writer()}.
  */
 public interface Connector extends AutoCloseable {
 
@@ -89,6 +91,15 @@ public interface Connector extends AutoCloseable {
      */
     default BatchReader openRemote(RemotePlan plan) {
         throw new UnsupportedOperationException("The source " + name() + " runs no parts of plans");
+    }
+
+    /**
+     * Returns what the source offers to create, append to and drop tables,
+     * for {@code CREATE TABLE}, {@code INSERT INTO} and {@code DROP TABLE}.
+     * The default writes nothing.
+     */
+    default Optional<Writer> writer() {
+        return Optional.empty();
     }
 
     @Override

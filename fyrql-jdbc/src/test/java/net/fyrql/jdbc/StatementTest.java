@@ -76,20 +76,24 @@ class StatementTest {
     }
 
     @Test
-    void updatesFailWithTheMessageOfFyrQL() throws SQLException {
+    void statementsFailWithTheMessageOfFyrQL() throws SQLException {
         try (Statement s = c.createStatement()) {
-            SQLException e = assertThrows(SQLFeatureNotSupportedException.class,
-                    () -> s.executeUpdate("INSERT INTO t VALUES (1, 'x')"));
-            assertEquals("0A000", e.getSQLState());
-            assertTrue(e.getMessage().startsWith("Only queries are supported, not INSERT"), e.getMessage());
+            SQLException e = assertThrows(SQLException.class, () -> s.executeUpdate("INSERT INTO t VALUES (1, 'x')"));
+            assertEquals("42000", e.getSQLState());
+            assertTrue(e.getMessage().startsWith("Source shop does not write tables"), e.getMessage());
             e = assertThrows(SQLFeatureNotSupportedException.class, () -> s.execute("DELETE FROM t"));
-            assertTrue(e.getMessage().startsWith("Only queries are supported, not DELETE"), e.getMessage());
-            e = assertThrows(SQLFeatureNotSupportedException.class, () -> s.executeLargeUpdate("SELECT 1"));
-            assertEquals("Updates are not supported by FyrQL; run a query with executeQuery", e.getMessage());
+            assertEquals("0A000", e.getSQLState());
+            assertTrue(e.getMessage().startsWith("Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are"
+                    + " supported, not DELETE"), e.getMessage());
+            e = assertThrows(SQLException.class, () -> s.executeLargeUpdate("SELECT 1"));
+            assertEquals("42809", e.getSQLState());
+            assertEquals("A query returns rows, not a number of rows written; run it with executeQuery or execute",
+                    e.getMessage());
             assertEquals("42601", assertThrows(SQLException.class, () -> s.executeUpdate("SELEC 1")).getSQLState());
-            for (ThrowingCall call : List.<ThrowingCall>of(() -> s.addBatch("SELECT 1"), s::clearBatch,
-                    s::executeBatch, s::executeLargeBatch, () -> s.execute("SELECT 1", Statement.RETURN_GENERATED_KEYS),
-                    () -> s.execute("SELECT 1", new int[] {1}), () -> s.setCursorName("c"))) {
+            for (ThrowingCall call : List.<ThrowingCall>of(() -> s.execute("SELECT 1", Statement.RETURN_GENERATED_KEYS),
+                    () -> s.execute("SELECT 1", new int[] {1}), () -> s.executeUpdate("SELECT 1", new int[] {1}),
+                    () -> s.executeLargeUpdate("SELECT 1", Statement.RETURN_GENERATED_KEYS),
+                    () -> s.setCursorName("c"))) {
                 assertEquals("0A000", assertThrows(SQLFeatureNotSupportedException.class, call::run).getSQLState());
             }
             assertTrue(s.execute("SELECT 1", Statement.NO_GENERATED_KEYS));

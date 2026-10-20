@@ -15,8 +15,10 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.expr.Expression;
@@ -57,7 +59,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>
  * The connector also offers the table functions {@code read_parquet} and
  * {@code parquet_scan} for any file; built without files it serves only
- * them. See {@link #bind}.
+ * them. See {@link #bind}. It writes Parquet files for {@code COPY ... TO},
+ * see {@link #openFile}.
  * <p>
  * A scan reads each row group as a split of its own, see
  * {@link RowGroupReader}, of a {@code STRUCT} column only the fields in
@@ -72,9 +75,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * those of the table. {@link Builder#recordReads} keeps what each scan
  * read.
  */
-public final class ParquetConnector implements Connector, TableFunctionProvider {
+public final class ParquetConnector implements Connector, TableFunctionProvider, FileWriterProvider {
 
     private static final List<String> TABLE_FUNCTIONS = List.of("read_parquet", "parquet_scan");
+
+    private static final List<String> FILE_FORMATS = List.of("parquet");
 
     /** The prefix of the names of the tables of table function calls, which no registered table gets. */
     private static final String CALL_PREFIX = "#";
@@ -215,6 +220,40 @@ public final class ParquetConnector implements Connector, TableFunctionProvider 
     @Override
     public List<String> tableFunctions() {
         return TABLE_FUNCTIONS;
+    }
+
+    @Override
+    public List<String> fileFormats() {
+        return FILE_FORMATS;
+    }
+
+    /**
+     * Opens a sink that writes a Parquet file in pure Java, with the types
+     * of {@code ParquetSchemas#message}: as DuckDB writes them, except that a
+     * {@code HUGEINT} is a {@code DECIMAL(38,0)}, so that a value of 39
+     * digits is an error that names its column. A nullable column is
+     * {@code optional}, any other {@code required}. The writer's name in the
+     * metadata of the file, {@code writer.model.name}, is {@code fyrql}. The
+     * options, with DuckDB's names:
+     * <ul>
+     * <li>{@code compression} or {@code codec}: {@code zstd}, the default,
+     * {@code snappy}, {@code gzip}, {@code lz4_raw} (or {@code lz4}) or
+     * {@code uncompressed};</li>
+     * <li>{@code row_group_size}: the rows of a row group, 122880 by
+     * default as in DuckDB; {@code row_group_size_bytes}: the bytes a row
+     * group holds at most before it is written, such as {@code 64MB},
+     * 128 MiB by default;</li>
+     * <li>{@code parquet_version}: {@code v1}, the default, or {@code v2}
+     * for the pages and encodings of version 2.</li>
+     * </ul>
+     */
+    @Override
+    public Sink openFile(String format, Path file, Schema schema, Map<String, String> options) {
+        if (!FILE_FORMATS.contains(format)) {
+            throw new IllegalArgumentException("The Parquet source " + name + " writes no files of the format "
+                    + format);
+        }
+        return ParquetFileSink.open(file, schema, options);
     }
 
     /**

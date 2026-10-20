@@ -157,11 +157,33 @@ final class QueryBinder {
         return query(q, Map.of());
     }
 
+    /**
+     * The rows of an {@code INSERT}, bound.
+     *
+     * @param untypedNulls the columns that are a bare {@code NULL} of a
+     *        select list, whose type the column they go to decides
+     */
+    record Rows(PlanNode plan, BitSet untypedNulls) {
+    }
+
+    /**
+     * Binds the query of an {@code INSERT}. If it is {@code VALUES} alone,
+     * with one value for each column it goes to, a bare {@code NULL} or a
+     * parameter takes the type of its column.
+     *
+     * @param targets the types of the columns the values go to
+     */
+    Rows insertRows(Query q, List<DataType> targets) {
+        PlanNode plan = q.isBodyOnly() && q.body() instanceof QueryBody.Values v
+                && v.rows().get(0).size() == targets.size() ? values(v, targets) : query(q);
+        return new Rows(plan, untypedNulls(plan));
+    }
+
     private PlanNode body(QueryBody body, Map<String, Cte> ctes) {
         return switch (body) {
             case QueryBody.Select s -> select(s, List.of(), null, null, ctes, null);
             case QueryBody.SetOperation s -> setOperation(s, ctes);
-            case QueryBody.Values v -> values(v);
+            case QueryBody.Values v -> values(v, null);
             case QueryBody.Parenthesized p -> query(p.query(), ctes);
         };
     }
@@ -392,7 +414,13 @@ final class QueryBinder {
 
     // ---------------------------------------------------------------- VALUES
 
-    private PlanNode values(QueryBody.Values v) {
+    /**
+     * Binds {@code VALUES}.
+     *
+     * @param targets the types a bare {@code NULL} or a parameter takes in
+     *        each column, or {@code null} to let the other values decide
+     */
+    private PlanNode values(QueryBody.Values v, List<DataType> targets) {
         int width = v.rows().get(0).size();
         for (List<SqlExpr> row : v.rows()) {
             if (row.size() != width) {
@@ -405,7 +433,8 @@ final class QueryBinder {
         for (int c = 0; c < width; c++) {
             List<ExpressionBinder.Bound> column = new ArrayList<>();
             for (List<SqlExpr> row : v.rows()) {
-                column.add(binder.bound(row.get(c)));
+                ExpressionBinder.Bound b = binder.bound(row.get(c));
+                column.add(targets != null && b.isNull() ? binder.typed(b, targets.get(c)) : b);
             }
             columns.add(binder.unifyRows(column, v.position()));
         }

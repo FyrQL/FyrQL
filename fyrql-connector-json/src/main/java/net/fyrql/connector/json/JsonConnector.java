@@ -15,8 +15,10 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.plan.TableRef;
@@ -65,9 +67,10 @@ import java.util.zip.GZIPInputStream;
  * The connector also offers the table functions {@code read_json},
  * {@code read_json_auto}, {@code read_ndjson} and {@code read_ndjson_auto}
  * for any file; built without files it serves only them. See
- * {@link #bind}.
+ * {@link #bind}. It writes JSON files for {@code COPY ... TO}, see
+ * {@link #openFile}.
  */
-public final class JsonConnector implements Connector, TableFunctionProvider {
+public final class JsonConnector implements Connector, TableFunctionProvider, FileWriterProvider {
 
     /** The split size by default, see {@link Builder#splitSize}. */
     public static final long SPLIT_SIZE = 4L << 20;
@@ -77,6 +80,8 @@ public final class JsonConnector implements Connector, TableFunctionProvider {
 
     private static final List<String> TABLE_FUNCTIONS = List.of("read_json", "read_json_auto", "read_ndjson",
             "read_ndjson_auto");
+
+    private static final List<String> FILE_FORMATS = List.of("json");
 
     /** The files a directory adds, and the extensions their table names drop. */
     private static final Pattern JSON_FILE = Pattern.compile("(?i)(.*)\\.(json|jsonl|ndjson)(\\.gz)?");
@@ -264,6 +269,44 @@ public final class JsonConnector implements Connector, TableFunctionProvider {
             return generated;
         });
         return TableRef.of(name, table);
+    }
+
+    @Override
+    public List<String> fileFormats() {
+        return FILE_FORMATS;
+    }
+
+    /**
+     * Opens a sink that writes a JSON file as DuckDB's {@code COPY ... TO}
+     * writes one: UTF-8, an object for each row without whitespace, with
+     * the columns as keys in their order. Numbers and booleans are written
+     * as they are, a {@code FLOAT} or a {@code DOUBLE} in the shortest form
+     * that reads back as the same value, {@code NaN} and the infinities as
+     * the tokens {@code NaN}, {@code Infinity} and {@code -Infinity}, which
+     * this connector reads too; a {@code STRUCT} or a {@code MAP} is an
+     * object, with the keys of a map cast to {@code VARCHAR}, a
+     * {@code LIST} an array, and any other value the string of its cast to
+     * {@code VARCHAR}, such as {@code "2024-02-29"} or
+     * {@code "\x00\xFF"} for a {@code BLOB}. The options, with
+     * DuckDB's names:
+     * <ul>
+     * <li>{@code array}: {@code false}, the default, for an object on each
+     * line (JSON Lines), {@code true} for an array of the objects;</li>
+     * <li>{@code dateformat} and {@code timestampformat}: formats of
+     * {@code strftime} for the columns of type {@code DATE} and
+     * {@code TIMESTAMP};</li>
+     * <li>{@code compression}: {@code gzip}, {@code none} or {@code auto},
+     * the default, which compresses a file whose name ends in
+     * {@code .gz}.</li>
+     * </ul>
+     */
+    @Override
+    public Sink openFile(String format, Path file, Schema schema, Map<String, String> options) {
+        if (!FILE_FORMATS.contains(format)) {
+            throw new IllegalArgumentException("The JSON source " + name + " writes no files of the format "
+                    + format);
+        }
+        return JsonFileWriter.open(file, schema, options);
     }
 
     private static String string(String function, String key, Object value) {

@@ -17,6 +17,7 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonPointer;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.json.JsonReadFeature;
 import net.fyrql.core.value.ConversionException;
 
 import java.io.IOException;
@@ -39,7 +40,9 @@ import java.util.Set;
  */
 final class JsonInput implements AutoCloseable {
 
-    private static final JsonFactory FACTORY = new JsonFactory();
+    /** Reads the tokens {@code NaN}, {@code Infinity} and {@code -Infinity}, which DuckDB writes. */
+    private static final JsonFactory FACTORY = JsonFactory.builder()
+            .enable(JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS).build();
 
     private final JsonParser parser;
     private final String source;

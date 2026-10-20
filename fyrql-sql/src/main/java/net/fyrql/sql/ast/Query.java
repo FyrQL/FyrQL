@@ -21,7 +21,7 @@ import java.util.Objects;
  * absent; {@code LIMIT ALL} and {@code LIMIT NULL} are absent.
  */
 public record Query(List<CommonTable> with, QueryBody body, List<OrderItem> orderBy, SqlExpr limit,
-        SqlExpr offset) {
+        SqlExpr offset) implements Statement {
 
     public Query {
         with = List.copyOf(with);

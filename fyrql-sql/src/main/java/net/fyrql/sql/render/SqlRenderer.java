@@ -591,6 +591,23 @@ public final class SqlRenderer {
         return b.toString();
     }
 
+    /**
+     * Renders an {@code INSERT} of one row of parameters, one for each
+     * column, for a prepared statement:
+     * {@code INSERT INTO t ("a", "b") VALUES (?, ?)}.
+     */
+    public String insertPrepared(String tableName, Schema schema) {
+        StringBuilder b = new StringBuilder("INSERT INTO ").append(tableName).append(" (");
+        for (int i = 0; i < schema.size(); i++) {
+            b.append(i > 0 ? ", " : "").append(dialect.quoteIdentifier(schema.name(i)));
+        }
+        b.append(") VALUES (");
+        for (int i = 0; i < schema.size(); i++) {
+            b.append(i > 0 ? ", ?" : "?");
+        }
+        return b.append(')').toString();
+    }
+
     /** Returns the dialect. */
     public Dialect dialect() {
         return dialect;

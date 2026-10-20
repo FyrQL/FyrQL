@@ -156,7 +156,7 @@ class MetadataTest {
         assertEquals(FlightSqlServer.VERSION, String.valueOf(values.get(
                 FlightSql.SqlInfo.FLIGHT_SQL_SERVER_VERSION_VALUE)));
         assertEquals("19.0.0", String.valueOf(values.get(FlightSql.SqlInfo.FLIGHT_SQL_SERVER_ARROW_VERSION_VALUE)));
-        assertEquals(true, values.get(FlightSql.SqlInfo.FLIGHT_SQL_SERVER_READ_ONLY_VALUE));
+        assertEquals(false, values.get(FlightSql.SqlInfo.FLIGHT_SQL_SERVER_READ_ONLY_VALUE));
         assertEquals("\"", String.valueOf(values.get(FlightSql.SqlInfo.SQL_IDENTIFIER_QUOTE_CHAR_VALUE)));
         assertTrue(sqlInfo(client.getSqlInfo(new int[0])).size() > 20, "all infos without a list");
     }

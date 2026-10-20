@@ -13,24 +13,32 @@ package net.fyrql.jdbc;
 
 import net.fyrql.core.type.Schema;
 import net.fyrql.exec.QueryContext;
-import net.fyrql.sql.parse.SqlParser;
 
+import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ScheduledFuture;
 
 /**
- * A statement that runs one query at a time; each run closes the result
- * set of the one before. A query is one {@code SELECT}, {@code WITH},
- * {@code VALUES} or set operation, or {@code EXPLAIN} and a query, whose
- * result is the plan in a column {@code plan}, one line per row. Every
- * other statement fails with the message of FyrQL; updates and batches
- * are not supported.
+ * A statement that runs one statement of SQL at a time; each run closes
+ * the result set of the one before. A query is one {@code SELECT},
+ * {@code WITH}, {@code VALUES} or set operation, or {@code EXPLAIN} and a
+ * statement, whose result is the plan in a column {@code plan}, one line
+ * per row. A statement that writes, {@code COPY ... TO},
+ * {@code CREATE TABLE}, {@code INSERT INTO} or {@code DROP TABLE}, runs
+ * to its end before the method returns, and the rows it wrote are the
+ * update count: {@link #execute(String)} runs either kind and returns
+ * {@code false} for a statement that writes, {@link #executeUpdate(String)}
+ * runs only those, and {@link #executeQuery(String)} only queries; a
+ * statement of the other kind fails with {@code 42809} before it runs.
+ * Every other statement fails with the message of FyrQL. A batch holds
+ * statements that write, which run one after another.
  */
 class FyrQLStatement implements Statement {
 
@@ -38,6 +46,9 @@ class FyrQLStatement implements Statement {
     private final int holdability;
     private FyrQLResultSet resultSet;
     private final List<FyrQLResultSet> kept = new ArrayList<>();
+    /** The rows the last statement wrote, {@code -1} after a query. */
+    private long updateCount = -1;
+    private final List<String> batch = new ArrayList<>();
     private long maxRows;
     private int fetchSize;
     private int queryTimeout;
@@ -62,28 +73,41 @@ class FyrQLStatement implements Statement {
     }
 
     /**
-     * Runs a query and makes its result the current result set. The query
-     * runs until its first rows before this returns, and then until its
-     * result set is read or closed; {@link #cancel()} and the query timeout
-     * end it on the way, from another thread.
+     * Runs a statement. A query becomes the current result set: it runs
+     * until its first rows before this returns, and then until its result
+     * set is read or closed. A statement that writes runs to its end, and
+     * the rows it wrote become the update count. {@link #cancel()} and the
+     * query timeout end either on the way, from another thread.
+     *
+     * @param expected the kind of statement the method runs
+     * @return the result set of a query, {@code null} for a statement that writes
      */
-    FyrQLResultSet run(String sql) throws SQLException {
+    FyrQLResultSet run(String sql, FyrQLConnection.Kind expected) throws SQLException {
         checkOpen();
         if (sql == null) {
             throw SqlStates.invalidArgument("The query must not be null");
         }
         closeResultSet();
+        updateCount = -1;
         QueryContext context = new QueryContext();
         running = context;
         ScheduledFuture<?> timeout = queryTimeout > 0 ? Timeouts.schedule(queryTimeout, context) : null;
-        BatchSource source;
+        FyrQLConnection.Outcome outcome;
         try {
-            source = connection.query(sql, context);
+            outcome = connection.run(sql, context, expected);
         } catch (SQLException | RuntimeException e) {
             if (timeout != null) {
                 timeout.cancel(false);
             }
             throw e;
+        }
+        BatchSource source = outcome.rows();
+        if (source == null) {
+            if (timeout != null) {
+                timeout.cancel(false);
+            }
+            updateCount = outcome.count();
+            return null;
         }
         if (timeout != null) {
             source = BatchSource.whenClosed(source, () -> timeout.cancel(false));
@@ -158,15 +182,21 @@ class FyrQLStatement implements Statement {
         }
     }
 
+    /** Runs a query; a statement that writes fails with {@code 42809} before it runs. */
     @Override
     public ResultSet executeQuery(String sql) throws SQLException {
-        return run(sql);
+        return run(sql, FyrQLConnection.Kind.QUERY);
     }
 
+    /**
+     * Runs a query or a statement that writes, see {@link FyrQLStatement}.
+     *
+     * @return {@code true} for a query, {@code false} for a statement that
+     *         writes, whose count {@link #getUpdateCount()} returns
+     */
     @Override
     public boolean execute(String sql) throws SQLException {
-        run(sql);
-        return true;
+        return run(sql, FyrQLConnection.Kind.ANY) != null;
     }
 
     @Override
@@ -191,86 +221,119 @@ class FyrQLStatement implements Statement {
     }
 
     /**
-     * Fails: FyrQL only reads. A text that is no query fails with the
-     * message of FyrQL, such as {@code Only queries are supported, not
-     * INSERT}.
+     * Runs a statement that writes and returns the rows it wrote, at most
+     * {@link Integer#MAX_VALUE}; a query fails with {@code 42809} before it
+     * runs.
      */
     @Override
     public int executeUpdate(String sql) throws SQLException {
-        throw notAnUpdate(sql);
-    }
-
-    /** Returns the failure of an update, after the text went to the parser for its message. */
-    SQLException notAnUpdate(String sql) throws SQLException {
-        checkOpen();
-        if (sql != null) {
-            try {
-                SqlParser.parse(sql);
-            } catch (RuntimeException e) {
-                return SqlStates.map(e);
-            }
-        }
-        return SqlStates.create("Updates are not supported by FyrQL; run a query with executeQuery",
-                SqlStates.FEATURE_NOT_SUPPORTED, null);
+        return clamp(executeLargeUpdate(sql));
     }
 
     @Override
     public int executeUpdate(String sql, int autoGeneratedKeys) throws SQLException {
-        throw notAnUpdate(sql);
+        return clamp(executeLargeUpdate(sql, autoGeneratedKeys));
     }
 
     @Override
     public int executeUpdate(String sql, int[] columnIndexes) throws SQLException {
-        throw notAnUpdate(sql);
+        return clamp(executeLargeUpdate(sql, columnIndexes));
     }
 
     @Override
     public int executeUpdate(String sql, String[] columnNames) throws SQLException {
-        throw notAnUpdate(sql);
+        return clamp(executeLargeUpdate(sql, columnNames));
     }
 
+    /** Runs a statement that writes and returns the rows it wrote, see {@link #executeUpdate(String)}. */
     @Override
     public long executeLargeUpdate(String sql) throws SQLException {
-        throw notAnUpdate(sql);
+        run(sql, FyrQLConnection.Kind.UPDATE);
+        return updateCount;
     }
 
     @Override
     public long executeLargeUpdate(String sql, int autoGeneratedKeys) throws SQLException {
-        throw notAnUpdate(sql);
+        if (autoGeneratedKeys != NO_GENERATED_KEYS) {
+            checkOpen();
+            throw SqlStates.unsupported("Generated keys");
+        }
+        return executeLargeUpdate(sql);
     }
 
     @Override
     public long executeLargeUpdate(String sql, int[] columnIndexes) throws SQLException {
-        throw notAnUpdate(sql);
+        checkOpen();
+        throw SqlStates.unsupported("Generated keys");
     }
 
     @Override
     public long executeLargeUpdate(String sql, String[] columnNames) throws SQLException {
-        throw notAnUpdate(sql);
+        checkOpen();
+        throw SqlStates.unsupported("Generated keys");
     }
 
+    /** Returns a number of rows as an {@code int}, at most {@link Integer#MAX_VALUE}. */
+    static int clamp(long rows) {
+        return (int) Math.min(rows, Integer.MAX_VALUE);
+    }
+
+    /** Adds a statement that writes to the batch, see {@link #executeLargeBatch()}. */
     @Override
     public void addBatch(String sql) throws SQLException {
         checkOpen();
-        throw SqlStates.unsupported("Batches");
+        if (sql == null) {
+            throw SqlStates.invalidArgument("The query must not be null");
+        }
+        batch.add(sql);
+    }
+
+    /** Adds a text to the batch, after the checks of the caller. */
+    void addToBatch(String sql) {
+        batch.add(sql);
     }
 
     @Override
     public void clearBatch() throws SQLException {
         checkOpen();
-        throw SqlStates.unsupported("Batches");
+        batch.clear();
     }
 
+    /** Runs the batch, see {@link #executeLargeBatch()}; each count is at most {@link Integer#MAX_VALUE}. */
     @Override
     public int[] executeBatch() throws SQLException {
-        checkOpen();
-        throw SqlStates.unsupported("Batches");
+        long[] counts = executeLargeBatch();
+        int[] result = new int[counts.length];
+        for (int i = 0; i < counts.length; i++) {
+            result[i] = clamp(counts[i]);
+        }
+        return result;
     }
 
+    /**
+     * Runs the statements of the batch one after another, each on its own
+     * as {@link #executeLargeUpdate(String)} runs it, and empties the
+     * batch. The first that fails, or is a query, ends the batch with a
+     * {@link BatchUpdateException} that holds the counts of the statements
+     * before it, whose writes stay.
+     */
     @Override
     public long[] executeLargeBatch() throws SQLException {
         checkOpen();
-        throw SqlStates.unsupported("Batches");
+        List<String> statements = List.copyOf(batch);
+        batch.clear();
+        long[] counts = new long[statements.size()];
+        for (int i = 0; i < counts.length; i++) {
+            try {
+                run(statements.get(i), FyrQLConnection.Kind.UPDATE);
+            } catch (SQLException e) {
+                throw new BatchUpdateException("Statement " + (i + 1) + " of the batch fails: " + e.getMessage(),
+                        e.getSQLState(), e.getErrorCode(), Arrays.copyOf(counts, i), e);
+            }
+            counts[i] = updateCount;
+        }
+        updateCount = -1;
+        return counts;
     }
 
     @Override
@@ -279,20 +342,24 @@ class FyrQLStatement implements Statement {
         return resultSet;
     }
 
-    /** Returns {@code -1}: a statement has no update counts. */
+    /**
+     * Returns the rows the last statement wrote, at most
+     * {@link Integer#MAX_VALUE}; {@code -1} after a query, after a batch
+     * and after {@link #getMoreResults()}.
+     */
     @Override
     public int getUpdateCount() throws SQLException {
         checkOpen();
-        return -1;
+        return clamp(updateCount);
     }
 
     @Override
     public long getLargeUpdateCount() throws SQLException {
         checkOpen();
-        return -1;
+        return updateCount;
     }
 
-    /** Closes the current result set; there is never another result. */
+    /** Closes the current result set and ends the update count; there is never another result. */
     @Override
     public boolean getMoreResults() throws SQLException {
         return getMoreResults(CLOSE_CURRENT_RESULT);
@@ -304,6 +371,7 @@ class FyrQLStatement implements Statement {
         if (current != CLOSE_CURRENT_RESULT && current != KEEP_CURRENT_RESULT && current != CLOSE_ALL_RESULTS) {
             throw SqlStates.invalidArgument("Unknown argument of getMoreResults: " + current);
         }
+        updateCount = -1;
         if (current == KEEP_CURRENT_RESULT) {
             synchronized (this) {
                 if (resultSet != null) {

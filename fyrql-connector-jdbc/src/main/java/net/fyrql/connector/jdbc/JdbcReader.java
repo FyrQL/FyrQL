@@ -13,16 +13,12 @@ package net.fyrql.connector.jdbc;
 
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.jdbc.ColumnReaders.ColumnReader;
-import net.fyrql.core.type.DataType;
-import net.fyrql.core.type.DataType.Scalar;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
 import net.fyrql.sql.render.BoundSql;
 
-import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -119,28 +115,7 @@ final class JdbcReader implements BatchReader {
         Calendar utc = ColumnReaders.utc();
         for (int i = 0; i < parameters.size(); i++) {
             BoundSql.Parameter p = parameters.get(i);
-            int index = i + 1;
-            Object v = p.value();
-            DataType type = p.type();
-            if (type instanceof DataType.Decimal) {
-                statement.setBigDecimal(index, (BigDecimal) v);
-                continue;
-            }
-            switch ((Scalar) type) {
-                case BOOLEAN -> statement.setBoolean(index, (Boolean) v);
-                case TINYINT -> statement.setByte(index, (Byte) v);
-                case SMALLINT -> statement.setShort(index, (Short) v);
-                case INTEGER -> statement.setInt(index, (Integer) v);
-                case BIGINT -> statement.setLong(index, (Long) v);
-                case HUGEINT -> statement.setBigDecimal(index, new BigDecimal((BigInteger) v));
-                case FLOAT -> statement.setFloat(index, (Float) v);
-                case DOUBLE -> statement.setDouble(index, (Double) v);
-                case VARCHAR -> statement.setString(index, (String) v);
-                case BLOB -> statement.setBytes(index, (byte[]) v);
-                case DATE -> statement.setDate(index, ColumnReaders.date((Integer) v), utc);
-                case TIMESTAMP -> statement.setTimestamp(index, ColumnReaders.timestamp((Long) v), utc);
-                case UUID -> statement.setString(index, v.toString());
-            }
+            JdbcBinding.bind(statement, i + 1, p.type(), p.value(), utc);
         }
     }
 

@@ -12,6 +12,7 @@
 package net.fyrql.jdbc;
 
 import net.fyrql.core.type.DataType;
+import net.fyrql.core.type.Schema;
 import net.fyrql.jdbc.JdbcValues.Typed;
 import net.fyrql.sql.parse.Parameters;
 import net.fyrql.sql.parse.TypeNames;
@@ -55,7 +56,9 @@ import java.util.List;
  * FyrQL with an explicit type, such as {@code CAST(42 AS INTEGER)} or
  * {@code DATE '2024-02-29'}, and a run puts the literals in place of the
  * parameters, so that the engine plans the text anew each time. The values
- * stay set from run to run until {@link #clearParameters()}.
+ * stay set from run to run until {@link #clearParameters()}. A statement
+ * that writes runs as {@link FyrQLStatement} runs it, and
+ * {@link #addBatch()} adds it with the values set to the batch.
  * <p>
  * {@code setObject} takes the classes {@link JdbcValues#fromJava} takes;
  * with a target type it converts the value as a cast of FyrQL does.
@@ -128,40 +131,38 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
                 + "without a query text", SqlStates.WRONG_OBJECT_TYPE, null);
     }
 
+    /** Runs the query; a statement that writes fails with {@code 42809} before it runs. */
     @Override
     public ResultSet executeQuery() throws SQLException {
         checkOpen();
-        return run(rendered());
+        return run(rendered(), FyrQLConnection.Kind.QUERY);
     }
 
+    /** Runs the statement and returns whether it is a query, see {@link FyrQLStatement#execute(String)}. */
     @Override
     public boolean execute() throws SQLException {
-        executeQuery();
-        return true;
+        checkOpen();
+        return run(rendered(), FyrQLConnection.Kind.ANY) != null;
     }
 
-    /** Fails: FyrQL only reads; see {@link FyrQLStatement#executeUpdate(String)}. */
+    /** Runs the statement that writes, see {@link FyrQLStatement#executeUpdate(String)}. */
     @Override
     public int executeUpdate() throws SQLException {
-        throw notAnUpdate(textForParser());
+        return clamp(executeLargeUpdate());
     }
 
     @Override
     public long executeLargeUpdate() throws SQLException {
-        throw notAnUpdate(textForParser());
+        checkOpen();
+        run(rendered(), FyrQLConnection.Kind.UPDATE);
+        return getLargeUpdateCount();
     }
 
-    /** Returns the text with a {@code NULL} for every parameter without a value, for the message of the parser. */
-    private String textForParser() throws SQLException {
-        String[] all = literals.clone();
-        Arrays.setAll(all, i -> all[i] == null ? UNTYPED_NULL : all[i]);
-        return sql.render(all);
-    }
-
+    /** Adds the statement with the values set to the batch, see {@link FyrQLStatement#executeLargeBatch()}. */
     @Override
     public void addBatch() throws SQLException {
         checkOpen();
-        throw SqlStates.unsupported("Batches");
+        addToBatch(rendered());
     }
 
     @Override
@@ -174,7 +175,7 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
      * Returns the columns of the result when every parameter has a value:
      * the engine plans the query without running it. Before that it is
      * {@code null}, since the types of the columns may depend on the
-     * values.
+     * values, as it is for a statement that writes.
      */
     @Override
     public ResultSetMetaData getMetaData() throws SQLException {
@@ -184,7 +185,8 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
                 return null;
             }
         }
-        return new FyrQLResultSetMetaData(connection.describe(rendered()));
+        Schema columns = connection.describe(rendered());
+        return columns == null ? null : new FyrQLResultSetMetaData(columns);
     }
 
     /**

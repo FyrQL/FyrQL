@@ -52,6 +52,7 @@ import java.util.Map;
 import java.util.TimeZone;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -529,17 +530,25 @@ class PreparedStatementTest {
         for (StatementTest.ThrowingCall call : withText) {
             assertEquals("42809", assertThrows(SQLException.class, call::run).getSQLState());
         }
-        assertEquals("0A000", assertThrows(SQLException.class, ps::addBatch).getSQLState());
-        assertEquals("0A000", assertThrows(SQLException.class, ps::executeBatch).getSQLState());
-        SQLException e = assertThrows(SQLFeatureNotSupportedException.class, ps::executeUpdate);
-        assertEquals("Updates are not supported by FyrQL; run a query with executeQuery", e.getMessage());
-        assertThrows(SQLFeatureNotSupportedException.class, ps::executeLargeUpdate);
+        assertEquals("07001", assertThrows(SQLException.class, ps::addBatch).getSQLState());
+        assertEquals("07001", assertThrows(SQLException.class, ps::executeUpdate).getSQLState());
+        assertArrayEquals(new int[0], ps.executeBatch());
+        ps.setInt(1, 1);
+        SQLException e = assertThrows(SQLException.class, ps::executeUpdate);
+        assertEquals("42809", e.getSQLState());
+        assertEquals("A query returns rows, not a number of rows written; run it with executeQuery or execute",
+                e.getMessage());
+        assertEquals("42809", assertThrows(SQLException.class, ps::executeLargeUpdate).getSQLState());
         try (PreparedStatement insert = c.prepareStatement("INSERT INTO t (i) VALUES (?)")) {
-            e = assertThrows(SQLFeatureNotSupportedException.class, insert::executeUpdate);
-            assertTrue(e.getMessage().startsWith("Only queries are supported, not INSERT"), e.getMessage());
             insert.setInt(1, 1);
-            e = assertThrows(SQLFeatureNotSupportedException.class, insert::executeQuery);
-            assertTrue(e.getMessage().startsWith("Only queries are supported, not INSERT"), e.getMessage());
+            e = assertThrows(SQLException.class, insert::executeQuery);
+            assertEquals("42809", e.getSQLState());
+            assertEquals("executeQuery runs queries; run a statement that writes with executeUpdate or execute",
+                    e.getMessage());
+            assertNull(insert.getMetaData(), "a statement that writes has no result set");
+            e = assertThrows(SQLException.class, insert::executeUpdate);
+            assertTrue(e.getMessage().startsWith("Table t of the memory source mem holds Java objects and cannot be"
+                    + " written"), e.getMessage());
         }
         ps.close();
         for (StatementTest.ThrowingCall call : List.<StatementTest.ThrowingCall>of(() -> ps.setInt(1, 1),
