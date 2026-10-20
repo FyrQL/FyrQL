@@ -21,15 +21,22 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.sql.render.GenericDialect;
+import net.fyrql.sql.render.H2Dialect;
 import net.fyrql.test.DuckDbReference;
 import net.fyrql.test.ResultComparison;
 import net.fyrql.test.db.TestDatabase;
+import net.fyrql.test.db.TestDatabases;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.SplittableRandom;
 import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,6 +56,12 @@ import static org.junit.jupiter.api.Assertions.fail;
  * only the columns a query needs. A third engine reads {@code items} in
  * ranges of {@code id}, see {@link JdbcConnector.Builder#splitRows}, and
  * must give the same rows.
+ * <p>
+ * A database without a dialect of its own is read through the generic
+ * dialect, see {@link GenericDialect}: H2 in its modes of compatibility,
+ * Derby and HSQLDB. It takes over fewer parts, binds its literals and
+ * sends conditions on strings as hints, and its tables are created with
+ * type names of its own.
  */
 public final class JdbcConformance {
 
@@ -64,18 +77,148 @@ public final class JdbcConformance {
     private static final List<String> STRINGS = List.of("", "a", "ab", "Ab", "AB", "b", "x y", " a", "%", "_",
             "\u00E4", "\u00E9t\u00E9", "Zebra", "zebra", "\u65E5\u672C", "a b", "it's");
 
+    /**
+     * The queries of which the generic dialect takes over a part: those
+     * with a filter on an integer or a date, as counted on 20 October 2026;
+     * the other dialects take over half of them at least.
+     */
+    private static final int GENERIC_PUSHED = 27;
+    /** As {@link #GENERIC_PUSHED}, but a date of H2 in the mode Oracle is a timestamp, which is not taken over. */
+    private static final int ORACLE_PUSHED = 23;
+
     private JdbcConformance() {
+    }
+
+    /**
+     * A database with what the conformance needs to know about it.
+     *
+     * @param name the name of the database in a message
+     * @param items the table {@code items} as it is written
+     * @param typeNames the names of the types the tables are created with,
+     *        or {@code null} for those the dialect of the database writes
+     * @param storedType the type a column comes back as, see {@link #stored(JdbcDialect)}
+     * @param storedValue the value a value of a type comes back as
+     * @param minPushed the queries of which the database takes over a part, at least, with pushdown
+     * @param settings further settings of the connectors
+     */
+    public record Target(TestDatabase db, String name, Schema items, Function<DataType, String> typeNames,
+            UnaryOperator<DataType> storedType, BiFunction<DataType, Object, Object> storedValue, int minPushed,
+            Consumer<JdbcConnector.Builder> settings) {
+
+        /** A database of a dialect of its own. */
+        public static Target of(TestDatabase db) {
+            JdbcDialect dialect = db.dialect();
+            // The names are qualified: the components of the record hide the methods of the class.
+            return new Target(db, dialect.toString(), JdbcConformance.items(dialect), null,
+                    t -> JdbcConformance.stored(dialect, t), (t, v) -> JdbcConformance.storedValue(dialect, v),
+                    QUERIES.size() / 2, b -> {
+                    });
+        }
+
+        boolean generic() {
+            return db.dialect() == JdbcDialect.GENERIC;
+        }
+
+        /** A table as it comes back from the database. */
+        Schema stored(Schema written) {
+            List<Schema.Field> fields = new ArrayList<>();
+            for (Schema.Field f : written.fields()) {
+                fields.add(new Schema.Field(f.name(), storedType.apply(f.type()), f.nullable()));
+            }
+            return new Schema(fields);
+        }
+
+        /** Rows of a table as they come back from the database. */
+        List<Object[]> storedRows(Schema written, List<Object[]> rows) {
+            List<Object[]> stored = new ArrayList<>();
+            for (Object[] row : rows) {
+                Object[] copy = row.clone();
+                for (int c = 0; c < copy.length; c++) {
+                    copy[c] = copy[c] == null ? null : storedValue.apply(written.type(c), copy[c]);
+                }
+                stored.add(copy);
+            }
+            return stored;
+        }
+
+        void load(String table, Schema schema, List<Object[]> rows) {
+            if (typeNames == null) {
+                db.load(table, schema, rows);
+            } else {
+                db.load(table, schema, typeNames, rows);
+            }
+        }
+    }
+
+    /**
+     * H2 in a mode of compatibility, read through the generic dialect. In
+     * the mode {@code Oracle} a {@code DATE} is a {@code TIMESTAMP(0)} and
+     * an empty string is {@code NULL}.
+     */
+    public static Target h2(String mode, Consumer<JdbcConnector.Builder> settings) {
+        boolean oracle = mode.equals("Oracle");
+        return new Target(TestDatabases.h2Mode(mode), "H2 in the mode " + mode, items(true),
+                H2Dialect.INSTANCE::typeName, t -> oracle && t == DataType.DATE ? DataType.TIMESTAMP : t,
+                (t, v) -> !oracle ? v : t == DataType.DATE ? (Integer) v * 86_400_000_000L : "".equals(v) ? null : v,
+                oracle ? ORACLE_PUSHED : GENERIC_PUSHED, settings);
+    }
+
+    /**
+     * Derby, read through the generic dialect with {@code FETCH FIRST}: no
+     * {@code TINYINT}, which is a {@code SMALLINT}, no {@code UUID}, which
+     * is a {@code CHAR(36)}, and no decimal as wide as a {@code HUGEINT}.
+     */
+    public static Target derby() {
+        return new Target(TestDatabases.derby(), "Derby", items(false), t -> sql92(t, "SMALLINT", "BLOB", "TIMESTAMP",
+                "CHAR(36)"), t -> t == DataType.TINYINT ? DataType.SMALLINT : t == DataType.UUID ? DataType.VARCHAR : t,
+                (t, v) -> v instanceof Byte b ? (Object) (short) b : v instanceof UUID u ? u.toString() : v,
+                GENERIC_PUSHED, b -> b.limitStyle(GenericDialect.LimitStyle.FETCH_FIRST));
+    }
+
+    /** HSQLDB, read through the generic dialect, whose {@code REAL} is a {@code DOUBLE}. */
+    public static Target hsqldb() {
+        return new Target(TestDatabases.hsqldb(), "HSQLDB", items(true),
+                t -> t == DataType.HUGEINT ? "DECIMAL(39,0)" : sql92(t, "TINYINT", "VARBINARY(100)", "TIMESTAMP(6)",
+                        "UUID"), t -> t == DataType.FLOAT ? DataType.DOUBLE : t,
+                (t, v) -> v instanceof Float f ? (Object) (double) f : v, GENERIC_PUSHED, b -> {
+                });
+    }
+
+    /** The name of a type in SQL-92, with the names of a database for the types that differ. */
+    private static String sql92(DataType type, String tinyint, String blob, String timestamp, String uuid) {
+        if (type instanceof DataType.Decimal d) {
+            return "DECIMAL(" + d.precision() + "," + d.scale() + ")";
+        }
+        return switch ((DataType.Scalar) type) {
+            case BOOLEAN -> "BOOLEAN";
+            case TINYINT -> tinyint;
+            case SMALLINT -> "SMALLINT";
+            case INTEGER -> "INTEGER";
+            case BIGINT -> "BIGINT";
+            case FLOAT -> "REAL";
+            case DOUBLE -> "DOUBLE";
+            case VARCHAR -> "VARCHAR(100)";
+            case BLOB -> blob;
+            case DATE -> "DATE";
+            case TIMESTAMP -> timestamp;
+            case UUID -> uuid;
+            case HUGEINT -> throw new IllegalArgumentException("No type for HUGEINT");
+        };
     }
 
     /** The table {@code items} with a column of every type the database stores. */
     public static Schema items(JdbcDialect dialect) {
+        return items(dialect != JdbcDialect.SQLITE);
+    }
+
+    private static Schema items(boolean hugeint) {
         List<Schema.Field> fields = new ArrayList<>(List.of(new Schema.Field("id", DataType.INTEGER, false),
                 field("b", DataType.BOOLEAN), field("ti", DataType.TINYINT), field("si", DataType.SMALLINT),
                 field("i", DataType.INTEGER), field("bi", DataType.BIGINT), field("de", DataType.decimal(9, 2)),
                 field("f", DataType.FLOAT), field("d", DataType.DOUBLE), field("s", DataType.VARCHAR),
                 field("bl", DataType.BLOB), field("dt", DataType.DATE), field("ts", DataType.TIMESTAMP),
                 field("u", DataType.UUID)));
-        if (dialect != JdbcDialect.SQLITE) {
+        if (hugeint) {
             fields.add(field("h", DataType.HUGEINT));
         }
         return new Schema(fields);
@@ -109,26 +252,24 @@ public final class JdbcConformance {
         return type;
     }
 
-    /** The rows of {@link #itemRows} with the values of {@link #stored}. */
-    public static List<Object[]> storedRows(JdbcDialect dialect) {
-        List<Object[]> rows = new ArrayList<>();
-        for (Object[] row : itemRows(dialect)) {
-            Object[] copy = row.clone();
-            for (int c = 0; c < copy.length; c++) {
-                if (copy[c] instanceof Byte b && dialect == JdbcDialect.POSTGRESQL) {
-                    copy[c] = (short) b;
-                } else if (copy[c] instanceof UUID u && dialect == JdbcDialect.MYSQL) {
-                    copy[c] = u.toString();
-                }
-            }
-            rows.add(copy);
+    /** A value as it comes back from the database: the values of {@link #stored}. */
+    private static Object storedValue(JdbcDialect dialect, Object value) {
+        if (value instanceof Byte b && dialect == JdbcDialect.POSTGRESQL) {
+            return (short) b;
         }
-        return rows;
+        if (value instanceof UUID u && dialect == JdbcDialect.MYSQL) {
+            return u.toString();
+        }
+        return value;
     }
 
     /** Random rows of {@link #items}, the same for a dialect in every run. */
     public static List<Object[]> itemRows(JdbcDialect dialect) {
-        Schema schema = items(dialect);
+        return itemRows(items(dialect));
+    }
+
+    /** Random rows of a table like {@code items}, the same for a schema in every run. */
+    private static List<Object[]> itemRows(Schema schema) {
         SplittableRandom random = new SplittableRandom(SEED);
         List<Object[]> rows = new ArrayList<>();
         for (int r = 0; r < ROWS; r++) {
@@ -306,18 +447,27 @@ public final class JdbcConformance {
      * the statements the database receives.
      */
     public static void check(TestDatabase db) {
-        JdbcDialect dialect = db.dialect();
-        db.load("items", items(dialect), itemRows(dialect));
-        db.load("items2", ITEMS2, items2Rows());
-        Schema stored = stored(dialect);
-        JdbcConnector primary = db.connector(SOURCE);
-        JdbcConnector plain = db.connector(SOURCE);
-        JdbcConnector split = db.connector(SOURCE, b -> b.splitRows(SPLIT_ROWS).splitColumn("items", "id"));
-        assertEquals(stored, primary.catalog().schema(TableRef.of(SOURCE, "items")), dialect + " reads the table back");
+        check(Target.of(db));
+    }
+
+    /** Runs the conformance over a database as {@link #check(TestDatabase)} does. */
+    public static void check(Target target) {
+        TestDatabase db = target.db();
+        String name = target.name();
+        List<Object[]> rows = itemRows(target.items());
+        target.load("items", target.items(), rows);
+        target.load("items2", ITEMS2, items2Rows());
+        Schema stored = target.stored(target.items());
+        Schema stored2 = target.stored(ITEMS2);
+        JdbcConnector primary = db.connector(SOURCE, target.settings());
+        JdbcConnector plain = db.connector(SOURCE, target.settings());
+        JdbcConnector split = db.connector(SOURCE, target.settings().andThen(b -> b.splitRows(SPLIT_ROWS)
+                .splitColumn("items", "id")));
+        assertEquals(stored, primary.catalog().schema(TableRef.of(SOURCE, "items")), name + " reads the table back");
         try (FyrQL engine = engine(primary, null); FyrQL off = engine(plain, false); FyrQL parts = engine(split, null, SPLIT_THREADS);
                 DuckDbReference duck = new DuckDbReference()) {
-            duck.load("items", stored, List.of(Batch.ofRows(stored, storedRows(dialect))));
-            duck.load("items2", ITEMS2, List.of(Batch.ofRows(ITEMS2, items2Rows())));
+            duck.load("items", stored, List.of(Batch.ofRows(stored, target.storedRows(target.items(), rows))));
+            duck.load("items2", stored2, List.of(Batch.ofRows(stored2, target.storedRows(ITEMS2, items2Rows()))));
             duck.load("tags", TAGS, List.of(Batch.ofRows(TAGS, tagRows())));
             List<String> failures = new ArrayList<>();
             int pushed = 0;
@@ -354,21 +504,22 @@ public final class JdbcConformance {
                 }
             }
             if (!failures.isEmpty()) {
-                fail(dialect + ": " + failures.size() + " of " + QUERIES.size() + " queries differ:\n\n"
+                fail(name + ": " + failures.size() + " of " + QUERIES.size() + " queries differ:\n\n"
                         + String.join("\n\n", failures));
             }
             if (engine.pushdown()) {
-                assertTrue(pushed >= QUERIES.size() / 2, dialect + " takes over parts of " + pushed + " queries");
+                assertTrue(pushed >= target.minPushed(), name + " takes over parts of " + pushed + " queries");
             } else {
                 assertEquals(0, pushed);
             }
             assertTrue(split.statements().stream().filter(s -> s.startsWith("SELECT min(")).count() >= 10,
-                    dialect + " reads items in parts: " + split.statements());
+                    name + " reads items in parts: " + split.statements());
             for (String sent : plain.statements()) {
                 assertFalse(sent.contains(" WHERE ") || sent.contains(" ORDER BY ") || sent.contains(" LIMIT ")
-                        || sent.contains(" GROUP BY ") || sent.contains("count(") || sent.contains(" JOIN "), sent);
+                        || sent.contains(" GROUP BY ") || sent.contains("count(") || sent.contains(" JOIN ")
+                        || sent.contains(" TOP ") || sent.contains(" FETCH FIRST ") || sent.contains(" -- "), sent);
             }
-            checkStatements(engine, primary, dialect);
+            checkStatements(engine, primary, target);
         }
     }
 
@@ -403,16 +554,21 @@ public final class JdbcConformance {
      * the filters, the order, the limit and the aggregation its dialect
      * takes over.
      */
-    private static void checkStatements(FyrQL engine, JdbcConnector connector, JdbcDialect dialect) {
-        String q = dialect.sql().quoteIdentifier("x").substring(0, 1);
-        String select = "SELECT t." + q + "id" + q + ", t." + q + "i" + q + ", t." + q + "s" + q + " FROM ";
+    private static void checkStatements(FyrQL engine, JdbcConnector connector, Target target) {
+        JdbcDialect dialect = target.db().dialect();
+        boolean generic = target.generic();
+        UnaryOperator<String> q = connector.sql()::quoteIdentifier;
+        String select = "SELECT t." + q.apply("id") + ", t." + q.apply("i") + ", t." + q.apply("s") + " FROM ";
         boolean on = engine.pushdown();
         String filtered = sent(engine, connector, "SELECT s FROM items WHERE i > 0 AND id < 100");
-        assertTrue(filtered.startsWith(select) && filtered.contains("." + q + "items" + q + " t"), filtered);
-        assertEquals(on, filtered.contains(" WHERE ((t." + q + "i" + q + " > "), filtered);
+        assertTrue(filtered.startsWith(select) && filtered.contains("." + q.apply("items") + " t"), filtered);
+        assertEquals(on, filtered.contains(" WHERE ((t." + q.apply("i") + " > "), filtered);
+        // The generic dialect binds the literals.
+        assertEquals(on && generic, filtered.endsWith(" -- parameters: 0, 100"), filtered);
 
+        // The generic dialect orders nothing, so the limit above the order stays with the engine as well.
         String limited = sent(engine, connector, "SELECT id, i FROM items ORDER BY i, id LIMIT 5 OFFSET 3");
-        assertEquals(on, limited.contains(" ORDER BY t.") && limited.endsWith(" LIMIT 8"), limited);
+        assertEquals(on && !generic, limited.contains(" ORDER BY t.") && limited.endsWith(" LIMIT 8"), limited);
 
         // Strings are ordered by their bytes only in SQLite.
         String strings = sent(engine, connector, "SELECT id, s FROM items ORDER BY s, id LIMIT 7");
@@ -421,30 +577,32 @@ public final class JdbcConformance {
         // A filter on a double stays with the engine, and so does the limit above it.
         String partly = sent(engine, connector, "SELECT id FROM items WHERE i > 0 AND d > 0 LIMIT 3");
         assertEquals(on, partly.contains(" WHERE "), partly);
-        assertFalse(partly.contains(" LIMIT "), partly);
-        assertFalse(partly.contains(q + "d" + q + " >"), partly);
+        assertFalse(partly.contains(" LIMIT ") || partly.contains(" TOP ") || partly.contains(" FETCH FIRST ")
+                || partly.contains("max rows"), partly);
+        assertFalse(partly.contains(q.apply("d") + " >"), partly);
 
-        // Counts and extremes of integers are computed in the database, with the groups.
+        // Counts and extremes of integers are computed in the database, with the groups; not in the generic dialect.
         String grouped = sent(engine, connector, "SELECT b, count(*), min(i), max(bi) FROM items WHERE i > 0 GROUP BY b");
-        assertEquals(on, grouped.startsWith("SELECT t." + q + "b" + q + ", count(*), min(t." + q + "i" + q + "), max(t.")
-                && grouped.contains(" WHERE ") && grouped.endsWith(" GROUP BY t." + q + "b" + q), grouped);
+        assertEquals(on && !generic, grouped.startsWith("SELECT t." + q.apply("b") + ", count(*), min(t." + q.apply("i")
+                + "), max(t.") && grouped.contains(" WHERE ") && grouped.endsWith(" GROUP BY t." + q.apply("b")), grouped);
 
         // A sum is cast to the type FyrQL gives it, except in SQLite, which has none and leaves the sum to the engine.
         String summed = sent(engine, connector, "SELECT ti, sum(bi) FROM items GROUP BY ti");
-        assertEquals(on && dialect != JdbcDialect.SQLITE,
-                summed.contains(", CAST(sum(t." + q + "bi" + q + ") AS ") && summed.contains(" GROUP BY "), summed);
+        assertEquals(on && dialect != JdbcDialect.SQLITE && !generic,
+                summed.contains(", CAST(sum(t." + q.apply("bi") + ") AS ") && summed.contains(" GROUP BY "), summed);
 
         // MySQL groups strings by a collation that ignores the case.
         String byString = sent(engine, connector, "SELECT s, count(*) FROM items GROUP BY s");
-        assertEquals(on && dialect != JdbcDialect.MYSQL, byString.endsWith(" GROUP BY t." + q + "s" + q), byString);
+        assertEquals(on && dialect != JdbcDialect.MYSQL && !generic, byString.endsWith(" GROUP BY t." + q.apply("s")),
+                byString);
 
         // Doubles are aggregated by the engine.
         String doubles = sent(engine, connector, "SELECT count(*), max(d) FROM items");
         assertFalse(doubles.contains("count("), doubles);
 
-        // A join of two tables of the database is one statement with its filters.
+        // A join of two tables of the database is one statement with its filters; the generic dialect joins nothing.
         List<String> joined = statements(engine, connector, JOIN);
-        if (on) {
+        if (on && !generic) {
             assertEquals(1, joined.size(), joined.toString());
             assertTrue(joined.get(0).contains(" INNER JOIN ") && joined.get(0).contains(" WHERE "), joined.get(0));
         } else {
@@ -452,16 +610,41 @@ public final class JdbcConformance {
         }
 
         // MySQL compares strings under a collation that ignores the case, so the engine joins on them.
-        assertEquals(on && dialect != JdbcDialect.MYSQL ? 1 : 2, statements(engine, connector, STRING_JOIN).size());
+        assertEquals(on && dialect != JdbcDialect.MYSQL && !generic ? 1 : 2,
+                statements(engine, connector, STRING_JOIN).size());
 
         // A semi or anti join of two tables of the database is a filter with EXISTS or NOT EXISTS.
         List<String> semi = statements(engine, connector, EXISTS);
-        assertEquals(on ? 1 : 2, semi.size(), semi.toString());
-        assertEquals(on, semi.get(0).contains(" WHERE EXISTS (SELECT 1 FROM "), semi.get(0));
+        assertEquals(on && !generic ? 1 : 2, semi.size(), semi.toString());
+        assertEquals(on && !generic, semi.get(0).contains(" WHERE EXISTS (SELECT 1 FROM "), semi.get(0));
         List<String> anti = statements(engine, connector, NOT_EXISTS);
-        assertEquals(on ? 1 : 2, anti.size(), anti.toString());
-        assertEquals(on, anti.get(0).contains(" WHERE NOT EXISTS (SELECT 1 FROM ") && anti.get(0).contains(" > "),
-                anti.get(0));
+        assertEquals(on && !generic ? 1 : 2, anti.size(), anti.toString());
+        assertEquals(on && !generic, anti.get(0).contains(" WHERE NOT EXISTS (SELECT 1 FROM ")
+                && anti.get(0).contains(" > "), anti.get(0));
+
+        if (generic) {
+            checkGenericStatements(engine, connector, q);
+        }
+    }
+
+    /** The generic dialect keeps the first rows as its settings say and sends conditions on strings as hints. */
+    private static void checkGenericStatements(FyrQL engine, JdbcConnector connector, UnaryOperator<String> q) {
+        boolean on = engine.pushdown();
+        GenericDialect.Settings settings = ((GenericDialect) connector.sql()).settings();
+        String first = sent(engine, connector, "SELECT id, i FROM items LIMIT 5");
+        boolean kept = switch (settings.limit()) {
+            case MAX_ROWS -> first.endsWith(" -- max rows: 5");
+            case LIMIT -> first.endsWith(" LIMIT 5");
+            case FETCH_FIRST -> first.endsWith(" FETCH FIRST 5 ROWS ONLY");
+            case TOP -> first.startsWith("SELECT TOP 5 ");
+        };
+        assertEquals(on, kept, first);
+
+        String hint = sent(engine, connector, "SELECT id FROM items WHERE s = 'ab'");
+        assertEquals(on, hint.contains(" WHERE (t." + q.apply("s") + " = ?)") && hint.endsWith(" -- parameters: 'ab'"),
+                hint);
+        String unequal = sent(engine, connector, "SELECT id FROM items WHERE s <> 'ab'");
+        assertFalse(unequal.contains(" WHERE "), unequal);
     }
 
     /** The statements a query sends to the database, none with a join unless it is the only one. */

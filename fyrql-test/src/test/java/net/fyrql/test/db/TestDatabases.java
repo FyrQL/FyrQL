@@ -16,6 +16,7 @@ import net.fyrql.connector.jdbc.JdbcDialect;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.mysql.MySQLContainer;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -27,6 +28,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * The databases the tests run against, each new and empty:
  * <ul>
  * <li>H2 in memory and SQLite in a temporary file, always;</li>
+ * <li>for the generic dialect H2 in memory in a mode of compatibility,
+ * Derby and HSQLDB in memory, always;</li>
  * <li>PostgreSQL from binaries the build unpacks and starts in a
  * directory of its own, one server for all tests of a run, with a
  * database of its own for every test; {@code -Dfyrql.test.postgres=off}
@@ -54,6 +57,28 @@ public final class TestDatabases {
     public static TestDatabase h2() {
         return new TestDatabase(JdbcDialect.H2, "jdbc:h2:mem:fyrqltest" + COUNT.incrementAndGet() + ";DB_CLOSE_DELAY=-1",
                 null, null);
+    }
+
+    /**
+     * A new H2 database in memory in a mode of compatibility, such as
+     * {@code Oracle}, read through the generic dialect.
+     */
+    public static TestDatabase h2Mode(String mode) {
+        return new TestDatabase(JdbcDialect.GENERIC, "jdbc:h2:mem:fyrqltest" + COUNT.incrementAndGet()
+                + ";DB_CLOSE_DELAY=-1;MODE=" + mode, null, null);
+    }
+
+    /** A new Derby database in memory, read through the generic dialect; its log goes to a temporary file. */
+    public static TestDatabase derby() {
+        DerbyLog.set();
+        return new TestDatabase(JdbcDialect.GENERIC, "jdbc:derby:memory:fyrqltest" + COUNT.incrementAndGet()
+                + ";create=true", null, null);
+    }
+
+    /** A new HSQLDB database in memory, read through the generic dialect. */
+    public static TestDatabase hsqldb() {
+        return new TestDatabase(JdbcDialect.GENERIC, "jdbc:hsqldb:mem:fyrqltest" + COUNT.incrementAndGet(), "SA",
+                "");
     }
 
     /** A new SQLite database in a file that is deleted when the tests end. */
@@ -132,6 +157,26 @@ public final class TestDatabases {
             } catch (IOException e) {
                 throw new UncheckedIOException("PostgreSQL does not start; -Dfyrql.test.postgres=off leaves it out", e);
             }
+        }
+    }
+
+    /** The file Derby logs to instead of {@code derby.log} in the working directory, set once. */
+    private static final class DerbyLog {
+
+        static {
+            if (System.getProperty("derby.stream.error.file") == null) {
+                try {
+                    File file = Files.createTempFile("fyrql-derby", ".log").toFile();
+                    file.deleteOnExit();
+                    System.setProperty("derby.stream.error.file", file.getPath());
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }
+        }
+
+        /** Sets the file before Derby starts; the work is done once, when the class is first used. */
+        static void set() {
         }
     }
 

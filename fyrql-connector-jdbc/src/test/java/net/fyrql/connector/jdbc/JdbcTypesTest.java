@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Types;
 import java.util.UUID;
 
+import static net.fyrql.connector.jdbc.JdbcDialect.GENERIC;
 import static net.fyrql.connector.jdbc.JdbcDialect.H2;
 import static net.fyrql.connector.jdbc.JdbcDialect.MYSQL;
 import static net.fyrql.connector.jdbc.JdbcDialect.POSTGRESQL;
@@ -68,6 +69,12 @@ class JdbcTypesTest {
         assertFalse(JdbcTypes.withTimeZone(MYSQL, Types.TIMESTAMP, "DATETIME"));
         assertFalse(JdbcTypes.withTimeZone(POSTGRESQL, Types.TIMESTAMP, "timestamp"));
         assertFalse(JdbcTypes.withTimeZone(H2, Types.TIMESTAMP, "TIMESTAMP"));
+        // Oracle and SQL Server, read through the generic dialect.
+        assertTrue(JdbcTypes.withTimeZone(GENERIC, Types.TIMESTAMP, "TIMESTAMP(6) WITH LOCAL TIME ZONE"));
+        assertTrue(JdbcTypes.withTimeZone(GENERIC, -101, "TIMESTAMP WITH TIME ZONE"));
+        assertTrue(JdbcTypes.withTimeZone(GENERIC, -155, "datetimeoffset"));
+        assertFalse(JdbcTypes.withTimeZone(GENERIC, Types.TIMESTAMP, "datetime2"));
+        assertFalse(JdbcTypes.withTimeZone(GENERIC, Types.TIMESTAMP, "TIMESTAMP"));
     }
 
     @Test

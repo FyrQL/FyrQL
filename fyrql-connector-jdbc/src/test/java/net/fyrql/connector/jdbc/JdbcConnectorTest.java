@@ -91,7 +91,7 @@ class JdbcConnectorTest {
     }
 
     @ParameterizedTest
-    @EnumSource(names = {"H2", "SQLITE"})
+    @EnumSource(names = {"H2", "SQLITE", "GENERIC"})
     void everyTypeIsReadBackWithItsNulls(JdbcDialect dialect) {
         TestDatabase db = allTypes(dialect);
         JdbcConnector connector = db.connector("db");
@@ -101,10 +101,11 @@ class JdbcConnectorTest {
         TableRef table = TableRef.of("db", ALL);
         assertEquals(TestDatabase.allTypes(dialect), connector.catalog().schema(table));
         assertRows(TestDatabase.allTypesRows(dialect), rows(readAll(connector, table)));
-        String schema = dialect == JdbcDialect.H2 ? "\"PUBLIC\"" : "\"main\"";
+        boolean sqlite = dialect == JdbcDialect.SQLITE;
+        String schema = sqlite ? "\"main\"" : "\"PUBLIC\"";
         assertEquals(List.of("SELECT t.\"id\", t.\"b\", t.\"ti\", t.\"si\", t.\"i\", t.\"bi\", t.\"de\", t.\"f\", "
                 + "t.\"d\", t.\"s\", t.\"bl\", t.\"dt\", t.\"ts\", t.\"u\""
-                + (dialect == JdbcDialect.H2 ? ", t.\"h\", t.\"dw\"" : "") + " FROM " + schema + ".\"all_types\" t"),
+                + (sqlite ? "" : ", t.\"h\", t.\"dw\"") + " FROM " + schema + ".\"all_types\" t"),
                 connector.statements());
         assertThrows(IllegalArgumentException.class, () -> connector.catalog().schema(TableRef.of("db", "nope")));
         assertThrows(IllegalArgumentException.class, () -> connector.catalog().schema(TableRef.of("db", "ALL_TYPES")));
@@ -394,6 +395,7 @@ class JdbcConnectorTest {
         assertEquals(JdbcDialect.POSTGRESQL, JdbcDialect.ofUrl("jdbc:postgresql://localhost/x").orElseThrow());
         assertEquals(JdbcDialect.MYSQL, JdbcDialect.ofUrl("jdbc:mysql://localhost/x").orElseThrow());
         assertEquals(JdbcDialect.MYSQL, JdbcDialect.ofName("mysql"));
+        assertEquals(JdbcDialect.GENERIC, JdbcDialect.ofName("generic"));
         assertThrows(IllegalArgumentException.class, () -> JdbcDialect.ofName("oracle"));
     }
 
@@ -443,14 +445,13 @@ class JdbcConnectorTest {
     }
 
     private static JdbcConnector splitting(TestDatabase db, long splitRows, Consumer<JdbcConnector.Builder> more) {
-        JdbcConnector.Builder b = JdbcConnector.builder("db").url(db.url()).recordStatements(true)
-                .splitRows(splitRows);
+        JdbcConnector.Builder b = db.builder("db").splitRows(splitRows);
         more.accept(b);
         return b.build();
     }
 
     private static String qualified(JdbcDialect dialect, String table) {
-        return (dialect == JdbcDialect.H2 ? "\"PUBLIC\"." : "\"main\".") + "\"" + table + "\"";
+        return (dialect == JdbcDialect.SQLITE ? "\"main\"." : "\"PUBLIC\".") + "\"" + table + "\"";
     }
 
     private static List<Integer> ids(List<Object[]> rows) {
@@ -458,7 +459,7 @@ class JdbcConnectorTest {
     }
 
     @ParameterizedTest
-    @EnumSource(names = {"H2", "SQLITE"})
+    @EnumSource(names = {"H2", "SQLITE", "GENERIC"})
     void aLargeTableIsReadInRangesOfItsPrimaryKey(JdbcDialect dialect) {
         TestDatabase db = items(dialect, 100);
         JdbcConnector connector = splitting(db, 30, b -> {
@@ -470,12 +471,12 @@ class JdbcConnectorTest {
         String id = "t.\"id\"";
         List<String> expected = new ArrayList<>(List.of(
                 "SELECT min(" + id + "), max(" + id + ") FROM " + qualified(dialect, "items") + " t",
-                select + "(" + id + " < " + literal(dialect, 25, type) + ")",
+                select + "(" + id + " < " + literal(dialect, 25, type) + ")" + bound(dialect, 25),
                 select + "((" + id + " >= " + literal(dialect, 25, type) + ") AND (" + id + " < "
-                        + literal(dialect, 50, type) + "))",
+                        + literal(dialect, 50, type) + "))" + bound(dialect, 25, 50),
                 select + "((" + id + " >= " + literal(dialect, 50, type) + ") AND (" + id + " < "
-                        + literal(dialect, 75, type) + "))",
-                select + "(" + id + " >= " + literal(dialect, 75, type) + ")"));
+                        + literal(dialect, 75, type) + "))" + bound(dialect, 50, 75),
+                select + "(" + id + " >= " + literal(dialect, 75, type) + ")" + bound(dialect, 75)));
         if (connector.catalog().schema(table).nullable(0)) {
             // SQLite tells that a key of type INTEGER may be NULL.
             expected.add(select + "(" + id + " IS NULL)");
@@ -510,8 +511,19 @@ class JdbcConnectorTest {
     }
 
     private static String literal(JdbcDialect dialect, long value, DataType type) {
+        if (dialect == JdbcDialect.GENERIC) {
+            return "?";
+        }
         Object v = type == DataType.INTEGER ? (Object) (int) value : (Object) value;
         return dialect.sql().literal(v, type);
+    }
+
+    /** The parameters of a statement of the generic dialect as it is recorded, or nothing for another dialect. */
+    private static String bound(JdbcDialect dialect, long... values) {
+        if (dialect != JdbcDialect.GENERIC) {
+            return "";
+        }
+        return " -- parameters: " + String.join(", ", Arrays.stream(values).mapToObj(Long::toString).toList());
     }
 
     @Test

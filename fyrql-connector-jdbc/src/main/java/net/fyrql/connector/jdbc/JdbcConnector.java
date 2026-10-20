@@ -25,18 +25,22 @@ import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.sql.render.BoundSql;
 import net.fyrql.sql.render.Dialect;
+import net.fyrql.sql.render.GenericDialect;
 import net.fyrql.sql.render.SqlRenderer;
 
 import javax.sql.DataSource;
 import java.math.BigInteger;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,11 +48,16 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Properties;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
- * The tables of a database over JDBC: H2, SQLite, PostgreSQL or MySQL.
+ * The tables of a database over JDBC: H2, SQLite, PostgreSQL or MySQL with
+ * a dialect of their own, any other database with the
+ * {@linkplain JdbcDialect#GENERIC generic dialect}, which takes over only
+ * filters on integers and dates, sends conditions on strings as hints and
+ * binds its literals as parameters, see {@link GenericDialect}.
  * <p>
  * A scan becomes one statement in the dialect of the database, which
  * selects the columns the query needs and takes over what the database
@@ -98,6 +107,7 @@ public final class JdbcConnector implements Connector {
     private final String name;
     private final Connections connections;
     private final JdbcDialect dialect;
+    private final Dialect sql;
     private final JdbcCatalog catalog;
     private final int fetchSize;
     private final int batchSize;
@@ -110,18 +120,19 @@ public final class JdbcConnector implements Connector {
      * The state of a scan plan: its statement, and the scan it renders,
      * from which the statements of its splits are rendered.
      */
-    private record ScanState(String sql, PlanNode.Scan scan) {
+    private record ScanState(BoundSql sql, PlanNode.Scan scan) {
         @Override
         public String toString() {
-            return sql;
+            return sql.toString();
         }
     }
 
-    private JdbcConnector(Builder b, Connections connections, JdbcDialect dialect) {
+    private JdbcConnector(Builder b, Connections connections, JdbcDialect dialect, Dialect sql) {
         this.name = b.name;
         this.connections = connections;
         this.dialect = dialect;
-        this.catalog = new JdbcCatalog(b.name, connections, dialect, b.schemas, b.defaultSchema);
+        this.sql = sql;
+        this.catalog = new JdbcCatalog(b.name, connections, dialect, sql, b.schemas, b.defaultSchema);
         this.fetchSize = b.fetchSize;
         this.batchSize = b.batchSize;
         this.listener = b.listener;
@@ -143,6 +154,15 @@ public final class JdbcConnector implements Connector {
     /** Returns the dialect of the database. */
     public JdbcDialect dialect() {
         return dialect;
+    }
+
+    /**
+     * Returns the dialect of the SQL the connector sends: the one of its
+     * {@linkplain #dialect() database}, or for the generic dialect one with
+     * the settings of the connector.
+     */
+    public Dialect sql() {
+        return sql;
     }
 
     /**
@@ -188,7 +208,9 @@ public final class JdbcConnector implements Connector {
      * the time zone of its session; the order if the dialect orders every
      * key so, and a limit; or the aggregation if the dialect groups and
      * aggregates as FyrQL does, none of its columns holds instants, and
-     * every filter is taken over. The state of the plan holds the
+     * every filter is taken over. Of a filter not taken over, the statement
+     * carries the {@linkplain Dialect#hint hint} of the dialect, unless it
+     * reads a column of instants. The state of the plan holds the
      * statement.
      */
     @Override
@@ -199,23 +221,29 @@ public final class JdbcConnector implements Connector {
         Schema output = request.output(tableSchema);
         List<Integer> columns = request.wholeColumns();
         BitSet zoned = zoned(table, columns);
-        Predicate<Expression> filter = e -> dialect.sql().supports(e) && !Expressions.columns(e).intersects(zoned);
-        Capabilities capabilities = new Capabilities(filter, true, keys -> dialect.sql().supportsOrder(keys, output),
-                aggregation -> dialect.sql().supportsAggregation(aggregation, output)
+        Predicate<Expression> filter = e -> sql.supports(e) && !Expressions.columns(e).intersects(zoned);
+        Capabilities capabilities = new Capabilities(filter, true, keys -> sql.supportsOrder(keys, output),
+                aggregation -> sql.supportsAggregation(aggregation, output)
                         && !reads(aggregation, zoned));
         ScanPlan plan = capabilities.plan(table, tableSchema, request, null);
+        List<Expression> hints = new ArrayList<>();
+        for (Expression f : request.filters()) {
+            if (!filter.test(f) && !Expressions.columns(f).intersects(zoned)) {
+                sql.hint(f).ifPresent(hints::add);
+            }
+        }
         PlanNode.Pushed pushed = new PlanNode.Pushed(plan.acceptedFilters(),
                 plan.limitAccepted() ? request.limit() : OptionalLong.empty(),
                 plan.orderAccepted() ? request.order() : List.of(),
-                plan.aggregationAccepted() ? request.aggregation() : Optional.empty());
+                plan.aggregationAccepted() ? request.aggregation() : Optional.empty(), hints);
         PlanNode.Scan scan = new PlanNode.Scan(table, tableSchema, columns, pushed);
-        String sql = renderer().renderScan(scan);
+        BoundSql statement = renderer().renderScanBound(scan, null);
         return new ScanPlan(plan.table(), plan.output(), plan.columns(), plan.acceptedFilters(), plan.limitAccepted(),
-                plan.orderAccepted(), plan.aggregationAccepted(), new ScanState(sql, scan));
+                plan.orderAccepted(), plan.aggregationAccepted(), new ScanState(statement, scan));
     }
 
     private SqlRenderer renderer() {
-        return new SqlRenderer(dialect.sql(), catalog::qualifiedName);
+        return new SqlRenderer(sql, catalog::qualifiedName);
     }
 
     /** Which of the columns of a table, in the order given, hold instants. */
@@ -279,7 +307,7 @@ public final class JdbcConnector implements Connector {
         SqlRenderer renderer = renderer();
         List<Split> splits = new ArrayList<>(ranges.size());
         for (Expression range : ranges) {
-            splits.add(new Split(plan, splits.size(), renderer.renderScan(state.scan(), range)));
+            splits.add(new Split(plan, splits.size(), renderer.renderScanBound(state.scan(), range)));
         }
         return splits;
     }
@@ -325,7 +353,7 @@ public final class JdbcConnector implements Connector {
             ranges.add(new Expression.IsNull(key, false));
         }
         for (Expression range : ranges) {
-            if (!dialect.sql().supports(range)) {
+            if (!sql.supports(range)) {
                 return List.of();
             }
         }
@@ -386,12 +414,12 @@ public final class JdbcConnector implements Connector {
 
     /** The least and the greatest value of a column, as {@code long}, or {@code null} if it has none. */
     private long[] bounds(TableRef table, String column, DataType type) {
-        String c = "t." + dialect.sql().quoteIdentifier(column);
-        String sql = "SELECT min(" + c + "), max(" + c + ") FROM " + catalog.qualifiedName(table) + " t";
-        record(sql);
+        String c = "t." + sql.quoteIdentifier(column);
+        String statement = "SELECT min(" + c + "), max(" + c + ") FROM " + catalog.qualifiedName(table) + " t";
+        record(statement);
         try {
             Connection connection = connections.open();
-            try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery(sql)) {
+            try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery(statement)) {
                 ResultSetMetaData md = rs.getMetaData();
                 ColumnReaders.ColumnReader min = ColumnReaders.of(dialect, type, md.getColumnType(1),
                         md.getColumnTypeName(1));
@@ -416,8 +444,8 @@ public final class JdbcConnector implements Connector {
     /** Reads a split: its own statement, or else the one of its plan. */
     @Override
     public BatchReader open(Split split) {
-        String sql = split.state() instanceof String own ? own : ((ScanState) split.plan().state()).sql();
-        return read(sql, split.plan().output());
+        BoundSql statement = split.state() instanceof BoundSql own ? own : ((ScanState) split.plan().state()).sql();
+        return read(statement, split.plan().output());
     }
 
     /**
@@ -431,25 +459,26 @@ public final class JdbcConnector implements Connector {
      * join stays with the engine, which would otherwise receive the whole
      * product. The statement nests a {@code SELECT} per node, see
      * {@link SqlRenderer#render}; it is the state and the description of
-     * the plan.
+     * the plan. A dialect that binds its literals, such as the generic one,
+     * runs no such part.
      */
     @Override
     public Optional<RemotePlan> planRemote(PlanNode plan) {
-        if (zoned(plan, true, true) == null) {
+        if (sql.bindsLiterals() || zoned(plan, true, true) == null) {
             return Optional.empty();
         }
-        String sql;
+        String statement;
         try {
-            sql = renderer().render(plan);
+            statement = renderer().render(plan);
         } catch (IllegalArgumentException e) {
             return Optional.empty();
         }
-        return Optional.of(new RemotePlan(plan.schema(), sql, sql));
+        return Optional.of(new RemotePlan(plan.schema(), statement, statement));
     }
 
     @Override
     public BatchReader openRemote(RemotePlan plan) {
-        return read((String) plan.state(), plan.output());
+        return read(BoundSql.of((String) plan.state()), plan.output());
     }
 
     /**
@@ -460,7 +489,6 @@ public final class JdbcConnector implements Connector {
      * @param ordered whether the order of the node is the order of the part, where a sort may be
      */
     private BitSet zoned(PlanNode node, boolean top, boolean ordered) {
-        Dialect sql = dialect.sql();
         return switch (node) {
             case PlanNode.Scan s -> s.pushed().isEmpty() && !s.readsFields() && s.table().source().equals(name)
                     ? zoned(s.table(), s.columns()) : null;
@@ -531,9 +559,9 @@ public final class JdbcConnector implements Connector {
     }
 
     /** Sends a statement and reads its result. */
-    private BatchReader read(String sql, Schema output) {
-        record(sql);
-        return JdbcReader.open(name, sql, connections, dialect, output, fetchSize, batchSize);
+    private BatchReader read(BoundSql statement, Schema output) {
+        record(statement.toString());
+        return JdbcReader.open(name, statement, connections, dialect, output, fetchSize, batchSize);
     }
 
     /** Tells the listener about a statement about to be sent, and records it. */
@@ -570,6 +598,10 @@ public final class JdbcConnector implements Connector {
         private Consumer<String> listener;
         private long splitRows;
         private final Map<String, String> splitColumns = new HashMap<>();
+        private Boolean pushdownFilters;
+        private String quote;
+        private GenericDialect.LimitStyle limitStyle;
+        private Set<GenericDialect.Trust> trusted;
 
         private Builder(String name) {
             this.name = Objects.requireNonNull(name, "name");
@@ -624,7 +656,12 @@ public final class JdbcConnector implements Connector {
             return this;
         }
 
-        /** Sets the dialect; by default it comes from the URL, or else from the product name of the database. */
+        /**
+         * Sets the dialect; by default it comes from the URL, or else from
+         * the product name of the database, and is
+         * {@link JdbcDialect#GENERIC} for a database without a dialect of
+         * its own.
+         */
         public Builder dialect(JdbcDialect dialect) {
             this.dialect = Objects.requireNonNull(dialect, "dialect");
             return this;
@@ -715,11 +752,49 @@ public final class JdbcConnector implements Connector {
         }
 
         /**
+         * Lets the database of the generic dialect evaluate filters, the
+         * default, or none at all; FyrQL then filters every row itself.
+         */
+        public Builder pushdownFilters(boolean filters) {
+            this.pushdownFilters = filters;
+            return this;
+        }
+
+        /**
+         * Sets the quote of identifiers for the generic dialect: {@code "},
+         * {@code `}, {@code [} for {@code [name]}, or empty for none; by
+         * default the one the driver tells.
+         */
+        public Builder quote(String quote) {
+            this.quote = Objects.requireNonNull(quote, "quote");
+            return this;
+        }
+
+        /**
+         * Sets how the generic dialect keeps the first rows; by default
+         * with {@code Statement.setMaxRows}.
+         */
+        public Builder limitStyle(GenericDialect.LimitStyle style) {
+            this.limitStyle = Objects.requireNonNull(style, "style");
+            return this;
+        }
+
+        /**
+         * Sets the types the database of the generic dialect is trusted to
+         * compare as FyrQL does, besides integers and dates; none by
+         * default.
+         */
+        public Builder trust(Set<GenericDialect.Trust> types) {
+            this.trusted = types.isEmpty() ? Set.of() : EnumSet.copyOf(types);
+            return this;
+        }
+
+        /**
          * Builds the connector.
          *
          * @throws IllegalArgumentException if not exactly one of URL, data
-         *         source and connection is set, or the dialect is not set
-         *         and cannot be told
+         *         source and connection is set, or an option of the generic
+         *         dialect is set for another one
          */
         public JdbcConnector build() {
             int ways = (url != null ? 1 : 0) + (dataSource != null ? 1 : 0) + (connection != null ? 1 : 0);
@@ -739,18 +814,46 @@ public final class JdbcConnector implements Connector {
             }
             Connections connections = url != null ? Connections.url(url, props)
                     : dataSource != null ? Connections.dataSource(dataSource) : Connections.shared(connection);
-            if (d == null) {
-                d = productDialect(connections);
+            String told = null;
+            if (d == null || d == JdbcDialect.GENERIC && quote == null) {
+                String[] product = product(connections);
+                if (d == null) {
+                    d = JdbcDialect.ofProductName(product[0]).orElse(JdbcDialect.GENERIC);
+                }
+                told = product[1];
             }
-            return new JdbcConnector(this, connections, d);
+            boolean generic = pushdownFilters != null || quote != null || limitStyle != null || trusted != null;
+            if (d != JdbcDialect.GENERIC) {
+                if (generic) {
+                    throw new IllegalArgumentException("The JDBC source " + name + " has the dialect "
+                            + d.sql().name() + "; pushdown, quote, limit and trust are options of the generic "
+                            + "dialect only");
+                }
+                return new JdbcConnector(this, connections, d, d.sql());
+            }
+            GenericDialect.Settings settings = new GenericDialect.Settings(quote != null ? quote : quoteOf(told),
+                    limitStyle != null ? limitStyle : GenericDialect.LimitStyle.MAX_ROWS,
+                    trusted != null ? trusted : Set.of(), pushdownFilters == null || pushdownFilters);
+            return new JdbcConnector(this, connections, d, GenericDialect.of(settings));
         }
 
-        private JdbcDialect productDialect(Connections connections) {
-            String product;
+        /** The quote of identifiers as the driver tells it, a blank for none. */
+        private String quoteOf(String told) {
+            String q = told == null ? "\"" : told.strip();
+            if (!q.isEmpty() && !q.equals("\"") && !q.equals("`") && !q.equals("[")) {
+                throw new IllegalArgumentException("The JDBC source " + name + " quotes identifiers with " + q
+                        + ", which the generic dialect does not write; set the quote");
+            }
+            return q;
+        }
+
+        /** The product name of the database and its quote of identifiers, as the metadata tells them. */
+        private String[] product(Connections connections) {
             try {
                 Connection c = connections.open();
                 try {
-                    product = c.getMetaData().getDatabaseProductName();
+                    DatabaseMetaData md = c.getMetaData();
+                    return new String[] {md.getDatabaseProductName(), md.getIdentifierQuoteString()};
                 } finally {
                     connections.release(c);
                 }
@@ -758,9 +861,6 @@ public final class JdbcConnector implements Connector {
                 throw new JdbcSourceException("The JDBC source " + name + " cannot connect to "
                         + connections.describe() + " to tell its dialect: " + e.getMessage(), e);
             }
-            return JdbcDialect.ofProductName(product).orElseThrow(() -> new IllegalArgumentException(
-                    "The JDBC source " + name + " connects to " + product + ", which has no dialect; known are "
-                            + "H2, SQLite, PostgreSQL and MySQL"));
         }
     }
 }

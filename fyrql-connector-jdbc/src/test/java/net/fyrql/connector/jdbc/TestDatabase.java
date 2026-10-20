@@ -30,7 +30,11 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** A database to test against: an H2 database in memory, or an SQLite file in a temporary directory. */
+/**
+ * A database to test against: an H2 database in memory, or an SQLite file
+ * in a temporary directory; for the generic dialect an H2 database, which
+ * is filled through the dialect of H2 and read through the generic one.
+ */
 record TestDatabase(JdbcDialect dialect, String url) {
 
     private static final AtomicInteger COUNT = new AtomicInteger();
@@ -38,7 +42,8 @@ record TestDatabase(JdbcDialect dialect, String url) {
     /** A new, empty database of a dialect that runs in this process. */
     static TestDatabase create(JdbcDialect dialect) {
         return switch (dialect) {
-            case H2 -> new TestDatabase(dialect, "jdbc:h2:mem:fyrql" + COUNT.incrementAndGet() + ";DB_CLOSE_DELAY=-1");
+            case H2, GENERIC -> new TestDatabase(dialect, "jdbc:h2:mem:fyrql" + COUNT.incrementAndGet()
+                    + ";DB_CLOSE_DELAY=-1");
             case SQLITE -> {
                 try {
                     Path dir = Files.createTempDirectory("fyrql-sqlite");
@@ -54,9 +59,25 @@ record TestDatabase(JdbcDialect dialect, String url) {
         };
     }
 
+    /** A new, empty H2 database in a mode of compatibility, read through the generic dialect. */
+    static TestDatabase h2Mode(String mode) {
+        return new TestDatabase(JdbcDialect.GENERIC, "jdbc:h2:mem:fyrql" + COUNT.incrementAndGet()
+                + ";DB_CLOSE_DELAY=-1;MODE=" + mode);
+    }
+
+    /** The dialect that fills the database. */
+    JdbcDialect loader() {
+        return dialect == JdbcDialect.GENERIC ? JdbcDialect.H2 : dialect;
+    }
+
     /** A connector over the database that records its statements. */
     JdbcConnector connector(String name) {
-        return JdbcConnector.builder(name).url(url).recordStatements(true).build();
+        return builder(name).build();
+    }
+
+    /** The builder of a connector over the database, with its dialect, that records its statements. */
+    JdbcConnector.Builder builder(String name) {
+        return JdbcConnector.builder(name).url(url).dialect(dialect).recordStatements(true);
     }
 
     Connection connect() throws SQLException {
@@ -76,10 +97,10 @@ record TestDatabase(JdbcDialect dialect, String url) {
 
     /** Creates a table under a name, quoted as given, and fills it with rows of Java values. */
     void load(String table, Schema schema, List<Object[]> rows) {
-        SqlRenderer renderer = new SqlRenderer(dialect.sql(), t -> {
+        SqlRenderer renderer = new SqlRenderer(loader().sql(), t -> {
             throw new UnsupportedOperationException();
         });
-        String name = dialect.sql().quoteIdentifier(table);
+        String name = loader().sql().quoteIdentifier(table);
         List<String> statements = new ArrayList<>();
         statements.add(renderer.createTable(name, schema));
         for (int from = 0; from < rows.size(); from += 500) {

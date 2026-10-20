@@ -15,10 +15,12 @@ import net.fyrql.connector.Catalog;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.sql.render.Dialect;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -44,12 +46,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * the default. The number of rows of a table is counted with
  * {@code count(*)} when first asked for and kept as well, and so is its
  * primary key.
+ * <p>
+ * For the {@linkplain JdbcDialect#GENERIC generic dialect} the catalog
+ * asks the metadata with care: the catalogs of JDBC are the schemas if the
+ * database has no schemas, the default schema is that of the connection if
+ * the driver tells it, a primary key the driver cannot read is none, and
+ * the columns of a table the metadata does not list come from an empty
+ * result of {@code SELECT *}.
  */
 final class JdbcCatalog implements Catalog {
 
     private final String source;
     private final Connections connections;
     private final JdbcDialect dialect;
+    private final Dialect sql;
     private final List<String> configuredSchemas;
     private final String configuredDefault;
 
@@ -59,8 +69,11 @@ final class JdbcCatalog implements Catalog {
     private final Map<List<String>, Long> rowCounts = new ConcurrentHashMap<>();
     private final Map<List<String>, Optional<String>> primaryKeys = new ConcurrentHashMap<>();
 
-    /** The schemas as listed, and the name in the database of the one listed as {@code main}. */
-    private record Schemas(List<String> listed, String defaultSchema) {
+    /**
+     * The schemas as listed, the name in the database of the one listed as
+     * {@code main}, and whether they are the catalogs of JDBC.
+     */
+    private record Schemas(List<String> listed, String defaultSchema, boolean catalogs) {
     }
 
     /** The columns of a table, and which of them hold instants, see {@link JdbcTypes#withTimeZone}. */
@@ -68,14 +81,16 @@ final class JdbcCatalog implements Catalog {
     }
 
     /**
+     * @param sql the dialect of the SQL the connector sends, which quotes the names
      * @param schemas the schemas to list besides the default, or {@code null} for all
      * @param defaultSchema the schema listed as {@code main}, or {@code null} for the one of the connection
      */
-    JdbcCatalog(String source, Connections connections, JdbcDialect dialect, List<String> schemas,
+    JdbcCatalog(String source, Connections connections, JdbcDialect dialect, Dialect sql, List<String> schemas,
             String defaultSchema) {
         this.source = source;
         this.connections = connections;
         this.dialect = dialect;
+        this.sql = sql;
         this.configuredSchemas = schemas == null ? null : List.copyOf(schemas);
         this.configuredDefault = defaultSchema;
     }
@@ -130,11 +145,17 @@ final class JdbcCatalog implements Catalog {
         DatabaseMetaData md = c.getMetaData();
         List<String> names = new ArrayList<>();
         try (ResultSet rs = dialect == JdbcDialect.SQLITE ? md.getPrimaryKeys(null, null, table)
-                : dialect.catalogsAsSchemas() ? md.getPrimaryKeys(schema, null, table)
+                : catalogs() ? md.getPrimaryKeys(schema, null, table)
                 : md.getPrimaryKeys(null, schema, table)) {
             while (rs.next()) {
                 names.add(rs.getString("COLUMN_NAME"));
             }
+        } catch (SQLException | UnsupportedOperationException e) {
+            if (dialect != JdbcDialect.GENERIC) {
+                throw e;
+            }
+            // A driver that cannot tell the key: the table is read in one part.
+            return Optional.empty();
         }
         return names.size() == 1 ? Optional.of(names.get(0)) : Optional.empty();
     }
@@ -180,7 +201,16 @@ final class JdbcCatalog implements Catalog {
         if (real == null) {
             throw new IllegalArgumentException("No schema " + table.schema() + " in the JDBC source " + source);
         }
-        return dialect.sql().quoteIdentifier(real) + "." + dialect.sql().quoteIdentifier(table.table());
+        return qualifiedName(real, table.table());
+    }
+
+    private String qualifiedName(String schema, String table) {
+        return sql.quoteIdentifier(schema) + "." + sql.quoteIdentifier(table);
+    }
+
+    /** Tells whether the schemas are the catalogs of JDBC, as in MySQL. */
+    private boolean catalogs() {
+        return schemaList().catalogs();
     }
 
     private Schemas schemaList() {
@@ -193,11 +223,25 @@ final class JdbcCatalog implements Catalog {
     }
 
     private Schemas readSchemas(Connection c) throws SQLException {
+        boolean catalogs = dialect.catalogsAsSchemas();
+        List<String> found = null;
+        if (dialect == JdbcDialect.GENERIC) {
+            // A database without schemas, such as one of MySQL's kind, has catalogs instead.
+            found = names(c.getMetaData().getSchemas(), "TABLE_SCHEM");
+            if (found.isEmpty()) {
+                List<String> catalogNames = names(c.getMetaData().getCatalogs(), "TABLE_CAT");
+                if (!catalogNames.isEmpty()) {
+                    catalogs = true;
+                    found = catalogNames;
+                }
+            }
+        }
         String defaultSchema = configuredDefault;
         if (defaultSchema == null) {
             defaultSchema = switch (dialect) {
                 case SQLITE -> TableRef.MAIN;
                 case MYSQL -> c.getCatalog();
+                case GENERIC -> catalogs ? c.getCatalog() : schemaOf(c);
                 default -> c.getSchema();
             };
         }
@@ -206,17 +250,11 @@ final class JdbcCatalog implements Catalog {
             all = configuredSchemas;
         } else if (dialect == JdbcDialect.SQLITE) {
             all = List.of(TableRef.MAIN);
+        } else if (found != null) {
+            all = found;
         } else {
-            all = new ArrayList<>();
             DatabaseMetaData md = c.getMetaData();
-            try (ResultSet rs = dialect.catalogsAsSchemas() ? md.getCatalogs() : md.getSchemas()) {
-                while (rs.next()) {
-                    String name = rs.getString(dialect.catalogsAsSchemas() ? "TABLE_CAT" : "TABLE_SCHEM");
-                    if (name != null && !dialect.isSystemSchema(name)) {
-                        all.add(name);
-                    }
-                }
-            }
+            all = catalogs ? names(md.getCatalogs(), "TABLE_CAT") : names(md.getSchemas(), "TABLE_SCHEM");
         }
         List<String> listed = new ArrayList<>();
         if (defaultSchema != null) {
@@ -227,7 +265,30 @@ final class JdbcCatalog implements Catalog {
                 listed.add(name);
             }
         }
-        return new Schemas(List.copyOf(listed), defaultSchema);
+        return new Schemas(List.copyOf(listed), defaultSchema, catalogs);
+    }
+
+    /** The names in a column of a result of the metadata, without those of the database itself. */
+    private List<String> names(ResultSet result, String column) throws SQLException {
+        List<String> names = new ArrayList<>();
+        try (ResultSet rs = result) {
+            while (rs.next()) {
+                String name = rs.getString(column);
+                if (name != null && !dialect.isSystemSchema(name)) {
+                    names.add(name);
+                }
+            }
+        }
+        return names;
+    }
+
+    /** The schema of a connection, or {@code null} if the driver cannot tell it. */
+    private static String schemaOf(Connection c) {
+        try {
+            return c.getSchema();
+        } catch (SQLException | UnsupportedOperationException | AbstractMethodError e) {
+            return null;
+        }
     }
 
     private List<String> readTables(String schema) {
@@ -244,7 +305,7 @@ final class JdbcCatalog implements Catalog {
                 return List.copyOf(names);
             }
             DatabaseMetaData md = c.getMetaData();
-            try (ResultSet rs = dialect.catalogsAsSchemas() ? md.getTables(schema, null, "%", null)
+            try (ResultSet rs = catalogs() ? md.getTables(schema, null, "%", null)
                     : md.getTables(null, pattern(md, schema), "%", null)) {
                 while (rs.next()) {
                     String type = String.valueOf(rs.getString("TABLE_TYPE")).toUpperCase(Locale.ROOT);
@@ -263,7 +324,7 @@ final class JdbcCatalog implements Catalog {
             List<Schema.Field> fields = new ArrayList<>();
             if (dialect == JdbcDialect.SQLITE) {
                 try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery("SELECT name, type, \"notnull\" "
-                        + "FROM pragma_table_info(" + dialect.sql().literal(table, DataType.VARCHAR) + ") ORDER BY cid")) {
+                        + "FROM pragma_table_info(" + sql.literal(table, DataType.VARCHAR) + ") ORDER BY cid")) {
                     while (rs.next()) {
                         fields.add(new Schema.Field(rs.getString(1), JdbcTypes.sqlite(rs.getString(2)),
                                 rs.getInt(3) == 0));
@@ -274,7 +335,7 @@ final class JdbcCatalog implements Catalog {
             DatabaseMetaData md = c.getMetaData();
             TreeMap<Integer, Schema.Field> byPosition = new TreeMap<>();
             TreeMap<Integer, Boolean> zoned = new TreeMap<>();
-            try (ResultSet rs = dialect.catalogsAsSchemas()
+            try (ResultSet rs = catalogs()
                     ? md.getColumns(schema, null, pattern(md, table), "%")
                     : md.getColumns(null, pattern(md, schema), pattern(md, table), "%")) {
                 while (rs.next()) {
@@ -287,6 +348,22 @@ final class JdbcCatalog implements Catalog {
                     int position = rs.getInt("ORDINAL_POSITION");
                     byPosition.put(position, new Schema.Field(rs.getString("COLUMN_NAME"), type, nullable));
                     zoned.put(position, JdbcTypes.withTimeZone(dialect, jdbcType, typeName));
+                }
+            }
+            if (byPosition.isEmpty() && dialect == JdbcDialect.GENERIC) {
+                // The metadata does not list the columns: an empty result of the table describes them.
+                try (Statement s = c.createStatement();
+                        ResultSet rs = s.executeQuery("SELECT * FROM " + qualifiedName(schema, table) + " WHERE 1 = 0")) {
+                    ResultSetMetaData rmd = rs.getMetaData();
+                    for (int i = 1; i <= rmd.getColumnCount(); i++) {
+                        int jdbcType = rmd.getColumnType(i);
+                        String typeName = rmd.getColumnTypeName(i);
+                        DataType type = JdbcTypes.type(dialect, jdbcType, typeName, rmd.getPrecision(i),
+                                rmd.getScale(i));
+                        boolean nullable = rmd.isNullable(i) != ResultSetMetaData.columnNoNulls;
+                        byPosition.put(i, new Schema.Field(rmd.getColumnLabel(i), type, nullable));
+                        zoned.put(i, JdbcTypes.withTimeZone(dialect, jdbcType, typeName));
+                    }
                 }
             }
             BitSet withTimeZone = new BitSet();

@@ -6,8 +6,9 @@ application, joined in one query, in the SQL dialect of [DuckDB](https://duckdb.
 is a library in pure Java: no server to run, no native code, and nothing to copy into a
 warehouse first.
 
-- **Heterogeneous sources, one query.** PostgreSQL, MySQL, SQLite and H2 over JDBC; CSV,
-  JSON and Parquet files; JSON from HTTP endpoints; OData services of versions 2 and 4;
+- **Heterogeneous sources, one query.** PostgreSQL, MySQL, SQLite and H2 over JDBC, and
+  any other database with a JDBC driver through a generic dialect; CSV, JSON and Parquet
+  files; JSON from HTTP endpoints; OData services of versions 2 and 4;
   and Java collections of records or beans. The columns of files and endpoints are
   inferred from the data as DuckDB infers them, nested `STRUCT`, `LIST` and `MAP` values
   included, so that no schema has to be declared.
@@ -189,7 +190,8 @@ tables in the schema `main` unless it says otherwise.
   the `sap-client` of SAP Gateway, and gives columns other types or leaves them out.
   `$expand` and navigation properties, `$apply`, functions and actions, entity sets with
   parameters, Atom, writing and client certificates are not supported.
-- `fyrql-connector-jdbc`: the tables of PostgreSQL, SQLite, H2 and MySQL. The default
+- `fyrql-connector-jdbc`: the tables of PostgreSQL, SQLite, H2 and MySQL, and of any other
+  database with a JDBC driver through the generic dialect, see below. The default
   schema of the database is `main`, the others keep their names. A scan becomes one
   statement in the dialect of the database, which selects the columns the query needs
   and takes over the filters, the order and the limit, or the grouping and the
@@ -276,6 +278,50 @@ A sum is cast to `NUMERIC(39)`, in MySQL `DECIMAL(39,0)`, and read as `HUGEINT`,
 FyrQL gives it, so that the database neither overflows nor answers in a type of its own;
 SQLite has no such type and leaves sums to the engine. The connector of an application
 may take over the same in its own way through `Capabilities` in `fyrql-connector-spi`.
+
+Any other database, such as Oracle, SQL Server, Db2, Derby or HSQLDB, is read through the
+generic dialect, which the connector chooses when the product name of the database is
+none of the four above, or with `dialect(JdbcDialect.GENERIC)`. Databases differ in
+quoting, in how they keep the first rows, in how they compare strings (with or without
+regard to case and to spaces at their end; Oracle even takes `''` for `NULL`), in
+arithmetic and in the place of `NULL`s in an order, so the generic dialect takes over
+only what every one of them evaluates as FyrQL does, and binds every literal as a
+parameter `?` of a prepared statement:
+
+| The generic dialect takes over | |
+| --- | --- |
+| comparisons, `BETWEEN`, `IN`, `IS [NOT] NULL` of a column of integers or `DATE` | yes |
+| the same on `DECIMAL`, `FLOAT` and `DOUBLE`, `TIMESTAMP` or `BOOLEAN` | with `trust` |
+| `AND`, `OR`, `NOT` over the above | yes |
+| `=` and `IN` against strings that are not empty, `LIKE` without `\` and `[`, `IS NULL` | as a hint |
+| `<>`, `<`, `>` on strings, `IS DISTINCT FROM`, arithmetic, casts, functions | no |
+| `LIMIT` without `ORDER BY`, with `Statement.setMaxRows` or a clause | yes |
+| `ORDER BY`, `GROUP BY`, aggregates, joins | no |
+
+A hint holds wherever the filter holds: the database returns at least the rows that
+satisfy the filter, and the engine filters them once more, so a scan with a hint keeps
+no limit in the database. The connector reads dates and timestamps with the getters of
+JDBC 4.0 and a calendar in UTC, so that a time in a gap of daylight saving time and a
+date before 1582 keep their values; a timestamp with a time zone, such as Oracle's
+`TIMESTAMP WITH LOCAL TIME ZONE` or SQL Server's `DATETIMEOFFSET`, is its instant in UTC
+and filtered by the engine. The quote of identifiers comes from the driver; the schemas
+are those of the metadata, or its catalogs if it has no schemas, without the schemas of
+the database itself (`INFORMATION_SCHEMA` and those starting with `SYS`), and
+`schemas` and `defaultSchema` set them where the metadata does not tell. The builder and
+the configuration set the rest:
+
+- `pushdownFilters(false)`, `pushdown: none`: the database evaluates no filter at all;
+- `quote(...)`, `quote`: `"`, `` ` ``, `[` for `[name]`, or `none`;
+- `limitStyle(...)`, `limit`: `maxRows` (the default), `fetchFirst` for
+  `FETCH FIRST n ROWS ONLY`, `limit` for `LIMIT n`, or `top` for `SELECT TOP n`;
+- `trust(...)`, `trust`: `decimal`, `double`, `timestamp` and `boolean`, a promise that
+  the database compares these types as FyrQL does, which a query with `pushdown(false)`
+  checks.
+
+A number without a precision, such as Oracle's `NUMBER`, is read as `DOUBLE`; an integer
+key of Oracle, a `NUMBER(10)`, is a `DECIMAL`, which the database neither filters nor
+splits by without `trust: decimal`. A part of a plan with joins is not sent to such a
+database.
 
 An OData service gets the filters of a scan as a `$filter` that holds wherever they hold,
 and the engine evaluates them once more, since a service may compare strings without
@@ -491,7 +537,9 @@ that lists the tables, such as DBeaver through the JDBC driver, then sends for e
 entity set.
 
 A source of the type `jdbc` takes `url`, `user`, `password`, `dialect` (`h2`, `sqlite`,
-`postgresql` or `mysql`, by default from the URL), `schemas` (a comma-separated list),
+`postgresql`, `mysql` or `generic`, by default from the URL or else the database, and
+`generic` for any other), for the generic dialect `pushdown`, `quote`, `limit` and
+`trust` (see [Connectors](#connectors)), `schemas` (a comma-separated list),
 `defaultSchema`, `fetchSize`, `batchSize`, `recordStatements`, `splitRows` and
 `splitColumn.<table>` (see [Parallel execution](#parallel-execution)), and
 `properties.<key>` for any property of the driver.
@@ -1379,7 +1427,7 @@ Known differences from DuckDB:
 | `fyrql-connector-parquet` | Parquet files as tables, read with parquet-java without Hadoop, which it carries renamed |
 | `fyrql-connector-http` | JSON from HTTP endpoints as tables |
 | `fyrql-connector-odata` | the entity sets of OData services of versions 2 and 4 as tables, with filters, orders, limits and `count(*)` pushed to the service |
-| `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC |
+| `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC, and of any other database through a generic dialect |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application; read only |
@@ -1420,8 +1468,9 @@ must give the results of all threads over tables in splits of 16 rows, with the
 exceptions of [Parallel execution](#parallel-execution); the other tests of `fyrql-test`
 run a second time with `-Dfyrql.codegen=always`.
 
-The JDBC connector is tested against H2, SQLite and PostgreSQL in every build; PostgreSQL
-comes as binaries that the build unpacks and starts in a temporary directory, without
+The JDBC connector is tested against H2, SQLite and PostgreSQL in every build, and through
+the generic dialect against H2 in its modes of compatibility with Oracle, SQL Server and
+MySQL, Derby and HSQLDB, all in memory; PostgreSQL comes as binaries that the build unpacks and starts in a temporary directory, without
 Docker (`-Dfyrql.test.postgres=off` leaves it out). MySQL runs in Docker through
 Testcontainers, in the profile `containers`; without Docker its tests are skipped:
 

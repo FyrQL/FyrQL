@@ -1,1 +1,2 @@
 net.fyrql.connector.jdbc.UnregisteredDriver
+net.fyrql.connector.jdbc.FakeProductDriver

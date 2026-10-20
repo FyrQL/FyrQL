@@ -12,6 +12,7 @@
 package net.fyrql.sql.render;
 
 import net.fyrql.core.expr.Expression;
+import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.function.StructPack;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
@@ -20,6 +21,7 @@ import net.fyrql.core.type.Schema;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 
@@ -41,6 +43,8 @@ public final class SqlRenderer {
     private final Dialect dialect;
     private final Function<TableRef, String> tableNames;
     private int aliases;
+    /** The parameters of the statement {@link #renderScanBound} renders, else {@code null}: literals are written. */
+    private List<BoundSql.Parameter> parameters;
 
     /**
      * @param dialect the dialect
@@ -52,8 +56,16 @@ public final class SqlRenderer {
         this.tableNames = tableNames;
     }
 
-    /** Renders a plan as one SQL statement. */
+    /**
+     * Renders a plan as one SQL statement.
+     *
+     * @throws IllegalArgumentException if the dialect binds its literals,
+     *         which only a flat scan does
+     */
     public String render(PlanNode plan) {
+        if (dialect.bindsLiterals()) {
+            throw new IllegalArgumentException(dialect.name() + " binds its literals and renders only a flat scan");
+        }
         aliases = 0;
         return select(plan);
     }
@@ -214,7 +226,7 @@ public final class SqlRenderer {
      * @throws IllegalArgumentException if the scan carries an aggregation
      *         together with an order or a limit, or an aggregation without
      *         groups and calls, or reads a field inside a column, or the
-     *         dialect cannot write a part of it
+     *         dialect cannot write a part of it, or binds its literals
      */
     public String renderScan(PlanNode.Scan s) {
         return renderScan(s, null);
@@ -231,13 +243,57 @@ public final class SqlRenderer {
      * @throws IllegalArgumentException as {@link #renderScan(PlanNode.Scan)} does
      */
     public String renderScan(PlanNode.Scan s, Expression restriction) {
+        if (dialect.bindsLiterals()) {
+            throw new IllegalArgumentException(dialect.name() + " binds its literals; the scan is rendered with "
+                    + "renderScanBound");
+        }
+        return flat(s, restriction).sql();
+    }
+
+    /**
+     * Renders a scan as {@link #renderScan(PlanNode.Scan, Expression)} does,
+     * as a statement with what it needs besides its text. Where the dialect
+     * {@linkplain Dialect#bindsLiterals binds its literals}, every literal
+     * other than {@code NULL} is a parameter {@code ?}; where it keeps the
+     * first rows {@linkplain Dialect.LimitForm#MAX_ROWS without a clause},
+     * the statement carries the limit. The hints of the scan join its
+     * filters in the {@code WHERE} clause, before the restriction.
+     *
+     * @param restriction the further condition over the columns of the
+     *        table, or {@code null} for none
+     * @throws IllegalArgumentException as {@link #renderScan(PlanNode.Scan)} does
+     */
+    public BoundSql renderScanBound(PlanNode.Scan s, Expression restriction) {
+        return flat(s, restriction);
+    }
+
+    private BoundSql flat(PlanNode.Scan s, Expression restriction) {
         if (s.readsFields()) {
             throw new IllegalArgumentException("A scan of fields inside columns is not rendered flat");
         }
+        // One renderer serves the scan of a plan and all its parts, so the parameters are those of this call.
+        List<BoundSql.Parameter> bound = new ArrayList<>();
+        parameters = dialect.bindsLiterals() ? bound : null;
+        try {
+            OptionalLong maxRows = OptionalLong.empty();
+            String sql = flatText(s, restriction);
+            if (s.pushed().limit().isPresent() && dialect.limitForm() == Dialect.LimitForm.MAX_ROWS) {
+                maxRows = s.pushed().limit();
+            }
+            return new BoundSql(sql, bound, maxRows);
+        } finally {
+            parameters = null;
+        }
+    }
+
+    private String flatText(PlanNode.Scan s, Expression restriction) {
         PlanNode.Pushed pushed = s.pushed();
         String t = "t";
         IntFunction<String> columns = i -> t + "." + dialect.quoteIdentifier(s.tableSchema().name(s.columns().get(i)));
         StringBuilder b = new StringBuilder("SELECT ");
+        if (pushed.limit().isPresent() && dialect.limitForm() == Dialect.LimitForm.TOP) {
+            b.append("TOP ").append(pushed.limit().getAsLong()).append(' ');
+        }
         if (pushed.aggregation().isPresent()) {
             if (!pushed.order().isEmpty() || pushed.limit().isPresent()) {
                 throw new IllegalArgumentException("A scan with an aggregation and an order or a limit is not "
@@ -251,12 +307,14 @@ public final class SqlRenderer {
             b.append(i > 0 ? ", " : "").append(columns.apply(i));
         }
         b.append(" FROM ").append(tableNames.apply(s.table())).append(' ').append(t);
-        if (!pushed.filters().isEmpty()) {
-            b.append(" WHERE ").append(expression(pushed.condition(), columns));
+        List<Expression> conditions = new ArrayList<>(pushed.filters());
+        conditions.addAll(pushed.hints());
+        if (!conditions.isEmpty()) {
+            b.append(" WHERE ").append(expression(Expressions.conjunction(conditions), columns));
         }
         if (restriction != null) {
             // Every rendered condition is a term that binds tighter than AND, or is in parentheses.
-            b.append(pushed.filters().isEmpty() ? " WHERE " : " AND ").append(expression(restriction,
+            b.append(conditions.isEmpty() ? " WHERE " : " AND ").append(expression(restriction,
                     (IntFunction<String>) i -> t + "." + dialect.quoteIdentifier(s.tableSchema().name(i))));
         }
         List<Integer> groups = pushed.aggregation().map(PlanNode.Aggregation::groupColumns).orElse(List.of());
@@ -268,7 +326,7 @@ public final class SqlRenderer {
             b.append(i == 0 ? " ORDER BY " : ", ")
                     .append(dialect.orderKey(columns.apply(k.column()), k.ascending(), k.nullsFirst()));
         }
-        if (pushed.limit().isPresent()) {
+        if (pushed.limit().isPresent() && dialect.limitForm() == Dialect.LimitForm.CLAUSE) {
             b.append(' ').append(dialect.limit(pushed.limit().getAsLong(), 0));
         }
         return b.toString();
@@ -441,6 +499,10 @@ public final class SqlRenderer {
     /** Renders an expression whose columns are written as the function says. */
     public String expression(Expression e, IntFunction<String> columns) {
         return switch (e) {
+            case Expression.Literal l when parameters != null && l.value() != null -> {
+                parameters.add(new BoundSql.Parameter(l.type(), l.value()));
+                yield "?";
+            }
             case Expression.Literal l -> dialect.literal(l.value(), l.type());
             case Expression.Column c -> columns.apply(c.index());
             case Expression.Arithmetic a -> dialect.arithmetic(a.op(), expression(a.left(), columns),

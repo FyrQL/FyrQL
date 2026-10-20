@@ -23,19 +23,30 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.GregorianCalendar;
+import java.util.TimeZone;
 import java.util.UUID;
 
 /**
  * Reads a column of a result as the Java values of its FyrQL type:
  * through the typed getters of JDBC, and for SQLite, whose values carry
  * their own storage class, through {@code getObject} with a check of
- * that class.
+ * that class. For the {@linkplain JdbcDialect#GENERIC generic dialect},
+ * dates and timestamps are read with the getters of JDBC 4.0 and a
+ * calendar in UTC, since not every driver reads {@code java.time} values
+ * and the default time zone would shift a time in a gap of daylight
+ * saving time.
  */
 final class ColumnReaders {
+
+    private static final long MILLIS_PER_DAY = 86_400_000L;
 
     /** Reads the value of a column at the current row; {@code null} for {@code NULL}. */
     @FunctionalInterface
@@ -47,6 +58,34 @@ final class ColumnReaders {
     }
 
     /**
+     * Returns a new calendar of the proleptic Gregorian calendar in UTC, as
+     * FyrQL counts days, for the getters and setters of JDBC 4.0; a
+     * calendar is not shared between threads.
+     */
+    static Calendar utc() {
+        GregorianCalendar calendar = new GregorianCalendar(TimeZone.getTimeZone("UTC"));
+        calendar.setGregorianChange(new Date(Long.MIN_VALUE));
+        return calendar;
+    }
+
+    /** The {@code java.sql.Date} of a day of FyrQL, at midnight in UTC. */
+    static java.sql.Date date(int days) {
+        return new java.sql.Date(days * MILLIS_PER_DAY);
+    }
+
+    /** The {@code Timestamp} of microseconds since the epoch of FyrQL, in UTC. */
+    static Timestamp timestamp(long micros) {
+        Timestamp t = new Timestamp(Math.floorDiv(micros, 1_000_000L) * 1000);
+        t.setNanos((int) Math.floorMod(micros, 1_000_000L) * 1000);
+        return t;
+    }
+
+    /** The microseconds since the epoch of a {@code Timestamp} read in UTC. */
+    static long micros(Timestamp t) {
+        return Math.floorDiv(t.getTime(), 1000L) * 1_000_000L + t.getNanos() / 1000;
+    }
+
+    /**
      * Returns the reader of a column.
      *
      * @param jdbcType the type of the column in the result, as {@link java.sql.Types}
@@ -55,6 +94,16 @@ final class ColumnReaders {
     static ColumnReader of(JdbcDialect dialect, DataType type, int jdbcType, String typeName) {
         if (dialect == JdbcDialect.SQLITE) {
             return sqlite(type);
+        }
+        if (dialect == JdbcDialect.GENERIC && (type == DataType.DATE || type == DataType.TIMESTAMP)) {
+            Calendar utc = utc();
+            return type == DataType.DATE ? (rs, c) -> {
+                java.sql.Date v = rs.getDate(c, utc);
+                return v == null ? null : Math.toIntExact(Math.floorDiv(v.getTime(), MILLIS_PER_DAY));
+            } : (rs, c) -> {
+                Timestamp v = rs.getTimestamp(c, utc);
+                return v == null ? null : micros(v);
+            };
         }
         if (type instanceof Decimal d) {
             return (rs, c) -> {

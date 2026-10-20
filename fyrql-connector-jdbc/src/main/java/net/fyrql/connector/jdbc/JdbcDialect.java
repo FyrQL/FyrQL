@@ -12,12 +12,14 @@
 package net.fyrql.connector.jdbc;
 
 import net.fyrql.sql.render.Dialect;
+import net.fyrql.sql.render.GenericDialect;
 import net.fyrql.sql.render.H2Dialect;
 import net.fyrql.sql.render.MySqlDialect;
 import net.fyrql.sql.render.PostgresDialect;
 import net.fyrql.sql.render.SqliteDialect;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -28,7 +30,7 @@ import java.util.Set;
 /**
  * The databases the connector knows: how it writes their SQL, how it finds
  * their schemas, and how it reads a result without holding all of it in
- * memory.
+ * memory; and {@link #GENERIC} for any other.
  */
 public enum JdbcDialect {
 
@@ -58,7 +60,20 @@ public enum JdbcDialect {
      * ({@code connectionTimeZone=SERVER}) unless the URL or a property sets
      * another; a data source or a shared connection is used as configured.
      */
-    MYSQL(MySqlDialect.INSTANCE, true, Set.of("information_schema", "mysql", "performance_schema", "sys"));
+    MYSQL(MySqlDialect.INSTANCE, true, Set.of("information_schema", "mysql", "performance_schema", "sys")),
+
+    /**
+     * Any other database: the statement binds its literals as parameters,
+     * keeps the first rows with {@code Statement.setMaxRows} and takes over
+     * only filters on integers and dates, see {@link GenericDialect}; a
+     * connector sets the quote of identifiers and the other settings of its
+     * own, see {@link JdbcConnector#sql()}. Dates and timestamps are read
+     * with the getters of JDBC 4.0 in UTC. The schemas are those of the
+     * JDBC metadata, or its catalogs if it has no schemas; schemas such as
+     * {@code INFORMATION_SCHEMA} or those starting with {@code SYS} are not
+     * listed.
+     */
+    GENERIC(GenericDialect.DEFAULT, false, Set.of("information_schema", "sqlj", "nullid", "guest"));
 
     private final Dialect sql;
     private final boolean catalogsAsSchemas;
@@ -70,7 +85,11 @@ public enum JdbcDialect {
         this.systemSchemas = systemSchemas;
     }
 
-    /** Returns the dialect of the SQL the connector sends. */
+    /**
+     * Returns the dialect of the SQL the connector sends; for
+     * {@link #GENERIC} with the default settings, which the connector may
+     * replace.
+     */
     public Dialect sql() {
         return sql;
     }
@@ -82,6 +101,10 @@ public enum JdbcDialect {
 
     /** Tells whether a schema belongs to the database itself and is not listed. */
     boolean isSystemSchema(String schema) {
+        if (this == GENERIC) {
+            String s = schema.toLowerCase(Locale.ROOT);
+            return systemSchemas.contains(s) || s.startsWith("sys") || s.startsWith("db_");
+        }
         return systemSchemas.contains(schema) || this == POSTGRESQL && schema.startsWith("pg_");
     }
 
@@ -121,14 +144,18 @@ public enum JdbcDialect {
         return Optional.empty();
     }
 
-    /** Returns the dialect by its name, as in a configuration: {@code h2}, {@code sqlite}, {@code postgresql}, {@code mysql}. */
+    /**
+     * Returns the dialect by its name, as in a configuration: {@code h2},
+     * {@code sqlite}, {@code postgresql}, {@code mysql} or {@code generic}.
+     */
     public static JdbcDialect ofName(String name) {
         for (JdbcDialect d : values()) {
             if (d.sql.name().equalsIgnoreCase(name) || d.name().equalsIgnoreCase(name)) {
                 return d;
             }
         }
-        throw new IllegalArgumentException("Unknown dialect " + name + "; known are h2, sqlite, postgresql, mysql");
+        throw new IllegalArgumentException("Unknown dialect " + name
+                + "; known are h2, sqlite, postgresql, mysql and generic");
     }
 
     /**
@@ -140,11 +167,26 @@ public enum JdbcDialect {
      *
      * @param owned whether the connection is the connector's own, opened for this one statement
      */
-    Statement prepare(Connection connection, int fetchSize, boolean owned) throws SQLException {
+    Statement statement(Connection connection, int fetchSize, boolean owned) throws SQLException {
+        beforeStatement(connection, owned);
+        return fetchSize(connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY),
+                fetchSize, owned);
+    }
+
+    /** Prepares a statement with parameters that reads its result as {@link #statement} does. */
+    PreparedStatement prepare(Connection connection, String sql, int fetchSize, boolean owned) throws SQLException {
+        beforeStatement(connection, owned);
+        return fetchSize(connection.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY),
+                fetchSize, owned);
+    }
+
+    private void beforeStatement(Connection connection, boolean owned) throws SQLException {
         if (this == POSTGRESQL && owned && connection.getAutoCommit()) {
             connection.setAutoCommit(false);
         }
-        Statement statement = connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+    }
+
+    private <S extends Statement> S fetchSize(S statement, int fetchSize, boolean owned) throws SQLException {
         if (this == MYSQL) {
             if (owned) {
                 statement.setFetchSize(Integer.MIN_VALUE);

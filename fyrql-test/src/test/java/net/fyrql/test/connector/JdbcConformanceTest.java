@@ -11,6 +11,7 @@
 
 package net.fyrql.test.connector;
 
+import net.fyrql.sql.render.GenericDialect;
 import net.fyrql.test.db.TestDatabases;
 import org.junit.jupiter.api.Test;
 
@@ -19,7 +20,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * The conformance of the JDBC connector over every database the tests
  * reach: H2, SQLite and PostgreSQL always, MySQL in the profile
- * {@code containers}.
+ * {@code containers}; and through the generic dialect H2 in the modes of
+ * compatibility with Oracle, SQL Server and MySQL, Derby and HSQLDB, always.
  */
 class JdbcConformanceTest {
 
@@ -45,5 +47,32 @@ class JdbcConformanceTest {
         var db = TestDatabases.mysql();
         assumeTrue(db.isPresent(), "MySQL runs in Docker, in the profile containers");
         JdbcConformance.check(db.get());
+    }
+
+    @Test
+    void h2Oracle() {
+        JdbcConformance.check(JdbcConformance.h2("Oracle", b -> {
+        }));
+    }
+
+    @Test
+    void h2SqlServer() {
+        JdbcConformance.check(JdbcConformance.h2("MSSQLServer", b -> b.quote("[")
+                .limitStyle(GenericDialect.LimitStyle.TOP)));
+    }
+
+    @Test
+    void h2MySql() {
+        JdbcConformance.check(JdbcConformance.h2("MySQL", b -> b.limitStyle(GenericDialect.LimitStyle.LIMIT)));
+    }
+
+    @Test
+    void derby() {
+        JdbcConformance.check(JdbcConformance.derby());
+    }
+
+    @Test
+    void hsqldb() {
+        JdbcConformance.check(JdbcConformance.hsqldb());
     }
 }

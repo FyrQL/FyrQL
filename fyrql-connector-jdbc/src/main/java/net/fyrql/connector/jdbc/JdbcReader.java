@@ -13,17 +13,24 @@ package net.fyrql.connector.jdbc;
 
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.jdbc.ColumnReaders.ColumnReader;
+import net.fyrql.core.type.DataType;
+import net.fyrql.core.type.DataType.Scalar;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
+import net.fyrql.sql.render.BoundSql;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 
 /**
@@ -32,12 +39,18 @@ import java.util.List;
  * works on it. The connection, the statement and the result are closed
  * after the last row, on an error, or when the reader is closed early; a
  * connection whose auto-commit the reader turned off is rolled back and
- * gets it back before it is released.
+ * gets it back before it is released. A statement with parameters is
+ * prepared and its values are bound; one that carries a number of rows
+ * gives the driver that number with {@code Statement.setMaxRows} and
+ * stops after it all the same.
  */
 final class JdbcReader implements BatchReader {
 
     private final String source;
+    /** The text of the statement. */
     private final String sql;
+    /** The statement as messages and the recorded statements show it, with its parameters. */
+    private final String shown;
     private final Connections connections;
     private final JdbcDialect dialect;
     private final Schema output;
@@ -50,13 +63,17 @@ final class JdbcReader implements BatchReader {
     private ResultSet result;
     private List<ColumnReader> readers;
     private long row;
+    /** The rows the statement may still return. */
+    private long remaining;
     private boolean done;
     private boolean cancelled;
 
-    private JdbcReader(String source, String sql, Connections connections, JdbcDialect dialect, Schema output,
+    private JdbcReader(String source, BoundSql bound, Connections connections, JdbcDialect dialect, Schema output,
             int batchSize) {
         this.source = source;
-        this.sql = sql;
+        this.sql = bound.sql();
+        this.shown = bound.toString();
+        this.remaining = bound.maxRows().orElse(Long.MAX_VALUE);
         this.connections = connections;
         this.dialect = dialect;
         this.output = output;
@@ -64,21 +81,66 @@ final class JdbcReader implements BatchReader {
     }
 
     /** Prepares the statement on a connection and returns a reader that sends it with the first batch. */
-    static JdbcReader open(String source, String sql, Connections connections, JdbcDialect dialect, Schema output,
-            int fetchSize, int batchSize) {
-        JdbcReader reader = new JdbcReader(source, sql, connections, dialect, output, batchSize);
+    static JdbcReader open(String source, BoundSql bound, Connections connections, JdbcDialect dialect,
+            Schema output, int fetchSize, int batchSize) {
+        JdbcReader reader = new JdbcReader(source, bound, connections, dialect, output, batchSize);
         try {
             reader.connection = connections.open();
             boolean autoCommit = reader.connection.getAutoCommit();
-            reader.statement = dialect.prepare(reader.connection, fetchSize, connections.owned());
+            if (bound.parameters().isEmpty()) {
+                reader.statement = dialect.statement(reader.connection, fetchSize, connections.owned());
+            } else {
+                PreparedStatement prepared = dialect.prepare(reader.connection, bound.sql(), fetchSize,
+                        connections.owned());
+                reader.statement = prepared;
+                bind(prepared, bound.parameters());
+            }
+            if (bound.maxRows().isPresent() && bound.maxRows().getAsLong() > 0) {
+                // 0 would be no limit to the driver; the reader stops after the rows anyway.
+                reader.statement.setMaxRows((int) Math.min(bound.maxRows().getAsLong(), Integer.MAX_VALUE));
+            }
             reader.autoCommitChanged = autoCommit && !reader.connection.getAutoCommit();
             return reader;
         } catch (SQLException e) {
             reader.release();
-            throw new JdbcSourceException("The JDBC source " + source + " fails on " + sql + ": " + e.getMessage(), e);
+            throw new JdbcSourceException("The JDBC source " + source + " fails on " + bound + ": " + e.getMessage(),
+                    e);
         } catch (RuntimeException e) {
             reader.release();
             throw e;
+        }
+    }
+
+    /**
+     * Binds the values of the parameters with the setters of JDBC 4.0,
+     * dates and timestamps with a calendar in UTC.
+     */
+    static void bind(PreparedStatement statement, List<BoundSql.Parameter> parameters) throws SQLException {
+        Calendar utc = ColumnReaders.utc();
+        for (int i = 0; i < parameters.size(); i++) {
+            BoundSql.Parameter p = parameters.get(i);
+            int index = i + 1;
+            Object v = p.value();
+            DataType type = p.type();
+            if (type instanceof DataType.Decimal) {
+                statement.setBigDecimal(index, (BigDecimal) v);
+                continue;
+            }
+            switch ((Scalar) type) {
+                case BOOLEAN -> statement.setBoolean(index, (Boolean) v);
+                case TINYINT -> statement.setByte(index, (Byte) v);
+                case SMALLINT -> statement.setShort(index, (Short) v);
+                case INTEGER -> statement.setInt(index, (Integer) v);
+                case BIGINT -> statement.setLong(index, (Long) v);
+                case HUGEINT -> statement.setBigDecimal(index, new BigDecimal((BigInteger) v));
+                case FLOAT -> statement.setFloat(index, (Float) v);
+                case DOUBLE -> statement.setDouble(index, (Double) v);
+                case VARCHAR -> statement.setString(index, (String) v);
+                case BLOB -> statement.setBytes(index, (byte[]) v);
+                case DATE -> statement.setDate(index, ColumnReaders.date((Integer) v), utc);
+                case TIMESTAMP -> statement.setTimestamp(index, ColumnReaders.timestamp((Long) v), utc);
+                case UUID -> statement.setString(index, v.toString());
+            }
         }
     }
 
@@ -88,14 +150,15 @@ final class JdbcReader implements BatchReader {
             synchronized (guard) {
                 if (cancelled) {
                     throw new JdbcSourceException("The JDBC source " + source + " was asked to stop before it ran "
-                            + sql);
+                            + shown);
                 }
             }
-            result = statement.executeQuery(sql);
+            result = statement instanceof PreparedStatement prepared ? prepared.executeQuery()
+                    : statement.executeQuery(sql);
             ResultSetMetaData md = result.getMetaData();
             if (md.getColumnCount() != Math.max(1, output.size())) {
                 throw new JdbcSourceException("The JDBC source " + source + " returns " + md.getColumnCount()
-                        + " columns instead of " + output.size() + " for " + sql);
+                        + " columns instead of " + output.size() + " for " + shown);
             }
             List<ColumnReader> columns = new ArrayList<>();
             for (int c = 0; c < output.size(); c++) {
@@ -105,7 +168,8 @@ final class JdbcReader implements BatchReader {
             readers = columns;
         } catch (SQLException e) {
             release();
-            throw new JdbcSourceException("The JDBC source " + source + " fails on " + sql + ": " + e.getMessage(), e);
+            throw new JdbcSourceException("The JDBC source " + source + " fails on " + shown + ": " + e.getMessage(),
+                    e);
         } catch (RuntimeException e) {
             release();
             throw e;
@@ -127,8 +191,9 @@ final class JdbcReader implements BatchReader {
         int n = 0;
         int column = -1;
         try {
-            while (n < batchSize && result.next()) {
+            while (n < batchSize && remaining > 0 && result.next()) {
                 row++;
+                remaining--;
                 for (column = 0; column < readers.size(); column++) {
                     builders.get(column).append(readers.get(column).read(result, column + 1));
                 }
@@ -137,13 +202,13 @@ final class JdbcReader implements BatchReader {
             }
         } catch (SQLException e) {
             release();
-            throw new JdbcSourceException("The JDBC source " + source + " fails at row " + (row + 1) + " of " + sql
-                    + ": " + e.getMessage(), e);
+            throw new JdbcSourceException("The JDBC source " + source + " fails at row " + (row + 1) + " of "
+                    + shown + ": " + e.getMessage(), e);
         } catch (RuntimeException e) {
             release();
             String where = column >= 0 ? ", column " + output.name(column) : "";
             throw new JdbcSourceException("The JDBC source " + source + " returns a value that does not fit at row "
-                    + row + where + " of " + sql + ": " + e.getMessage(), e);
+                    + row + where + " of " + shown + ": " + e.getMessage(), e);
         }
         if (n < batchSize) {
             close();
@@ -162,8 +227,8 @@ final class JdbcReader implements BatchReader {
     public void close() {
         SQLException failure = release();
         if (failure != null) {
-            throw new JdbcSourceException("The JDBC source " + source + " cannot close the result of " + sql + ": "
-                    + failure.getMessage(), failure);
+            throw new JdbcSourceException("The JDBC source " + source + " cannot close the result of " + shown
+                    + ": " + failure.getMessage(), failure);
         }
     }
 

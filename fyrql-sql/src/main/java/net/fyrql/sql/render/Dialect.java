@@ -20,6 +20,7 @@ import net.fyrql.core.type.Schema;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * What differs between the SQL dialects the renderer writes: quoting, type
@@ -79,6 +80,42 @@ public interface Dialect {
 
     /** Renders the name of a scalar function as the dialect spells it. */
     String functionName(String name);
+
+    /** How a dialect keeps the first rows of a flat scan. */
+    enum LimitForm {
+        /** With the clause {@link #limit} renders at the end of the statement. */
+        CLAUSE,
+        /** With {@code TOP n} after {@code SELECT}. */
+        TOP,
+        /** Not in the text: the statement carries the number of rows, which whoever runs it enforces. */
+        MAX_ROWS
+    }
+
+    /** Returns how the dialect keeps the first rows of a flat scan; the default is a clause. */
+    default LimitForm limitForm() {
+        return LimitForm.CLAUSE;
+    }
+
+    /**
+     * Tells whether the literals of a flat scan are bound as parameters
+     * instead of written into the text; such a scan is rendered with
+     * {@link SqlRenderer#renderScanBound}. The default is no.
+     */
+    default boolean bindsLiterals() {
+        return false;
+    }
+
+    /**
+     * Returns a condition that holds wherever a filter holds, which the
+     * dialect evaluates and a connector may send to the source as a hint:
+     * the source then returns at least the rows that satisfy the filter,
+     * and the filter is evaluated again above it. The default is the filter
+     * itself where the dialect {@linkplain #supports supports} it, and
+     * nothing otherwise.
+     */
+    default Optional<Expression> hint(Expression filter) {
+        return supports(filter) ? Optional.of(filter) : Optional.empty();
+    }
 
     /** Renders the clause that keeps {@code count} rows after {@code offset}, e.g. {@code LIMIT 10 OFFSET 5}. */
     default String limit(long count, long offset) {

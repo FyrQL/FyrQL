@@ -31,14 +31,17 @@ import java.util.Locale;
  * {@code DOUBLE};</li>
  * <li>{@code NUMERIC(p,s)} and {@code DECIMAL(p,s)} are a decimal up to
  * 38 digits; 39 digits without a scale are {@code HUGEINT}, as the dialects
- * write it; PostgreSQL's {@code numeric} without a precision is
- * {@code DOUBLE}, as in DuckDB; more digits are {@code VARCHAR};</li>
+ * write it; a number without a precision, such as PostgreSQL's
+ * {@code numeric} or Oracle's {@code NUMBER}, is {@code DOUBLE}, as in
+ * DuckDB; more digits are {@code VARCHAR};</li>
  * <li>the character types and large objects are {@code VARCHAR}, the
  * binary ones {@code BLOB};</li>
  * <li>{@code DATE} is {@code DATE}; {@code TIMESTAMP} is
  * {@code TIMESTAMP}, and a timestamp with a time zone, such as
- * PostgreSQL's {@code timestamptz} or MySQL's {@code TIMESTAMP}, is its
- * instant in UTC, see {@link #withTimeZone};</li>
+ * PostgreSQL's {@code timestamptz}, MySQL's {@code TIMESTAMP}, Oracle's
+ * {@code TIMESTAMP WITH LOCAL TIME ZONE} or SQL Server's
+ * {@code DATETIMEOFFSET}, is its instant in UTC, see
+ * {@link #withTimeZone};</li>
  * <li>a type named {@code uuid} is {@code UUID};</li>
  * <li>everything else, such as {@code TIME}, {@code INTERVAL}, JSON or
  * arrays, is {@code VARCHAR}, read as the driver writes it as a
@@ -141,7 +144,8 @@ final class JdbcTypes {
     static boolean withTimeZone(JdbcDialect dialect, int jdbcType, String typeName) {
         String name = typeName == null ? "" : typeName.strip().toUpperCase(Locale.ROOT);
         return jdbcType == Types.TIMESTAMP_WITH_TIMEZONE || name.equals("TIMESTAMPTZ")
-                || name.contains("WITH TIME ZONE") || dialect == JdbcDialect.MYSQL && name.equals("TIMESTAMP");
+                || name.contains("TIME ZONE") || name.equals("DATETIMEOFFSET")
+                || dialect == JdbcDialect.MYSQL && name.equals("TIMESTAMP");
     }
 
     /** The type of a column of SQLite by the name it was declared with. */

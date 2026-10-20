@@ -54,7 +54,7 @@ class ConnectorsTest {
                 assertThrows(ConfigException.class, () -> Connectors.create(
                         new SourceConfig("shop", "jdbc", Map.of("user", "sa")), factories, DIR)).getMessage());
         assertEquals("Cannot create the source shop: The JDBC source shop has an unknown option usr; known are url,"
-                + " user, password, dialect, schemas, defaultSchema, fetchSize, batchSize, recordStatements,"
+                + " user, password, dialect, pushdown, quote, limit, trust, schemas, defaultSchema, fetchSize, batchSize, recordStatements,"
                 + " splitRows, splitColumn.<table>, properties.<key>",assertThrows(ConfigException.class, () -> Connectors.create(
                         new SourceConfig("shop", "jdbc", Map.of("url", "jdbc:h2:mem:x", "usr", "sa")), factories, DIR))
                 .getMessage());
