@@ -12,8 +12,9 @@
 package net.fyrql.connector.parquet;
 
 import net.fyrql.connector.ConfigOptions;
+import net.fyrql.connector.FileOutput;
+import net.fyrql.connector.FileStores;
 import net.fyrql.connector.Sink;
-import net.fyrql.connector.TemporaryFile;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
@@ -50,7 +51,6 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.math.BigInteger;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
@@ -76,7 +76,7 @@ final class ParquetFileSink implements Sink {
     private static final long MIN_HIGH = MAX_HUGEINT_DECIMAL.negate().shiftRight(64).longValue();
     private static final long MIN_LOW = MAX_HUGEINT_DECIMAL.negate().longValue();
 
-    private final TemporaryFile file;
+    private final FileOutput file;
     private final Output output;
     private final ParquetWriter<Cursor> writer;
     private final Cursor cursor = new Cursor();
@@ -89,20 +89,20 @@ final class ParquetFileSink implements Sink {
         int row;
     }
 
-    private ParquetFileSink(TemporaryFile file, Output output, ParquetWriter<Cursor> writer) {
+    private ParquetFileSink(FileOutput file, Output output, ParquetWriter<Cursor> writer) {
         this.file = file;
         this.output = output;
         this.writer = writer;
     }
 
     /**
-     * Checks the options and the types, and creates the temporary file.
+     * Checks the options and the types, and starts to write the file in its store.
      *
      * @throws IllegalArgumentException if an option is unknown or does not
      *         fit, or if a column has a type the file cannot hold
      */
-    static ParquetFileSink open(Path path, Schema schema, Map<String, String> options) {
-        String owner = "the Parquet file " + path;
+    static ParquetFileSink open(String location, FileStores stores, Schema schema, Map<String, String> options) {
+        String owner = "the Parquet file " + location;
         ConfigOptions o = new ConfigOptions(owner, options, Path.of(""));
         Optional<String> compression = o.string("compression");
         Optional<String> codecOption = o.string("codec");
@@ -135,8 +135,13 @@ final class ParquetFileSink implements Sink {
             columns[c] = writer(schema.type(c), schema.fields().get(c).name());
         }
 
-        TemporaryFile file = TemporaryFile.create(path);
-        Output output = new Output(file.path());
+        FileOutput file;
+        try {
+            file = stores.create(location);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot write " + location + ": " + e.getMessage(), e);
+        }
+        Output output = new Output(file);
         try {
             ParquetWriter<Cursor> writer = new Builder(output, new RowSupport(message, schema, columns))
                     .withConf(new PlainParquetConfiguration())
@@ -151,7 +156,7 @@ final class ParquetFileSink implements Sink {
         } catch (IOException e) {
             output.abort();
             file.close();
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         } catch (RuntimeException e) {
             output.abort();
             file.close();
@@ -169,7 +174,7 @@ final class ParquetFileSink implements Sink {
     @Override
     public void write(Batch batch) {
         if (done) {
-            throw new IllegalStateException("The Parquet file " + file.target() + " is already closed");
+            throw new IllegalStateException("The Parquet file " + file.location() + " is already closed");
         }
         cursor.batch = batch;
         try {
@@ -178,7 +183,7 @@ final class ParquetFileSink implements Sink {
                 writer.write(cursor);
             }
         } catch (IOException e) {
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         } finally {
             cursor.batch = null;
         }
@@ -188,21 +193,21 @@ final class ParquetFileSink implements Sink {
     @Override
     public long commit() {
         if (done) {
-            throw new IllegalStateException("The Parquet file " + file.target() + " is already closed");
+            throw new IllegalStateException("The Parquet file " + file.location() + " is already closed");
         }
         done = true;
         try {
             writer.close();
+            file.commit();
         } catch (IOException e) {
             output.abort();
             file.close();
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         }
-        file.commit();
         return rows;
     }
 
-    /** Abandons the file without writing what the writer holds: closes the stream and deletes the file. */
+    /** Abandons the file without writing what the writer holds: closes the stream and leaves no file. */
     @Override
     public void close() {
         if (!done) {
@@ -451,15 +456,15 @@ final class ParquetFileSink implements Sink {
     }
 
     /**
-     * The temporary file as an output of parquet-java, which keeps the
+     * The file being written as an output of parquet-java, which keeps the
      * stream so that a write can be abandoned without the footer.
      */
     private static final class Output implements OutputFile {
-        private final Path path;
+        private final FileOutput file;
         private OutputStream stream;
 
-        Output(Path path) {
-            this.path = path;
+        Output(FileOutput file) {
+            this.file = file;
         }
 
         @Override
@@ -469,7 +474,7 @@ final class ParquetFileSink implements Sink {
 
         @Override
         public PositionOutputStream createOrOverwrite(long blockSizeHint) throws IOException {
-            OutputStream s = new BufferedOutputStream(Files.newOutputStream(path), 1 << 16);
+            OutputStream s = new BufferedOutputStream(file.stream(), 1 << 16);
             stream = s;
             return new PositionOutputStream() {
                 private long position;
@@ -515,7 +520,7 @@ final class ParquetFileSink implements Sink {
 
         @Override
         public String getPath() {
-            return path.toString();
+            return file.location();
         }
 
         /** Closes the stream, if any, quietly. */

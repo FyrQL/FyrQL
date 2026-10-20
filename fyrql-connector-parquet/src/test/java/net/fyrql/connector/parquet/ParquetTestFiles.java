@@ -11,6 +11,7 @@
 
 package net.fyrql.connector.parquet;
 
+import net.fyrql.connector.FileStores;
 import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.hadoop.ParquetWriter;
@@ -113,6 +114,12 @@ final class ParquetTestFiles {
             }
         }
         return rows;
+    }
+
+    /** Returns the footer of a local Parquet file. */
+    static ParquetFiles.Footer footer(Path file) {
+        ParquetFiles files = new ParquetFiles(FileStores.local(Path.of("")), ParquetFiles.READ_AHEAD);
+        return files.footer(files.object(file.toString()));
     }
 
     /** Returns a path as DuckDB reads it in a string literal. */

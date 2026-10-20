@@ -12,6 +12,7 @@ package net.fyrql.connector.json;
 
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.ConnectorFactory;
+import net.fyrql.connector.FileStores;
 import net.fyrql.core.function.DateFormats;
 
 import java.nio.file.Path;
@@ -61,7 +62,14 @@ public final class JsonConnectorFactory implements ConnectorFactory {
         Map<String, Map<String, String>> tables = o.tables("file");
         o.rejectUnknown();
         files.ifPresent(b::directory);
-        tables.forEach((table, attributes) -> b.file(table, o.resolve(attributes.get("file"))));
+        tables.forEach((table, attributes) -> {
+            String file = attributes.get("file");
+            if (FileStores.isLocal(file)) {
+                b.file(table, o.resolve(file));
+            } else {
+                b.file(table, file);
+            }
+        });
         return b.build();
     }
 

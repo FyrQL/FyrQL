@@ -129,7 +129,7 @@ class ParquetNestedTest {
         for (Map.Entry<String, Consumer<ExampleParquetWriter.Builder>> variant : variants) {
             List<List<Object>> written = new ArrayList<>();
             Path file = write(dir.resolve(variant.getKey() + ".parquet"), 2000, variant.getValue(), written);
-            assertTrue(new ParquetFiles().footer(file).metadata().getBlocks().size() > 1, file.toString());
+            assertTrue(ParquetTestFiles.footer(file).metadata().getBlocks().size() > 1, file.toString());
             ParquetConnector parquet = connector(file, 7);
             Schema schema = parquet.catalog().schema(table());
             assertEquals("(id BIGINT NOT NULL, s STRUCT(a INTEGER, b VARCHAR, c STRUCT(x DOUBLE, tags VARCHAR[])),"

@@ -11,6 +11,9 @@
 
 package net.fyrql.connector.parquet;
 
+import net.fyrql.connector.FileObject;
+import net.fyrql.connector.FileStores;
+import net.fyrql.connector.Globs;
 import net.fyrql.core.type.Schema;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.filter2.compat.FilterCompat;
@@ -18,44 +21,57 @@ import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
+import org.apache.parquet.io.InputFile;
 import org.apache.parquet.schema.MessageType;
 
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Pattern;
 
 /**
  * The files of the tables of a connector: finds the files a location names
- * and keeps the footer of each file as long as its size and time of
- * modification stay the same.
+ * in the stores of files and keeps the footer of each file as long as its
+ * size and version stay the same.
  * <p>
  * A location is a file, a directory, whose {@code .parquet} files make up
  * the table, or a pattern with {@code *} and {@code ?} in the name of the
- * file, such as {@code data/orders-*.parquet}. The files are sorted by
- * their paths.
+ * file, such as {@code data/orders-*.parquet}, local or in a store such as
+ * {@code s3://bucket/orders/}. The files are sorted by their locations.
  */
 final class ParquetFiles {
 
     private static final String EXTENSION = ".parquet";
 
-    /** A file in a version: its path, size and time of modification. */
-    record Version(Path file, long size, FileTime modified) {
+    /** The bytes a file of a store other than the local one is read ahead by default, see {@link StoreFile}. */
+    static final int READ_AHEAD = 1 << 20;
 
-        static Version of(Path file) {
-            try {
-                return new Version(file, Files.size(file), Files.getLastModifiedTime(file));
-            } catch (IOException e) {
-                throw new IllegalArgumentException("Cannot read " + file + ": " + e.getMessage(), e);
-            }
+    /**
+     * A file in a version: its location, size and version, and the file
+     * through which it is read, which two equal versions need not share.
+     */
+    record Version(String location, long size, String tag, FileObject file) {
+
+        static Version of(FileObject file) {
+            return new Version(file.location(), file.size(), file.version(), file);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Version v && location.equals(v.location) && size == v.size && tag.equals(v.tag);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(location, size, tag);
         }
     }
 
@@ -86,7 +102,29 @@ final class ParquetFiles {
     record Table(String location, List<Version> files, Schema schema, long rows) {
     }
 
-    private final Map<Path, Footer> footers = new ConcurrentHashMap<>();
+    private final Map<String, Footer> footers = new ConcurrentHashMap<>();
+    private final int readAhead;
+    private volatile FileStores stores;
+
+    ParquetFiles(FileStores stores, int readAhead) {
+        this.stores = stores;
+        this.readAhead = readAhead;
+    }
+
+    /** Returns the stores of the files. */
+    FileStores stores() {
+        return stores;
+    }
+
+    /** Sets the stores of the files, those of the engine. */
+    void stores(FileStores stores) {
+        this.stores = stores;
+    }
+
+    /** Returns a file for the reader of parquet-java. */
+    InputFile input(FileObject file) {
+        return new StoreFile(file, readAhead);
+    }
 
     /** Returns the options with which every file is read: the codecs in pure Java. */
     static ParquetReadOptions options() {
@@ -115,18 +153,20 @@ final class ParquetFiles {
     }
 
     /**
-     * Returns a location as an absolute one, relative ones resolved against
-     * a directory, leaving a pattern in the name of the file as it is.
+     * Returns a location as an absolute one, relative local ones resolved
+     * against a directory, leaving a pattern in the name of the file and a
+     * location with a scheme as they are.
      */
     static String absolute(String location, Path directory) {
-        int slash = Math.max(location.lastIndexOf('/'), location.lastIndexOf('\\'));
+        Globs.checkPattern(location);
+        if (FileStores.scheme(location).isPresent()) {
+            return location;
+        }
+        int slash = Globs.lastSeparator(location);
         String name = location.substring(slash + 1);
         String parent = slash < 0 ? "" : location.substring(0, slash + 1);
-        if (isPattern(parent)) {
-            throw new IllegalArgumentException("A pattern is only supported in the name of a file: " + location);
-        }
         try {
-            if (!isPattern(name)) {
+            if (!Globs.isPattern(name)) {
                 return directory.resolve(location).toAbsolutePath().normalize().toString();
             }
             return directory.resolve(parent).toAbsolutePath().normalize() + java.io.File.separator + name;
@@ -135,59 +175,57 @@ final class ParquetFiles {
         }
     }
 
-    private static boolean isPattern(String s) {
-        return s.indexOf('*') >= 0 || s.indexOf('?') >= 0;
-    }
-
     /**
      * Returns the files of a location, sorted.
      *
      * @throws IllegalArgumentException if the location names no file, has
      *         a pattern outside the name of the file, or cannot be listed
      */
-    static List<Path> resolve(String location) {
-        int slash = Math.max(location.lastIndexOf('/'), location.lastIndexOf('\\'));
-        String name = location.substring(slash + 1);
-        String parent = slash < 0 ? "" : location.substring(0, slash + 1);
-        if (isPattern(parent)) {
-            throw new IllegalArgumentException("A pattern is only supported in the name of a file: " + location);
-        }
-        List<Path> files = new ArrayList<>();
+    List<FileObject> resolve(String location) {
+        List<FileObject> files;
         try {
-            if (isPattern(name)) {
-                Pattern pattern = glob(name);
-                Path dir = Path.of(parent.isEmpty() ? "." : parent);
-                if (Files.isDirectory(dir)) {
-                    try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir,
-                            p -> Files.isRegularFile(p) && pattern.matcher(p.getFileName().toString()).matches())) {
-                        entries.forEach(files::add);
-                    }
-                }
-            } else {
-                Path path = Path.of(location);
-                if (Files.isDirectory(path)) {
-                    files.addAll(parquetFiles(path));
-                    if (files.isEmpty()) {
-                        throw new IllegalArgumentException("No Parquet files in the directory " + location);
-                    }
-                } else if (Files.isRegularFile(path)) {
-                    files.add(path);
-                }
-            }
-        } catch (InvalidPathException e) {
-            throw new IllegalArgumentException("Invalid path " + location, e);
+            files = stores.list(location, EXTENSION);
         } catch (IOException e) {
             throw new IllegalArgumentException("Cannot list " + location + ": " + e.getMessage(), e);
         }
         if (files.isEmpty()) {
+            if (FileStores.isLocal(location) && !Globs.isPattern(location)
+                    && Files.isDirectory(stores.local().path(location))) {
+                throw new IllegalArgumentException("No Parquet files in the directory " + location);
+            }
             throw new IllegalArgumentException("No files found that match the pattern \"" + location + "\"");
         }
-        List<Path> sorted = new ArrayList<>();
-        for (Path f : files) {
-            sorted.add(f.toAbsolutePath().normalize());
+        return files;
+    }
+
+    /**
+     * Returns the file at a location.
+     *
+     * @throws IllegalArgumentException if there is none or it cannot be read
+     */
+    FileObject object(String location) {
+        try {
+            return stores.object(location);
+        } catch (NoSuchFileException e) {
+            throw new IllegalArgumentException("No files found that match the pattern \"" + location + "\"", e);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Cannot read " + location + ": " + e.getMessage(), e);
         }
-        sorted.sort(null);
-        return sorted;
+    }
+
+    /**
+     * Tells whether a local file changed since it was looked up; a file of
+     * another store is read in its version or not at all.
+     */
+    boolean changed(Version version) {
+        if (version.file().path().isEmpty()) {
+            return false;
+        }
+        try {
+            return !Version.of(stores.local().object(version.location())).equals(version);
+        } catch (IOException e) {
+            return true;
+        }
     }
 
     /** Returns the {@code .parquet} files directly in a directory, sorted. */
@@ -211,50 +249,30 @@ final class ParquetFiles {
         return name.substring(0, name.length() - EXTENSION.length());
     }
 
-    /** Turns {@code *} and {@code ?} into a regular expression; all else stands for itself. */
-    private static Pattern glob(String name) {
-        StringBuilder regex = new StringBuilder();
-        StringBuilder literal = new StringBuilder();
-        for (char c : name.toCharArray()) {
-            if (c == '*' || c == '?') {
-                if (!literal.isEmpty()) {
-                    regex.append(Pattern.quote(literal.toString()));
-                    literal.setLength(0);
-                }
-                regex.append(c == '*' ? ".*" : ".");
-            } else {
-                literal.append(c);
-            }
-        }
-        if (!literal.isEmpty()) {
-            regex.append(Pattern.quote(literal.toString()));
-        }
-        return Pattern.compile(regex.toString(), Pattern.DOTALL);
-    }
-
     /**
-     * Returns the footer of a file in its current version, read again if
-     * the file changed since it was read last.
+     * Returns the footer of a file in the version in which it was looked
+     * up, read again if the file changed since it was read last.
      *
      * @throws IllegalArgumentException if the file is not a Parquet file or
      *         cannot be read
      */
-    Footer footer(Path file) {
+    Footer footer(FileObject file) {
         Version version = Version.of(file);
-        Footer footer = footers.get(file);
+        Footer footer = footers.get(version.location());
         if (footer != null && footer.version().equals(version)) {
             return footer;
         }
         footer = new Footer(version, read(file));
-        footers.put(file, footer);
+        footers.put(version.location(), footer);
         return footer;
     }
 
-    private static ParquetMetadata read(Path file) {
-        try (ParquetFileReader reader = ParquetFileReader.open(new LocalFile(file), options())) {
+    private ParquetMetadata read(FileObject file) {
+        try (ParquetFileReader reader = ParquetFileReader.open(input(file), options())) {
             return reader.getFooter();
         } catch (IOException | RuntimeException e) {
-            throw new IllegalArgumentException("Cannot read the Parquet file " + file + ": " + e.getMessage(), e);
+            throw new IllegalArgumentException("Cannot read the Parquet file " + file.location() + ": "
+                    + e.getMessage(), e);
         }
     }
 
@@ -267,23 +285,28 @@ final class ParquetFiles {
      *         columns
      */
     Table table(String location) {
+        return table(location, resolve(location));
+    }
+
+    /** Reads the footers of the files of a location found before, see {@link #table(String)}. */
+    Table table(String location, List<FileObject> files) {
         List<Version> versions = new ArrayList<>();
         Schema schema = null;
-        Path first = null;
+        String first = null;
         long rows = 0;
-        for (Path file : resolve(location)) {
+        for (FileObject file : files) {
             Footer footer = footer(file);
             Schema s;
             try {
                 s = ParquetSchemas.schema(footer.schema());
             } catch (IllegalArgumentException e) {
-                throw new IllegalArgumentException(e.getMessage() + " in " + file, e);
+                throw new IllegalArgumentException(e.getMessage() + " in " + file.location(), e);
             }
             if (schema == null) {
                 schema = s;
-                first = file;
+                first = file.location();
             } else {
-                schema = shared(schema, s, first, file);
+                schema = shared(schema, s, first, file.location());
             }
             versions.add(footer.version());
             rows += footer.rows();
@@ -292,7 +315,7 @@ final class ParquetFiles {
     }
 
     /** Returns the columns two files share, nullable if nullable in either. */
-    private static Schema shared(Schema a, Schema b, Path fileA, Path fileB) {
+    private static Schema shared(Schema a, Schema b, String fileA, String fileB) {
         boolean same = a.size() == b.size();
         for (int c = 0; same && c < a.size(); c++) {
             same = a.name(c).equals(b.name(c)) && a.type(c).equals(b.type(c));

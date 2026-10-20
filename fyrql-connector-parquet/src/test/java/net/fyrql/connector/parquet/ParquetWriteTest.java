@@ -72,7 +72,7 @@ class ParquetWriteTest {
     }
 
     private static long write(Path file, Schema schema, Map<String, String> options, List<Batch> batches) {
-        try (Sink sink = connector().openFile("parquet", file, schema, options)) {
+        try (Sink sink = connector().openFile("parquet", file.toString(), schema, options)) {
             for (Batch b : batches) {
                 sink.write(b);
             }
@@ -271,7 +271,7 @@ class ParquetWriteTest {
                 assertThrows(IllegalArgumentException.class, () -> write(file, schema, Map.of("row_group_size", "0"),
                         List.of())).getMessage());
         assertEquals("The Parquet source pq writes no files of the format csv",
-                assertThrows(IllegalArgumentException.class, () -> connector().openFile("csv", file, schema,
+                assertThrows(IllegalArgumentException.class, () -> connector().openFile("csv", file.toString(), schema,
                         Map.of())).getMessage());
         assertEquals(List.of(), files());
         assertEquals(List.of("parquet"), connector().fileFormats());
@@ -286,7 +286,7 @@ class ParquetWriteTest {
         TableRef t = TableRef.of("pq", "t");
         assertEquals(1, reader.catalog().rowCount(t).orElseThrow());
 
-        try (Sink sink = connector().openFile("parquet", file, schema, Map.of())) {
+        try (Sink sink = connector().openFile("parquet", file.toString(), schema, Map.of())) {
             sink.write(Batch.ofRows(schema, List.<Object[]>of(new Object[] {2}, new Object[] {3})));
             assertEquals(2, files().size());
         }

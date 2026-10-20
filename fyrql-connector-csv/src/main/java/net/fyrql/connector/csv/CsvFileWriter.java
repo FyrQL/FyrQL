@@ -12,8 +12,10 @@
 package net.fyrql.connector.csv;
 
 import net.fyrql.connector.ConfigOptions;
+import net.fyrql.connector.FileOutput;
+import net.fyrql.connector.FileStores;
+import net.fyrql.connector.Globs;
 import net.fyrql.connector.Sink;
-import net.fyrql.connector.TemporaryFile;
 import net.fyrql.core.function.DateFormats;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -31,7 +33,6 @@ import java.io.OutputStreamWriter;
 import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Map;
@@ -51,7 +52,7 @@ final class CsvFileWriter implements Sink {
 
     private static final int BUFFER = 1 << 16;
 
-    private final TemporaryFile file;
+    private final FileOutput file;
     private final Writer out;
     private final DataType[] types;
     private final char delimiter;
@@ -64,7 +65,7 @@ final class CsvFileWriter implements Sink {
     private long rows;
     private boolean done;
 
-    private CsvFileWriter(TemporaryFile file, Writer out, Schema schema, char delimiter, char quote, char escape,
+    private CsvFileWriter(FileOutput file, Writer out, Schema schema, char delimiter, char quote, char escape,
             String nullString, LongFunction<String> dateFormat, LongFunction<String> timestampFormat) {
         this.file = file;
         this.out = out;
@@ -78,13 +79,13 @@ final class CsvFileWriter implements Sink {
     }
 
     /**
-     * Checks the options, creates the temporary file and writes the header.
+     * Checks the options, starts to write the file in its store and writes the header.
      *
      * @throws IllegalArgumentException if an option is unknown or does not fit
      */
-    static CsvFileWriter open(Path path, Schema schema, Map<String, String> options) {
+    static CsvFileWriter open(String path, FileStores stores, Schema schema, Map<String, String> options) {
         ConfigOptions o = new ConfigOptions("the CSV file " + path, options, Path.of(""));
-        String name = String.valueOf(path.getFileName()).toLowerCase(Locale.ROOT);
+        String name = path.substring(Globs.lastSeparator(path) + 1).toLowerCase(Locale.ROOT);
         boolean header = o.bool("header").orElse(true);
         char delimiter = first(o.character("delimiter"), o.character("delim"), o.character("sep"))
                 .orElse(name.endsWith(".tsv") || name.endsWith(".tsv.gz") ? '\t' : ',');
@@ -100,9 +101,9 @@ final class CsvFileWriter implements Sink {
                     + " differ from each other and from line breaks");
         }
 
-        TemporaryFile file = TemporaryFile.create(path);
+        FileOutput file = create(stores, path);
         try {
-            OutputStream stream = Files.newOutputStream(file.path());
+            OutputStream stream = file.stream();
             if (gzip) {
                 stream = new GZIPOutputStream(stream, BUFFER);
             }
@@ -121,10 +122,23 @@ final class CsvFileWriter implements Sink {
             return writer;
         } catch (IOException e) {
             file.close();
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         } catch (RuntimeException e) {
             file.close();
             throw e;
+        }
+    }
+
+    /**
+     * Starts to write a file in its store.
+     *
+     * @throws UncheckedIOException if it cannot
+     */
+    static FileOutput create(FileStores stores, String location) {
+        try {
+            return stores.create(location);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot write " + location + ": " + e.getMessage(), e);
         }
     }
 
@@ -158,7 +172,7 @@ final class CsvFileWriter implements Sink {
     @Override
     public void write(Batch batch) {
         if (done) {
-            throw new IllegalStateException("The CSV file " + file.target() + " is already closed");
+            throw new IllegalStateException("The CSV file " + file.location() + " is already closed");
         }
         int n = batch.rowCount();
         for (int r = 0; r < n; r++) {
@@ -223,7 +237,7 @@ final class CsvFileWriter implements Sink {
         try {
             out.append(line);
         } catch (IOException e) {
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         }
         line.setLength(0);
     }
@@ -231,16 +245,16 @@ final class CsvFileWriter implements Sink {
     @Override
     public long commit() {
         if (done) {
-            throw new IllegalStateException("The CSV file " + file.target() + " is already closed");
+            throw new IllegalStateException("The CSV file " + file.location() + " is already closed");
         }
         done = true;
         try {
             out.close();
+            file.commit();
         } catch (IOException e) {
             file.close();
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         }
-        file.commit();
         return rows;
     }
 

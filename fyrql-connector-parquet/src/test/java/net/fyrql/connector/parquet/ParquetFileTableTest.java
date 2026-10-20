@@ -56,7 +56,7 @@ class ParquetFileTableTest {
         for (int r = 0; r < rows; r++) {
             values.add(new Object[] {r, BigInteger.valueOf(r).negate(), r % 2 == 0 ? null : List.of("x", "y")});
         }
-        try (Sink sink = parquet.openFile("parquet", file, SCHEMA, Map.of())) {
+        try (Sink sink = parquet.openFile("parquet", file.toString(), SCHEMA, Map.of())) {
             sink.write(Batch.ofRows(SCHEMA, values));
             sink.commit();
         }
@@ -81,7 +81,7 @@ class ParquetFileTableTest {
         Path file = write("p.parquet", 3);
         Schema wanted = Schema.of(new Schema.Field("a", DataType.BIGINT), new Schema.Field("b", DataType.VARCHAR),
                 new Schema.Field("c", DataType.VARCHAR));
-        TableRef table = parquet.fileTable("parquet", file, wanted, Map.of());
+        TableRef table = parquet.fileTable("parquet", file.toString(), wanted, Map.of());
         assertEquals("parquet", table.source());
         assertTrue(table.table().startsWith("#"), table.table());
         // A HUGEINT is a DECIMAL(38,0) in a Parquet file.
@@ -94,10 +94,10 @@ class ParquetFileTableTest {
         assertEquals(List.of(), parquet.catalog().tables("main"));
 
         // The same file in the same version gives the same table, as read_parquet does; a new version another one.
-        assertEquals(table, parquet.fileTable("parquet", file, SCHEMA, Map.of()));
+        assertEquals(table, parquet.fileTable("parquet", file.toString(), SCHEMA, Map.of()));
         assertEquals(table, parquet.bind("read_parquet", List.of(file.toString()), Map.of()));
         write("p.parquet", 5);
-        TableRef changed = parquet.fileTable("parquet", file, wanted, Map.of());
+        TableRef changed = parquet.fileTable("parquet", file.toString(), wanted, Map.of());
         assertNotEquals(table, changed);
         assertEquals(5, read(changed).size());
     }
@@ -107,14 +107,14 @@ class ParquetFileTableTest {
         Path file = write("e.parquet", 1);
         List<Map.Entry<String, Runnable>> errors = new ArrayList<>();
         errors.add(Map.entry("The Parquet source parquet reads no files of the format csv",
-                () -> parquet.fileTable("csv", file, SCHEMA, Map.of())));
+                () -> parquet.fileTable("csv", file.toString(), SCHEMA, Map.of())));
         errors.add(Map.entry("The Parquet file " + file + " is read without options, not with compression",
-                () -> parquet.fileTable("parquet", file, SCHEMA, Map.of("compression", "zstd"))));
+                () -> parquet.fileTable("parquet", file.toString(), SCHEMA, Map.of("compression", "zstd"))));
         Path missing = dir.resolve("missing.parquet");
         errors.add(Map.entry("No files found that match the pattern \"" + missing + "\"",
-                () -> parquet.fileTable("parquet", missing, SCHEMA, Map.of())));
+                () -> parquet.fileTable("parquet", missing.toString(), SCHEMA, Map.of())));
         errors.add(Map.entry("No files found that match the pattern \"" + dir + "\"",
-                () -> parquet.fileTable("parquet", dir, SCHEMA, Map.of())));
+                () -> parquet.fileTable("parquet", dir.toString(), SCHEMA, Map.of())));
         for (Map.Entry<String, Runnable> e : errors) {
             IllegalArgumentException x = assertThrows(IllegalArgumentException.class, e.getValue()::run);
             assertEquals(e.getKey(), x.getMessage());

@@ -14,7 +14,6 @@ package net.fyrql.connector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
 
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -38,7 +37,8 @@ public interface FileReaderProvider {
      * {@link TableFunctionProvider}.
      *
      * @param format one of {@link #fileFormats()}
-     * @param file the file to read
+     * @param location the location of the file to read, a local path or
+     *        one with a scheme, see {@link FileStores}
      * @param schema the columns to read, by their names and types; a format
      *        whose files hold their own columns, such as Parquet, may give
      *        the table those of the file instead, which the engine then
@@ -50,5 +50,5 @@ public interface FileReaderProvider {
      *         fit, if a column has a type the format cannot hold, or if the
      *         file does not exist
      */
-    TableRef fileTable(String format, Path file, Schema schema, Map<String, String> options);
+    TableRef fileTable(String format, String location, Schema schema, Map<String, String> options);
 }

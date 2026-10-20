@@ -8,7 +8,8 @@ warehouse first.
 
 - **Heterogeneous sources, one query.** PostgreSQL, MySQL, SQLite and H2 over JDBC, and
   any other database with a JDBC driver through a generic dialect; CSV, JSON and Parquet
-  files; JSON from HTTP endpoints; OData services of versions 2 and 4;
+  files, local or in S3 and MinIO; JSON from HTTP endpoints; OData services of versions 2
+  and 4;
   and Java collections of records or beans. The columns of files and endpoints are
   inferred from the data as DuckDB infers them, nested `STRUCT`, `LIST` and `MAP` values
   included, so that no schema has to be declared.
@@ -25,7 +26,8 @@ warehouse first.
   six-core laptop in about 17 s together, where DuckDB takes about 7 s over the same files
   (see [Building](#building)).
 - **Moving data.** `COPY ... TO` writes the result of a query into a CSV, JSON or Parquet
-  file, `COPY ... FROM` loads such a file into a table with the types of its columns, and
+  file, also in S3, `COPY ... FROM` loads such a file into a table with the types of its
+  columns, and
   `CREATE TABLE ... AS` and `INSERT INTO` write results into tables in memory and in
   databases, so that data moves between sources, such as from PostgreSQL into Parquet.
 - **Embedded.** The engine runs inside the process of the application and is set up with
@@ -152,14 +154,15 @@ and JDBC write tables; see [Writing](#writing).
   decimals of up to 18 digits, dates, booleans and ASCII strings straight from the
   characters of the file into the columns; a field of another type, or in a form such as
   `+1`, `1e3` or ` 1`, is read as a string is cast, with the same value and error. A file
-  whose name ends in `.gz` is read through gzip, in one part. The table functions take
-  `header`, `delim` or `sep`, `quote`, `nullstr`, `dateformat` and `timestampformat`.
+  whose name ends in `.gz` is read through gzip, in one part, and so is a file in S3. The
+  table functions take `header`, `delim` or `sep`, `quote`, `nullstr`, `dateformat` and
+  `timestampformat`.
 - `fyrql-connector-json`: JSON files (`.json`, `.jsonl`, `.ndjson`, also with `.gz`) that
   hold an array of records or a sequence of them. The columns are inferred from a sample
   as DuckDB's `read_json` infers them; objects and arrays become `STRUCT`, `MAP` and `LIST`
   values, and a field whose values do not unite is `VARCHAR` with the JSON text. A scan
   streams the file and skips the values of the columns, and of the fields of structs,
-  that it does not need. The table
+  that it does not need; a file in S3 is read in one part. The table
   functions take `format`, `sample_size`, `ignore_errors`, `map_inference_threshold`,
   `field_appearance_threshold`, `dateformat` and `timestampformat`.
 - `fyrql-connector-parquet`: Parquet files, read in pure Java with parquet-java without
@@ -178,7 +181,9 @@ and JDBC write tables; see [Writing](#writing).
   timestamps, strings and booleans, also on fields of structs, under `AND`, `OR` and
   `NOT`. `explain` does not show these filters; `recordReads(true)` keeps the row groups
   and columns each scan read. parquet-java holds the column chunks of a row group in
-  memory, compressed, outside the memory budget of the engine.
+  memory, compressed, outside the memory budget of the engine. A file in S3 is read in
+  ranges, see `fyrql-connector-s3`; the option `readAhead` (`1MB`) is the size of the
+  reads of the headers of pages, of dictionaries and of indexes there.
 - `fyrql-connector-http`: the JSON an endpoint answers to a `GET`, read as a JSON file,
   or the array that a JSON pointer such as `/data` points to inside the answer. The
   connector sends its headers, such as `Authorization`, accepts gzip and infers the
@@ -215,6 +220,34 @@ and JDBC write tables; see [Writing](#writing).
   DuckDB. `recordStatements(true)` keeps every statement sent. With `splitRows(n)`, a
   scan of a table of more than `n` rows is read in parts on several threads, see
   [Parallel execution](#parallel-execution).
+- `fyrql-connector-s3`: the objects of S3, and of stores with its API such as MinIO, as
+  the files of locations `s3://bucket/key`, which the connectors of CSV, JSON and Parquet
+  read and write in `FROM`, in their table functions, in `COPY` and as the tables of their
+  sources, such as `tables.events: s3://lake/events/*.parquet`. The source of the type
+  `s3` has no tables of its own, and an engine has at most one. It talks to S3 over HTTP
+  with a client of its own, without the SDK of AWS, and signs its requests with the
+  Signature Version 4 of AWS. A location names an object, the objects directly under a
+  prefix (`s3://lake/events/` or `s3://lake/events`), or those whose names match a
+  pattern in the last part (`s3://lake/events/2026-*.parquet`). A Parquet object is read
+  in ranges: the footer, usually with one request for the tail of the object, and then
+  only the column chunks of the row groups and columns a scan needs, so that a filter
+  that excludes every row group by the statistics reads nothing more. Each read names
+  the entity tag of the object, so that an object that changes during a query fails it
+  rather than mixing versions. A CSV or JSON object is read as one stream, in one part.
+  An object is written as a multipart upload in parts of `partSize` and appears only with
+  the last row, as a local file does; a statement that fails abandons the upload. A
+  request that fails on the network, with a status of 500 or more or with 429 is tried
+  again `retries` times. The options: `endpoint` (such as `http://127.0.0.1:9000` for
+  MinIO; by default that of AWS in the region), `region` (`us-east-1`), `accessKey`,
+  `secretKey` and `sessionToken`, `profile`, `pathStyle` (`true` with an `endpoint`,
+  otherwise `false`), `timeout` (`30s`), `partSize` (`8MB`, at least `5MB`) and `retries`
+  (`3`). What is not given comes from the environment as for the tools of AWS:
+  `AWS_ENDPOINT_URL_S3` or `AWS_ENDPOINT_URL`, `AWS_REGION` or `AWS_DEFAULT_REGION`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, or else the profile
+  of `~/.aws/credentials` that `profile` or `AWS_PROFILE` names; without credentials the
+  requests go unsigned, as for a public bucket. No message shows the value of an option.
+  Without a source of S3, a location of S3 fails with `No source handles s3:// locations;
+  register a source of the type s3`.
 
 A query over orders in PostgreSQL, customers in a CSV file and products from an HTTP
 endpoint:
@@ -435,7 +468,8 @@ scripts of several statements are not supported.
 `parquet`), or else from the end of the name of the file: `.csv` and `.tsv`, `.json`,
 `.jsonl` and `.ndjson`, or `.parquet`, CSV and JSON also with `.gz`, which compresses
 them with gzip. A relative path is resolved against the working directory of the
-process. The rows go into a temporary file `<name>.<random>.tmp` next to the file, which
+process; a location `s3://bucket/key` writes an object of S3, see
+[Connectors](#connectors). The rows go into a temporary file `<name>.<random>.tmp` next to the file, which
 takes its name when the last row is written and replaces a file of that name, so that a
 reader never sees half a file; the directory must exist. `COPY t (a, b) TO 'file'`
 writes the columns of the list, as `COPY (SELECT a, b FROM t) TO 'file'` does. The
@@ -512,8 +546,9 @@ The options of reading, all optional, with their defaults:
 
 A CSV file holds no nested values: a column of the type `STRUCT`, `LIST` or `MAP` in the
 list fails the statement. In a CSV file of one column whose null string is empty, an
-empty line is a `NULL`, as DuckDB writes and reads it; otherwise it is skipped. Files
-compressed with zstd, and several files at once, are not loaded.
+empty line is a `NULL`, as DuckDB writes and reads it; otherwise it is skipped. An object
+of S3 is loaded by its location, as in `COPY mem.archive FROM 's3://lake/archive.csv'`.
+Files compressed with zstd, and several files at once, are not loaded.
 
 **Tables.** The memory connector and the JDBC connector create, fill and drop tables. In
 memory, a table that SQL created holds the batches of its rows and shows the rows of a
@@ -703,7 +738,7 @@ engine:
 ```
 
 The `type` of a source picks its connector, which must be on the class path: `csv`,
-`json`, `parquet`, `http`, `odata`, `jdbc` or `memory`; a connector of an application joins them through a
+`json`, `parquet`, `http`, `odata`, `jdbc`, `memory` or `s3`; a connector of an application joins them through a
 `ConnectorFactory` listed in `META-INF/services`. The other keys of a source are the
 options of its type, read as text with nested keys joined by dots (`tables.products.url`);
 an unknown or misspelled option is an error that lists the known ones. Relative paths
@@ -746,6 +781,24 @@ a scan of a table reads on several threads. A source of the type `csv`, `json` o
 `parquet` without options has no tables; the engine has one of each anyway whose module
 is on the class path, unless `implicitSources: false` stands under `engine` (see
 [Writing](#writing)).
+
+A source of the type `s3` holds no tables; it opens the objects of `s3://` locations to
+the sources of the formats, with the options of `fyrql-connector-s3` (see
+[Connectors](#connectors)). A table of a source of the type `csv`, `json` or `parquet`
+in S3 is looked up when it is first used:
+
+```yaml
+sources:
+  - name: s3
+    type: s3
+    endpoint: http://127.0.0.1:9000
+    accessKey: ${env:MINIO_ROOT_USER}
+    secretKey: ${env:MINIO_ROOT_PASSWORD}
+  - name: lake
+    type: parquet
+    tables:
+      events: s3://lake/events/*.parquet
+```
 
 ## JDBC driver
 
@@ -1569,6 +1622,9 @@ functions in a correlated subquery, and subqueries or `unnest` inside window fun
 
 Known differences from DuckDB:
 
+- Files in S3 need a registered source of the type `s3`, rather than the extension
+  `httpfs` and `CREATE SECRET`. Locations of `gs://`, `az://`, `http://` and `https://`,
+  `**` in a pattern and a pattern before the last part of a location are not supported.
 - `now()` is a `TIMESTAMP` without time zone.
 - On several threads, the last binary digits of `sum` and `avg` over `FLOAT` and
   `DOUBLE`, and which error is reported when rows of several parts of a source fail, may
@@ -1669,6 +1725,7 @@ Known differences from DuckDB:
 | `fyrql-connector-http` | JSON from HTTP endpoints as tables |
 | `fyrql-connector-odata` | the entity sets of OData services of versions 2 and 4 as tables, with filters, orders, limits and `count(*)` pushed to the service |
 | `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC, and of any other database through a generic dialect, read and written |
+| `fyrql-connector-s3` | the objects of S3 and MinIO as the files of the connectors of CSV, JSON and Parquet, over a client of its own with the signatures of AWS |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources and those of the file formats on the class path |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application |

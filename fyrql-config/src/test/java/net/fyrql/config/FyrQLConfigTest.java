@@ -13,6 +13,7 @@ package net.fyrql.config;
 
 import net.fyrql.FyrQL;
 import net.fyrql.connector.jdbc.JdbcConnector;
+import net.fyrql.connector.s3.FakeS3Server;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -151,5 +152,34 @@ class FyrQLConfigTest {
         Path missing = config("{}");
         String message = assertThrows(ConfigException.class, () -> FyrQLConfig.open(missing)).getMessage();
         assertTrue(message.startsWith(missing + ": Cannot create the source docs: "), message);
+    }
+
+    @Test
+    void aSourceOfS3HoldsTheFilesOfS3LocationsForTheSourcesOfFormats() throws IOException {
+        try (FakeS3Server s3 = FakeS3Server.start("fyrql", "fyrql-secret")) {
+            s3.createBucket("lake");
+            Path file = Files.writeString(dir.resolve("s3.yaml"), """
+                    sources:
+                      - name: s3
+                        type: s3
+                        endpoint: %s
+                        accessKey: fyrql
+                        secretKey: fyrql-secret
+                        timeout: 10s
+                      - name: lake
+                        type: parquet
+                        tables:
+                          events: s3://lake/events/*.parquet
+                    """.formatted(s3.endpoint()), StandardCharsets.UTF_8);
+            try (FyrQL engine = FyrQLConfig.open(file)) {
+                assertEquals(List.of("s3", "lake", "csv", "json"), engine.sources());
+                assertEquals(2, engine.update("COPY (SELECT * FROM (VALUES (1), (2)) v(n)) TO"
+                        + " 's3://lake/events/a.parquet'"));
+                assertEquals(1, engine.update("COPY (SELECT 3 AS n) TO 's3://lake/events/b.parquet'"));
+                assertEquals(List.of(List.of(1), List.of(2), List.of(3)), engine.rows("SELECT n FROM lake.events"
+                        + " ORDER BY n").stream().map(Arrays::asList).toList());
+                assertEquals(List.of("events/a.parquet", "events/b.parquet"), s3.keys("lake"));
+            }
+        }
     }
 }

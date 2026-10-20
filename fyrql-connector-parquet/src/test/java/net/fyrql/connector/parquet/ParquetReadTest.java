@@ -123,7 +123,7 @@ class ParquetReadTest {
         }
         ParquetTestFiles.duckdb(statements.toArray(String[]::new));
         for (Path file : files) {
-            assertTrue(new ParquetFiles().footer(file).metadata().getBlocks().size() > 1, file.toString());
+            assertTrue(ParquetTestFiles.footer(file).metadata().getBlocks().size() > 1, file.toString());
             List<List<String>> expected = duckdb(file, "");
             for (int batchSize : file == files.get(0) ? List.of(1, 7, 2048) : List.of(7, 2048)) {
                 assertRows(expected, fyrql(connector(file, batchSize), null, OptionalLong.empty()),
@@ -275,7 +275,7 @@ class ParquetReadTest {
                             rows.row(g -> fill(g, random, i));
                         }
                     });
-            assertEquals(3, new ParquetFiles().footer(file).metadata().getBlocks().size(), variant.name());
+            assertEquals(3, ParquetTestFiles.footer(file).metadata().getBlocks().size(), variant.name());
             List<List<String>> expected = duckdb(file, "");
             for (int batchSize : List.of(1, 7, 2048)) {
                 assertRows(expected, fyrql(connector(file, batchSize), null, OptionalLong.empty()),
@@ -295,7 +295,7 @@ class ParquetReadTest {
         List<ParquetConnector.Read> reads = c.reads();
         assertEquals(5, reads.size());
         for (int g = 0; g < 5; g++) {
-            assertEquals(new ParquetConnector.Read(file.toAbsolutePath(), g, List.of("id", "amount"), 1000),
+            assertEquals(new ParquetConnector.Read(file.toAbsolutePath().toString(), g, List.of("id", "amount"), 1000),
                     reads.get(g));
         }
         c.clearReads();

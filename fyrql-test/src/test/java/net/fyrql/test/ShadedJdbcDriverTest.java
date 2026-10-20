@@ -13,6 +13,7 @@ package net.fyrql.test;
 
 import net.fyrql.connector.odata.FakeODataServer;
 import net.fyrql.connector.odata.ODataVersion;
+import net.fyrql.connector.s3.FakeS3Server;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.jdbc.FyrQLDriver;
@@ -86,17 +87,18 @@ class ShadedJdbcDriverTest {
     @Test
     void aFederatedQueryRunsThroughTheJarInAClassLoaderOfItsOwn() throws Exception {
         Path jar = jar();
-        try (FakeODataServer server = FakeODataServer.start()) {
+        try (FakeODataServer server = FakeODataServer.start();
+                FakeS3Server s3 = FakeS3Server.start("fyrql", "fyrql-secret")) {
             Schema discounts = new Schema(List.of(new Schema.Field("Country", DataType.VARCHAR, false),
                     new Schema.Field("Rate", DataType.decimal(4, 2), true)));
             server.service("pricing", ODataVersion.V4).pageSize(1).entitySet("Discounts", discounts,
                     List.of(new Object[] {"DE", new BigDecimal("0.10")}, new Object[] {"FR", new BigDecimal("0.05")},
                             new Object[] {"IT", null}), "Country");
-            federatedQuery(jar, server);
+            federatedQuery(jar, server, s3);
         }
     }
 
-    private void federatedQuery(Path jar, FakeODataServer server) throws Exception {
+    private void federatedQuery(Path jar, FakeODataServer server, FakeS3Server s3) throws Exception {
         Path data = Files.createDirectories(dir.resolve("data"));
         Files.writeString(data.resolve("orders.csv"), "id,customer,amount\n1,1,10.50\n2,2,20.00\n3,1,5.25\n",
                 StandardCharsets.UTF_8);
@@ -107,6 +109,7 @@ class ShadedJdbcDriverTest {
             s.execute("COPY (SELECT * FROM (VALUES (1, 2), (1, 3), (2, 1), (3, 4)) v(order_id, qty)) TO '"
                     + path(data.resolve("items.parquet")) + "' (FORMAT parquet)");
         }
+        s3.put("lake", "items/items.parquet", Files.readAllBytes(data.resolve("items.parquet")));
         String h2 = "jdbc:h2:file:" + path(dir.resolve("countries"));
         try (Connection c = DriverManager.getConnection(h2); Statement s = c.createStatement()) {
             s.execute("CREATE TABLE \"countries\" (\"code\" VARCHAR(2), \"name\" VARCHAR(20))");
@@ -130,7 +133,12 @@ class ShadedJdbcDriverTest {
                     type: odata
                     url: "%s"
                     trustFilters: true
-                """.formatted(h2, server.url("pricing")), StandardCharsets.UTF_8);
+                  - name: s3
+                    type: s3
+                    endpoint: "%s"
+                    accessKey: fyrql
+                    secretKey: fyrql-secret
+                """.formatted(h2, server.url("pricing"), s3.endpoint()), StandardCharsets.UTF_8);
 
         URL h2Jar = org.h2.Driver.class.getProtectionDomain().getCodeSource().getLocation();
         Thread thread = Thread.currentThread();
@@ -163,7 +171,7 @@ class ShadedJdbcDriverTest {
                         catalogs.add(rs.getString(1));
                     }
                 }
-                assertEquals(List.of("files", "docs", "pq", "db", "erp"), catalogs);
+                assertEquals(List.of("files", "docs", "pq", "db", "erp", "s3"), catalogs);
                 try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery(sql)) {
                     assertTrue(rs.next());
                     assertEquals("Ann", rs.getString(1));
@@ -200,6 +208,17 @@ class ShadedJdbcDriverTest {
                         + server.requests());
                 assertTrue(server.requests("/pricing/Discounts").stream().anyMatch(r -> r.parameters()
                         .containsKey("$skiptoken")), "the answer has several pages");
+                // Files in S3, read and written through the source of S3 of the configuration.
+                try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery("SELECT sum(qty) FROM"
+                        + " 's3://lake/items/*.parquet'")) {
+                    assertTrue(rs.next());
+                    assertEquals(10, rs.getLong(1));
+                }
+                try (Statement s = c.createStatement()) {
+                    assertEquals(2, s.executeUpdate("COPY (SELECT * FROM orders WHERE amount > 6) TO"
+                            + " 's3://lake/out/orders.parquet'"));
+                }
+                assertTrue(s3.keys("lake").contains("out/orders.parquet"), s3.keys("lake").toString());
                 SQLException e = assertThrows(SQLException.class,
                         () -> c.createStatement().executeQuery("SELECT * FROM nowhere"));
                 assertEquals("42P01", e.getSQLState(), e.getMessage());
@@ -233,7 +252,8 @@ class ShadedJdbcDriverTest {
                     "net.fyrql.connector.http.HttpConnectorFactory",
                     "net.fyrql.connector.odata.ODataConnectorFactory",
                     "net.fyrql.connector.jdbc.JdbcConnectorFactory",
-                    "net.fyrql.connector.memory.MemoryConnectorFactory"),
+                    "net.fyrql.connector.memory.MemoryConnectorFactory",
+                    "net.fyrql.connector.s3.S3ConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),
                     services(jar, "net.fyrql.exec.spi.ExpressionCompiler"));

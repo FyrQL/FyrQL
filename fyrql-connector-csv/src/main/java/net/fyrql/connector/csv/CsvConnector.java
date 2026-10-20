@@ -25,8 +25,11 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileObject;
 import net.fyrql.connector.FileReaderProvider;
+import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
+import net.fyrql.connector.Globs;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Sink;
@@ -49,6 +52,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
@@ -105,7 +109,11 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     private static final String CALL_PREFIX = "#";
 
     private final String name;
+    private volatile FileStores stores = FileStores.local(Path.of(""));
     private final Map<String, Table> tables;
+    /** The tables in another store than the local one by their names, looked up when first used. */
+    private final Map<String, Pending> pending;
+    private final Map<String, Table> found = new ConcurrentHashMap<>();
     private final int batchSize;
     private final int sampleRows;
     private final Charset charset;
@@ -131,18 +139,30 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      *        {@code null} for the forms of a cast
      * @param timestampFormat the same for the timestamps
      * @param gzip whether the file is compressed with gzip
+     * @param remote the file if it is in another store than the local
+     *        one, which is read as a whole in one part; {@code null} for a
+     *        local one, and for a table not looked up yet
      */
     record Table(Path file, char delimiter, char quote, boolean header, String nullString, Charset charset,
-            Schema schema, long rows, String dateFormat, String timestampFormat, boolean gzip) {
+            Schema schema, long rows, String dateFormat, String timestampFormat, boolean gzip, FileObject remote) {
+
+        /** Returns where the file is, for messages. */
+        String location() {
+            return remote != null ? remote.location() : String.valueOf(file);
+        }
+    }
+
+    /** A table in another store than the local one, before it is looked up: its location and settings. */
+    private record Pending(String location, Boolean header, Schema schema) {
     }
 
     /** A call of a table function: the file in its current version and how to read it. */
-    private record Call(Path file, FileTime modified, long size, char delimiter, char quote, Boolean header,
+    private record Call(String file, String version, long size, char delimiter, char quote, Boolean header,
             String nullString, String dateFormat, String timestampFormat) {
     }
 
     /** A file in its current version read with given columns and options. */
-    private record FileCall(Path file, FileTime modified, long size, Schema schema, Map<String, String> options) {
+    private record FileCall(String file, String version, long size, Schema schema, Map<String, String> options) {
     }
 
     /** What the index of a file depends on besides the file. */
@@ -157,10 +177,11 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     private record PageRange(CsvIndex index, int from, int to) {
     }
 
-    private CsvConnector(String name, Map<String, Table> tables, int batchSize, int sampleRows, Charset charset,
-            long splitSize) {
+    private CsvConnector(String name, Map<String, Table> tables, Map<String, Pending> pending, int batchSize,
+            int sampleRows, Charset charset, long splitSize) {
         this.name = name;
         this.tables = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(tables));
+        this.pending = Map.copyOf(pending);
         this.batchSize = batchSize;
         this.sampleRows = sampleRows;
         this.charset = charset;
@@ -200,6 +221,35 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     }
 
     @Override
+    public void fileStores(FileStores stores) {
+        this.stores = stores;
+    }
+
+    /** Returns the path of a local location. */
+    private static Path local(String location) {
+        try {
+            return Path.of(location);
+        } catch (InvalidPathException e) {
+            throw new IllegalArgumentException("Not a file: " + location + " (" + e.getReason() + ")", e);
+        }
+    }
+
+    /**
+     * Returns a file of another store than the local one.
+     *
+     * @throws IllegalArgumentException if there is none or it cannot be read
+     */
+    private FileObject remote(String location) {
+        try {
+            return stores.object(location);
+        } catch (NoSuchFileException e) {
+            throw new IllegalArgumentException("No files found that match the pattern \"" + location + "\"", e);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Cannot read " + location + ": " + e.getMessage(), e);
+        }
+    }
+
+    @Override
     public Catalog catalog() {
         return catalog;
     }
@@ -212,7 +262,26 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         if (t == null) {
             throw new IllegalArgumentException("No table " + ref + " in the CSV source " + name);
         }
+        if (t.file() == null && t.remote() == null) {
+            t = found.computeIfAbsent(ref.table(), this::lookUp);
+        }
         return t;
+    }
+
+    /** Looks up a table in another store than the local one and sniffs its schema unless it has one. */
+    private Table lookUp(String table) {
+        Pending p = pending.get(table);
+        Table t = tables.get(table);
+        try {
+            Table sniffed = sniff(new Table(null, t.delimiter(), t.quote(), false, t.nullString(), t.charset(), null,
+                    -1, null, null, t.gzip(), remote(p.location())), p.header(), sampleRows);
+            return p.schema() == null ? sniffed : new Table(null, sniffed.delimiter(), sniffed.quote(),
+                    sniffed.header(), sniffed.nullString(), sniffed.charset(), p.schema(), sniffed.rows(), null, null,
+                    sniffed.gzip(), sniffed.remote());
+        } catch (IllegalArgumentException | UncheckedIOException e) {
+            throw new IllegalArgumentException("The table " + table + " of the CSV source " + name + ": "
+                    + e.getMessage(), e);
+        }
     }
 
     @Override
@@ -250,14 +319,19 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         if (path.indexOf('*') >= 0 || path.indexOf('?') >= 0) {
             throw new IllegalArgumentException("Patterns of file names are not supported yet: " + path);
         }
-        Path file;
-        try {
-            file = Path.of(path).toAbsolutePath().normalize();
-        } catch (InvalidPathException e) {
-            throw new IllegalArgumentException("Invalid path " + path, e);
-        }
-        if (!Files.isRegularFile(file)) {
-            throw new IllegalArgumentException("No files found that match the pattern \"" + path + "\"");
+        Path file = null;
+        FileObject remote = null;
+        if (FileStores.isLocal(path)) {
+            try {
+                file = Path.of(path).toAbsolutePath().normalize();
+            } catch (InvalidPathException e) {
+                throw new IllegalArgumentException("Invalid path " + path, e);
+            }
+            if (!Files.isRegularFile(file)) {
+                throw new IllegalArgumentException("No files found that match the pattern \"" + path + "\"");
+            }
+        } else {
+            remote = remote(path);
         }
         String lower = path.toLowerCase(Locale.ROOT);
         if (lower.endsWith(".zst")) {
@@ -284,16 +358,23 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             }
         }
         Call call;
-        try {
-            call = new Call(file, Files.getLastModifiedTime(file), Files.size(file), delimiter, quote, header,
-                    nullString, dateFormat, timestampFormat);
-        } catch (IOException e) {
-            throw new IllegalArgumentException("Cannot read " + path + ": " + e.getMessage(), e);
+        if (remote != null) {
+            call = new Call(remote.location(), remote.version(), remote.size(), delimiter, quote, header, nullString,
+                    dateFormat, timestampFormat);
+        } else {
+            try {
+                call = new Call(file.toString(), Files.getLastModifiedTime(file).toString(), Files.size(file),
+                        delimiter, quote, header, nullString, dateFormat, timestampFormat);
+            } catch (IOException e) {
+                throw new IllegalArgumentException("Cannot read " + path + ": " + e.getMessage(), e);
+            }
         }
         boolean gzip = lower.endsWith(".gz");
+        Path local = file;
+        FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
-            Table t = new Table(call.file(), call.delimiter(), call.quote(), false, call.nullString(), charset, null,
-                    -1, call.dateFormat(), call.timestampFormat(), gzip);
+            Table t = new Table(local, call.delimiter(), call.quote(), false, call.nullString(), charset, null,
+                    -1, call.dateFormat(), call.timestampFormat(), gzip, object);
             String generated = CALL_PREFIX + callCount.incrementAndGet();
             callTables.put(generated, sniff(t, call.header(), sampleRows));
             return generated;
@@ -334,11 +415,11 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * </ul>
      */
     @Override
-    public Sink openFile(String format, Path file, Schema schema, Map<String, String> options) {
+    public Sink openFile(String format, String location, Schema schema, Map<String, String> options) {
         if (!FILE_FORMATS.contains(format)) {
             throw new IllegalArgumentException("The CSV source " + name + " writes no files of the format " + format);
         }
-        return CsvFileWriter.open(file, schema, options);
+        return CsvFileWriter.open(location, stores, schema, options);
     }
 
     /**
@@ -366,13 +447,15 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * options gives the same table.
      */
     @Override
-    public TableRef fileTable(String format, Path file, Schema schema, Map<String, String> options) {
+    public TableRef fileTable(String format, String location, Schema schema, Map<String, String> options) {
+        boolean isLocal = FileStores.isLocal(location);
+        String file = isLocal ? local(location).toString() : location;
         if (!FILE_FORMATS.contains(format)) {
             throw new IllegalArgumentException("The CSV source " + name + " reads no files of the format " + format);
         }
         String owner = "the CSV file " + file;
         ConfigOptions o = new ConfigOptions(owner, options, Path.of(""));
-        String lower = String.valueOf(file.getFileName()).toLowerCase(Locale.ROOT);
+        String lower = file.substring(Globs.lastSeparator(file) + 1).toLowerCase(Locale.ROOT);
         boolean header = o.bool("header").orElse(true);
         char delimiter = CsvFileWriter.first(o.character("delimiter"), o.character("delim"), o.character("sep"))
                 .orElse(lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',');
@@ -400,21 +483,30 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         if (!gzip && lower.endsWith(".zst")) {
             throw new IllegalArgumentException("Files compressed with zstd are not supported: " + file);
         }
-        Path absolute = file.toAbsolutePath().normalize();
-        if (!Files.isRegularFile(absolute)) {
-            throw new IllegalArgumentException("No files found that match the pattern \"" + file + "\"");
-        }
+        Path absolute = null;
+        FileObject remote = null;
         FileCall call;
-        try {
-            call = new FileCall(absolute, Files.getLastModifiedTime(absolute), Files.size(absolute), schema,
-                    Map.copyOf(options));
-        } catch (IOException e) {
-            throw new IllegalArgumentException("Cannot read " + file + ": " + e.getMessage(), e);
+        if (isLocal) {
+            absolute = Path.of(file).toAbsolutePath().normalize();
+            if (!Files.isRegularFile(absolute)) {
+                throw new IllegalArgumentException("No files found that match the pattern \"" + file + "\"");
+            }
+            try {
+                call = new FileCall(absolute.toString(), Files.getLastModifiedTime(absolute).toString(),
+                        Files.size(absolute), schema, Map.copyOf(options));
+            } catch (IOException e) {
+                throw new IllegalArgumentException("Cannot read " + file + ": " + e.getMessage(), e);
+            }
+        } else {
+            remote = remote(location);
+            call = new FileCall(remote.location(), remote.version(), remote.size(), schema, Map.copyOf(options));
         }
+        Path local = absolute;
+        FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
             String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, new Table(absolute, delimiter, quote, header, nullString, charset, schema, -1,
-                    dateFormat, timestampFormat, gzip));
+            callTables.put(generated, new Table(local, delimiter, quote, header, nullString, charset, schema, -1,
+                    dateFormat, timestampFormat, gzip, object));
             return generated;
         });
         return TableRef.of(name, table);
@@ -514,8 +606,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
 
     /** Returns the index of a file larger than the split size, or {@code null} for one split. */
     private CsvIndex index(Table table) {
-        if (table.gzip()) {
-            // The index finds the records by the bytes of the file, which gzip hides.
+        if (table.gzip() || table.remote() != null) {
+            // The index finds the records by the bytes of a local file, which gzip hides.
             return null;
         }
         long size;
@@ -739,10 +831,10 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 return null;
             }
             if (getFieldCount() != table.schema().size()) {
-                throw new ConversionException("Line " + getStartingLineNumber() + " of " + table.file() + " has "
+                throw new ConversionException("Line " + getStartingLineNumber() + " of " + table.location() + " has "
                         + getFieldCount() + " fields, the header " + table.schema().size());
             } else if (error != null) {
-                throw new ConversionException("Line " + getStartingLineNumber() + " of " + table.file()
+                throw new ConversionException("Line " + getStartingLineNumber() + " of " + table.location()
                         + ", column " + output.name(errorColumn) + ": " + error.getMessage(), error);
             }
             return Boolean.TRUE;
@@ -779,23 +871,26 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 .commentStrategy(CommentStrategy.NONE);
         InputStream in;
         try {
-            if (!table.gzip()) {
+            if (table.remote() != null) {
+                in = table.remote().open();
+            } else if (!table.gzip()) {
                 return builder.build(handler, table.file(), table.charset());
+            } else {
+                in = Files.newInputStream(table.file());
             }
-            in = Files.newInputStream(table.file());
         } catch (IOException e) {
-            throw new UncheckedIOException("Cannot open " + table.file(), e);
+            throw new UncheckedIOException("Cannot open " + table.location() + ": " + e.getMessage(), e);
         }
         try {
             // The CSV reader closes the stream.
-            return builder.build(handler, new GZIPInputStream(in, 1 << 16), table.charset());
+            return builder.build(handler, table.gzip() ? new GZIPInputStream(in, 1 << 16) : in, table.charset());
         } catch (IOException | RuntimeException e) {
             try {
                 in.close();
             } catch (IOException suppressed) {
                 e.addSuppressed(suppressed);
             }
-            throw e instanceof IOException io ? new UncheckedIOException("Cannot read " + table.file()
+            throw e instanceof IOException io ? new UncheckedIOException("Cannot read " + table.location()
                     + " as gzip: " + io.getMessage(), io) : (RuntimeException) e;
         }
     }
@@ -840,10 +935,10 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 }
             }
         } catch (IOException e) {
-            throw new UncheckedIOException("Cannot read " + table.file(), e);
+            throw new UncheckedIOException("Cannot read " + table.location(), e);
         }
         if (rows.isEmpty()) {
-            throw new IllegalArgumentException("Empty file " + table.file());
+            throw new IllegalArgumentException("Empty file " + table.location());
         }
         List<String> first = rows.get(0);
         int width = first.size();
@@ -875,7 +970,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         }
         return new Table(table.file(), table.delimiter(), table.quote(), hasHeader, table.nullString(),
                 table.charset(), new Schema(fields), rowCount(table, rows, hasHeader, sampleRows),
-                table.dateFormat(), table.timestampFormat(), table.gzip());
+                table.dateFormat(), table.timestampFormat(), table.gzip(), table.remote());
     }
 
     /**
@@ -890,7 +985,6 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         if (table.gzip()) {
             return -1;
         }
-        Path file = table.file();
         long headerChars = hasHeader ? chars(rows.get(0)) : 0;
         long sampleChars = -headerChars;
         for (List<String> row : rows) {
@@ -898,7 +992,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         }
         long size;
         try {
-            size = Files.size(file);
+            size = table.remote() != null ? table.remote().size() : Files.size(table.file());
         } catch (IOException e) {
             return -1;
         }
@@ -998,6 +1092,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         private final Map<String, Table> tables = new LinkedHashMap<>();
         private final Map<String, Schema> schemas = new LinkedHashMap<>();
         private final Map<String, Boolean> headers = new LinkedHashMap<>();
+        private final Map<String, String> locations = new LinkedHashMap<>();
         private Character delimiter;
         private char quote = '"';
         private Boolean header;
@@ -1077,11 +1172,34 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             if (table.startsWith(CALL_PREFIX)) {
                 throw new IllegalArgumentException("A table name may not start with " + CALL_PREFIX + ": " + table);
             }
+            locations.remove(table);
             String lower = file.toString().toLowerCase(Locale.ROOT);
             char d = delimiter != null ? delimiter : lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
             tables.put(table, new Table(file, d, quote, false, nullString, charset, null, -1, null, null,
-                    lower.endsWith(".gz")));
+                    lower.endsWith(".gz"), null));
             headers.put(table, header);
+            return this;
+        }
+
+        /**
+         * Adds a file as a table, a local one, relative to the working
+         * directory unless absolute, or one in a store of the engine such as
+         * {@code s3://bucket/key}, which is looked up when the table is first
+         * used and read in one part.
+         */
+        public Builder file(String table, String location) {
+            if (FileStores.isLocal(location)) {
+                return file(table, local(location));
+            }
+            if (table.startsWith(CALL_PREFIX)) {
+                throw new IllegalArgumentException("A table name may not start with " + CALL_PREFIX + ": " + table);
+            }
+            String lower = location.toLowerCase(Locale.ROOT);
+            char d = delimiter != null ? delimiter : lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
+            tables.put(table, new Table(null, d, quote, false, nullString, charset, null, -1, null, null,
+                    lower.endsWith(".gz"), null));
+            headers.put(table, header);
+            locations.put(table, location);
             return this;
         }
 
@@ -1102,16 +1220,27 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             return this;
         }
 
-        /** Builds the connector, sniffing the schema of every file without an explicit one. */
+        /**
+         * Builds the connector, sniffing the schema of every local file
+         * without an explicit one; a file in another store is sniffed when
+         * its table is first used.
+         */
         public CsvConnector build() {
             Map<String, Table> withSchemas = new LinkedHashMap<>();
+            Map<String, Pending> pending = new LinkedHashMap<>();
             for (Map.Entry<String, Table> e : tables.entrySet()) {
+                String location = locations.get(e.getKey());
+                if (location != null) {
+                    withSchemas.put(e.getKey(), e.getValue());
+                    pending.put(e.getKey(), new Pending(location, headers.get(e.getKey()), schemas.get(e.getKey())));
+                    continue;
+                }
                 Table t = sniff(e.getValue(), headers.get(e.getKey()), sampleRows);
                 Schema schema = schemas.getOrDefault(e.getKey(), t.schema());
                 withSchemas.put(e.getKey(), new Table(t.file(), t.delimiter(), t.quote(), t.header(), t.nullString(),
-                        t.charset(), schema, t.rows(), t.dateFormat(), t.timestampFormat(), t.gzip()));
+                        t.charset(), schema, t.rows(), t.dateFormat(), t.timestampFormat(), t.gzip(), null));
             }
-            return new CsvConnector(name, withSchemas, batchSize, sampleRows, charset, splitSize);
+            return new CsvConnector(name, withSchemas, pending, batchSize, sampleRows, charset, splitSize);
         }
     }
 }

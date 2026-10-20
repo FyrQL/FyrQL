@@ -25,8 +25,11 @@ import java.util.Optional;
  * {@code .parquet} files become tables, and {@code tables.<name>} or
  * {@code tables.<name>.path} for a file, a directory or a pattern with
  * {@code *} and {@code ?} in the name of the file, all resolved against the
- * directory of the configuration; and {@code batchSize}. A source without
- * tables serves only the table functions.
+ * directory of the configuration, or in a store of the engine such as
+ * {@code s3://bucket/orders/}; {@code batchSize}; and {@code readAhead},
+ * the bytes by which a file in such a store is read ahead for small reads,
+ * such as {@code 1MB}, the default. A source without tables serves only the
+ * table functions.
  */
 public final class ParquetConnectorFactory implements ConnectorFactory {
 
@@ -45,6 +48,7 @@ public final class ParquetConnectorFactory implements ConnectorFactory {
         ConfigOptions o = new ConfigOptions("the Parquet source " + name, options, directory);
         ParquetConnector.Builder b = ParquetConnector.builder(name);
         o.integer("batchSize").ifPresent(b::batchSize);
+        o.bytes("readAhead").ifPresent(bytes -> b.readAhead((int) Math.min(bytes, Integer.MAX_VALUE)));
         Optional<Path> files = o.path("directory");
         Map<String, Map<String, String>> tables = o.tables("path");
         o.rejectUnknown();

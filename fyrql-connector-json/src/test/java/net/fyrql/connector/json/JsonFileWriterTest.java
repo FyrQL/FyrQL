@@ -105,7 +105,7 @@ class JsonFileWriterTest {
     }
 
     private static long write(Path file, Schema schema, Map<String, String> options, Batch... batches) {
-        try (Sink sink = connector().openFile("json", file, schema, options)) {
+        try (Sink sink = connector().openFile("json", file.toString(), schema, options)) {
             for (Batch b : batches) {
                 sink.write(b);
             }
@@ -196,7 +196,7 @@ class JsonFileWriterTest {
     void closeAloneLeavesNoTraceAndWrongOptionsFailFirst() throws IOException {
         Schema schema = Schema.of(new Schema.Field("n", DataType.INTEGER));
         Path file = dir.resolve("n.json");
-        try (Sink sink = connector().openFile("json", file, schema, Map.of())) {
+        try (Sink sink = connector().openFile("json", file.toString(), schema, Map.of())) {
             sink.write(Batch.ofRows(schema, List.<Object[]>of(new Object[] {1})));
             assertEquals(1, files().size());
         }
@@ -208,7 +208,7 @@ class JsonFileWriterTest {
                 assertThrows(IllegalArgumentException.class, () -> write(file, schema, Map.of("compression",
                         "zstd"))).getMessage());
         assertEquals("The JSON source json writes no files of the format csv",
-                assertThrows(IllegalArgumentException.class, () -> connector().openFile("csv", file, schema,
+                assertThrows(IllegalArgumentException.class, () -> connector().openFile("csv", file.toString(), schema,
                         Map.of())).getMessage());
         assertEquals(List.of(), files());
         assertEquals(List.of("json"), connector().fileFormats());

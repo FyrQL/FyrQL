@@ -15,7 +15,9 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileObject;
 import net.fyrql.connector.FileReaderProvider;
+import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
@@ -76,6 +78,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * each scan, so that it reads what is there; their columns must still be
  * those of the table. {@link Builder#recordReads} keeps what each scan
  * read.
+ * <p>
+ * Files may also be in a store of the engine, such as
+ * {@code s3://bucket/orders/*.parquet}, see {@link #fileStores}; such a
+ * file is read in ranges, the footer first and then only the column chunks
+ * of the row groups a scan needs, see {@link Builder#readAhead}. A table
+ * of the builder in such a store is looked up when it is first used.
  */
 public final class ParquetConnector implements Connector, TableFunctionProvider, FileWriterProvider,
         FileReaderProvider {
@@ -94,12 +102,12 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
     /**
      * A row group a scan read.
      *
-     * @param file the file
+     * @param file the location of the file
      * @param rowGroup the index of the row group in the file
      * @param columns the paths of the primitive columns read, in the order of the file
      * @param rows the rows delivered
      */
-    public record Read(Path file, int rowGroup, List<String> columns, long rows) {
+    public record Read(String file, int rowGroup, List<String> columns, long rows) {
         public Read {
             columns = List.copyOf(columns);
         }
@@ -122,6 +130,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
 
     private final String name;
     private final ParquetFiles files;
+    /** The locations of the tables by their names, and the tables found so far. */
+    private final Map<String, String> locations;
     private final Map<String, ParquetFiles.Table> tables;
     private final int batchSize;
     private final Catalog catalog;
@@ -134,11 +144,12 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
     private final AtomicInteger callCount = new AtomicInteger();
     private final List<Read> reads;
 
-    private ParquetConnector(String name, ParquetFiles files, Map<String, ParquetFiles.Table> tables,
-            int batchSize, boolean recordReads) {
+    private ParquetConnector(String name, ParquetFiles files, Map<String, String> locations,
+            Map<String, ParquetFiles.Table> tables, int batchSize, boolean recordReads) {
         this.name = name;
         this.files = files;
-        this.tables = Collections.unmodifiableMap(new LinkedHashMap<>(tables));
+        this.locations = Collections.unmodifiableMap(new LinkedHashMap<>(locations));
+        this.tables = new ConcurrentHashMap<>(tables);
         this.batchSize = batchSize;
         this.reads = recordReads ? new ArrayList<>() : null;
         this.catalog = new Catalog() {
@@ -149,7 +160,7 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
 
             @Override
             public List<String> tables(String schema) {
-                return schema.equals(TableRef.MAIN) ? List.copyOf(ParquetConnector.this.tables.keySet()) : List.of();
+                return schema.equals(TableRef.MAIN) ? List.copyOf(locations.keySet()) : List.of();
             }
 
             @Override
@@ -177,6 +188,12 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
     @Override
     public Catalog catalog() {
         return catalog;
+    }
+
+    /** Takes the stores of the engine, through which locations with a scheme are read and written. */
+    @Override
+    public void fileStores(FileStores stores) {
+        files.stores(stores);
     }
 
     /** Returns the number of rows per batch. */
@@ -215,12 +232,28 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
     private ParquetFiles.Table table(TableRef ref) {
         ParquetFiles.Table t = null;
         if (ref.schema().equals(TableRef.MAIN)) {
-            t = ref.table().startsWith(CALL_PREFIX) ? callTables.get(ref.table()) : tables.get(ref.table());
+            t = ref.table().startsWith(CALL_PREFIX) ? callTables.get(ref.table()) : registered(ref.table());
         }
         if (t == null) {
             throw new IllegalArgumentException("No table " + ref + " in the Parquet source " + name);
         }
         return t;
+    }
+
+    /** Returns a table of the builder, looked up on first use if it is in a store other than the local one. */
+    private ParquetFiles.Table registered(String table) {
+        String location = locations.get(table);
+        if (location == null) {
+            return null;
+        }
+        return tables.computeIfAbsent(table, t -> {
+            try {
+                return files.table(location);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("The table " + t + " of the Parquet source " + name + ": "
+                        + e.getMessage(), e);
+            }
+        });
     }
 
     @Override
@@ -254,12 +287,12 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * </ul>
      */
     @Override
-    public Sink openFile(String format, Path file, Schema schema, Map<String, String> options) {
+    public Sink openFile(String format, String location, Schema schema, Map<String, String> options) {
         if (!FILE_FORMATS.contains(format)) {
             throw new IllegalArgumentException("The Parquet source " + name + " writes no files of the format "
                     + format);
         }
-        return ParquetFileSink.open(file, schema, options);
+        return ParquetFileSink.open(location, files.stores(), schema, options);
     }
 
     /**
@@ -270,23 +303,19 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * the same as {@link #bind} gives.
      */
     @Override
-    public TableRef fileTable(String format, Path file, Schema schema, Map<String, String> options) {
+    public TableRef fileTable(String format, String location, Schema schema, Map<String, String> options) {
         if (!FILE_FORMATS.contains(format)) {
             throw new IllegalArgumentException("The Parquet source " + name + " reads no files of the format "
                     + format);
         }
         if (!options.isEmpty()) {
-            throw new IllegalArgumentException("The Parquet file " + file + " is read without options, not with "
+            throw new IllegalArgumentException("The Parquet file " + location + " is read without options, not with "
                     + String.join(", ", options.keySet()));
         }
-        Path absolute = file.toAbsolutePath().normalize();
-        if (!Files.isRegularFile(absolute)) {
-            throw new IllegalArgumentException("No files found that match the pattern \"" + file + "\"");
-        }
-        String location = ParquetFiles.absolute(absolute.toString(), Path.of(""));
-        String table = calls.computeIfAbsent(List.of(ParquetFiles.Version.of(absolute)), v -> {
+        FileObject file = files.object(location);
+        String table = calls.computeIfAbsent(List.of(ParquetFiles.Version.of(file)), v -> {
             String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, files.table(location));
+            callTables.put(generated, files.table(file.location(), List.of(file)));
             return generated;
         });
         return TableRef.of(name, table);
@@ -298,7 +327,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * {@code main} under a generated name that starts with {@code #} and
      * does not appear among the tables of the catalog. The path is a file,
      * a directory or a pattern with {@code *} and {@code ?} in the name of
-     * the file. The same call on unchanged files gives the same table; a
+     * the file, local or in a store of the engine such as
+     * {@code s3://bucket/key}. The same call on unchanged files gives the same table; a
      * changed, added or removed file gives a new one.
      */
     @Override
@@ -315,13 +345,14 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
                     + "\" for function " + function + "; it has none");
         }
         String location = ParquetFiles.absolute(path, Path.of(""));
+        List<FileObject> found = files.resolve(location);
         List<ParquetFiles.Version> versions = new ArrayList<>();
-        for (Path file : ParquetFiles.resolve(location)) {
+        for (FileObject file : found) {
             versions.add(ParquetFiles.Version.of(file));
         }
         String table = calls.computeIfAbsent(versions, v -> {
             String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, files.table(location));
+            callTables.put(generated, files.table(location, found));
             return generated;
         });
         return TableRef.of(name, table);
@@ -392,9 +423,9 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * Returns the row groups of a file in which a row can satisfy a
      * predicate, by their statistics, dictionaries and Bloom filters.
      */
-    private static List<BlockMetaData> passing(ParquetFiles.Footer footer, FilterPredicate predicate) {
-        Path file = footer.version().file();
-        InputFile input = new LocalFile(file);
+    private List<BlockMetaData> passing(ParquetFiles.Footer footer, FilterPredicate predicate) {
+        String file = footer.version().location();
+        InputFile input = files.input(footer.version().file());
         try (ParquetFileReader reader = new ParquetFileReader(input, footer.metadata(),
                 ParquetFiles.options(FilterCompat.get(predicate), true), input.newStream())) {
             return reader.getRowGroups();
@@ -451,8 +482,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         if (!(split.state() instanceof RowGroup group)) {
             throw new IllegalArgumentException("Not a split of the Parquet source " + name + ": " + split);
         }
-        return new RowGroupReader(group.footer(), group.block(), group.rows(), group.predicate(), plan.output(),
-                plan.columns(), batchSize, reads == null ? null : this::record);
+        return new RowGroupReader(files, group.footer(), group.block(), group.rows(), group.predicate(),
+                plan.output(), plan.columns(), batchSize, reads == null ? null : this::record);
     }
 
     /** Collects the tables of a Parquet connector. */
@@ -460,6 +491,7 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         private final String name;
         private final Map<String, String> locations = new LinkedHashMap<>();
         private int batchSize = 2048;
+        private int readAhead = ParquetFiles.READ_AHEAD;
         private boolean recordReads;
 
         private Builder(String name) {
@@ -471,6 +503,19 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
                 throw new IllegalArgumentException("The batch size must be positive: " + batchSize);
             }
             this.batchSize = batchSize;
+            return this;
+        }
+
+        /**
+         * Sets the bytes by which a file of a store other than the local one
+         * is read ahead for small reads, such as the footer and the headers
+         * of pages; 1 MiB by default.
+         */
+        public Builder readAhead(int bytes) {
+            if (bytes < 8) {
+                throw new IllegalArgumentException("The read-ahead must be at least 8 bytes: " + bytes);
+            }
+            this.readAhead = bytes;
             return this;
         }
 
@@ -488,8 +533,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         /**
          * Adds a file, a directory of {@code .parquet} files or a pattern with
          * {@code *} and {@code ?} in the name of the file as a table, relative
-         * to the working directory unless absolute; a name may not start
-         * with {@code #}.
+         * to the working directory unless absolute or in a store with a
+         * scheme such as {@code s3://}; a name may not start with {@code #}.
          */
         public Builder path(String table, String location) {
             if (table.startsWith(CALL_PREFIX)) {
@@ -526,24 +571,30 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
 
         /**
          * Builds the connector, reading the footers of the files of every
-         * table.
+         * local table; a table in another store is read when it is first
+         * used, once the engine gave the connector its stores.
          *
-         * @throws IllegalArgumentException if a location names no file, a
-         *         file is not a Parquet file, or the files of a table differ
+         * @throws IllegalArgumentException if a local location names no file,
+         *         a file is not a Parquet file, or the files of a table differ
          *         in their columns
          */
         public ParquetConnector build() {
-            ParquetFiles files = new ParquetFiles();
+            ParquetFiles files = new ParquetFiles(FileStores.local(Path.of("")), readAhead);
+            Map<String, String> absolute = new LinkedHashMap<>();
             Map<String, ParquetFiles.Table> tables = new LinkedHashMap<>();
             for (Map.Entry<String, String> e : locations.entrySet()) {
                 try {
-                    tables.put(e.getKey(), files.table(ParquetFiles.absolute(e.getValue(), Path.of(""))));
+                    String location = ParquetFiles.absolute(e.getValue(), Path.of(""));
+                    absolute.put(e.getKey(), location);
+                    if (FileStores.isLocal(location)) {
+                        tables.put(e.getKey(), files.table(location));
+                    }
                 } catch (IllegalArgumentException ex) {
                     throw new IllegalArgumentException("The table " + e.getKey() + " of the Parquet source " + name
                             + ": " + ex.getMessage(), ex);
                 }
             }
-            return new ParquetConnector(name, files, tables, batchSize, recordReads);
+            return new ParquetConnector(name, files, absolute, tables, batchSize, recordReads);
         }
     }
 }

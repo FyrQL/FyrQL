@@ -102,6 +102,24 @@ public interface Connector extends AutoCloseable {
         return Optional.empty();
     }
 
+    /**
+     * Returns the store of the files of a scheme the source holds, such as
+     * {@code s3}, which the engine gives to all sources through
+     * {@link #fileStores}. The default holds none.
+     */
+    default Optional<FileStore> fileStore() {
+        return Optional.empty();
+    }
+
+    /**
+     * Takes the stores of files of the engine, which a source that reads or
+     * writes files uses for locations with a scheme. The engine calls it
+     * once all sources are created, before the first statement; the
+     * default ignores them.
+     */
+    default void fileStores(FileStores stores) {
+    }
+
     @Override
     default void close() {
     }

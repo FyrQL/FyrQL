@@ -12,6 +12,7 @@ package net.fyrql.connector.csv;
 
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.ConnectorFactory;
+import net.fyrql.connector.FileStores;
 
 import java.nio.charset.Charset;
 import java.nio.file.Path;
@@ -23,7 +24,8 @@ import java.util.Optional;
  * Creates CSV sources of the type {@code csv} from options:
  * {@code directory}, whose {@code .csv} and {@code .tsv} files become
  * tables, and {@code tables.<name>} or {@code tables.<name>.file} for single
- * files, both resolved against the directory of the configuration; and
+ * files, both resolved against the directory of the configuration, or a
+ * file in a store of the engine such as {@code s3://bucket/key}; and
  * {@code delimiter}, {@code quote}, {@code header}, {@code nullString},
  * {@code charset}, {@code sampleRows}, {@code batchSize} and
  * {@code splitSize} (a number of bytes, such as {@code 4MiB}), which apply to
@@ -57,7 +59,14 @@ public final class CsvConnectorFactory implements ConnectorFactory {
         Map<String, Map<String, String>> tables = o.tables("file");
         o.rejectUnknown();
         files.ifPresent(b::directory);
-        tables.forEach((table, attributes) -> b.file(table, o.resolve(attributes.get("file"))));
+        tables.forEach((table, attributes) -> {
+            String file = attributes.get("file");
+            if (FileStores.isLocal(file)) {
+                b.file(table, o.resolve(file));
+            } else {
+                b.file(table, file);
+            }
+        });
         return b.build();
     }
 }

@@ -13,6 +13,7 @@ package net.fyrql.catalog;
 
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.FileReaderProvider;
+import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.plan.TableRef;
@@ -155,16 +156,26 @@ public final class EngineCatalog implements CatalogView {
                     + (fileReaders.isEmpty() ? "" : "; there are " + String.join(", ", fileReaders.keySet())),
                     Position.UNKNOWN);
         }
-        Path file;
+        checkLocal(path);
         try {
-            file = Path.of(path);
-        } catch (InvalidPathException e) {
-            throw new SqlException("Not a file: " + path + " (" + e.getReason() + ")", Position.UNKNOWN);
-        }
-        try {
-            return provider.fileTable(f, file, schema, options);
+            return provider.fileTable(f, path, schema, options);
         } catch (IllegalArgumentException | UncheckedIOException e) {
             throw new SqlException(e.getMessage(), Position.UNKNOWN);
+        }
+    }
+
+    /**
+     * Checks that a location without a scheme is a valid local path.
+     *
+     * @throws SqlException if it is not
+     */
+    public static void checkLocal(String location) {
+        if (FileStores.scheme(location).isEmpty()) {
+            try {
+                Path.of(location);
+            } catch (InvalidPathException e) {
+                throw new SqlException("Not a file: " + location + " (" + e.getReason() + ")", Position.UNKNOWN);
+            }
         }
     }
 

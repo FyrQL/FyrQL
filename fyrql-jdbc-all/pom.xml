@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.7.5-SNAPSHOT</version>
+		<version>0.7.5</version>
 	</parent>
 
 	<artifactId>fyrql-jdbc-all</artifactId>
@@ -82,6 +82,10 @@
 		<dependency>
 			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-connector-jdbc</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-s3</artifactId>
 		</dependency>
 	</dependencies>
 

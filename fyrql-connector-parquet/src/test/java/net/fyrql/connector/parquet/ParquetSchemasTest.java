@@ -116,7 +116,7 @@ class ParquetSchemasTest {
         int n = 0;
         for (Case c : CASES) {
             Path file = ParquetTestFiles.write(dir.resolve("t" + n++ + ".parquet"), "message m { " + c.column() + " }");
-            Schema schema = ParquetSchemas.schema(new ParquetFiles().footer(file).schema());
+            Schema schema = ParquetSchemas.schema(ParquetTestFiles.footer(file).schema());
             String fyrql = schema.type(0).sqlName();
             String duckdb;
             try {

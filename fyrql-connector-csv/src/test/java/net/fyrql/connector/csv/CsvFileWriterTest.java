@@ -98,7 +98,7 @@ class CsvFileWriterTest {
     }
 
     private static long write(Path file, Schema schema, Map<String, String> options, Batch... batches) {
-        try (Sink sink = connector().openFile("csv", file, schema, options)) {
+        try (Sink sink = connector().openFile("csv", file.toString(), schema, options)) {
             for (Batch b : batches) {
                 sink.write(b);
             }
@@ -195,7 +195,7 @@ class CsvFileWriterTest {
         Schema schema = Schema.of(new Schema.Field("n", DataType.INTEGER));
         Path file = dir.resolve("n.csv");
         Files.writeString(file, "old\n");
-        try (Sink sink = connector().openFile("csv", file, schema, Map.of())) {
+        try (Sink sink = connector().openFile("csv", file.toString(), schema, Map.of())) {
             sink.write(Batch.ofRows(schema, List.<Object[]>of(new Object[] {1})));
             assertEquals(2, files().size());
             assertEquals("old\n", Files.readString(file));
@@ -207,7 +207,7 @@ class CsvFileWriterTest {
         assertEquals("n\n", Files.readString(file));
         assertEquals(List.of(Path.of("n.csv")), files());
 
-        Sink sink = connector().openFile("csv", file, schema, Map.of());
+        Sink sink = connector().openFile("csv", file.toString(), schema, Map.of());
         sink.commit();
         sink.close();
         assertThrows(IllegalStateException.class, () -> sink.write(Batch.empty(schema)));
@@ -239,7 +239,7 @@ class CsvFileWriterTest {
         assertEquals("Cannot write " + dir + ": it is a directory",
                 assertThrows(IllegalArgumentException.class, () -> write(dir, schema, Map.of())).getMessage());
         assertEquals("The CSV source csv writes no files of the format json",
-                assertThrows(IllegalArgumentException.class, () -> connector().openFile("json", file, schema,
+                assertThrows(IllegalArgumentException.class, () -> connector().openFile("json", file.toString(), schema,
                         Map.of())).getMessage());
         assertEquals(List.of(), files());
         assertFalse(Files.exists(file));

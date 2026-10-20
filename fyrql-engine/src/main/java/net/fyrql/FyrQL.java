@@ -19,6 +19,8 @@ import net.fyrql.connector.Connector;
 import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.FileReaderProvider;
+import net.fyrql.connector.FileStore;
+import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.RemotePlan;
 import net.fyrql.connector.ScanPlan;
@@ -52,12 +54,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.Set;
 
@@ -918,6 +922,10 @@ public final class FyrQL implements AutoCloseable {
             Map<String, Connector> sources = new LinkedHashMap<>(connectors);
             List<Connector> implicit = implicitSources ? addImplicitSources(sources) : List.of();
             try {
+                FileStores stores = fileStores(sources);
+                for (Connector c : sources.values()) {
+                    c.fileStores(stores);
+                }
                 return new FyrQL(sources, new SearchPath(source, defaultSchema),
                         functions != null ? functions : FunctionRegistry.standard(),
                         new MemoryBudget(memoryBudget), batchSize, codegen, options, engineThreads, preserveOrder);
@@ -925,6 +933,29 @@ public final class FyrQL implements AutoCloseable {
                 close(implicit, e);
                 throw e;
             }
+        }
+
+        /**
+         * Returns the stores of files the sources offer, by their schemes.
+         *
+         * @throws IllegalStateException if two sources offer a store of the same scheme
+         */
+        private static FileStores fileStores(Map<String, Connector> sources) {
+            Map<String, FileStore> stores = new LinkedHashMap<>();
+            Map<String, String> owners = new HashMap<>();
+            for (Connector c : sources.values()) {
+                Optional<FileStore> store = c.fileStore();
+                if (store.isPresent()) {
+                    String scheme = store.get().scheme().toLowerCase(Locale.ROOT);
+                    String other = owners.putIfAbsent(scheme, c.name());
+                    if (other != null) {
+                        throw new IllegalStateException("Two sources handle " + scheme + ":// locations: " + other
+                                + " and " + c.name());
+                    }
+                    stores.put(scheme, store.get());
+                }
+            }
+            return new FileStores(stores, Path.of(""));
         }
 
         /** Adds the implicit sources to the sources and returns them. */

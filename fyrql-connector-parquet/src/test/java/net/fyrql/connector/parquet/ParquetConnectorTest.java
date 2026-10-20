@@ -190,7 +190,7 @@ class ParquetConnectorTest {
         assertEquals(OptionalLong.of(10), c.catalog().rowCount(ref("both")));
         assertEquals(OptionalLong.of(4), c.catalog().rowCount(ref("first")));
         assertEquals(100, c.batchSize());
-        assertEquals("The Parquet source pq has an unknown option files; known are batchSize, directory,"
+        assertEquals("The Parquet source pq has an unknown option files; known are batchSize, readAhead, directory,"
                 + " tables.<name>, tables.<name>.path", assertThrows(IllegalArgumentException.class,
                         () -> factory.create("pq", Map.of("files", "x"), dir)).getMessage());
         assertEquals(List.of(), factory.create("pq", Map.of(), dir).catalog().tables("main"));

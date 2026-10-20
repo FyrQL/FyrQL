@@ -73,7 +73,7 @@ class PureJavaCodecsTest {
             assertEquals(List.of(List.of("1000", "499500", "666")), ParquetTestFiles.duckdbRows(
                     "SELECT count(*), sum(id), count(name) FROM read_parquet(" + ParquetTestFiles.sql(file) + ")"),
                     codec.name());
-            assertEquals(codec, new ParquetFiles().footer(file).metadata().getBlocks().get(0).getColumns().get(0)
+            assertEquals(codec, ParquetTestFiles.footer(file).metadata().getBlocks().get(0).getColumns().get(0)
                     .getCodec());
         }
     }

@@ -28,8 +28,6 @@ import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.bind.BoundStatement;
 
-import java.nio.file.InvalidPathException;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
@@ -84,14 +82,9 @@ final class Writes {
                         + EngineCatalog.moduleHint(copy.format())
                         + (engine.catalog().fileFormats().isEmpty() ? ""
                         : "; there are " + String.join(", ", engine.catalog().fileFormats())), Position.UNKNOWN));
-        Path file;
-        try {
-            file = Path.of(copy.path());
-        } catch (InvalidPathException e) {
-            throw new SqlException("Not a file: " + copy.path() + " (" + e.getReason() + ")", Position.UNKNOWN);
-        }
+        EngineCatalog.checkLocal(copy.path());
         Schema schema = copy.input().schema();
-        return write(() -> provider.openFile(copy.format(), file, schema, copy.options()), rows(copy.input()),
+        return write(() -> provider.openFile(copy.format(), copy.path(), schema, copy.options()), rows(copy.input()),
                 null, null, context);
     }
 

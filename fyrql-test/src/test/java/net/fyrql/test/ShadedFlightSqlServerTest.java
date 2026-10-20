@@ -334,7 +334,8 @@ class ShadedFlightSqlServerTest {
                     "net.fyrql.connector.http.HttpConnectorFactory",
                     "net.fyrql.connector.odata.ODataConnectorFactory",
                     "net.fyrql.connector.jdbc.JdbcConnectorFactory",
-                    "net.fyrql.connector.memory.MemoryConnectorFactory"),
+                    "net.fyrql.connector.memory.MemoryConnectorFactory",
+                    "net.fyrql.connector.s3.S3ConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),
                     services(jar, "net.fyrql.exec.spi.ExpressionCompiler"));

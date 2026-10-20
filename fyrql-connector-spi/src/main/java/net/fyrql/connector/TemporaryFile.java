@@ -20,7 +20,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * The temporary file of a {@link Sink} that writes a file, as the
+ * The temporary file of a local {@link FileOutput}, as the
  * {@link FileWriterProvider} describes it: a file named after the target
  * with a random part and {@code .tmp} added, in the directory of the
  * target. {@link #commit} gives it the name of the target, replacing a file

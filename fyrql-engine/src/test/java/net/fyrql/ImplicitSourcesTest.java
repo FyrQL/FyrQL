@@ -109,7 +109,8 @@ class ImplicitSourcesTest {
         }
 
         @Override
-        public Sink openFile(String format, Path file, Schema schema, Map<String, String> options) {
+        public Sink openFile(String format, String location, Schema schema, Map<String, String> options) {
+            Path file = Path.of(location);
             return new Sink() {
                 private long rows;
 
@@ -135,7 +136,8 @@ class ImplicitSourcesTest {
         }
 
         @Override
-        public TableRef fileTable(String format, Path file, Schema schema, Map<String, String> options) {
+        public TableRef fileTable(String format, String location, Schema schema, Map<String, String> options) {
+            Path file = Path.of(location);
             long rows;
             try {
                 rows = Long.parseLong(Files.readString(file, StandardCharsets.UTF_8));
@@ -201,8 +203,8 @@ class ImplicitSourcesTest {
         }
 
         @Override
-        public Sink openFile(String format, Path file, Schema schema, Map<String, String> options) {
-            return inner.openFile(format, file, schema, options);
+        public Sink openFile(String format, String location, Schema schema, Map<String, String> options) {
+            return inner.openFile(format, location, schema, options);
         }
 
         @Override

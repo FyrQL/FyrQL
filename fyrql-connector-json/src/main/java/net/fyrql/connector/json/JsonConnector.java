@@ -16,8 +16,11 @@ import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileObject;
 import net.fyrql.connector.FileReaderProvider;
+import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
+import net.fyrql.connector.Globs;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Sink;
@@ -39,9 +42,9 @@ import java.nio.channels.FileChannel;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -98,7 +101,11 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
     private static final String CALL_PREFIX = "#";
 
     private final String name;
+    private volatile FileStores stores = FileStores.local(Path.of(""));
     private final Map<String, Table> tables;
+    /** The locations of the tables in another store than the local one, looked up when first used. */
+    private final Map<String, String> pending;
+    private final Map<String, Table> found = new ConcurrentHashMap<>();
     private final JsonOptions options;
     private final int batchSize;
     private final long splitSize;
@@ -113,26 +120,37 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
     /** The rows of each table by its name, counted or estimated when first asked for; -1 if unknown. */
     private final Map<String, Long> rowCounts = new ConcurrentHashMap<>();
 
-    /** A file, how to read it, its columns, and whether it is compressed with gzip. */
-    record Table(Path file, JsonOptions options, JsonLayout layout, boolean gzip) {
+    /**
+     * A file, how to read it, its columns, and whether it is compressed
+     * with gzip; a file in another store than the local one is
+     * {@code remote} and read as a whole in one part. A table not looked up
+     * yet has neither a file nor a remote one.
+     */
+    record Table(Path file, JsonOptions options, JsonLayout layout, boolean gzip, FileObject remote) {
+
+        /** Returns where the file is, for messages. */
+        String location() {
+            return remote != null ? remote.location() : String.valueOf(file);
+        }
     }
 
     /** A call of a table function: the file in its current version and how to read it. */
-    private record Call(Path file, FileTime modified, long size, JsonOptions options) {
+    private record Call(String file, String version, long size, JsonOptions options) {
     }
 
     /** A file in its current version read with given columns and options. */
-    private record FileCall(Path file, FileTime modified, long size, Schema schema, Map<String, String> options) {
+    private record FileCall(String file, String version, long size, Schema schema, Map<String, String> options) {
     }
 
     /** The bytes of a file that a split reads, from {@code from} to before {@code to}. */
     private record Range(long from, long to) {
     }
 
-    private JsonConnector(String name, Map<String, Table> tables, JsonOptions options, int batchSize,
-            long splitSize) {
+    private JsonConnector(String name, Map<String, Table> tables, Map<String, String> pending, JsonOptions options,
+            int batchSize, long splitSize) {
         this.name = name;
         this.tables = Collections.unmodifiableMap(new LinkedHashMap<>(tables));
+        this.pending = Map.copyOf(pending);
         this.options = options;
         this.batchSize = batchSize;
         this.splitSize = splitSize;
@@ -155,8 +173,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
             @Override
             public OptionalLong rowCount(TableRef table) {
                 Table t = table(table);
-                long rows = rowCounts.computeIfAbsent(table.table(), k -> estimateRows(t.file(), t.options(),
-                        t.gzip()));
+                long rows = rowCounts.computeIfAbsent(table.table(), k -> estimateRows(t));
                 return rows < 0 ? OptionalLong.empty() : OptionalLong.of(rows);
             }
         };
@@ -167,13 +184,14 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
      * the bytes of the first {@code sampleSize} records; -1 for a
      * compressed file whose size says nothing.
      */
-    static long estimateRows(Path file, JsonOptions options, boolean gzip) {
-        if (gzip) {
+    static long estimateRows(Table table) {
+        if (table.gzip()) {
             return -1;
         }
+        JsonOptions options = table.options();
         long sample = options.sampleSize();
-        try (JsonInput input = new JsonInput(open(file, false), options.format(), "", file.toString())) {
-            long size = Files.size(file);
+        try (JsonInput input = new JsonInput(open(table), options.format(), "", table.location())) {
+            long size = table.remote() != null ? table.remote().size() : Files.size(table.file());
             while (input.next()) {
                 if (sample >= 0 && input.record() > sample) {
                     long bytes = input.parser().currentTokenLocation().getByteOffset();
@@ -198,6 +216,35 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
     }
 
     @Override
+    public void fileStores(FileStores stores) {
+        this.stores = stores;
+    }
+
+    /**
+     * Returns a file of another store than the local one.
+     *
+     * @throws IllegalArgumentException if there is none or it cannot be read
+     */
+    private FileObject remote(String location) {
+        try {
+            return stores.object(location);
+        } catch (NoSuchFileException e) {
+            throw new IllegalArgumentException("No files found that match the pattern \"" + location + "\"", e);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Cannot read " + location + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** Returns the path of a local location. */
+    private static Path local(String location) {
+        try {
+            return Path.of(location);
+        } catch (InvalidPathException e) {
+            throw new IllegalArgumentException("Not a file: " + location + " (" + e.getReason() + ")", e);
+        }
+    }
+
+    @Override
     public Catalog catalog() {
         return catalog;
     }
@@ -210,7 +257,24 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         if (t == null) {
             throw new IllegalArgumentException("No table " + ref + " in the JSON source " + name);
         }
+        if (t.file() == null && t.remote() == null) {
+            t = found.computeIfAbsent(ref.table(), this::lookUp);
+        }
         return t;
+    }
+
+    /** Looks up a table in another store than the local one and infers its columns unless it has some. */
+    private Table lookUp(String table) {
+        Table t = tables.get(table);
+        try {
+            FileObject remote = remote(pending.get(table));
+            JsonLayout layout = t.layout() != null ? t.layout()
+                    : JsonSchemaInference.infer(open(remote, t.gzip()), t.options(), remote.location());
+            return new Table(null, t.options(), layout, t.gzip(), remote);
+        } catch (IllegalArgumentException | UncheckedIOException e) {
+            throw new IllegalArgumentException("The table " + table + " of the JSON source " + name + ": "
+                    + e.getMessage(), e);
+        }
     }
 
     @Override
@@ -244,14 +308,22 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         if (path.indexOf('*') >= 0 || path.indexOf('?') >= 0) {
             throw new IllegalArgumentException("Patterns of file names are not supported yet: " + path);
         }
-        Path file;
-        try {
-            file = Path.of(path).toAbsolutePath().normalize();
-        } catch (InvalidPathException e) {
-            throw new IllegalArgumentException("Invalid path " + path, e);
-        }
-        if (!Files.isRegularFile(file)) {
-            throw new IllegalArgumentException("No files found that match the pattern \"" + path + "\"");
+        Path file = null;
+        FileObject remote = null;
+        if (FileStores.isLocal(path)) {
+            try {
+                file = Path.of(path).toAbsolutePath().normalize();
+            } catch (InvalidPathException e) {
+                throw new IllegalArgumentException("Invalid path " + path, e);
+            }
+            if (!Files.isRegularFile(file)) {
+                throw new IllegalArgumentException("No files found that match the pattern \"" + path + "\"");
+            }
+        } else {
+            remote = remote(path);
+            if (remote.name().toLowerCase(Locale.ROOT).endsWith(".zst")) {
+                throw new IllegalArgumentException("Files compressed with zstd are not supported: " + path);
+            }
         }
         JsonOptions o = function.startsWith("read_ndjson") ? options.withFormat(JsonFormat.NEWLINE_DELIMITED)
                 : options;
@@ -274,15 +346,23 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
             };
         }
         Call call;
-        try {
-            call = new Call(file, Files.getLastModifiedTime(file), Files.size(file), o);
-        } catch (IOException e) {
-            throw new IllegalArgumentException("Cannot read " + path + ": " + e.getMessage(), e);
+        if (remote != null) {
+            call = new Call(remote.location(), remote.version(), remote.size(), o);
+        } else {
+            try {
+                call = new Call(file.toString(), Files.getLastModifiedTime(file).toString(), Files.size(file), o);
+            } catch (IOException e) {
+                throw new IllegalArgumentException("Cannot read " + path + ": " + e.getMessage(), e);
+            }
         }
+        Path local = file;
+        FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
             String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, new Table(call.file(), call.options(), infer(call.file(), call.options()),
-                    gzipped(call.file())));
+            boolean gzip = path.toLowerCase(Locale.ROOT).endsWith(".gz");
+            JsonLayout layout = object != null ? JsonSchemaInference.infer(open(object, gzip), call.options(),
+                    object.location()) : infer(local, call.options());
+            callTables.put(generated, new Table(local, call.options(), layout, gzip, object));
             return generated;
         });
         return TableRef.of(name, table);
@@ -318,12 +398,12 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
      * </ul>
      */
     @Override
-    public Sink openFile(String format, Path file, Schema schema, Map<String, String> options) {
+    public Sink openFile(String format, String location, Schema schema, Map<String, String> options) {
         if (!FILE_FORMATS.contains(format)) {
             throw new IllegalArgumentException("The JSON source " + name + " writes no files of the format "
                     + format);
         }
-        return JsonFileWriter.open(file, schema, options);
+        return JsonFileWriter.open(location, stores, schema, options);
     }
 
     /**
@@ -351,14 +431,16 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
      * gives the same table.
      */
     @Override
-    public TableRef fileTable(String format, Path file, Schema schema, Map<String, String> options) {
+    public TableRef fileTable(String format, String location, Schema schema, Map<String, String> options) {
+        boolean isLocal = FileStores.isLocal(location);
+        String file = isLocal ? local(location).toString() : location;
         if (!FILE_FORMATS.contains(format)) {
             throw new IllegalArgumentException("The JSON source " + name + " reads no files of the format "
                     + format);
         }
         String owner = "the JSON file " + file;
         ConfigOptions o = new ConfigOptions(owner, options, Path.of(""));
-        String lower = String.valueOf(file.getFileName()).toLowerCase(Locale.ROOT);
+        String lower = file.substring(Globs.lastSeparator(file) + 1).toLowerCase(Locale.ROOT);
         Optional<JsonFormat> records = o.get("format", null, JsonFormat::of);
         Optional<Boolean> array = o.bool("array");
         String dateFormat = o.get("dateformat", null, JsonConnector::checked).orElse(null);
@@ -377,20 +459,29 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
                 .withFormat(records.orElse(array.map(a -> a ? JsonFormat.ARRAY : JsonFormat.NEWLINE_DELIMITED)
                         .orElse(JsonFormat.AUTO)))
                 .withIgnoreErrors(ignoreErrors).withDateFormat(dateFormat).withTimestampFormat(timestampFormat);
-        Path absolute = file.toAbsolutePath().normalize();
-        if (!Files.isRegularFile(absolute)) {
-            throw new IllegalArgumentException("No files found that match the pattern \"" + file + "\"");
-        }
+        Path absolute = null;
+        FileObject remote = null;
         FileCall call;
-        try {
-            call = new FileCall(absolute, Files.getLastModifiedTime(absolute), Files.size(absolute), schema,
-                    Map.copyOf(options));
-        } catch (IOException e) {
-            throw new IllegalArgumentException("Cannot read " + file + ": " + e.getMessage(), e);
+        if (isLocal) {
+            absolute = Path.of(file).toAbsolutePath().normalize();
+            if (!Files.isRegularFile(absolute)) {
+                throw new IllegalArgumentException("No files found that match the pattern \"" + file + "\"");
+            }
+            try {
+                call = new FileCall(absolute.toString(), Files.getLastModifiedTime(absolute).toString(),
+                        Files.size(absolute), schema, Map.copyOf(options));
+            } catch (IOException e) {
+                throw new IllegalArgumentException("Cannot read " + file + ": " + e.getMessage(), e);
+            }
+        } else {
+            remote = remote(location);
+            call = new FileCall(remote.location(), remote.version(), remote.size(), schema, Map.copyOf(options));
         }
+        Path local = absolute;
+        FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
             String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, new Table(absolute, read, JsonLayout.of(schema, parser(read)), gzip));
+            callTables.put(generated, new Table(local, read, JsonLayout.of(schema, parser(read)), gzip, object));
             return generated;
         });
         return TableRef.of(name, table);
@@ -507,6 +598,9 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
 
     /** Returns the offsets at which the parts of a file start, see {@link #splits}. */
     private List<Long> starts(Table table) {
+        if (table.remote() != null) {
+            return List.of(0L);
+        }
         String fileName = table.file().getFileName().toString().toLowerCase(Locale.ROOT);
         if (table.options().format() == JsonFormat.ARRAY || table.gzip() || fileName.endsWith(".zst")) {
             return List.of(0L);
@@ -622,8 +716,8 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
                     table.options().withFormat(JsonFormat.NEWLINE_DELIMITED), batchSize, table.file().toString(),
                     range.from() == 0 ? JsonInput.Origin.START : new Before(table.file(), range.from()));
         }
-        return JsonRecordReader.open(open(table.file(), table.gzip()), table.layout(), split.plan().columns(),
-                table.options(), batchSize, table.file().toString());
+        return JsonRecordReader.open(open(table), table.layout(), split.plan().columns(), table.options(),
+                batchSize, table.location());
     }
 
     /** The bytes of a file from one offset to before another one, or to its end. */
@@ -740,6 +834,22 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         return open(file, gzipped(file));
     }
 
+    /** Opens the file of a table, uncompressing it if it is compressed with gzip. */
+    static InputStream open(Table table) {
+        return table.remote() != null ? open(table.remote(), table.gzip()) : open(table.file(), table.gzip());
+    }
+
+    /** Opens a file of another store than the local one, uncompressing it if it is compressed with gzip. */
+    static InputStream open(FileObject file, boolean gzip) {
+        InputStream in;
+        try {
+            in = file.open();
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot open " + file.location() + ": " + e.getMessage(), e);
+        }
+        return gzip ? gunzip(in, file.location()) : in;
+    }
+
     /** Opens a file, uncompressing it if it is compressed with gzip. */
     static InputStream open(Path file, boolean gzip) {
         InputStream in;
@@ -748,9 +858,11 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot open " + file, e);
         }
-        if (!gzip) {
-            return in;
-        }
+        return gzip ? gunzip(in, file.toString()) : in;
+    }
+
+    /** Reads a stream through gzip, closing it if it is no gzip. */
+    private static InputStream gunzip(InputStream in, String file) {
         try {
             return new GZIPInputStream(in, 1 << 16);
         } catch (IOException e) {
@@ -772,6 +884,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
     public static final class Builder {
         private final String name;
         private final Map<String, Path> files = new LinkedHashMap<>();
+        private final Map<String, String> locations = new LinkedHashMap<>();
         private final Map<String, Schema> schemas = new LinkedHashMap<>();
         private JsonOptions options = JsonOptions.DEFAULT;
         private int batchSize = 2048;
@@ -863,6 +976,25 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
                 throw new IllegalArgumentException("A table name may not start with " + CALL_PREFIX + ": " + table);
             }
             files.put(table, file);
+            locations.remove(table);
+            return this;
+        }
+
+        /**
+         * Adds a file as a table, a local one, relative to the working
+         * directory unless absolute, or one in a store of the engine such as
+         * {@code s3://bucket/key}, which is looked up when the table is first
+         * used and read in one part.
+         */
+        public Builder file(String table, String location) {
+            if (FileStores.isLocal(location)) {
+                return file(table, local(location));
+            }
+            if (table.startsWith(CALL_PREFIX)) {
+                throw new IllegalArgumentException("A table name may not start with " + CALL_PREFIX + ": " + table);
+            }
+            files.put(table, null);
+            locations.put(table, location);
             return this;
         }
 
@@ -889,16 +1021,26 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
             return this;
         }
 
-        /** Builds the connector, inferring the columns of every file without an explicit schema. */
+        /**
+         * Builds the connector, inferring the columns of every local file
+         * without an explicit schema; those of a file in another store when
+         * its table is first used.
+         */
         public JsonConnector build() {
             Map<String, Table> tables = new LinkedHashMap<>();
             for (Map.Entry<String, Path> e : files.entrySet()) {
                 Schema schema = schemas.get(e.getKey());
+                String location = locations.get(e.getKey());
+                if (location != null) {
+                    tables.put(e.getKey(), new Table(null, options, schema != null ? JsonLayout.of(schema,
+                            parser(options)) : null, location.toLowerCase(Locale.ROOT).endsWith(".gz"), null));
+                    continue;
+                }
                 JsonLayout layout = schema != null ? JsonLayout.of(schema, parser(options))
                         : infer(e.getValue(), options);
-                tables.put(e.getKey(), new Table(e.getValue(), options, layout, gzipped(e.getValue())));
+                tables.put(e.getKey(), new Table(e.getValue(), options, layout, gzipped(e.getValue()), null));
             }
-            return new JsonConnector(name, tables, options, batchSize, splitSize);
+            return new JsonConnector(name, tables, locations, options, batchSize, splitSize);
         }
     }
 }

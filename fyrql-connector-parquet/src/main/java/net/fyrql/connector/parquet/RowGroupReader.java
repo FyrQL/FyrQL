@@ -45,7 +45,6 @@ import org.apache.parquet.schema.Type;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -73,7 +72,7 @@ import java.util.function.Consumer;
  */
 final class RowGroupReader implements BatchReader {
 
-    private final Path file;
+    private final String file;
     private final int block;
     private long rows;
     private final Schema output;
@@ -100,6 +99,7 @@ final class RowGroupReader implements BatchReader {
      * Opens a row group of a file and reads its pages of the columns into
      * memory.
      *
+     * @param files the files of the connector
      * @param footer the footer of the file in the version the scan plans with
      * @param block the index of the row group in the file
      * @param rows the rows to deliver, at most those of the row group
@@ -110,9 +110,9 @@ final class RowGroupReader implements BatchReader {
      * @throws IllegalArgumentException naming the file and the row group if
      *         the file changed or its pages cannot be read
      */
-    RowGroupReader(ParquetFiles.Footer footer, int block, long rows, FilterPredicate predicate, Schema output,
-            List<ColumnPath> columns, int batchSize, Consumer<ParquetConnector.Read> reads) {
-        this.file = footer.version().file();
+    RowGroupReader(ParquetFiles files, ParquetFiles.Footer footer, int block, long rows, FilterPredicate predicate,
+            Schema output, List<ColumnPath> columns, int batchSize, Consumer<ParquetConnector.Read> reads) {
+        this.file = footer.version().location();
         this.block = block;
         this.rows = rows;
         this.output = output;
@@ -156,11 +156,11 @@ final class RowGroupReader implements BatchReader {
                 sources[i] = new Source(-1, m, children(recordTypes.get(m), p.fields()));
             }
         }
-        if (!ParquetFiles.Version.of(file).equals(footer.version())) {
+        if (files.changed(footer.version())) {
             throw new IllegalArgumentException("The Parquet file " + file + " changed since its footer was read");
         }
         read = requested.getColumns().stream().map(d -> String.join(".", d.getPath())).toList();
-        InputFile input = new LocalFile(file);
+        InputFile input = files.input(footer.version().file());
         try (ParquetFileReader reader = new ParquetFileReader(input, footer.metadata(), predicate == null
                 ? ParquetFiles.options() : ParquetFiles.options(FilterCompat.get(predicate), false),
                 input.newStream())) {

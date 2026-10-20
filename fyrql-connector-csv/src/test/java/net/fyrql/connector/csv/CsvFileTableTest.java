@@ -83,7 +83,7 @@ class CsvFileTableTest {
     }
 
     private void write(Path file, Map<String, String> options) {
-        try (Sink sink = csv.openFile("csv", file, SCALARS, options)) {
+        try (Sink sink = csv.openFile("csv", file.toString(), SCALARS, options)) {
             sink.write(Batch.ofRows(SCALARS, scalarRows()));
             sink.commit();
         }
@@ -119,7 +119,7 @@ class CsvFileTableTest {
         for (Map<String, String> options : variants) {
             Path file = dir.resolve("all" + options.size() + options.hashCode() + ".csv");
             write(file, options);
-            TableRef table = csv.fileTable("csv", file, SCALARS, options);
+            TableRef table = csv.fileTable("csv", file.toString(), SCALARS, options);
             assertEquals("csv", table.source());
             assertTrue(table.table().startsWith("#"), table.table());
             assertEquals(SCALARS, csv.catalog().schema(table));
@@ -131,7 +131,8 @@ class CsvFileTableTest {
         // A name that ends in .gz is compressed by default, and .tsv.gz has a tab between the fields.
         Path gz = dir.resolve("all.tsv.gz");
         write(gz, Map.of());
-        assertEquals(expected(""), Arrays.deepToString(read(csv.fileTable("csv", gz, SCALARS, Map.of())).toArray()));
+        assertEquals(expected(""), Arrays.deepToString(read(csv.fileTable("csv", gz.toString(), SCALARS, Map.of()))
+                .toArray()));
     }
 
     @Test
@@ -140,11 +141,12 @@ class CsvFileTableTest {
         Files.writeString(file, "x,y\n1,2024-02-29\n,\n", StandardCharsets.UTF_8);
         Schema schema = Schema.of(new Schema.Field("a", DataType.SMALLINT), new Schema.Field("b", DataType.DATE));
         assertEquals("[[1, " + Conversions.parseDate("2024-02-29") + "], [null, null]]",
-                Arrays.deepToString(read(csv.fileTable("csv", file, schema, Map.of())).toArray()));
+                Arrays.deepToString(read(csv.fileTable("csv", file.toString(), schema, Map.of())).toArray()));
         Files.writeString(file, "1,2024-02-29\n", StandardCharsets.UTF_8);
-        assertEquals("[]", Arrays.deepToString(read(csv.fileTable("csv", file, schema, Map.of())).toArray()));
+        assertEquals("[]", Arrays.deepToString(read(csv.fileTable("csv", file.toString(), schema, Map.of()))
+                .toArray()));
         assertEquals("[[1, " + Conversions.parseDate("2024-02-29") + "]]", Arrays.deepToString(read(
-                csv.fileTable("csv", file, schema, Map.of("header", "false"))).toArray()));
+                csv.fileTable("csv", file.toString(), schema, Map.of("header", "false"))).toArray()));
     }
 
     @Test
@@ -152,9 +154,9 @@ class CsvFileTableTest {
         Path one = dir.resolve("one.csv");
         Files.writeString(one, "\nc\n1\n\n3\n\n", StandardCharsets.UTF_8);
         Schema schema = Schema.of(new Schema.Field("c", DataType.INTEGER));
-        assertEquals("[[1], [null], [3], [null]]", Arrays.deepToString(read(csv.fileTable("csv", one, schema,
+        assertEquals("[[1], [null], [3], [null]]", Arrays.deepToString(read(csv.fileTable("csv", one.toString(), schema,
                 Map.of())).toArray()));
-        assertEquals("[[1], [3]]", Arrays.deepToString(read(csv.fileTable("csv", one, schema,
+        assertEquals("[[1], [3]]", Arrays.deepToString(read(csv.fileTable("csv", one.toString(), schema,
                 Map.of("nullstr", "NA"))).toArray()));
         Files.writeString(one, "c\n1\n\n3\n\n", StandardCharsets.UTF_8);
         assertEquals("[[1], [null], [3], [null]]", Arrays.deepToString(read(csv.bind("read_csv",
@@ -162,7 +164,7 @@ class CsvFileTableTest {
 
         Path two = dir.resolve("two.csv");
         Files.writeString(two, "a,b\n1,2\n\n3,4\n\n", StandardCharsets.UTF_8);
-        assertEquals("[[1, 2], [3, 4]]", Arrays.deepToString(read(csv.fileTable("csv", two, Schema.of(
+        assertEquals("[[1, 2], [3, 4]]", Arrays.deepToString(read(csv.fileTable("csv", two.toString(), Schema.of(
                 new Schema.Field("a", DataType.INTEGER), new Schema.Field("b", DataType.INTEGER)), Map.of()))
                 .toArray()));
     }
@@ -172,13 +174,13 @@ class CsvFileTableTest {
         Path file = dir.resolve("s.csv");
         Files.writeString(file, "a\n1\n", StandardCharsets.UTF_8);
         Schema schema = Schema.of(new Schema.Field("a", DataType.BIGINT));
-        TableRef table = csv.fileTable("csv", file, schema, Map.of());
-        assertEquals(table, csv.fileTable("csv", file, schema, Map.of()));
-        assertNotEquals(table, csv.fileTable("csv", file, schema, Map.of("header", "true")));
-        assertNotEquals(table, csv.fileTable("csv", file, Schema.of(new Schema.Field("a", DataType.INTEGER)),
+        TableRef table = csv.fileTable("csv", file.toString(), schema, Map.of());
+        assertEquals(table, csv.fileTable("csv", file.toString(), schema, Map.of()));
+        assertNotEquals(table, csv.fileTable("csv", file.toString(), schema, Map.of("header", "true")));
+        assertNotEquals(table, csv.fileTable("csv", file.toString(), Schema.of(new Schema.Field("a", DataType.INTEGER)),
                 Map.of()));
         Files.writeString(file, "a\n1\n2\n", StandardCharsets.UTF_8);
-        TableRef changed = csv.fileTable("csv", file, schema, Map.of());
+        TableRef changed = csv.fileTable("csv", file.toString(), schema, Map.of());
         assertNotEquals(table, changed);
         assertEquals(2, read(changed).size());
     }
@@ -190,47 +192,48 @@ class CsvFileTableTest {
         Schema schema = Schema.of(new Schema.Field("a", DataType.INTEGER), new Schema.Field("b", DataType.INTEGER));
         List<Map.Entry<String, Runnable>> errors = new ArrayList<>();
         errors.add(Map.entry("The CSV source csv reads no files of the format json",
-                () -> csv.fileTable("json", file, schema, Map.of())));
+                () -> csv.fileTable("json", file.toString(), schema, Map.of())));
         errors.add(Map.entry("The CSV file " + file + " has an unknown option rows; known are header, delimiter,"
                 + " delim, sep, quote, escape, nullstr, null, dateformat, timestampformat, compression",
-                () -> csv.fileTable("csv", file, schema, Map.of("rows", "3"))));
+                () -> csv.fileTable("csv", file.toString(), schema, Map.of("rows", "3"))));
         errors.add(Map.entry("Not supported: an escape other than the quote, for the CSV file " + file + "; a quote"
                 + " in a quoted value is read as two quotes",
-                () -> csv.fileTable("csv", file, schema, Map.of("escape", "\\"))));
+                () -> csv.fileTable("csv", file.toString(), schema, Map.of("escape", "\\"))));
         errors.add(Map.entry("The CSV file " + file + " needs a delimiter and a quote that differ from each other"
-                + " and from line breaks", () -> csv.fileTable("csv", file, schema, Map.of("quote", ","))));
+                + " and from line breaks", () -> csv.fileTable("csv", file.toString(), schema, Map.of("quote", ","))));
         errors.add(Map.entry("The option compression of the CSV file " + file + " must be gzip, none or auto, not"
-                + " zip", () -> csv.fileTable("csv", file, schema, Map.of("compression", "zip"))));
+                + " zip", () -> csv.fileTable("csv", file.toString(), schema, Map.of("compression", "zip"))));
         errors.add(Map.entry("A CSV file holds no values of the type INTEGER[], as the column l has",
-                () -> csv.fileTable("csv", file, Schema.of(new Schema.Field("l", DataType.listOf(DataType.INTEGER))),
-                        Map.of())));
+                () -> csv.fileTable("csv", file.toString(), Schema.of(new Schema.Field("l",
+                        DataType.listOf(DataType.INTEGER))), Map.of())));
         Path missing = dir.resolve("missing.csv");
         errors.add(Map.entry("No files found that match the pattern \"" + missing + "\"",
-                () -> csv.fileTable("csv", missing, schema, Map.of())));
+                () -> csv.fileTable("csv", missing.toString(), schema, Map.of())));
         Path zst = dir.resolve("e.csv.zst");
         Files.writeString(zst, "a,b\n", StandardCharsets.UTF_8);
         errors.add(Map.entry("Files compressed with zstd are not supported: " + zst,
-                () -> csv.fileTable("csv", zst, schema, Map.of())));
+                () -> csv.fileTable("csv", zst.toString(), schema, Map.of())));
         for (Map.Entry<String, Runnable> e : errors) {
             IllegalArgumentException x = assertThrows(IllegalArgumentException.class, e.getValue()::run);
             assertEquals(e.getKey(), x.getMessage());
         }
         IllegalArgumentException format = assertThrows(IllegalArgumentException.class,
-                () -> csv.fileTable("csv", file, schema, Map.of("dateformat", "%Q")));
+                () -> csv.fileTable("csv", file.toString(), schema, Map.of("dateformat", "%Q")));
         assertTrue(format.getMessage().startsWith("The option dateformat of the CSV file " + file + " is invalid: "),
                 format.getMessage());
 
         // A field that does not parse, and a record of too few fields, are errors of the scan.
-        TableRef table = csv.fileTable("csv", file, schema, Map.of());
+        TableRef table = csv.fileTable("csv", file.toString(), schema, Map.of());
         ConversionException x = assertThrows(ConversionException.class, () -> read(table));
         assertTrue(x.getMessage().startsWith("Line 3 of " + file.toAbsolutePath() + ", column b: "), x.getMessage());
         Files.writeString(file, "a,b\n1,2\n4\n", StandardCharsets.UTF_8);
-        x = assertThrows(ConversionException.class, () -> read(csv.fileTable("csv", file, schema, Map.of())));
+        x = assertThrows(ConversionException.class, () -> read(csv.fileTable("csv", file.toString(), schema,
+                Map.of())));
         assertEquals("Line 3 of " + file.toAbsolutePath() + " has 1 fields, the header 2", x.getMessage());
         // A date in another form than the format is an error, also one a cast would read.
         Files.writeString(file, "a,b\n2024-02-29,x\n", StandardCharsets.UTF_8);
         Schema dates = Schema.of(new Schema.Field("a", DataType.DATE), new Schema.Field("b", DataType.VARCHAR));
-        x = assertThrows(ConversionException.class, () -> read(csv.fileTable("csv", file, dates,
+        x = assertThrows(ConversionException.class, () -> read(csv.fileTable("csv", file.toString(), dates,
                 Map.of("dateformat", "%d.%m.%Y"))));
         assertTrue(x.getMessage().startsWith("Line 2 of " + file.toAbsolutePath() + ", column a: "), x.getMessage());
     }

@@ -66,6 +66,14 @@
  * Both write through a {@link net.fyrql.connector.Sink}. A source that reads
  * files with columns given in advance, for {@code COPY ... FROM}, offers
  * them as a {@link net.fyrql.connector.FileReaderProvider}.</li>
+ * <li>Files are named by locations as text: a local path or a location
+ * with a scheme, such as {@code s3://bucket/key}. A source that holds the
+ * files of a scheme offers a {@link net.fyrql.connector.FileStore} through
+ * {@link net.fyrql.connector.Connector#fileStore()}; the engine gives all
+ * stores to every source as {@link net.fyrql.connector.FileStores} through
+ * {@link net.fyrql.connector.Connector#fileStores}, once all sources are
+ * created, and the sources of file formats read and write through
+ * them.</li>
  * <li>The engine writes the batches of a sink in the schema it opened the
  * sink with, from one thread, and then commits it or closes it without a
  * commit, which abandons the write.</li>

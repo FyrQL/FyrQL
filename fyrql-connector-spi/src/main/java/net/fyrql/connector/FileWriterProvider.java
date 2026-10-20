@@ -13,7 +13,6 @@ package net.fyrql.connector;
 
 import net.fyrql.core.type.Schema;
 
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -22,10 +21,10 @@ import java.util.Map;
  * {@code COPY ... TO 'file' (FORMAT format, ...)}. The engine looks for the
  * format among its sources, as it does for table functions.
  * <p>
- * The file is written under a temporary name in its directory and gets
- * its name with the commit of the sink, replacing a file of that name;
- * closing the sink without a commit deletes the temporary file. The
- * directory must exist. {@link TemporaryFile} does this.
+ * The file appears under its location only with the commit of the sink,
+ * replacing a file there; closing the sink without a commit leaves
+ * nothing behind. A {@link FileOutput} of the {@link FileStores} does
+ * this; a local directory must exist.
  */
 public interface FileWriterProvider {
 
@@ -36,7 +35,8 @@ public interface FileWriterProvider {
      * Opens a sink that writes a file.
      *
      * @param format one of {@link #fileFormats()}
-     * @param file the file to write
+     * @param location the location of the file to write, a local path or
+     *        one with a scheme, see {@link FileStores}
      * @param schema the columns of the rows
      * @param options the options of the statement besides the format, by
      *        names in lower case, in their order; a value is the text of
@@ -46,5 +46,5 @@ public interface FileWriterProvider {
      *         option is unknown, which names the known ones, or does not
      *         fit, or if a column has a type the format cannot hold
      */
-    Sink openFile(String format, Path file, Schema schema, Map<String, String> options);
+    Sink openFile(String format, String location, Schema schema, Map<String, String> options);
 }

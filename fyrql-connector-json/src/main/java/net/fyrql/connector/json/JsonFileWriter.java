@@ -12,8 +12,10 @@
 package net.fyrql.connector.json;
 
 import net.fyrql.connector.ConfigOptions;
+import net.fyrql.connector.FileOutput;
+import net.fyrql.connector.FileStores;
+import net.fyrql.connector.Globs;
 import net.fyrql.connector.Sink;
-import net.fyrql.connector.TemporaryFile;
 import net.fyrql.core.function.DateFormats;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -29,7 +31,6 @@ import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
@@ -46,7 +47,7 @@ final class JsonFileWriter implements Sink {
 
     private static final int BUFFER = 1 << 16;
 
-    private final TemporaryFile file;
+    private final FileOutput file;
     private final Writer out;
     private final List<String> names;
     private final DataType[] types;
@@ -57,7 +58,7 @@ final class JsonFileWriter implements Sink {
     private long rows;
     private boolean done;
 
-    private JsonFileWriter(TemporaryFile file, Writer out, Schema schema, boolean array,
+    private JsonFileWriter(FileOutput file, Writer out, Schema schema, boolean array,
             LongFunction<String> dateFormat, LongFunction<String> timestampFormat) {
         this.file = file;
         this.out = out;
@@ -85,22 +86,27 @@ final class JsonFileWriter implements Sink {
     }
 
     /**
-     * Checks the options and creates the temporary file.
+     * Checks the options and starts to write the file in its store.
      *
      * @throws IllegalArgumentException if an option is unknown or does not fit
      */
-    static JsonFileWriter open(Path path, Schema schema, Map<String, String> options) {
+    static JsonFileWriter open(String path, FileStores stores, Schema schema, Map<String, String> options) {
         String owner = "the JSON file " + path;
         ConfigOptions o = new ConfigOptions(owner, options, Path.of(""));
         boolean array = o.bool("array").orElse(false);
         LongFunction<String> dateFormat = o.get("dateformat", null, DateFormats::writer).orElse(null);
         LongFunction<String> timestampFormat = o.get("timestampformat", null, DateFormats::writer).orElse(null);
-        boolean gzip = gzip(o, String.valueOf(path.getFileName()).toLowerCase(Locale.ROOT), owner);
+        boolean gzip = gzip(o, path.substring(Globs.lastSeparator(path) + 1).toLowerCase(Locale.ROOT), owner);
         o.rejectUnknown();
 
-        TemporaryFile file = TemporaryFile.create(path);
+        FileOutput file;
         try {
-            OutputStream stream = Files.newOutputStream(file.path());
+            file = stores.create(path);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot write " + path + ": " + e.getMessage(), e);
+        }
+        try {
+            OutputStream stream = file.stream();
             if (gzip) {
                 stream = new GZIPOutputStream(stream, BUFFER);
             }
@@ -111,14 +117,14 @@ final class JsonFileWriter implements Sink {
             return new JsonFileWriter(file, out, schema, array, dateFormat, timestampFormat);
         } catch (IOException e) {
             file.close();
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         }
     }
 
     @Override
     public void write(Batch batch) {
         if (done) {
-            throw new IllegalStateException("The JSON file " + file.target() + " is already closed");
+            throw new IllegalStateException("The JSON file " + file.location() + " is already closed");
         }
         int n = batch.rowCount();
         for (int r = 0; r < n; r++) {
@@ -219,7 +225,7 @@ final class JsonFileWriter implements Sink {
         try {
             out.append(line);
         } catch (IOException e) {
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         }
         line.setLength(0);
     }
@@ -227,7 +233,7 @@ final class JsonFileWriter implements Sink {
     @Override
     public long commit() {
         if (done) {
-            throw new IllegalStateException("The JSON file " + file.target() + " is already closed");
+            throw new IllegalStateException("The JSON file " + file.location() + " is already closed");
         }
         done = true;
         try {
@@ -235,11 +241,11 @@ final class JsonFileWriter implements Sink {
                 out.write(rows > 0 ? "\n]\n" : "]\n");
             }
             out.close();
+            file.commit();
         } catch (IOException e) {
             file.close();
-            throw new UncheckedIOException("Cannot write " + file.path() + ": " + e.getMessage(), e);
+            throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
         }
-        file.commit();
         return rows;
     }
 
