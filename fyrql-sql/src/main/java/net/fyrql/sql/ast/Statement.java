@@ -13,8 +13,8 @@ package net.fyrql.sql.ast;
 
 /**
  * A statement: a query, or one of the statements that write, which are
- * {@code COPY ... TO}, {@code CREATE TABLE}, {@code INSERT INTO} and
- * {@code DROP TABLE}.
+ * {@code COPY ... TO}, {@code COPY ... FROM}, {@code CREATE TABLE},
+ * {@code INSERT INTO} and {@code DROP TABLE}.
  */
-public sealed interface Statement permits Query, CopyTo, CreateTable, InsertInto, DropTable {
+public sealed interface Statement permits Query, CopyTo, CopyFrom, CreateTable, InsertInto, DropTable {
 }

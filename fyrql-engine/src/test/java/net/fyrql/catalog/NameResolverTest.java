@@ -213,8 +213,8 @@ class NameResolverTest {
         assertEquals("read_csv needs an argument",
                 assertThrows(SqlException.class, () -> first.tableFunction("read_csv", List.of(), Map.of()))
                         .getMessage());
-        assertEquals("Table function with name read_json does not exist; there are read_csv, read_a, read_b",
-                assertThrows(SqlException.class, () -> first.tableFunction("read_json", List.of(), Map.of()))
+        assertEquals("Table function with name read_xml does not exist; there are read_csv, read_a, read_b",
+                assertThrows(SqlException.class, () -> first.tableFunction("read_xml", List.of(), Map.of()))
                         .getMessage());
     }
 }

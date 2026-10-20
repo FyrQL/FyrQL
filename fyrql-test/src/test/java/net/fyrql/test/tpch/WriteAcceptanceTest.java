@@ -24,6 +24,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -37,9 +38,10 @@ import static org.junit.jupiter.api.Assertions.fail;
  * FyrQL moves TPC-H tables at scale factor 0.01 between the sources of
  * {@link TpchEngine}: {@code orders} from the database (PostgreSQL, or H2
  * if it is off) into a Parquet file, {@code partsupp} from a CSV file into
- * the memory source, and {@code part} from a file of JSON lines into an H2
- * database of its own. Q3, Q9 and Q13 over the copies give the rows that
- * DuckDB gives over the original files.
+ * a table of the memory source that {@code CREATE TABLE} creates with its
+ * columns and {@code COPY ... FROM} loads, and {@code part} from a file of
+ * JSON lines into an H2 database of its own. Q3, Q9 and Q13 over the copies
+ * give the rows that DuckDB gives over the original files.
  */
 class WriteAcceptanceTest {
 
@@ -48,7 +50,8 @@ class WriteAcceptanceTest {
 
     @Test
     void queriesOverTheCopiesGiveTheRowsOfDuckDb() {
-        TpchEngine tpch = TpchEngine.load(TpchEngine.SMALL, TpchTest.directory(TpchEngine.SMALL));
+        Path data = TpchTest.directory(TpchEngine.SMALL);
+        TpchEngine tpch = TpchEngine.load(TpchEngine.SMALL, data);
         TestDatabase h2 = TestDatabases.h2();
         Path orders = dir.resolve("copy-of-o.parquet");
         try (FyrQL engine = tpch.open(null, null, 0, List.of(h2.connector("h2", b -> {
@@ -62,10 +65,13 @@ class WriteAcceptanceTest {
             assertEquals(orderRows, engine.update("COPY db.orders TO '" + WrittenFiles.path(orders) + "'"));
             assertTrue(Files.isRegularFile(orders), orders.toString());
 
-            long half = engine.update("CREATE TABLE mem.partsupp AS SELECT * FROM files.partsupp"
-                    + " WHERE ps_partkey <= 1000");
-            assertEquals(partsuppRows, half + engine.update("INSERT INTO mem.partsupp SELECT * FROM files.partsupp"
-                    + " WHERE ps_partkey > 1000"));
+            List<String> columns = new ArrayList<>();
+            for (Schema.Field f : TpchTable.PARTSUPP.schema().fields()) {
+                columns.add(f.name() + " " + f.type().sqlName() + " NOT NULL");
+            }
+            assertEquals(0, engine.update("CREATE TABLE mem.partsupp (" + String.join(", ", columns) + ")"));
+            assertEquals(partsuppRows, engine.update("COPY mem.partsupp FROM '" + WrittenFiles.path(TpchData.file(
+                    data, TpchTable.PARTSUPP)) + "' (DELIMITER '" + TpchData.DELIMITER + "')"));
 
             assertEquals(partRows, engine.update("CREATE TABLE h2.part AS SELECT * FROM json.part"));
             assertEquals(names(TpchTable.PART.schema()), names(engine.connector("h2").catalog().schema(

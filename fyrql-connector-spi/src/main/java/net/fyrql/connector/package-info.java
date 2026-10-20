@@ -63,7 +63,9 @@
  * {@link net.fyrql.connector.Writer} through
  * {@link net.fyrql.connector.Connector#writer()}; a source that writes
  * files offers formats as a {@link net.fyrql.connector.FileWriterProvider}.
- * Both write through a {@link net.fyrql.connector.Sink}.</li>
+ * Both write through a {@link net.fyrql.connector.Sink}. A source that reads
+ * files with columns given in advance, for {@code COPY ... FROM}, offers
+ * them as a {@link net.fyrql.connector.FileReaderProvider}.</li>
  * <li>The engine writes the batches of a sink in the schema it opened the
  * sink with, from one thread, and then commits it or closes it without a
  * commit, which abandons the write.</li>

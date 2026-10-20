@@ -25,7 +25,8 @@ warehouse first.
   six-core laptop in about 17 s together, where DuckDB takes about 7 s over the same files
   (see [Building](#building)).
 - **Moving data.** `COPY ... TO` writes the result of a query into a CSV, JSON or Parquet
-  file, and `CREATE TABLE ... AS` and `INSERT INTO` write it into tables in memory and in
+  file, `COPY ... FROM` loads such a file into a table with the types of its columns, and
+  `CREATE TABLE ... AS` and `INSERT INTO` write results into tables in memory and in
   databases, so that data moves between sources, such as from PostgreSQL into Parquet.
 - **Embedded.** The engine runs inside the process of the application and is set up with
   a builder or a YAML file; there is no cluster or installation. A JDBC driver, also as
@@ -46,10 +47,11 @@ warehouse first.
 
 FyrQL is young: version 0.x, not yet used in production, and its API may still change.
 It writes results into files, tables in memory and databases, but does not update or
-delete rows; the hash tables and sorts of a query must fit into its memory budget, since nothing is spilled to disk yet; and where all data is in local files
-and native code is fine, DuckDB itself is faster. FyrQL is meant for the other case: data
-spread across databases, files and services, queried from a Java application or a JDBC
-tool, without moving it first.
+delete rows; the hash tables and sorts of a query must fit into its memory budget, since
+nothing is spilled to disk yet; and where all data is in local files and native code is
+fine, DuckDB itself is faster. FyrQL is meant for the other case: data spread across
+databases, files and services, queried from a Java application or a JDBC tool, without
+moving it first.
 
 ## Using the engine
 
@@ -123,8 +125,9 @@ Plans can also be built in Java from the nodes of `PlanNode`, starting with
 `engine.scan(TableRef.of("mem", "orders"))`, and run with `engine.execute(plan)`.
 The builder takes further settings: `defaultSource` and `defaultSchema` for short names,
 `functions` for a `FunctionRegistry` with functions of the application, `memoryBudget`,
-`batchSize`, `pushdown`, `threads` and `preserveOrder`. Before a plan runs, the [optimizer](#optimizer) rewrites
-it, every scan is narrowed to the columns in use, and with pushdown (the default, or the system property `fyrql.pushdown` set to `on`
+`batchSize`, `pushdown`, `threads`, `preserveOrder`, and `implicitSources` and
+`classLoader` for the sources of the file formats (see [Writing](#writing)). Before a plan
+runs, the [optimizer](#optimizer) rewrites it, every scan is narrowed to the columns in use, and with pushdown (the default, or the system property `fyrql.pushdown` set to `on`
 or `off`) the source of a scan takes over what it can of the filter, aggregation, sort and
 limit above it; `explain` shows that as `[pushed: ...]`. A source may only take over what
 it evaluates exactly as the engine would, and the tests run every query with and without
@@ -138,7 +141,8 @@ agree.
 
 Each kind of source is a connector in a module of its own, and every connector serves its
 tables in the schema `main` unless it says otherwise. The connectors of CSV, JSON and
-Parquet also write files, and those of memory and JDBC tables; see [Writing](#writing).
+Parquet also write files and read them with the columns of a table, and those of memory
+and JDBC write tables; see [Writing](#writing).
 
 - `fyrql-connector-memory`: Java collections of records, beans or rows; records and
   nested collections become `STRUCT`, `LIST` and `MAP` values. The tables that SQL creates
@@ -147,7 +151,9 @@ Parquet also write files, and those of memory and JDBC tables; see [Writing](#wr
   inferred from a sample as DuckDB's `read_csv` infers them. A scan reads integers,
   decimals of up to 18 digits, dates, booleans and ASCII strings straight from the
   characters of the file into the columns; a field of another type, or in a form such as
-  `+1`, `1e3` or ` 1`, is read as a string is cast, with the same value and error.
+  `+1`, `1e3` or ` 1`, is read as a string is cast, with the same value and error. A file
+  whose name ends in `.gz` is read through gzip, in one part. The table functions take
+  `header`, `delim` or `sep`, `quote`, `nullstr`, `dateformat` and `timestampformat`.
 - `fyrql-connector-json`: JSON files (`.json`, `.jsonl`, `.ndjson`, also with `.gz`) that
   hold an array of records or a sequence of them. The columns are inferred from a sample
   as DuckDB's `read_json` infers them; objects and arrays become `STRUCT`, `MAP` and `LIST`
@@ -367,11 +373,13 @@ version 2, is not asked for.
 
 ## Writing
 
-Four statements write, and each gives one row with the number of rows written in a
+Five statements write, and each gives one row with the number of rows written in a
 column `Count` of the type `BIGINT`, as in DuckDB:
 
-- `COPY (query) TO 'file' [(option value, ...)]`, or `COPY table TO 'file'`, writes the
-  rows of a query into a CSV, JSON or Parquet file;
+- `COPY (query) TO 'file' [(option value, ...)]`, or `COPY table [(columns)] TO 'file'`,
+  writes the rows of a query into a CSV, JSON or Parquet file;
+- `COPY table [(columns)] FROM 'file' [(option value, ...)]` loads such a file into a
+  table with the types of its columns;
 - `CREATE TABLE t AS query` creates a table with the columns of the query and its rows,
   and `CREATE TABLE t (a INTEGER NOT NULL, b VARCHAR)` an empty one; `CREATE OR REPLACE
   TABLE` drops a table of the name first, and `CREATE TABLE IF NOT EXISTS` does nothing if
@@ -420,9 +428,8 @@ to the schema `main` of the source of that name or else to the schema of that na
 the default source, and of three parts to `source.schema.table`. Each statement is a
 transaction of its own in the source it writes to; there is no transaction over several
 statements or sources, and `CREATE OR REPLACE` drops the old table and then creates the
-new one in two steps. `UPDATE`, `DELETE`, `ALTER TABLE`, constraints and keys,
-`COPY ... FROM` (for which `INSERT INTO t SELECT * FROM read_csv('file')` reads a file)
-and scripts of several statements are not supported.
+new one in two steps. `UPDATE`, `DELETE`, `ALTER TABLE`, constraints and keys, and
+scripts of several statements are not supported.
 
 **Files.** `COPY` takes the format from the option `FORMAT` (`csv`, `json` or
 `parquet`), or else from the end of the name of the file: `.csv` and `.tsv`, `.json`,
@@ -430,12 +437,9 @@ and scripts of several statements are not supported.
 them with gzip. A relative path is resolved against the working directory of the
 process. The rows go into a temporary file `<name>.<random>.tmp` next to the file, which
 takes its name when the last row is written and replaces a file of that name, so that a
-reader never sees half a file; the directory must exist. The writer of a format comes
-from a source of that type, which must be registered, if without tables, as
-`CsvConnector.builder("csv").build()` or a source `type: parquet` without options in the
-[configuration file](#configuration-file); otherwise the statement fails with
-`No source writes files of the format parquet`. The options, all optional, with their
-defaults:
+reader never sees half a file; the directory must exist. `COPY t (a, b) TO 'file'`
+writes the columns of the list, as `COPY (SELECT a, b FROM t) TO 'file'` does. The
+options, all optional, with their defaults:
 
 | Format | Options |
 | --- | --- |
@@ -458,6 +462,58 @@ adjusted to UTC and a `UUID` of the logical type `UUID`, except for `HUGEINT`, w
 holds as a `DECIMAL(38,0)`: a value of 39 digits fails with the name of its column, where
 DuckDB writes a `HUGEINT` as a `DOUBLE`. Its metadata has the key `writer.model.name`
 with the value `fyrql`.
+
+**Formats.** The reader and the writer of a format come with the module of the format:
+an engine with `fyrql-connector-parquet` on its class path has a source `parquet`
+without tables, which reads and writes Parquet files for `COPY`, the table function
+`read_parquet` and file names in `FROM`, unless registered sources read and write that
+format or one has that name. The engine finds these sources with the `ServiceLoader` in the class loader of
+FyrQL, or in the one given to `classLoader(...)` on the builder; `sources()` lists them
+after the registered ones, and none of them is the default source. `implicitSources(false)`
+on the builder, or `implicitSources: false` in the [configuration file](#configuration-file),
+turns them off. Without a source of its format, a statement fails with
+`No source writes files of the format parquet; put fyrql-connector-parquet on the class
+path or register a source of the type parquet`.
+
+**Loading.** `COPY t [(columns)] FROM 'file' [(option value, ...)]` loads a file into the
+table `t`, which must exist, with the types of its columns, as DuckDB does. Where
+`INSERT INTO t SELECT * FROM 'file'` reads the file with the types that a sample of it
+suggests and casts them, so that a `007` in a `VARCHAR` column becomes `7` and a column
+that is empty in the sample gets a type that a later row may not fit, `COPY ... FROM`
+reads each column as the type of its column in the table, from the first row to the last.
+The file holds the columns of the list, by default all columns of the table; the other
+columns get `NULL`, and one of them that is `NOT NULL` fails the statement before the
+file is opened. A CSV file gives its fields in the order of the list, and its first line
+is a header unless `HEADER false` is given, which is skipped without a look at its names;
+a JSON file gives the values of its records by the names of their keys, where a missing
+key is `NULL` and an unknown one is passed over; a Parquet file gives its columns in the
+order of the list, which are cast to the types of the table where such a cast is
+allowed, and otherwise the statement fails with the column and both types. The format
+comes from the option `FORMAT` or the name of the file, as for `COPY ... TO`, and a name
+that ends in `.gz` is read through gzip. The statement gives the number of rows loaded,
+checks `NOT NULL` and leaves no rows behind when it fails, as `INSERT INTO` does, and
+`explain` shows its plan below a line such as
+`Copy from 'data/orders-by-region.csv' into mem.main.archive [format: csv]`. With the
+sources of the example above, this loads the file that `COPY ... TO` wrote into a new
+table with types of its own:
+
+```java
+engine.update("CREATE TABLE mem.archive (id BIGINT NOT NULL, region VARCHAR, amount DECIMAL(10,2))");
+long loaded = engine.update("COPY mem.archive FROM 'data/orders-by-region.csv'");
+```
+
+The options of reading, all optional, with their defaults:
+
+| Format | Options |
+| --- | --- |
+| CSV | `header` (`true`), `delimiter`, `delim` or `sep` (`,`, or a tab for `.tsv`), `quote` (`"`), `escape` (only the quote), `nullstr` or `null` (empty), `dateformat` and `timestampformat` (as in `strptime`; a value must have that form), `compression` (`gzip`, `none` or `auto`: by the name) |
+| JSON | `format` (`auto`, `array` or `newline_delimited`; `auto`) or `array` (`true` or `false`), `dateformat`, `timestampformat`, `ignore_errors` (`false`; with `true`, a value that does not fit is `NULL`), `compression` |
+| Parquet | none |
+
+A CSV file holds no nested values: a column of the type `STRUCT`, `LIST` or `MAP` in the
+list fails the statement. In a CSV file of one column whose null string is empty, an
+empty line is a `NULL`, as DuckDB writes and reads it; otherwise it is skipped. Files
+compressed with zstd, and several files at once, are not loaded.
 
 **Tables.** The memory connector and the JDBC connector create, fill and drop tables. In
 memory, a table that SQL created holds the batches of its rows and shows the rows of a
@@ -656,9 +712,10 @@ as `${env:NAME}`, or `${env:NAME:-default}`, and a system property as `${sys:nam
 that secrets need not be in the file. The settings under `engine` are those of the
 builder: `defaultSource`, `defaultSchema`, `batchSize`, `memoryBudget` (such as `512MB`),
 `codegen` (`off`, `auto` or `always`), `codegenThreshold`, `pushdown`, `threads` and
-`preserveOrder` (see [Parallel execution](#parallel-execution)). A file whose
-name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` returns the builder
-instead, so that an application can add sources of its own, such as tables in memory.
+`preserveOrder` (see [Parallel execution](#parallel-execution)), and `implicitSources`
+(see [Writing](#writing)). A file whose name ends in `.json` is read as JSON.
+`FyrQLConfig.builder(path)` returns the builder instead, so that an application can add
+sources of its own, such as tables in memory.
 A third section, `server`, holds the settings of the [Flight SQL server](#flight-sql-server),
 which the engine leaves aside.
 
@@ -686,7 +743,9 @@ the driver.
 A source of the type `memory` starts without tables, for those that SQL
 [creates](#writing), and takes `batchSize` and `splitRows`, the rows of the parts that
 a scan of a table reads on several threads. A source of the type `csv`, `json` or
-`parquet` without options has no tables, but gives `COPY` its format.
+`parquet` without options has no tables; the engine has one of each anyway whose module
+is on the class path, unless `implicitSources: false` stands under `engine` (see
+[Writing](#writing)).
 
 ## JDBC driver
 
@@ -992,9 +1051,10 @@ name `FyrQL` and the version of the server, and the types. A statement that
 sent as a query, when the client asks for its flight info, which then gives the row of
 `Count`. A prepared statement that writes has a result without columns, as the Flight SQL
 JDBC driver of Arrow expects, and runs once for each row of values the client sends; at
-a row that fails, the rows before it stay written. Each statement is a transaction of
-its own, and there is no bulk ingestion. An error has the message of FyrQL, with the
-position in the text, and the status `INVALID_ARGUMENT` for a statement that does not
+a row that fails, the rows before it stay written. `COPY` reads and writes files on the
+machine of the server, with paths relative to its working directory. Each statement is a
+transaction of its own, and there is no bulk ingestion. An error has the message of
+FyrQL, with the position in the text, and the status `INVALID_ARGUMENT` for a statement that does not
 parse or bind, values out of range, a failed cast and a write the target refuses,
 `RESOURCE_EXHAUSTED` for the memory budget and `maxQueries`, which counts statements that
 write too, `CANCELLED` for a cancelled query, and `INTERNAL` for an error of a source. All clients share the engine, with its threads and its memory budget.
@@ -1584,6 +1644,9 @@ Known differences from DuckDB:
   takes earlier groups; FyrQL keeps such a frame empty.
 - A Parquet file that `COPY` writes holds a `HUGEINT` as a `DECIMAL(38,0)`, where DuckDB
   writes a `DOUBLE`; `CREATE OR REPLACE TABLE` drops and creates in two transactions.
+- `COPY ... FROM` takes the first line of a CSV file as a header unless `HEADER false` is
+  given, where DuckDB detects whether it is one; it reads a quote inside a quoted value
+  only as two quotes, so that `ESCAPE` must be the quote.
 - A parameter `?` gets its type from its context when the query is prepared, as a bare
   `NULL` would; as the argument of a function, that is the first type the function takes
   of `BIGINT`, `DOUBLE`, `INTEGER` and so on, where DuckDB may choose another, and alone
@@ -1600,13 +1663,13 @@ Known differences from DuckDB:
 | `fyrql-sql` | the SQL parser, the binder, which turns subqueries into joins, and the rendering of plans as SQL per dialect |
 | `fyrql-optimizer` | the folding of constants, the moving of conditions toward the tables and into join keys, the order of inner joins by the row counts of the catalogs, the narrowing of scans to the columns and fields in use, joins in a database and the pushdown into sources |
 | `fyrql-connector-memory` | Java collections, records and POJOs as tables, and the tables that SQL creates |
-| `fyrql-connector-csv` | CSV and TSV files as tables, and their writer |
+| `fyrql-connector-csv` | CSV and TSV files as tables, also compressed with gzip, and their writer |
 | `fyrql-connector-json` | JSON files as tables, with the columns inferred as DuckDB infers them, and their writer |
 | `fyrql-connector-parquet` | Parquet files as tables, read and written with parquet-java without Hadoop, which it carries renamed |
 | `fyrql-connector-http` | JSON from HTTP endpoints as tables |
 | `fyrql-connector-odata` | the entity sets of OData services of versions 2 and 4 as tables, with filters, orders, limits and `count(*)` pushed to the service |
 | `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC, and of any other database through a generic dialect, read and written |
-| `fyrql-engine` | the public Java API and the catalog over the registered sources |
+| `fyrql-engine` | the public Java API and the catalog over the registered sources and those of the file formats on the class path |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application |
 | `fyrql-jdbc-all` | the JDBC driver with the engine, code generation and all connectors in one JAR, for tools such as DBeaver; the drivers of the databases are not in it |

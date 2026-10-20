@@ -12,6 +12,7 @@
 package net.fyrql.sql.parse;
 
 import net.fyrql.sql.SqlException;
+import net.fyrql.sql.ast.CopyFrom;
 import net.fyrql.sql.ast.CopyTo;
 import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.ast.SqlPrinter;
@@ -27,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** {@code COPY ... TO}, which {@link CopyParser} reads besides JSqlParser. */
+/** {@code COPY ... TO} and {@code COPY ... FROM}, which {@link CopyParser} reads besides JSqlParser. */
 class CopyParserTest {
 
     private static CopyTo copy(String sql) {
@@ -69,6 +70,34 @@ class CopyParserTest {
         assertEquals(Map.of("format", "parquet"), c.options());
         c = copy("  /* a */ COPY \"my schema\".t TO 'x.json'");
         assertEquals("SELECT * FROM \"my schema\".t", SqlPrinter.print(c.query()));
+        c = copy("COPY s.t (b, \"A\") TO 'x.csv'");
+        assertEquals("SELECT b, A FROM s.t", SqlPrinter.print(c.query()));
+    }
+
+    @Test
+    void copyFromTakesATableWithItsColumns() {
+        CopyFrom c = assertInstanceOf(CopyFrom.class, SqlParser.parseStatement("COPY s.t FROM 'in.csv'"));
+        assertEquals(List.of("s", "t"), c.name());
+        assertEquals(List.of(), c.columns());
+        assertEquals("in.csv", c.path());
+        assertEquals(Map.of(), c.options());
+        assertEquals(new Position(1, 6), c.position());
+        assertEquals(new Position(1, 15), c.pathPosition());
+
+        c = assertInstanceOf(CopyFrom.class, SqlParser.parseStatement(
+                "copy t (b, \"A b\") from 'x.csv.gz' with (DELIMITER ';', HEADER false, FORMAT csv);"));
+        assertEquals(List.of("t"), c.name());
+        assertEquals(List.of("b", "A b"), c.columns());
+        Map<String, String> expected = new LinkedHashMap<>();
+        expected.put("delimiter", ";");
+        expected.put("header", "false");
+        expected.put("format", "csv");
+        assertEquals(List.copyOf(expected.entrySet()), List.copyOf(c.options().entrySet()));
+        c = assertInstanceOf(CopyFrom.class, SqlParser.parseStatement("COPY t FROM 'x' (NULL 'n/a')"));
+        assertEquals(Map.of("null", "n/a"), c.options());
+        SqlParser.ParameterizedStatement p = SqlParser.parseStatementWithParameters("COPY t FROM 'x.csv'");
+        assertInstanceOf(CopyFrom.class, p.statement());
+        assertEquals(List.of(), p.parameters());
     }
 
     @Test
@@ -97,8 +126,14 @@ class CopyParserTest {
     @Test
     void errors() {
         Map<String, String> cases = new LinkedHashMap<>();
-        cases.put("COPY t FROM 'x.csv'", "Not supported: COPY ... FROM; read a file with INSERT INTO table SELECT *"
-                + " FROM read_csv('file') or read_json or read_parquet@1:8");
+        cases.put("COPY (SELECT 1) FROM 'x.csv'", "COPY ... FROM takes a table, not a query@1:17");
+        cases.put("COPY t FROM x.csv",
+                "Syntax error at or near \"x\": the file after FROM is a string in single quotes@1:13");
+        cases.put("COPY t (a b) FROM 'x.csv'", "Syntax error at or near \"b\"@1:11");
+        cases.put("COPY t () FROM 'x.csv'", "Syntax error at or near \")\"@1:9");
+        cases.put("COPY t (a, 'b') FROM 'x.csv'", "Syntax error at or near \"'b'\"@1:12");
+        cases.put("COPY t (a) INTO 'x.csv'", "Syntax error at or near \"INTO\"@1:12");
+        cases.put("COPY t FROM 'x.csv' (HEADER", "Syntax error at end of input@1:28");
         cases.put("COPY (SELECT 1 TO 'x'",
                 "Syntax error at end of input: the query after COPY has no closing parenthesis@1:22");
         cases.put("COPY t TO x.csv",

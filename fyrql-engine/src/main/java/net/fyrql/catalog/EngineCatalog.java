@@ -12,6 +12,7 @@
 package net.fyrql.catalog;
 
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileReaderProvider;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.plan.TableRef;
@@ -21,6 +22,8 @@ import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.bind.CatalogView;
 
 import java.io.UncheckedIOException;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -32,7 +35,7 @@ import java.util.Optional;
  * {@link NameResolver}, and table functions from the connectors that offer
  * them. A function offered by several connectors is taken from the default
  * source if it offers it, otherwise from the first one registered; so are
- * the writers of file formats.
+ * the writers and the readers of file formats.
  */
 public final class EngineCatalog implements CatalogView {
 
@@ -40,6 +43,10 @@ public final class EngineCatalog implements CatalogView {
     private final NameResolver resolver;
     private final Map<String, TableFunctionProvider> functions = new LinkedHashMap<>();
     private final Map<String, FileWriterProvider> fileWriters = new LinkedHashMap<>();
+    private final Map<String, FileReaderProvider> fileReaders = new LinkedHashMap<>();
+
+    /** The formats of files that a module of their own brings. */
+    private static final List<String> MODULE_FORMATS = List.of("csv", "json", "parquet");
 
     /** A catalog over sources by name, in the order of their registration. */
     public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath) {
@@ -56,6 +63,11 @@ public final class EngineCatalog implements CatalogView {
                 fileWriters.put(f.toLowerCase(Locale.ROOT), p);
             }
         }
+        if (preferred instanceof FileReaderProvider p) {
+            for (String f : p.fileFormats()) {
+                fileReaders.put(f.toLowerCase(Locale.ROOT), p);
+            }
+        }
         for (Connector c : sources.values()) {
             if (c instanceof TableFunctionProvider p) {
                 for (String f : p.tableFunctions()) {
@@ -65,6 +77,11 @@ public final class EngineCatalog implements CatalogView {
             if (c instanceof FileWriterProvider p) {
                 for (String f : p.fileFormats()) {
                     fileWriters.putIfAbsent(f.toLowerCase(Locale.ROOT), p);
+                }
+            }
+            if (c instanceof FileReaderProvider p) {
+                for (String f : p.fileFormats()) {
+                    fileReaders.putIfAbsent(f.toLowerCase(Locale.ROOT), p);
                 }
             }
         }
@@ -95,9 +112,60 @@ public final class EngineCatalog implements CatalogView {
         return List.copyOf(fileWriters.keySet());
     }
 
+    /**
+     * Returns a hint at the module that brings a format of files, such as
+     * {@code "; put fyrql-connector-csv on the class path or register a
+     * source of the type csv"}, or an empty text for a format without a
+     * module.
+     */
+    public static String moduleHint(String format) {
+        String f = format.toLowerCase(Locale.ROOT);
+        return MODULE_FORMATS.contains(f)
+                ? "; put fyrql-connector-" + f + " on the class path or register a source of the type " + f : "";
+    }
+
     /** Returns the writer of a format of files, given in any case. */
     public Optional<FileWriterProvider> fileWriter(String format) {
         return Optional.ofNullable(fileWriters.get(format.toLowerCase(Locale.ROOT)));
+    }
+
+    /** Returns the formats of files that {@code COPY ... FROM} reads, in lower case. */
+    public List<String> readFormats() {
+        return List.copyOf(fileReaders.keySet());
+    }
+
+    /** Returns the reader of a format of files, given in any case. */
+    public Optional<FileReaderProvider> fileReader(String format) {
+        return Optional.ofNullable(fileReaders.get(format.toLowerCase(Locale.ROOT)));
+    }
+
+    /**
+     * Returns the table of the source that reads the format, which reads
+     * the file with the given columns.
+     *
+     * @throws SqlException if no source reads the format, the path is no
+     *         file, or the source refuses the file, the columns or the options
+     */
+    @Override
+    public TableRef fileTable(String format, String path, Schema schema, Map<String, String> options) {
+        String f = format.toLowerCase(Locale.ROOT);
+        FileReaderProvider provider = fileReaders.get(f);
+        if (provider == null) {
+            throw new SqlException("No source reads files of the format " + format + moduleHint(format)
+                    + (fileReaders.isEmpty() ? "" : "; there are " + String.join(", ", fileReaders.keySet())),
+                    Position.UNKNOWN);
+        }
+        Path file;
+        try {
+            file = Path.of(path);
+        } catch (InvalidPathException e) {
+            throw new SqlException("Not a file: " + path + " (" + e.getReason() + ")", Position.UNKNOWN);
+        }
+        try {
+            return provider.fileTable(f, file, schema, options);
+        } catch (IllegalArgumentException | UncheckedIOException e) {
+            throw new SqlException(e.getMessage(), Position.UNKNOWN);
+        }
     }
 
     @Override
@@ -139,6 +207,7 @@ public final class EngineCatalog implements CatalogView {
         TableFunctionProvider provider = functions.get(function);
         if (provider == null) {
             throw new SqlException("Table function with name " + name + " does not exist"
+                    + (function.startsWith("read_") ? moduleHint(function.substring(5)) : "")
                     + (functions.isEmpty() ? "" : "; there are " + String.join(", ", functions.keySet())),
                     Position.UNKNOWN);
         }

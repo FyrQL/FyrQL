@@ -15,6 +15,7 @@ import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.ConnectorFactory;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -32,6 +33,11 @@ public final class ParquetConnectorFactory implements ConnectorFactory {
     @Override
     public String type() {
         return "parquet";
+    }
+
+    @Override
+    public List<String> fileFormats() {
+        return ParquetConnector.FILE_FORMATS;
     }
 
     @Override

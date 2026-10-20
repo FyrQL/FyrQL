@@ -45,7 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /** JSON files that {@code COPY ... TO} writes, through {@link JsonConnector#openFile}. */
 class JsonFileWriterTest {
 
-    private static final Schema ALL_TYPES = Schema.of(new Schema.Field("i", DataType.INTEGER),
+    static final Schema ALL_TYPES = Schema.of(new Schema.Field("i", DataType.INTEGER),
             new Schema.Field("s", DataType.VARCHAR), new Schema.Field("d", DataType.DOUBLE),
             new Schema.Field("f", DataType.FLOAT), new Schema.Field("dec", DataType.decimal(10, 2)),
             new Schema.Field("hi", DataType.HUGEINT), new Schema.Field("dt", DataType.DATE),
@@ -79,7 +79,8 @@ class JsonFileWriterTest {
     @TempDir
     Path dir;
 
-    private static Batch allTypes() {
+    /** Rows with a value of each type and the values that need care: quotes, line breaks, NaN, -0.0. */
+    static Batch allTypes() {
         Map<String, Integer> m = new LinkedHashMap<>();
         m.put("a", 1);
         m.put("b", null);

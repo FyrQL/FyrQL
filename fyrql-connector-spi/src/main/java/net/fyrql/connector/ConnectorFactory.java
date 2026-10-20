@@ -12,6 +12,7 @@
 package net.fyrql.connector;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -24,6 +25,17 @@ public interface ConnectorFactory {
 
     /** Returns the type the factory creates, in lower case, e.g. {@code csv} or {@code jdbc}. */
     String type();
+
+    /**
+     * Returns the formats of files, in lower case, that a connector of this
+     * type reads and writes without options; none by default. An engine
+     * with the factory on its class path creates such a connector as the
+     * source of the name {@link #type()} unless registered sources read and
+     * write the formats, see {@code FyrQL.Builder.implicitSources}.
+     */
+    default List<String> fileFormats() {
+        return List.of();
+    }
 
     /**
      * Creates a connector.

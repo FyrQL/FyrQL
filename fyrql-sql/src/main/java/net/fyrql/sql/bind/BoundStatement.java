@@ -66,6 +66,27 @@ public sealed interface BoundStatement {
         }
     }
 
+    /**
+     * {@code COPY ... FROM}.
+     *
+     * @param table the table
+     * @param input the rows of the file, in the columns of the table, in
+     *        their order and of their types
+     * @param path the file, as written
+     * @param format the format in lower case, as in {@link Copy}
+     * @param options the options besides the format, as in {@link Copy}
+     */
+    record CopyFrom(TableRef table, PlanNode input, String path, String format, Map<String, String> options)
+            implements BoundStatement {
+        public CopyFrom {
+            Objects.requireNonNull(table, "table");
+            Objects.requireNonNull(input, "input");
+            Objects.requireNonNull(path, "path");
+            Objects.requireNonNull(format, "format");
+            options = Collections.unmodifiableMap(new LinkedHashMap<>(options));
+        }
+    }
+
     /** What {@code CREATE TABLE} does with a table that exists. */
     enum CreateMode {
         /** Fails. */

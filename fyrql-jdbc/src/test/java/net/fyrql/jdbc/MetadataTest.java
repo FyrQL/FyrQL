@@ -228,7 +228,8 @@ class MetadataTest {
     }
 
     private static Connection connect(Connector... sources) {
-        FyrQL.Builder builder = FyrQL.builder();
+        // The given sources alone, without those of the formats of files.
+        FyrQL.Builder builder = FyrQL.builder().implicitSources(false);
         for (Connector c : sources) {
             builder.register(c);
         }

@@ -11,6 +11,7 @@
 
 package net.fyrql;
 
+import net.fyrql.catalog.EngineCatalog;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.FileWriterProvider;
@@ -42,6 +43,9 @@ import java.util.function.Supplier;
  * closed before the commit, so that a source that reads and writes the
  * same table has finished reading.
  * <p>
+ * {@code COPY ... FROM} is an {@code INSERT INTO} whose rows are those of
+ * the table of the file.
+ * <p>
  * {@code CREATE OR REPLACE} drops the table first and then creates it; if
  * its query reads the table, the engine reads all rows of the query
  * before it drops the table.
@@ -67,6 +71,7 @@ final class Writes {
         return switch (statement) {
             case BoundStatement.Query q -> throw new IllegalArgumentException("A query writes nothing");
             case BoundStatement.Copy c -> copy(c, context);
+            case BoundStatement.CopyFrom c -> insert(new BoundStatement.Insert(c.table(), c.input()), context);
             case BoundStatement.Create c -> create(c, context);
             case BoundStatement.Insert i -> insert(i, context);
             case BoundStatement.Drop d -> drop(d);
@@ -76,6 +81,7 @@ final class Writes {
     private long copy(BoundStatement.Copy copy, QueryContext context) {
         FileWriterProvider provider = engine.catalog().fileWriter(copy.format()).orElseThrow(() ->
                 new SqlException("No source writes files of the format " + copy.format()
+                        + EngineCatalog.moduleHint(copy.format())
                         + (engine.catalog().fileFormats().isEmpty() ? ""
                         : "; there are " + String.join(", ", engine.catalog().fileFormats())), Position.UNKNOWN));
         Path file;

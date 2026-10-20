@@ -134,6 +134,22 @@ class UpdateTest {
     }
 
     @Test
+    void copyFromLoadsAFileWithTheTypesOfTheTable() throws Exception {
+        Path file = dir.resolve("in.csv");
+        Files.writeString(file, "s;a\n007;1\n;2\n", StandardCharsets.UTF_8);
+        String path = file.toString().replace('\\', '/');
+        try (Statement s = c.createStatement()) {
+            s.executeUpdate("CREATE TABLE t (a INTEGER NOT NULL, s VARCHAR)");
+            assertFalse(s.execute("COPY t (s, a) FROM '" + path + "' (DELIMITER ';')"));
+            assertEquals(2, s.getUpdateCount());
+            // The column s keeps the text of the file, which read_csv would take for a number.
+            assertEquals(List.of("1 007", "2 null"), StatementTest.rows(s.executeQuery("SELECT * FROM t ORDER BY a")));
+            List<String> plan = StatementTest.rows(s.executeQuery("EXPLAIN COPY t FROM '" + path + "'"));
+            assertEquals("Copy from '" + path + "' into mem.main.t [format: csv]", plan.get(0));
+        }
+    }
+
+    @Test
     void aReadOnlyConnectionRefusesWrites() throws SQLException {
         try (Statement s = c.createStatement()) {
             s.executeUpdate("CREATE TABLE t AS SELECT 1 AS a");

@@ -41,8 +41,9 @@ import java.util.Optional;
  * {@code memoryBudget} (bytes, such as {@code 512MB} or {@code 2GiB}),
  * {@code codegen} ({@code off}, {@code auto} or {@code always}),
  * {@code codegenThreshold}, {@code pushdown} ({@code true} or
- * {@code false}), {@code threads} and {@code preserveOrder}, as the
- * methods of {@link FyrQL.Builder} of the same names take them.
+ * {@code false}), {@code threads}, {@code preserveOrder} and
+ * {@code implicitSources}, as the methods of {@link FyrQL.Builder} of the
+ * same names take them.
  */
 public final class FyrQLConfig {
 
@@ -165,6 +166,7 @@ public final class FyrQLConfig {
         o.bool("pushdown").ifPresent(b::pushdown);
         o.integer("threads").ifPresent(b::threads);
         o.bool("preserveOrder").ifPresent(b::preserveOrder);
+        o.bool("implicitSources").ifPresent(b::implicitSources);
         o.rejectUnknown();
         if (defaultSource.isPresent()) {
             String name = defaultSource.get();

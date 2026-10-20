@@ -23,13 +23,16 @@ import de.siegmar.fastcsv.reader.IndexedCsvReader;
 import de.siegmar.fastcsv.reader.RecordType;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Catalog;
+import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileReaderProvider;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
+import net.fyrql.core.function.DateFormats;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -39,6 +42,7 @@ import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -54,9 +58,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.ToLongFunction;
+import java.util.zip.GZIPInputStream;
 
 /**
  * CSV and TSV files as tables in the schema {@code main}: every
@@ -71,14 +78,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  * unterminated quote or a field that is not a number, is an error.
  * <p>
  * A file larger than the split size is read in parts of about that size,
- * which the engine reads on several threads, see {@link #splits}.
+ * which the engine reads on several threads, see {@link #splits}. A file
+ * whose name ends in {@code .gz} is read through gzip, in one part.
  * <p>
  * The connector also offers the table functions {@code read_csv} and
  * {@code read_csv_auto} for any file; built without files it serves only
  * them. See {@link #bind}. It writes CSV files for {@code COPY ... TO}, see
- * {@link #openFile}.
+ * {@link #openFile}, and reads them with the columns of a table for
+ * {@code COPY ... FROM}, see {@link #fileTable}.
  */
-public final class CsvConnector implements Connector, TableFunctionProvider, FileWriterProvider {
+public final class CsvConnector implements Connector, TableFunctionProvider, FileWriterProvider,
+        FileReaderProvider {
 
     /** The split size by default, see {@link Builder#splitSize}. */
     public static final long SPLIT_SIZE = 4L << 20;
@@ -89,7 +99,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
 
     private static final List<String> TABLE_FUNCTIONS = List.of("read_csv", "read_csv_auto");
 
-    private static final List<String> FILE_FORMATS = List.of("csv");
+    static final List<String> FILE_FORMATS = List.of("csv");
 
     /** The prefix of the names of the tables of table function calls, which no registered file gets. */
     private static final String CALL_PREFIX = "#";
@@ -101,9 +111,12 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     private final Charset charset;
     private final long splitSize;
     private final Catalog catalog;
-    /** The tables of table function calls by their names, and the names by the calls. */
+    /**
+     * The tables of table function calls and of files read with given
+     * columns by their names, and the names by the calls and the files.
+     */
     private final Map<String, Table> callTables = new ConcurrentHashMap<>();
-    private final Map<Call, String> calls = new ConcurrentHashMap<>();
+    private final Map<Object, String> calls = new ConcurrentHashMap<>();
     private final AtomicInteger callCount = new AtomicInteger();
     /** The index of each file read in splits, in the version it was built for. */
     private final Map<IndexKey, Pages> indexes = new ConcurrentHashMap<>();
@@ -114,14 +127,22 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * @param rows the number of rows, exact if the sample read the whole
      *        file, otherwise estimated from the size of the file and the
      *        sample; -1 if unknown
+     * @param dateFormat the format of {@code strptime} of the dates, or
+     *        {@code null} for the forms of a cast
+     * @param timestampFormat the same for the timestamps
+     * @param gzip whether the file is compressed with gzip
      */
     record Table(Path file, char delimiter, char quote, boolean header, String nullString, Charset charset,
-            Schema schema, long rows) {
+            Schema schema, long rows, String dateFormat, String timestampFormat, boolean gzip) {
     }
 
     /** A call of a table function: the file in its current version and how to read it. */
     private record Call(Path file, FileTime modified, long size, char delimiter, char quote, Boolean header,
-            String nullString) {
+            String nullString, String dateFormat, String timestampFormat) {
+    }
+
+    /** A file in its current version read with given columns and options. */
+    private record FileCall(Path file, FileTime modified, long size, Schema schema, Map<String, String> options) {
     }
 
     /** What the index of a file depends on besides the file. */
@@ -207,10 +228,16 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * {@code header} (a boolean, or a value that casts to one; detected by
      * default), {@code delim} or {@code sep} (one character, {@code '\t'}
      * for a tab; a comma, or a tab for {@code .tsv} files, by default),
-     * {@code quote} (one character, {@code "} by default) and
-     * {@code nullstr} (empty by default). The schema is sniffed as for
-     * registered files. The same call on an unchanged file gives the same
-     * table; a changed file is sniffed again.
+     * {@code quote} (one character, {@code "} by default),
+     * {@code nullstr} (empty by default), and {@code dateformat} or
+     * {@code date_format} and {@code timestampformat} or
+     * {@code timestamp_format} (formats of {@code strptime} in which the
+     * values of the columns of type {@code DATE} and {@code TIMESTAMP} are
+     * sniffed and read, instead of the forms of a cast). The schema is
+     * sniffed as for registered files. A file whose name ends in
+     * {@code .gz} is read through gzip; a tab is the delimiter by default
+     * also for {@code .tsv.gz}. The same call on an unchanged file gives the
+     * same table; a changed file is sniffed again.
      */
     @Override
     public TableRef bind(String function, List<Object> arguments, Map<String, Object> namedArguments) {
@@ -232,10 +259,16 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         if (!Files.isRegularFile(file)) {
             throw new IllegalArgumentException("No files found that match the pattern \"" + path + "\"");
         }
-        char delimiter = path.toLowerCase(Locale.ROOT).endsWith(".tsv") ? '\t' : ',';
+        String lower = path.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".zst")) {
+            throw new IllegalArgumentException("Files compressed with zstd are not supported: " + path);
+        }
+        char delimiter = lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
         char quote = '"';
         Boolean header = null;
         String nullString = "";
+        String dateFormat = null;
+        String timestampFormat = null;
         for (Map.Entry<String, Object> e : namedArguments.entrySet()) {
             Object value = e.getValue();
             switch (e.getKey()) {
@@ -243,21 +276,26 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 case "delim", "sep" -> delimiter = character(function, e.getKey(), value);
                 case "quote" -> quote = character(function, e.getKey(), value);
                 case "nullstr" -> nullString = string(function, e.getKey(), value);
+                case "dateformat", "date_format" -> dateFormat = format(function, e.getKey(), value);
+                case "timestampformat", "timestamp_format" -> timestampFormat = format(function, e.getKey(), value);
                 default -> throw new IllegalArgumentException("Invalid named parameter \"" + e.getKey()
-                        + "\" for function " + function + "; supported are header, delim, sep, quote, nullstr");
+                        + "\" for function " + function + "; supported are header, delim, sep, quote, nullstr,"
+                        + " dateformat, timestampformat");
             }
         }
         Call call;
         try {
             call = new Call(file, Files.getLastModifiedTime(file), Files.size(file), delimiter, quote, header,
-                    nullString);
+                    nullString, dateFormat, timestampFormat);
         } catch (IOException e) {
             throw new IllegalArgumentException("Cannot read " + path + ": " + e.getMessage(), e);
         }
-        String table = calls.computeIfAbsent(call, c -> {
-            Table t = new Table(c.file(), c.delimiter(), c.quote(), false, c.nullString(), charset, null, -1);
+        boolean gzip = lower.endsWith(".gz");
+        String table = calls.computeIfAbsent(call, k -> {
+            Table t = new Table(call.file(), call.delimiter(), call.quote(), false, call.nullString(), charset, null,
+                    -1, call.dateFormat(), call.timestampFormat(), gzip);
             String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, sniff(t, c.header(), sampleRows));
+            callTables.put(generated, sniff(t, call.header(), sampleRows));
             return generated;
         });
         return TableRef.of(name, table);
@@ -303,11 +341,112 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         return CsvFileWriter.open(file, schema, options);
     }
 
+    /**
+     * Returns a table that reads a CSV file with the given columns, for
+     * {@code COPY ... FROM}: the fields of a record are the columns in their
+     * order, read as their types, and the header, if there is one, is
+     * skipped without a look at its names. An empty field is {@code NULL}.
+     * The options, with DuckDB's names:
+     * <ul>
+     * <li>{@code header}: whether the first line is a header, {@code true}
+     * by default, as {@code COPY ... TO} writes one;</li>
+     * <li>{@code delimiter}, {@code delim} or {@code sep}, {@code quote},
+     * and {@code nullstr} or {@code null}, as for {@link #openFile};
+     * {@code escape} only if it is the quote, as a quote in a quoted value
+     * is read only as two quotes;</li>
+     * <li>{@code dateformat} and {@code timestampformat}: formats of
+     * {@code strptime} in which the values of the columns of type
+     * {@code DATE} and {@code TIMESTAMP} are read, and no other form;</li>
+     * <li>{@code compression}: {@code gzip}, {@code none} or {@code auto},
+     * the default, which reads a file whose name ends in {@code .gz}
+     * through gzip.</li>
+     * </ul>
+     * A column of type {@code STRUCT}, {@code LIST} or {@code MAP} is an
+     * error. The same file in the same version with the same columns and
+     * options gives the same table.
+     */
+    @Override
+    public TableRef fileTable(String format, Path file, Schema schema, Map<String, String> options) {
+        if (!FILE_FORMATS.contains(format)) {
+            throw new IllegalArgumentException("The CSV source " + name + " reads no files of the format " + format);
+        }
+        String owner = "the CSV file " + file;
+        ConfigOptions o = new ConfigOptions(owner, options, Path.of(""));
+        String lower = String.valueOf(file.getFileName()).toLowerCase(Locale.ROOT);
+        boolean header = o.bool("header").orElse(true);
+        char delimiter = CsvFileWriter.first(o.character("delimiter"), o.character("delim"), o.character("sep"))
+                .orElse(lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',');
+        char quote = o.character("quote").orElse('"');
+        Optional<Character> escape = o.character("escape");
+        String nullString = CsvFileWriter.first(o.string("nullstr"), o.string("null")).orElse("");
+        String dateFormat = o.get("dateformat", null, CsvConnector::checked).orElse(null);
+        String timestampFormat = o.get("timestampformat", null, CsvConnector::checked).orElse(null);
+        boolean gzip = CsvFileWriter.gzip(o, lower, owner);
+        o.rejectUnknown();
+        if (escape.isPresent() && escape.get() != quote) {
+            throw new IllegalArgumentException("Not supported: an escape other than the quote, for " + owner
+                    + "; a quote in a quoted value is read as two quotes");
+        }
+        if (delimiter == quote || delimiter == '\n' || delimiter == '\r' || quote == '\n' || quote == '\r') {
+            throw new IllegalArgumentException("The CSV file " + file + " needs a delimiter and a quote that"
+                    + " differ from each other and from line breaks");
+        }
+        for (Schema.Field f : schema.fields()) {
+            if (f.type().isNested()) {
+                throw new IllegalArgumentException("A CSV file holds no values of the type " + f.type().sqlName()
+                        + ", as the column " + f.name() + " has");
+            }
+        }
+        if (!gzip && lower.endsWith(".zst")) {
+            throw new IllegalArgumentException("Files compressed with zstd are not supported: " + file);
+        }
+        Path absolute = file.toAbsolutePath().normalize();
+        if (!Files.isRegularFile(absolute)) {
+            throw new IllegalArgumentException("No files found that match the pattern \"" + file + "\"");
+        }
+        FileCall call;
+        try {
+            call = new FileCall(absolute, Files.getLastModifiedTime(absolute), Files.size(absolute), schema,
+                    Map.copyOf(options));
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Cannot read " + file + ": " + e.getMessage(), e);
+        }
+        String table = calls.computeIfAbsent(call, k -> {
+            String generated = CALL_PREFIX + callCount.incrementAndGet();
+            callTables.put(generated, new Table(absolute, delimiter, quote, header, nullString, charset, schema, -1,
+                    dateFormat, timestampFormat, gzip));
+            return generated;
+        });
+        return TableRef.of(name, table);
+    }
+
+    /** Returns a format of {@code strptime} if it is valid. */
+    private static String checked(String format) {
+        DateFormats.check(format);
+        return format;
+    }
+
+    /** Returns the reader of a format of {@code strptime}, or {@code null} for none. */
+    private static ToLongFunction<String> strptime(String format) {
+        return format == null ? null : DateFormats.reader(format);
+    }
+
     private static String string(String function, String key, Object value) {
         if (!(value instanceof String s)) {
             throw new IllegalArgumentException("The argument " + key + " of " + function + " must be a VARCHAR");
         }
         return s;
+    }
+
+    /** Reads a format of {@code strptime}. */
+    private static String format(String function, String key, Object value) {
+        String s = string(function, key, value);
+        try {
+            return checked(s);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("The argument " + key + " of " + function + " is invalid: "
+                    + e.getMessage(), e);
+        }
     }
 
     /** Reads a boolean argument; as in DuckDB, a string or a number is cast to a boolean. */
@@ -375,6 +514,10 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
 
     /** Returns the index of a file larger than the split size, or {@code null} for one split. */
     private CsvIndex index(Table table) {
+        if (table.gzip()) {
+            // The index finds the records by the bytes of the file, which gzip hides.
+            return null;
+        }
         long size;
         FileTime modified;
         try {
@@ -433,7 +576,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         if (split.state() instanceof PageRange range) {
             return pages(table, handler, range);
         }
-        CsvReader<Boolean> reader = reader(table, handler);
+        CsvReader<Boolean> reader = reader(table, handler, false);
         Iterator<Boolean> records = reader.iterator();
         return new BatchReader() {
             @Override
@@ -515,11 +658,13 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * parse, is an error, which the CSV reader wraps, see {@link #unwrap}.
      */
     private static final class RecordReader extends AbstractBaseCsvCallbackHandler<Boolean> {
+        private static final char[] NO_CHARS = new char[0];
         private final Table table;
         private final Schema output;
         private final FieldParser[] parsers;
         /** The positions in the output of each field of a record. */
         private final int[][] targets;
+        private final boolean emptyLineIsNull;
         boolean header;
         private int errorColumn;
         private RuntimeException error;
@@ -529,18 +674,22 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             this.output = output;
             this.header = table.header();
             parsers = new FieldParser[columns.size()];
+            ToLongFunction<String> dateFormat = strptime(table.dateFormat());
+            ToLongFunction<String> timestampFormat = strptime(table.timestampFormat());
             List<List<Integer>> positions = new ArrayList<>();
             for (int f = 0; f < table.schema().size(); f++) {
                 positions.add(new ArrayList<>());
             }
             for (int c = 0; c < columns.size(); c++) {
-                parsers[c] = FieldParser.of(output.type(c), table.nullString(), batchSize);
+                parsers[c] = FieldParser.of(output.type(c), table.nullString(), batchSize, dateFormat,
+                        timestampFormat);
                 positions.get(columns.get(c)).add(c);
             }
             targets = new int[positions.size()][];
             for (int f = 0; f < targets.length; f++) {
                 targets[f] = positions.get(f).stream().mapToInt(Integer::intValue).toArray();
             }
+            emptyLineIsNull = targets.length == 1 && table.nullString().isEmpty();
         }
 
         @Override
@@ -566,9 +715,23 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             }
         }
 
+        /**
+         * In a file of one column whose null string is empty, an empty line
+         * after the header is a {@code NULL}, as DuckDB reads it, so that a
+         * {@code NULL} that a writer wrote as an empty line comes back;
+         * otherwise it is skipped.
+         */
+        @Override
+        protected void handleEmpty() {
+            if (!header && emptyLineIsNull) {
+                handleField(0, NO_CHARS, 0, 0, false);
+            }
+        }
+
         @Override
         protected Boolean buildRecord() {
-            if (getRecordType() != RecordType.DATA) {
+            boolean empty = getRecordType() == RecordType.EMPTY && !header && emptyLineIsNull;
+            if (getRecordType() != RecordType.DATA && !empty) {
                 return null;
             }
             if (header) {
@@ -596,23 +759,44 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     }
 
     private static CsvReader<CsvRecord> reader(Table table) {
-        return reader(table, CsvRecordHandler.of());
+        return reader(table, CsvRecordHandler.of(), true);
     }
 
+    /**
+     * Opens a reader of a file.
+     *
+     * @param skipEmptyLines whether the reader drops the records of empty lines that the handler gives
+     */
     @SuppressWarnings("removal")
-    private static <T> CsvReader<T> reader(Table table, CsvCallbackHandler<T> handler) {
+    private static <T> CsvReader<T> reader(Table table, CsvCallbackHandler<T> handler, boolean skipEmptyLines) {
+        CsvReader.CsvReaderBuilder builder = CsvReader.builder()
+                .fieldSeparator(table.delimiter())
+                .quoteCharacter(table.quote())
+                .skipEmptyLines(skipEmptyLines)
+                .allowExtraFields(true)
+                .allowMissingFields(true)
+                .detectBomHeader(true)
+                .commentStrategy(CommentStrategy.NONE);
+        InputStream in;
         try {
-            return CsvReader.builder()
-                    .fieldSeparator(table.delimiter())
-                    .quoteCharacter(table.quote())
-                    .skipEmptyLines(true)
-                    .allowExtraFields(true)
-                    .allowMissingFields(true)
-                    .detectBomHeader(true)
-                    .commentStrategy(CommentStrategy.NONE)
-                    .build(handler, table.file(), table.charset());
+            if (!table.gzip()) {
+                return builder.build(handler, table.file(), table.charset());
+            }
+            in = Files.newInputStream(table.file());
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot open " + table.file(), e);
+        }
+        try {
+            // The CSV reader closes the stream.
+            return builder.build(handler, new GZIPInputStream(in, 1 << 16), table.charset());
+        } catch (IOException | RuntimeException e) {
+            try {
+                in.close();
+            } catch (IOException suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e instanceof IOException io ? new UncheckedIOException("Cannot read " + table.file()
+                    + " as gzip: " + io.getMessage(), io) : (RuntimeException) e;
         }
     }
 
@@ -645,6 +829,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * @return the table with its header decided, its schema and its rows
      */
     static Table sniff(Table table, Boolean header, int sampleRows) {
+        ToLongFunction<String> date = strptime(table.dateFormat());
+        ToLongFunction<String> timestamp = strptime(table.timestampFormat());
         List<List<String>> rows = new ArrayList<>();
         try (CsvReader<CsvRecord> reader = reader(table)) {
             for (CsvRecord record : reader) {
@@ -667,15 +853,16 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         } else if (rows.size() == 1) {
             hasHeader = true;
         } else {
-            List<DataType> rest = types(rows.subList(1, rows.size()), width, table.nullString());
+            List<DataType> rest = types(rows.subList(1, rows.size()), width, table.nullString(), date, timestamp);
             hasHeader = rest.stream().allMatch(t -> t == DataType.VARCHAR);
             for (int c = 0; c < width && !hasHeader; c++) {
                 String value = first.get(c);
                 hasHeader = rest.get(c) != DataType.VARCHAR && !value.equals(table.nullString())
-                        && !fits(rest.get(c), value);
+                        && !fits(rest.get(c), value, date, timestamp);
             }
         }
-        List<DataType> types = types(hasHeader ? rows.subList(1, rows.size()) : rows, width, table.nullString());
+        List<DataType> types = types(hasHeader ? rows.subList(1, rows.size()) : rows, width, table.nullString(),
+                date, timestamp);
         List<Schema.Field> fields = new ArrayList<>();
         java.util.Set<String> used = new java.util.HashSet<>();
         for (int c = 0; c < width; c++) {
@@ -687,15 +874,23 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             fields.add(new Schema.Field(unique, types.get(c)));
         }
         return new Table(table.file(), table.delimiter(), table.quote(), hasHeader, table.nullString(),
-                table.charset(), new Schema(fields), rowCount(table.file(), rows, hasHeader, sampleRows));
+                table.charset(), new Schema(fields), rowCount(table, rows, hasHeader, sampleRows),
+                table.dateFormat(), table.timestampFormat(), table.gzip());
     }
 
-    /** The data rows of the sample, or an estimate from the file size if the sample is not the whole file. */
-    private static long rowCount(Path file, List<List<String>> rows, boolean hasHeader, int sampleRows) {
+    /**
+     * The data rows of the sample, or an estimate from the file size if the
+     * sample is not the whole file; -1 for a compressed file that is not.
+     */
+    private static long rowCount(Table table, List<List<String>> rows, boolean hasHeader, int sampleRows) {
         long dataRows = rows.size() - (hasHeader ? 1 : 0);
         if (rows.size() <= sampleRows) {
             return dataRows;
         }
+        if (table.gzip()) {
+            return -1;
+        }
+        Path file = table.file();
         long headerChars = hasHeader ? chars(rows.get(0)) : 0;
         long sampleChars = -headerChars;
         for (List<String> row : rows) {
@@ -730,12 +925,13 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     }
 
     /** Returns the type of each column: the first of {@link #SNIFF_ORDER} that fits every value, else VARCHAR. */
-    private static List<DataType> types(List<List<String>> sample, int width, String nullString) {
+    private static List<DataType> types(List<List<String>> sample, int width, String nullString,
+            ToLongFunction<String> date, ToLongFunction<String> timestamp) {
         List<DataType> types = new ArrayList<>();
         for (int c = 0; c < width; c++) {
             DataType type = DataType.VARCHAR;
             for (DataType candidate : SNIFF_ORDER) {
-                if (fits(candidate, c, sample, nullString)) {
+                if (fits(candidate, c, sample, nullString, date, timestamp)) {
                     type = candidate;
                     break;
                 }
@@ -745,7 +941,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         return types;
     }
 
-    private static boolean fits(DataType type, int column, List<List<String>> sample, String nullString) {
+    private static boolean fits(DataType type, int column, List<List<String>> sample, String nullString,
+            ToLongFunction<String> date, ToLongFunction<String> timestamp) {
         boolean anyValue = false;
         for (List<String> row : sample) {
             if (column >= row.size()) {
@@ -756,14 +953,25 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 continue;
             }
             anyValue = true;
-            if (!fits(type, field)) {
+            if (!fits(type, field, date, timestamp)) {
                 return false;
             }
         }
         return anyValue;
     }
 
-    private static boolean fits(DataType type, String field) {
+    /** Tells whether a value fits a type: in its format, if the type has one, otherwise in a shape of its own. */
+    private static boolean fits(DataType type, String field, ToLongFunction<String> date,
+            ToLongFunction<String> timestamp) {
+        ToLongFunction<String> format = type == DataType.DATE ? date : type == DataType.TIMESTAMP ? timestamp : null;
+        if (format != null) {
+            try {
+                format.applyAsLong(field);
+                return true;
+            } catch (RuntimeException e) {
+                return false;
+            }
+        }
         // The sniffer is stricter than a cast, which also reads '1.5' as an integer or ignores a time after a date.
         java.util.regex.Pattern shape = SNIFF_SHAPES.get(type);
         if (shape != null && !shape.matcher(field).matches()) {
@@ -861,14 +1069,18 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             return this;
         }
 
-        /** Adds a file as a table; a name may not start with {@code #}. */
+        /**
+         * Adds a file as a table, read through gzip if its name ends in
+         * {@code .gz}; a name may not start with {@code #}.
+         */
         public Builder file(String table, Path file) {
             if (table.startsWith(CALL_PREFIX)) {
                 throw new IllegalArgumentException("A table name may not start with " + CALL_PREFIX + ": " + table);
             }
-            char d = delimiter != null ? delimiter : file.toString().toLowerCase(Locale.ROOT).endsWith(".tsv") ? '\t'
-                    : ',';
-            tables.put(table, new Table(file, d, quote, false, nullString, charset, null, -1));
+            String lower = file.toString().toLowerCase(Locale.ROOT);
+            char d = delimiter != null ? delimiter : lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
+            tables.put(table, new Table(file, d, quote, false, nullString, charset, null, -1, null, null,
+                    lower.endsWith(".gz")));
             headers.put(table, header);
             return this;
         }
@@ -897,7 +1109,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 Table t = sniff(e.getValue(), headers.get(e.getKey()), sampleRows);
                 Schema schema = schemas.getOrDefault(e.getKey(), t.schema());
                 withSchemas.put(e.getKey(), new Table(t.file(), t.delimiter(), t.quote(), t.header(), t.nullString(),
-                        t.charset(), schema, t.rows()));
+                        t.charset(), schema, t.rows(), t.dateFormat(), t.timestampFormat(), t.gzip()));
             }
             return new CsvConnector(name, withSchemas, batchSize, sampleRows, charset, splitSize);
         }

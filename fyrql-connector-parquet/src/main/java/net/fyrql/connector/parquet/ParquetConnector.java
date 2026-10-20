@@ -15,6 +15,7 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileReaderProvider;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
@@ -60,7 +61,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * The connector also offers the table functions {@code read_parquet} and
  * {@code parquet_scan} for any file; built without files it serves only
  * them. See {@link #bind}. It writes Parquet files for {@code COPY ... TO},
- * see {@link #openFile}.
+ * see {@link #openFile}, and reads them for {@code COPY ... FROM}, see
+ * {@link #fileTable}.
  * <p>
  * A scan reads each row group as a split of its own, see
  * {@link RowGroupReader}, of a {@code STRUCT} column only the fields in
@@ -75,11 +77,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * those of the table. {@link Builder#recordReads} keeps what each scan
  * read.
  */
-public final class ParquetConnector implements Connector, TableFunctionProvider, FileWriterProvider {
+public final class ParquetConnector implements Connector, TableFunctionProvider, FileWriterProvider,
+        FileReaderProvider {
 
     private static final List<String> TABLE_FUNCTIONS = List.of("read_parquet", "parquet_scan");
 
-    private static final List<String> FILE_FORMATS = List.of("parquet");
+    static final List<String> FILE_FORMATS = List.of("parquet");
 
     /** The prefix of the names of the tables of table function calls, which no registered table gets. */
     private static final String CALL_PREFIX = "#";
@@ -122,7 +125,10 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
     private final Map<String, ParquetFiles.Table> tables;
     private final int batchSize;
     private final Catalog catalog;
-    /** The tables of table function calls by their names, and the names by the files of the calls. */
+    /**
+     * The tables of table function calls and of files read for
+     * {@code COPY ... FROM} by their names, and the names by their files.
+     */
     private final Map<String, ParquetFiles.Table> callTables = new ConcurrentHashMap<>();
     private final Map<List<ParquetFiles.Version>, String> calls = new ConcurrentHashMap<>();
     private final AtomicInteger callCount = new AtomicInteger();
@@ -254,6 +260,36 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
                     + format);
         }
         return ParquetFileSink.open(file, schema, options);
+    }
+
+    /**
+     * Returns a table that reads a Parquet file, for {@code COPY ... FROM}:
+     * the table has the columns of the file, not the given ones, which the
+     * engine casts the columns of the file to by position. There are no
+     * options. The same file in the same version gives the same table, also
+     * the same as {@link #bind} gives.
+     */
+    @Override
+    public TableRef fileTable(String format, Path file, Schema schema, Map<String, String> options) {
+        if (!FILE_FORMATS.contains(format)) {
+            throw new IllegalArgumentException("The Parquet source " + name + " reads no files of the format "
+                    + format);
+        }
+        if (!options.isEmpty()) {
+            throw new IllegalArgumentException("The Parquet file " + file + " is read without options, not with "
+                    + String.join(", ", options.keySet()));
+        }
+        Path absolute = file.toAbsolutePath().normalize();
+        if (!Files.isRegularFile(absolute)) {
+            throw new IllegalArgumentException("No files found that match the pattern \"" + file + "\"");
+        }
+        String location = ParquetFiles.absolute(absolute.toString(), Path.of(""));
+        String table = calls.computeIfAbsent(List.of(ParquetFiles.Version.of(absolute)), v -> {
+            String generated = CALL_PREFIX + callCount.incrementAndGet();
+            callTables.put(generated, files.table(location));
+            return generated;
+        });
+        return TableRef.of(name, table);
     }
 
     /**

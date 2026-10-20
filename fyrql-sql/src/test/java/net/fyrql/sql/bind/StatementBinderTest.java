@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -42,6 +43,15 @@ class StatementBinderTest {
             new Schema.Field("d", DataType.DATE));
 
     private static final TableRef S_T = TableRef.of("s", "t");
+
+    /** The columns of a Parquet file p.parquet, and of one odd.parquet. */
+    private static final Schema P = Schema.of(new Schema.Field("x", DataType.BIGINT, false),
+            new Schema.Field("y", DataType.VARCHAR), new Schema.Field("z", DataType.SMALLINT),
+            new Schema.Field("w", DataType.TIMESTAMP));
+    private static final Schema ODD = Schema.of(new Schema.Field("x", DataType.DATE));
+
+    /** The tables of files, which read the given columns, or those of a Parquet file. */
+    private static final Map<TableRef, Schema> FILES = new ConcurrentHashMap<>();
 
     private static final CatalogView CATALOG = new CatalogView() {
         @Override
@@ -65,12 +75,22 @@ class StatementBinderTest {
 
         @Override
         public Schema schema(TableRef table) {
-            return T;
+            return FILES.getOrDefault(table, T);
         }
 
         @Override
         public TableRef tableFunction(String name, List<Object> arguments, Map<String, Object> namedArguments) {
             return TableRef.of("s", name + arguments);
+        }
+
+        @Override
+        public TableRef fileTable(String format, String path, Schema schema, Map<String, String> options) {
+            if (path.startsWith("missing")) {
+                throw new SqlException("No files found that match the pattern \"" + path + "\"", Position.UNKNOWN);
+            }
+            TableRef file = TableRef.of("s", "#" + format + ":" + path + options);
+            FILES.put(file, !format.equals("parquet") ? schema : path.startsWith("odd") ? ODD : P);
+            return file;
         }
     };
 
@@ -127,6 +147,56 @@ class StatementBinderTest {
         assertEquals("No format for the file x.txt: end its name in .csv, .json or .parquet, or give one, as in"
                 + " (FORMAT csv)@1:11", error("COPY t TO 'x.txt'"));
         assertEquals("Table with name nope does not exist@1:6", error("COPY nope TO 'x.csv'"));
+    }
+
+    @Test
+    void copyFromReadsTheFileWithTheColumnsOfTheTable() {
+        BoundStatement.CopyFrom c = assertInstanceOf(BoundStatement.CopyFrom.class, bind("COPY t FROM 'in.CSV.gz'"));
+        assertEquals(S_T, c.table());
+        assertEquals("in.CSV.gz", c.path());
+        assertEquals("csv", c.format());
+        assertEquals(Map.of("compression", "gzip"), c.options());
+        // The file is read with the columns of the table, each of which may be NULL in the file.
+        PlanNode.Scan scan = assertInstanceOf(PlanNode.Scan.class, c.input());
+        assertEquals(TableRef.of("s", "#csv:in.CSV.gz{compression=gzip}"), scan.table());
+        assertEquals(new Schema(T.fields().stream().map(f -> new Schema.Field(f.name(), f.type(), true)).toList()),
+                scan.schema());
+
+        c = assertInstanceOf(BoundStatement.CopyFrom.class,
+                bind("COPY t (B, a) FROM 'x.txt' (FORMAT 'JSON', array true)"));
+        assertEquals("json", c.format());
+        assertEquals(Map.of("array", "true"), c.options());
+        assertEquals(Schema.of(new Schema.Field("b", DataType.VARCHAR), new Schema.Field("a", DataType.INTEGER)),
+                FILES.get(TableRef.of("s", "#json:x.txt{array=true}")));
+        assertEquals(List.of("a=Column[index=1, type=INTEGER]", "b=Column[index=0, type=VARCHAR]",
+                "e=Literal[type=TINYINT, value=null]", "d=Literal[type=DATE, value=null]"), expressions(c.input()));
+    }
+
+    @Test
+    void theColumnsOfAParquetFileAreCastByPosition() {
+        BoundStatement.CopyFrom c = assertInstanceOf(BoundStatement.CopyFrom.class, bind("COPY t FROM 'p.parquet'"));
+        assertEquals(Map.of(), c.options());
+        assertEquals(List.of("a=Cast[operand=Column[index=0, type=BIGINT], target=INTEGER, safe=false]",
+                "b=Column[index=1, type=VARCHAR]",
+                "e=Cast[operand=Column[index=2, type=SMALLINT], target=TINYINT, safe=false]",
+                "d=Cast[operand=Column[index=3, type=TIMESTAMP], target=DATE, safe=false]"), expressions(c.input()));
+    }
+
+    @Test
+    void copyFromErrors() {
+        // Before the file is opened.
+        assertEquals("NOT NULL constraint failed: t.a, which the COPY gives no value@1:6",
+                error("COPY t (b) FROM 'missing.csv'"));
+        assertEquals("Column a is given more than once in the COPY into t@1:6", error("COPY t (a, A) FROM 'x.csv'"));
+        assertEquals("Table t does not have a column with name \"zz\"@1:6", error("COPY t (zz) FROM 'x.csv'"));
+        assertEquals("Table with name nope does not exist@1:6", error("COPY nope FROM 'x.csv'"));
+        assertEquals("No format for the file x.txt: end its name in .csv, .json or .parquet, or give one, as in"
+                + " (FORMAT csv)@1:13", error("COPY t FROM 'x.txt'"));
+        assertEquals("No files found that match the pattern \"missing.csv\"@1:13", error("COPY t FROM 'missing.csv'"));
+        assertEquals("The file p.parquet has 4 columns, but the COPY into t reads 2@1:20",
+                error("COPY t (a, b) FROM 'p.parquet'"));
+        assertEquals("Cannot copy column x of type DATE of the file odd.parquet into column a of type INTEGER@1:17",
+                error("COPY t (a) FROM 'odd.parquet'"));
     }
 
     @Test
@@ -251,5 +321,8 @@ class StatementBinderTest {
         assertInstanceOf(Expression.Column.class, ((PlanNode.Project) ((BoundStatement.Insert) binder.bind(
                 SqlParser.parseStatement("INSERT INTO t (a, b, d, e) SELECT a, b, d, e FROM t"))).input()).columns()
                 .get(3).expression());
+        e = assertThrows(SqlException.class, () -> binder.bind(SqlParser.parseStatement("COPY t FROM 'x.csv'")));
+        assertEquals("Not supported: reading files", e.reason());
+        assertEquals(new Position(1, 13), e.position());
     }
 }

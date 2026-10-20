@@ -87,7 +87,7 @@ class FyrQLConfigTest {
         Path file = config("defaultSource: shop\nbatchSize: 2\nmemoryBudget: 64MiB\ncodegen: off\npushdown: true\n"
                 + "threads: 3\npreserveOrder: false\n");
         try (FyrQL engine = FyrQLConfig.open(file)) {
-            assertEquals(List.of("shop", "files", "docs"), engine.sources());
+            assertEquals(List.of("shop", "files", "docs", "parquet"), engine.sources());
             assertTrue(engine.pushdown());
             assertEquals(3, engine.threads());
             assertFalse(engine.preserveOrder());
@@ -97,6 +97,19 @@ class FyrQLConfigTest {
             List<String> statements = ((JdbcConnector) engine.connector("shop")).statements();
             assertEquals(1, statements.size());
             assertTrue(statements.get(0).contains("WHERE"), statements.get(0));
+        }
+    }
+
+    @Test
+    void theFormatsOfFilesNeedNoSourceOfTheirOwn() throws IOException {
+        String file = dir.resolve("n.parquet").toString().replace('\\', '/');
+        try (FyrQL engine = FyrQLConfig.open(config("{}"))) {
+            assertEquals(2, engine.update("COPY (SELECT * FROM (VALUES (1), (2)) v(n)) TO '" + file + "'"));
+            assertEquals(List.of(List.of(1), List.of(2)), engine.rows("SELECT * FROM '" + file + "' ORDER BY n")
+                    .stream().map(Arrays::asList).toList());
+        }
+        try (FyrQL engine = FyrQLConfig.open(config("implicitSources: false\n"))) {
+            assertEquals(List.of("shop", "files", "docs"), engine.sources());
         }
     }
 
@@ -133,7 +146,7 @@ class FyrQLConfigTest {
         assertTrue(assertThrows(ConfigException.class, () -> FyrQLConfig.open(typo)).getMessage().startsWith(
                 typo + ": The engine has an unknown option batchsize; known are defaultSource, defaultSchema,"
                         + " batchSize, memoryBudget, codegen, codegenThreshold, pushdown, threads,"
-                        + " preserveOrder"));
+                        + " preserveOrder, implicitSources"));
         Files.delete(dir.resolve("products.json"));
         Path missing = config("{}");
         String message = assertThrows(ConfigException.class, () -> FyrQLConfig.open(missing)).getMessage();

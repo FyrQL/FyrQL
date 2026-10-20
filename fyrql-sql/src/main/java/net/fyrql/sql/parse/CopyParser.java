@@ -26,13 +26,13 @@ import java.util.Map;
  * form of DuckDB:
  * <pre>
  * COPY ( query ) TO 'path' [ [WITH] ( option [value] [, ...] ) ] [;]
- * COPY name TO 'path' [ [WITH] ( option [value] [, ...] ) ] [;]
+ * COPY name [ ( column [, ...] ) ] TO 'path' [ [WITH] ( option [value] [, ...] ) ] [;]
+ * COPY name [ ( column [, ...] ) ] FROM 'path' [ [WITH] ( option [value] [, ...] ) ] [;]
  * </pre>
  * The query in parentheses is cut out by counting parentheses outside
  * strings, quoted names and comments, and is parsed as any query; the
  * rest of the text is read here. A value is a word, a string, a number,
- * or absent, which stands for {@code true}. {@code COPY ... FROM} is an
- * error.
+ * or absent, which stands for {@code true}.
  */
 final class CopyParser {
 
@@ -61,13 +61,15 @@ final class CopyParser {
      * @param queryStart where the query in parentheses starts, or -1 for a name
      * @param queryEnd where it ends
      * @param name the parts of the name, or empty for a query
+     * @param columns the columns of the table in parentheses after its name, or empty
      * @param namePosition the position of the name, or of the query
+     * @param from whether the file is read ({@code FROM}) rather than written ({@code TO})
      * @param path the file
      * @param pathPosition the position of the file
      * @param options the options, by names in lower case, in their order
      */
-    record Copy(int queryStart, int queryEnd, List<String> name, Position namePosition, String path,
-            Position pathPosition, Map<String, String> options) {
+    record Copy(int queryStart, int queryEnd, List<String> name, List<String> columns, Position namePosition,
+            boolean from, String path, Position pathPosition, Map<String, String> options) {
     }
 
     private final String sql;
@@ -127,6 +129,7 @@ final class CopyParser {
         int queryStart = -1;
         int queryEnd = -1;
         List<String> name = new ArrayList<>();
+        List<String> columns = new ArrayList<>();
         Token first = peek();
         Position namePosition = position(sql, first.start());
         if (first.isSymbol('(')) {
@@ -154,20 +157,33 @@ final class CopyParser {
                 take();
                 name.add(namePart(take()));
             }
+            if (peek().isSymbol('(')) {
+                take();
+                columns.add(namePart(take()));
+                while (peek().isSymbol(',')) {
+                    take();
+                    columns.add(namePart(take()));
+                }
+                Token close = take();
+                if (!close.isSymbol(')')) {
+                    throw syntaxError(close);
+                }
+            }
         }
-        Token to = take();
-        if (to.is("FROM")) {
-            throw new SqlException("Not supported: COPY ... FROM; read a file with INSERT INTO table SELECT * FROM"
-                    + " read_csv('file') or read_json or read_parquet", position(sql, to.start()));
+        Token direction = take();
+        boolean from = direction.is("FROM");
+        if (from && queryStart >= 0) {
+            throw new SqlException("COPY ... FROM takes a table, not a query", position(sql, direction.start()));
         }
-        if (!to.is("TO")) {
-            throw syntaxError(to);
+        if (!from && !direction.is("TO")) {
+            throw syntaxError(direction);
         }
         Token path = take();
         if (path.kind() != Kind.STRING) {
             throw path.kind() == Kind.END ? syntaxError(path)
-                    : new SqlException("Syntax error at or near \"" + text(path) + "\": the file after TO is a string"
-                            + " in single quotes", position(sql, path.start()));
+                    : new SqlException("Syntax error at or near \"" + text(path) + "\": the file after "
+                            + direction.value().toUpperCase(Locale.ROOT) + " is a string in single quotes",
+                            position(sql, path.start()));
         }
         Map<String, String> options = new LinkedHashMap<>();
         if (peek().is("WITH")) {
@@ -197,8 +213,8 @@ final class CopyParser {
             throw semicolon ? new SqlException("Only one statement is supported", position(sql, end.start()))
                     : syntaxError(end);
         }
-        return new Copy(queryStart, queryEnd, List.copyOf(name), namePosition, path.value(),
-                position(sql, path.start()), Collections.unmodifiableMap(options));
+        return new Copy(queryStart, queryEnd, List.copyOf(name), List.copyOf(columns), namePosition, from,
+                path.value(), position(sql, path.start()), Collections.unmodifiableMap(options));
     }
 
     /** Reads {@code option [value]} into the options. */

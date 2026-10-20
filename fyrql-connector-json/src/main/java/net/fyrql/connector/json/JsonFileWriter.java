@@ -69,6 +69,22 @@ final class JsonFileWriter implements Sink {
     }
 
     /**
+     * Reads the option {@code compression}: {@code gzip}, {@code none} (or
+     * {@code uncompressed}), or {@code auto}, the default, which is
+     * {@code gzip} for a name that ends in {@code .gz}.
+     */
+    static boolean gzip(ConfigOptions o, String lowerName, String owner) {
+        String compression = o.string("compression").map(c -> c.toLowerCase(Locale.ROOT)).orElse("auto");
+        return switch (compression) {
+            case "gzip" -> true;
+            case "none", "uncompressed" -> false;
+            case "auto" -> lowerName.endsWith(".gz");
+            default -> throw new IllegalArgumentException("The option compression of " + owner
+                    + " must be gzip, none or auto, not " + compression);
+        };
+    }
+
+    /**
      * Checks the options and creates the temporary file.
      *
      * @throws IllegalArgumentException if an option is unknown or does not fit
@@ -79,15 +95,7 @@ final class JsonFileWriter implements Sink {
         boolean array = o.bool("array").orElse(false);
         LongFunction<String> dateFormat = o.get("dateformat", null, DateFormats::writer).orElse(null);
         LongFunction<String> timestampFormat = o.get("timestampformat", null, DateFormats::writer).orElse(null);
-        String compression = o.string("compression").map(c -> c.toLowerCase(Locale.ROOT)).orElse("auto");
-        String name = String.valueOf(path.getFileName()).toLowerCase(Locale.ROOT);
-        boolean gzip = switch (compression) {
-            case "gzip" -> true;
-            case "none", "uncompressed" -> false;
-            case "auto" -> name.endsWith(".gz");
-            default -> throw new IllegalArgumentException("The option compression of " + owner
-                    + " must be gzip, none or auto, not " + compression);
-        };
+        boolean gzip = gzip(o, String.valueOf(path.getFileName()).toLowerCase(Locale.ROOT), owner);
         o.rejectUnknown();
 
         TemporaryFile file = TemporaryFile.create(path);

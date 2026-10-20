@@ -14,17 +14,21 @@ package net.fyrql.connector.json;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
+import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileReaderProvider;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
+import net.fyrql.core.function.DateFormats;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Casts;
+import net.fyrql.core.value.Conversions;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -45,9 +49,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.ToLongFunction;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
@@ -68,9 +74,11 @@ import java.util.zip.GZIPInputStream;
  * {@code read_json_auto}, {@code read_ndjson} and {@code read_ndjson_auto}
  * for any file; built without files it serves only them. See
  * {@link #bind}. It writes JSON files for {@code COPY ... TO}, see
- * {@link #openFile}.
+ * {@link #openFile}, and reads them with the columns of a table for
+ * {@code COPY ... FROM}, see {@link #fileTable}.
  */
-public final class JsonConnector implements Connector, TableFunctionProvider, FileWriterProvider {
+public final class JsonConnector implements Connector, TableFunctionProvider, FileWriterProvider,
+        FileReaderProvider {
 
     /** The split size by default, see {@link Builder#splitSize}. */
     public static final long SPLIT_SIZE = 4L << 20;
@@ -81,7 +89,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
     private static final List<String> TABLE_FUNCTIONS = List.of("read_json", "read_json_auto", "read_ndjson",
             "read_ndjson_auto");
 
-    private static final List<String> FILE_FORMATS = List.of("json");
+    static final List<String> FILE_FORMATS = List.of("json");
 
     /** The files a directory adds, and the extensions their table names drop. */
     private static final Pattern JSON_FILE = Pattern.compile("(?i)(.*)\\.(json|jsonl|ndjson)(\\.gz)?");
@@ -95,19 +103,26 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
     private final int batchSize;
     private final long splitSize;
     private final Catalog catalog;
-    /** The tables of table function calls by their names, and the names by the calls. */
+    /**
+     * The tables of table function calls and of files read with given
+     * columns by their names, and the names by the calls and the files.
+     */
     private final Map<String, Table> callTables = new ConcurrentHashMap<>();
-    private final Map<Call, String> calls = new ConcurrentHashMap<>();
+    private final Map<Object, String> calls = new ConcurrentHashMap<>();
     private final AtomicInteger callCount = new AtomicInteger();
     /** The rows of each table by its name, counted or estimated when first asked for; -1 if unknown. */
     private final Map<String, Long> rowCounts = new ConcurrentHashMap<>();
 
-    /** A file, how to read it, and its columns. */
-    record Table(Path file, JsonOptions options, JsonLayout layout) {
+    /** A file, how to read it, its columns, and whether it is compressed with gzip. */
+    record Table(Path file, JsonOptions options, JsonLayout layout, boolean gzip) {
     }
 
     /** A call of a table function: the file in its current version and how to read it. */
     private record Call(Path file, FileTime modified, long size, JsonOptions options) {
+    }
+
+    /** A file in its current version read with given columns and options. */
+    private record FileCall(Path file, FileTime modified, long size, Schema schema, Map<String, String> options) {
     }
 
     /** The bytes of a file that a split reads, from {@code from} to before {@code to}. */
@@ -140,7 +155,8 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
             @Override
             public OptionalLong rowCount(TableRef table) {
                 Table t = table(table);
-                long rows = rowCounts.computeIfAbsent(table.table(), k -> estimateRows(t.file(), t.options()));
+                long rows = rowCounts.computeIfAbsent(table.table(), k -> estimateRows(t.file(), t.options(),
+                        t.gzip()));
                 return rows < 0 ? OptionalLong.empty() : OptionalLong.of(rows);
             }
         };
@@ -151,12 +167,12 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
      * the bytes of the first {@code sampleSize} records; -1 for a
      * compressed file whose size says nothing.
      */
-    static long estimateRows(Path file, JsonOptions options) {
-        if (file.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".gz")) {
+    static long estimateRows(Path file, JsonOptions options, boolean gzip) {
+        if (gzip) {
             return -1;
         }
         long sample = options.sampleSize();
-        try (JsonInput input = new JsonInput(open(file), options.format(), "", file.toString())) {
+        try (JsonInput input = new JsonInput(open(file, false), options.format(), "", file.toString())) {
             long size = Files.size(file);
             while (input.next()) {
                 if (sample >= 0 && input.record() > sample) {
@@ -263,9 +279,10 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         } catch (IOException e) {
             throw new IllegalArgumentException("Cannot read " + path + ": " + e.getMessage(), e);
         }
-        String table = calls.computeIfAbsent(call, c -> {
+        String table = calls.computeIfAbsent(call, k -> {
             String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, new Table(c.file(), c.options(), infer(c.file(), c.options())));
+            callTables.put(generated, new Table(call.file(), call.options(), infer(call.file(), call.options()),
+                    gzipped(call.file())));
             return generated;
         });
         return TableRef.of(name, table);
@@ -307,6 +324,105 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
                     + format);
         }
         return JsonFileWriter.open(file, schema, options);
+    }
+
+    /**
+     * Returns a table that reads a JSON file with the given columns, for
+     * {@code COPY ... FROM}: the key of a column is its name, a key that is
+     * no column is skipped, a missing key is {@code NULL}, and a value is
+     * read as the type of its column, see {@link JsonRecordReader}. The
+     * options, with DuckDB's names:
+     * <ul>
+     * <li>{@code format}: {@code auto}, the default, {@code array} or
+     * {@code newline_delimited}, see {@link JsonFormat}; or {@code array}
+     * as for {@link #openFile}, {@code true} for an array of the records
+     * and {@code false} for a sequence of them;</li>
+     * <li>{@code dateformat} and {@code timestampformat}: formats of
+     * {@code strptime} in which the strings of the columns and fields of
+     * type {@code DATE} and {@code TIMESTAMP} are read, and no other
+     * form;</li>
+     * <li>{@code ignore_errors}: whether a value that does not fit is
+     * {@code NULL}, {@code false} by default;</li>
+     * <li>{@code compression}: {@code gzip}, {@code none} or {@code auto},
+     * the default, which reads a file whose name ends in {@code .gz}
+     * through gzip.</li>
+     * </ul>
+     * The same file in the same version with the same columns and options
+     * gives the same table.
+     */
+    @Override
+    public TableRef fileTable(String format, Path file, Schema schema, Map<String, String> options) {
+        if (!FILE_FORMATS.contains(format)) {
+            throw new IllegalArgumentException("The JSON source " + name + " reads no files of the format "
+                    + format);
+        }
+        String owner = "the JSON file " + file;
+        ConfigOptions o = new ConfigOptions(owner, options, Path.of(""));
+        String lower = String.valueOf(file.getFileName()).toLowerCase(Locale.ROOT);
+        Optional<JsonFormat> records = o.get("format", null, JsonFormat::of);
+        Optional<Boolean> array = o.bool("array");
+        String dateFormat = o.get("dateformat", null, JsonConnector::checked).orElse(null);
+        String timestampFormat = o.get("timestampformat", null, JsonConnector::checked).orElse(null);
+        boolean ignoreErrors = o.bool("ignore_errors").orElse(false);
+        boolean gzip = JsonFileWriter.gzip(o, lower, owner);
+        o.rejectUnknown();
+        if (records.isPresent() && array.isPresent()) {
+            throw new IllegalArgumentException("The JSON file " + file + " takes the option format or array, not"
+                    + " both");
+        }
+        if (!gzip && lower.endsWith(".zst")) {
+            throw new IllegalArgumentException("Files compressed with zstd are not supported: " + file);
+        }
+        JsonOptions read = JsonOptions.DEFAULT
+                .withFormat(records.orElse(array.map(a -> a ? JsonFormat.ARRAY : JsonFormat.NEWLINE_DELIMITED)
+                        .orElse(JsonFormat.AUTO)))
+                .withIgnoreErrors(ignoreErrors).withDateFormat(dateFormat).withTimestampFormat(timestampFormat);
+        Path absolute = file.toAbsolutePath().normalize();
+        if (!Files.isRegularFile(absolute)) {
+            throw new IllegalArgumentException("No files found that match the pattern \"" + file + "\"");
+        }
+        FileCall call;
+        try {
+            call = new FileCall(absolute, Files.getLastModifiedTime(absolute), Files.size(absolute), schema,
+                    Map.copyOf(options));
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Cannot read " + file + ": " + e.getMessage(), e);
+        }
+        String table = calls.computeIfAbsent(call, k -> {
+            String generated = CALL_PREFIX + callCount.incrementAndGet();
+            callTables.put(generated, new Table(absolute, read, JsonLayout.of(schema, parser(read)), gzip));
+            return generated;
+        });
+        return TableRef.of(name, table);
+    }
+
+    /** Returns a format of {@code strptime} if it is valid. */
+    private static String checked(String format) {
+        DateFormats.check(format);
+        return format;
+    }
+
+    /**
+     * Returns the reader of the strings of given columns: a {@code DATE} or
+     * a {@code TIMESTAMP} in the format of the options, if they have one,
+     * and any other value as cast; {@code null} for the casts alone.
+     */
+    static JsonStringParser parser(JsonOptions options) {
+        if (options.dateFormat() == null && options.timestampFormat() == null) {
+            return null;
+        }
+        ToLongFunction<String> date = options.dateFormat() == null ? null : DateFormats.reader(options.dateFormat());
+        ToLongFunction<String> timestamp = options.timestampFormat() == null ? null
+                : DateFormats.reader(options.timestampFormat());
+        return (text, type) -> {
+            if (type == DataType.DATE && date != null) {
+                return Conversions.timestampToDate(date.applyAsLong(text));
+            }
+            if (type == DataType.TIMESTAMP && timestamp != null) {
+                return timestamp.applyAsLong(text);
+            }
+            return type == DataType.VARCHAR ? text : Casts.parse(text, type);
+        };
     }
 
     private static String string(String function, String key, Object value) {
@@ -392,7 +508,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
     /** Returns the offsets at which the parts of a file start, see {@link #splits}. */
     private List<Long> starts(Table table) {
         String fileName = table.file().getFileName().toString().toLowerCase(Locale.ROOT);
-        if (table.options().format() == JsonFormat.ARRAY || fileName.endsWith(".gz") || fileName.endsWith(".zst")) {
+        if (table.options().format() == JsonFormat.ARRAY || table.gzip() || fileName.endsWith(".zst")) {
             return List.of(0L);
         }
         List<Long> starts = new ArrayList<>(List.of(0L));
@@ -506,7 +622,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
                     table.options().withFormat(JsonFormat.NEWLINE_DELIMITED), batchSize, table.file().toString(),
                     range.from() == 0 ? JsonInput.Origin.START : new Before(table.file(), range.from()));
         }
-        return JsonRecordReader.open(open(table.file()), table.layout(), split.plan().columns(),
+        return JsonRecordReader.open(open(table.file(), table.gzip()), table.layout(), split.plan().columns(),
                 table.options(), batchSize, table.file().toString());
     }
 
@@ -621,12 +737,35 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         if (fileName.endsWith(".zst")) {
             throw new IllegalArgumentException("Files compressed with zstd are not supported: " + file);
         }
+        return open(file, gzipped(file));
+    }
+
+    /** Opens a file, uncompressing it if it is compressed with gzip. */
+    static InputStream open(Path file, boolean gzip) {
+        InputStream in;
         try {
-            InputStream in = Files.newInputStream(file);
-            return fileName.endsWith(".gz") ? new GZIPInputStream(in, 1 << 16) : in;
+            in = Files.newInputStream(file);
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot open " + file, e);
         }
+        if (!gzip) {
+            return in;
+        }
+        try {
+            return new GZIPInputStream(in, 1 << 16);
+        } catch (IOException e) {
+            try {
+                in.close();
+            } catch (IOException suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw new UncheckedIOException("Cannot read " + file + " as gzip: " + e.getMessage(), e);
+        }
+    }
+
+    /** Tells whether the name of a file ends in {@code .gz}. */
+    private static boolean gzipped(Path file) {
+        return file.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".gz");
     }
 
     /** Collects the files of a JSON connector. */
@@ -708,7 +847,11 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
             return this;
         }
 
-        /** Gives a table an explicit schema instead of the inferred one; the names are the keys. */
+        /**
+         * Gives a table an explicit schema instead of the inferred one; the
+         * names are the keys, and the date and timestamp formats of the
+         * options apply to the strings of their types.
+         */
         public Builder schema(String table, Schema schema) {
             schemas.put(table, schema);
             return this;
@@ -751,8 +894,9 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
             Map<String, Table> tables = new LinkedHashMap<>();
             for (Map.Entry<String, Path> e : files.entrySet()) {
                 Schema schema = schemas.get(e.getKey());
-                JsonLayout layout = schema != null ? JsonLayout.of(schema) : infer(e.getValue(), options);
-                tables.put(e.getKey(), new Table(e.getValue(), options, layout));
+                JsonLayout layout = schema != null ? JsonLayout.of(schema, parser(options))
+                        : infer(e.getValue(), options);
+                tables.put(e.getKey(), new Table(e.getValue(), options, layout, gzipped(e.getValue())));
             }
             return new JsonConnector(name, tables, options, batchSize, splitSize);
         }

@@ -15,6 +15,7 @@ import net.fyrql.connector.ConnectorFactory;
 
 import java.nio.charset.Charset;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -33,6 +34,11 @@ public final class CsvConnectorFactory implements ConnectorFactory {
     @Override
     public String type() {
         return "csv";
+    }
+
+    @Override
+    public List<String> fileFormats() {
+        return CsvConnector.FILE_FORMATS;
     }
 
     @Override

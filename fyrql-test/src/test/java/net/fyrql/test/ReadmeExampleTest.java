@@ -151,6 +151,14 @@ class ReadmeExampleTest {
             engine.update("INSERT INTO mem.regions SELECT region, sum(amount) FROM '" + file + "' GROUP BY ALL");
             printed = written + " " + engine.rows("SELECT * FROM regions ORDER BY region").stream()
                     .map(Arrays::toString).toList();
+            // The example of loading, with the same file.
+            engine.update("CREATE TABLE mem.archive (id BIGINT NOT NULL, region VARCHAR, amount DECIMAL(10,2))");
+            long loaded = engine.update("COPY mem.archive FROM '" + file + "'");
+            assertEquals(4, loaded);
+            assertEquals("[[1, north, 10.50], [2, south, 20.00], [3, north, 5.25], [4, north, null]]", engine.rows(
+                    "SELECT * FROM mem.archive ORDER BY id").stream().map(Arrays::toString).toList().toString());
+            assertTrue(engine.explain("COPY mem.archive FROM '" + file + "'").startsWith("Copy from '" + file
+                    + "' into mem.main.archive [format: csv]\n"));
 
             assertTrue(engine.explain("INSERT INTO mem.regions SELECT region, 0 FROM customers")
                     .startsWith("Insert into mem.main.regions\n"));

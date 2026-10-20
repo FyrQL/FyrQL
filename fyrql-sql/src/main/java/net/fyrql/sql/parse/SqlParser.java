@@ -12,6 +12,7 @@
 package net.fyrql.sql.parse;
 
 import net.fyrql.sql.SqlException;
+import net.fyrql.sql.ast.CopyFrom;
 import net.fyrql.sql.ast.CopyTo;
 import net.fyrql.sql.ast.FromItem;
 import net.fyrql.sql.ast.Position;
@@ -100,9 +101,9 @@ public final class SqlParser {
     }
 
     /**
-     * Parses a statement: a query, {@code COPY ... TO}, {@code CREATE TABLE},
-     * {@code INSERT INTO} or {@code DROP TABLE}; a trailing semicolon is
-     * allowed.
+     * Parses a statement: a query, {@code COPY ... TO}, {@code COPY ... FROM},
+     * {@code CREATE TABLE}, {@code INSERT INTO} or {@code DROP TABLE}; a
+     * trailing semicolon is allowed.
      *
      * @throws SqlException if the text is not one statement of the supported
      *         forms, or has a parameter
@@ -167,14 +168,22 @@ public final class SqlParser {
     /**
      * Parses {@code COPY}: the query in parentheses as any query, in the
      * text with spaces in place of the rest, so that its positions are those
-     * of the whole text; a name as {@code SELECT * FROM name}.
+     * of the whole text; a name as {@code SELECT * FROM name}, or with
+     * columns in parentheses as {@code SELECT columns FROM name}.
      */
     private static ParameterizedStatement copy(String sql, boolean parameters) {
         CopyParser.Copy copy = CopyParser.parse(sql);
+        if (copy.from()) {
+            return new ParameterizedStatement(new CopyFrom(copy.name(), copy.columns(), copy.path(), copy.options(),
+                    copy.namePosition(), copy.pathPosition()), List.of());
+        }
         if (copy.queryStart() < 0) {
             Position p = copy.namePosition();
-            QueryBody.Select select = new QueryBody.Select(false,
-                    List.of(new SelectItem.Star(List.of(), List.of(), List.of(), p)),
+            List<SelectItem> items = copy.columns().isEmpty()
+                    ? List.of(new SelectItem.Star(List.of(), List.of(), List.of(), p))
+                    : copy.columns().stream().<SelectItem>map(c -> new SelectItem.ExpressionItem(
+                            new SqlExpr.Identifier(List.of(c), p), null)).toList();
+            QueryBody.Select select = new QueryBody.Select(false, items,
                     new FromItem.TableName(copy.name(), null, p), null, null, null, p);
             return new ParameterizedStatement(new CopyTo(Query.of(select), copy.path(), copy.options(),
                     copy.pathPosition()), List.of());

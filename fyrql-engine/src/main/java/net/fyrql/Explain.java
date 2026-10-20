@@ -59,6 +59,7 @@ final class Explain {
     /**
      * Returns the line of a statement that writes, above the plan of its
      * rows: {@code Copy to 'file' [format: csv, header: true]},
+     * {@code Copy from 'file' into source.schema.t [format: csv]},
      * {@code Create table source.schema.t (a INTEGER NOT NULL, b VARCHAR)}
      * with {@code [or replace]} or {@code [if not exists]},
      * {@code Insert into source.schema.t} or
@@ -69,6 +70,12 @@ final class Explain {
             case BoundStatement.Copy c -> {
                 StringBuilder sb = new StringBuilder("Copy to '").append(c.path().replace("'", "''"))
                         .append("' [format: ").append(c.format());
+                c.options().forEach((k, v) -> sb.append(", ").append(k).append(": ").append(v));
+                yield sb.append(']').toString();
+            }
+            case BoundStatement.CopyFrom c -> {
+                StringBuilder sb = new StringBuilder("Copy from '").append(c.path().replace("'", "''"))
+                        .append("' into ").append(c.table()).append(" [format: ").append(c.format());
                 c.options().forEach((k, v) -> sb.append(", ").append(k).append(": ").append(v));
                 yield sb.append(']').toString();
             }

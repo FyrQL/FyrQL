@@ -15,6 +15,7 @@ import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.core.function.DateFormats;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -36,6 +37,11 @@ public final class JsonConnectorFactory implements ConnectorFactory {
     @Override
     public String type() {
         return "json";
+    }
+
+    @Override
+    public List<String> fileFormats() {
+        return JsonConnector.FILE_FORMATS;
     }
 
     @Override

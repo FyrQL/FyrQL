@@ -18,7 +18,13 @@ import net.fyrql.flight.ServerConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -26,6 +32,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.List;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -44,6 +51,9 @@ class FlightSqlJdbcWriteTest {
     private FyrQL engine;
     private FlightSqlServer server;
     private Connection connection;
+
+    @TempDir
+    Path dir;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -104,5 +114,39 @@ class FlightSqlJdbcWriteTest {
             assertEquals(3, Arrays.stream(ps.executeBatch()).sum());
         }
         assertEquals(List.of("[1, a]", "[2, r2]", "[3, null]", "[4, r4]"), rows("SELECT * FROM t ORDER BY k"));
+    }
+
+    @Test
+    void copyWritesAFormatThatNoRegisteredSourceHas() throws SQLException {
+        String file = dir.resolve("t.parquet").toString().replace('\\', '/');
+        try (Statement s = connection.createStatement()) {
+            s.executeUpdate("CREATE TABLE t (k INTEGER NOT NULL, v VARCHAR)");
+            s.executeUpdate("INSERT INTO t VALUES (1, 'a'), (2, NULL)");
+            assertEquals(2, s.executeUpdate("COPY t TO '" + file + "'"));
+        }
+        assertEquals(List.of("mem", "csv", "json", "parquet"), engine.sources());
+        assertEquals(List.of("[1, a]", "[2, null]"), rows("SELECT * FROM '" + file + "' ORDER BY k"));
+    }
+
+    @Test
+    void copyFromLoadsAFormatThatNoRegisteredSourceHas() throws Exception {
+        Path file = dir.resolve("in.csv.gz");
+        try (Writer w = new OutputStreamWriter(new GZIPOutputStream(Files.newOutputStream(file)),
+                StandardCharsets.UTF_8)) {
+            w.write("v;k\n007;1\n;2\n");
+        }
+        String path = file.toString().replace('\\', '/');
+        String copy = "COPY t (v, k) FROM '" + path + "' (DELIMITER ';')";
+        try (Statement s = connection.createStatement()) {
+            s.executeUpdate("CREATE TABLE t (k INTEGER NOT NULL, v VARCHAR)");
+            assertEquals(2, s.executeUpdate(copy));
+            SQLException e = assertThrows(SQLException.class, () -> s.executeUpdate("COPY t (v) FROM 'x.csv'"));
+            assertTrue(e.getMessage().contains("NOT NULL constraint failed: t.k, which the COPY gives no value"),
+                    e.getMessage());
+        }
+        assertEquals(List.of("[1, 007]", "[2, null]"), rows("SELECT * FROM t ORDER BY k"));
+        String plan = engine.explain(copy);
+        assertTrue(plan.startsWith("Copy from '" + path + "' into mem.main.t [format: csv, delimiter: ;,"
+                + " compression: gzip]\n"), plan);
     }
 }

@@ -31,12 +31,13 @@ import java.util.concurrent.ScheduledFuture;
  * {@code WITH}, {@code VALUES} or set operation, or {@code EXPLAIN} and a
  * statement, whose result is the plan in a column {@code plan}, one line
  * per row. A statement that writes, {@code COPY ... TO},
- * {@code CREATE TABLE}, {@code INSERT INTO} or {@code DROP TABLE}, runs
- * to its end before the method returns, and the rows it wrote are the
- * update count: {@link #execute(String)} runs either kind and returns
- * {@code false} for a statement that writes, {@link #executeUpdate(String)}
- * runs only those, and {@link #executeQuery(String)} only queries; a
- * statement of the other kind fails with {@code 42809} before it runs.
+ * {@code COPY ... FROM}, {@code CREATE TABLE}, {@code INSERT INTO} or
+ * {@code DROP TABLE}, runs to its end before the method returns, and the
+ * rows it wrote are the update count: {@link #execute(String)} runs either
+ * kind and returns {@code false} for a statement that writes,
+ * {@link #executeUpdate(String)} runs only those, and
+ * {@link #executeQuery(String)} only queries; a statement of the other
+ * kind fails with {@code 42809} before it runs.
  * Every other statement fails with the message of FyrQL. A batch holds
  * statements that write, which run one after another.
  */

@@ -225,7 +225,10 @@ class WriteStatementTest {
             assertEquals("Table people of the memory source mem holds Java objects and cannot be written",
                     fails(engine, "INSERT INTO mem.people VALUES (4, 'Di')"));
             assertEquals(0, engine.update("DROP TABLE mem.people"));
-            assertEquals("No source writes files of the format csv", fails(engine, "COPY ro.people TO 'x.csv'"));
+            assertEquals("No source writes files of the format csv; put fyrql-connector-csv on the class path or"
+                    + " register a source of the type csv", fails(engine, "COPY ro.people TO 'x.csv'"));
+            assertEquals("No source reads files of the format csv; put fyrql-connector-csv on the class path or"
+                    + " register a source of the type csv", fails(engine, "COPY ro.people FROM 'x.csv'"));
         }
         try (FyrQL engine = FyrQL.builder().register(MemoryConnector.builder("a").build())
                 .register(MemoryConnector.builder("b").build()).build()) {

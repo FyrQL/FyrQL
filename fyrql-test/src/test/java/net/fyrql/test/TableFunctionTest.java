@@ -92,6 +92,7 @@ class TableFunctionTest {
                 FyrQL engine = FyrQL.builder()
                         .register(MemoryConnector.builder("mem").build())
                         .register(CsvConnector.builder("files").build())
+                        .implicitSources(false)
                         .build()) {
             Binder binder = new Binder(engine.catalog(), FunctionRegistry.standard());
             for (String sql : queries) {
@@ -105,7 +106,8 @@ class TableFunctionTest {
             SqlException e = assertThrows(SqlException.class, () -> binder.bind(SqlParser.parse(
                     "SELECT * FROM read_csv('" + dir.toString().replace('\\', '/') + "/no.csv')")));
             assertTrue(e.reason().startsWith("No files found that match the pattern"), e.getMessage());
-            assertEquals("Table function with name read_parquet does not exist; there are read_csv, read_csv_auto",
+            assertEquals("Table function with name read_parquet does not exist; put fyrql-connector-parquet on the"
+                    + " class path or register a source of the type parquet; there are read_csv, read_csv_auto",
                     assertThrows(SqlException.class, () -> binder.bind(SqlParser.parse("SELECT * FROM 'x.parquet'")))
                             .reason());
         }

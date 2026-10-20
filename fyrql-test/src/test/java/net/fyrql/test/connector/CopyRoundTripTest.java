@@ -17,7 +17,9 @@ import net.fyrql.connector.Batches;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
+import net.fyrql.connector.Writer;
 import net.fyrql.connector.csv.CsvConnector;
 import net.fyrql.connector.json.JsonConnector;
 import net.fyrql.connector.memory.MemoryConnector;
@@ -62,10 +64,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * SQL corpus ({@code t}, {@code u}, {@code w}, and {@code n} with nested
  * columns) into CSV, JSON and Parquet files. DuckDB reads each file, with
  * the column types given for CSV and JSON, and gets the rows of the table;
- * so does FyrQL. What the formats lose: CSV keeps no types, and FyrQL's
- * CSV reader reads an empty string as {@code NULL}, as DuckDB does by
- * default; a Parquet file holds a {@code HUGEINT} as a
- * {@code DECIMAL(38,0)}, which a value of 39 digits does not fit.
+ * so does FyrQL, and {@code COPY ... FROM} loads the file into a table with
+ * the columns of the first one. What the formats lose: CSV keeps no types
+ * and holds no nested values, and FyrQL's CSV reader reads an empty string
+ * as {@code NULL}, as DuckDB does by default; a Parquet file holds a
+ * {@code HUGEINT} as a {@code DECIMAL(38,0)}, which a value of 39 digits
+ * does not fit, and which {@code COPY ... FROM} casts back. The engine has
+ * only the memory source registered: the sources of the formats come with
+ * their modules on the class path.
  */
 class CopyRoundTripTest {
 
@@ -85,9 +91,7 @@ class CopyRoundTripTest {
         for (Map.Entry<String, List<Object[]>> t : RandomTables.rows(20261020).entrySet()) {
             memory.table(t.getKey(), RandomTables.SCHEMAS.get(t.getKey()), t.getValue());
         }
-        engine = FyrQL.builder().register(memory.build()).register(CsvConnector.builder("csv").build())
-                .register(JsonConnector.builder("json").build()).register(ParquetConnector.builder("parquet").build())
-                .build();
+        engine = FyrQL.builder().register(memory.build()).build();
         duck = new DuckDbReference();
     }
 
@@ -149,9 +153,19 @@ class CopyRoundTripTest {
                 }
                 same(textSchema, expected, read(CsvConnector.builder("back").header(true).schema(table, textSchema)
                         .file(table, file).build(), table), "FyrQL reads " + file.getFileName());
+                if (schema.fields().stream().noneMatch(f -> f.type().isNested())) {
+                    same(schema, emptyAsNull(rows), copyFrom(file, schema, "", ""), "COPY FROM "
+                            + file.getFileName());
+                } else {
+                    assertTrue(assertThrows(SqlException.class, () -> copyFrom(file, schema, "", "")).getMessage()
+                            .startsWith("A CSV file holds no values of the type "));
+                }
             }
-            case "json" -> same(schema, rows, read(JsonConnector.builder("back").schema(table, schema)
-                    .file(table, file).build(), table), "FyrQL reads " + file.getFileName());
+            case "json" -> {
+                same(schema, rows, read(JsonConnector.builder("back").schema(table, schema).file(table, file)
+                        .build(), table), "FyrQL reads " + file.getFileName());
+                same(schema, rows, copyFrom(file, schema, "", ""), "COPY FROM " + file.getFileName());
+            }
             default -> {
                 // A HUGEINT comes back as a DECIMAL(38,0).
                 Connector back = ParquetConnector.builder("back").path(table, file).build();
@@ -167,8 +181,52 @@ class CopyRoundTripTest {
                     expected.add(e);
                 }
                 same(read, expected, read(back, table), "FyrQL reads " + file.getFileName());
+                // COPY ... FROM casts the DECIMAL(38,0) back to a HUGEINT.
+                same(schema, rows, copyFrom(file, schema, "", ""), "COPY FROM " + file.getFileName());
             }
         }
+    }
+
+    /**
+     * Loads a file with {@code COPY ... FROM} into a new table of the memory
+     * source with the columns of a schema, all of them nullable, and returns
+     * the rows of the table, which is dropped again.
+     *
+     * @param columns the column list of the statement, such as {@code " (v, k)"}, or empty
+     * @param options the options of the statement, such as {@code " (HEADER false)"}, or empty
+     */
+    private static List<Object[]> copyFrom(Path file, Schema schema, String columns, String options) {
+        List<Schema.Field> fields = new ArrayList<>();
+        for (Schema.Field f : schema.fields()) {
+            fields.add(new Schema.Field(f.name(), f.type(), true));
+        }
+        Writer writer = engine.connector("memory").writer().orElseThrow();
+        try (Sink sink = writer.create(TableRef.of("memory", "back"), new Schema(fields))) {
+            sink.commit();
+        }
+        try {
+            long count = engine.update("COPY memory.back" + columns + " FROM '" + path(file) + "'" + options);
+            List<Object[]> rows = engine.rows("SELECT * FROM memory.back");
+            assertEquals(rows.size(), count, "rows loaded from " + file.getFileName());
+            return rows;
+        } finally {
+            engine.update("DROP TABLE memory.back");
+        }
+    }
+
+    /** Returns the rows with an empty string as {@code NULL}, as FyrQL reads them from a CSV file. */
+    private static List<Object[]> emptyAsNull(List<Object[]> rows) {
+        List<Object[]> out = new ArrayList<>();
+        for (Object[] row : rows) {
+            Object[] e = row.clone();
+            for (int c = 0; c < e.length; c++) {
+                if ("".equals(e[c])) {
+                    e[c] = null;
+                }
+            }
+            out.add(e);
+        }
+        return out;
     }
 
     private static void same(Schema schema, List<Object[]> expected, List<Object[]> actual, String what) {
@@ -215,5 +273,36 @@ class CopyRoundTripTest {
                 + " delimiter, delim, sep, quote, escape, nullstr, null, dateformat, timestampformat, compression",
                 assertThrows(SqlException.class, () -> engine.update("COPY memory.t TO '" + path(dir.resolve("x.csv"))
                         + "' (ROWS 3)")).getMessage().replace('/', java.io.File.separatorChar).split(" at line")[0]);
+    }
+
+    @Test
+    void copyFromReadsWhatCopyToWritesWithTheSameOptionsAndColumns() {
+        Schema schema = RandomTables.SCHEMAS.get("q");
+        List<Object[]> rows = engine.rows("SELECT * FROM memory.q");
+
+        String csv = " (DELIMITER ';', HEADER false, DATEFORMAT '%d.%m.%Y')";
+        Path gz = dir.resolve("q-options.csv.gz");
+        assertEquals(30, engine.update("COPY memory.q TO '" + path(gz) + "'" + csv));
+        same(schema, emptyAsNull(rows), copyFrom(gz, schema, "", csv), "COPY FROM " + gz.getFileName());
+
+        Path data = dir.resolve("q-options.data");
+        assertEquals(30, engine.update("COPY memory.q TO '" + path(data) + "' (FORMAT json, ARRAY true,"
+                + " DATEFORMAT '%d.%m.%Y')"));
+        same(schema, rows, copyFrom(data, schema, "", " (FORMAT json, DATEFORMAT '%d.%m.%Y')"), "COPY FROM "
+                + data.getFileName());
+
+        // The columns of the file are the ones of the column list, in its order; the others are NULL.
+        Path tsv = dir.resolve("q-columns.tsv");
+        assertEquals(30, engine.update("COPY memory.q (v, k) TO '" + path(tsv) + "'"));
+        List<Object[]> some = new ArrayList<>();
+        for (Object[] row : emptyAsNull(rows)) {
+            Object[] e = new Object[row.length];
+            e[0] = row[0];
+            e[3] = row[3];
+            some.add(e);
+        }
+        same(schema, some, copyFrom(tsv, schema, " (v, k)", ""), "COPY FROM " + tsv.getFileName());
+        String error = assertThrows(RuntimeException.class, () -> copyFrom(tsv, schema, "", "")).getMessage();
+        assertTrue(error.contains(" has 2 fields, the header 7"), error);
     }
 }

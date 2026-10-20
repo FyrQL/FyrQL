@@ -13,12 +13,12 @@ package net.fyrql.test.random;
 
 import net.fyrql.FyrQL;
 import net.fyrql.QueryResult;
-import net.fyrql.connector.csv.CsvConnector;
-import net.fyrql.connector.json.JsonConnector;
-import net.fyrql.connector.parquet.ParquetConnector;
+import net.fyrql.connector.Sink;
+import net.fyrql.connector.Writer;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
+import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
 import net.fyrql.exec.CodegenMode;
 import net.fyrql.exec.Executor;
@@ -44,12 +44,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The results of random plans, written with {@code COPY ... TO} into a CSV,
  * a JSON and a Parquet file: DuckDB reads each file and gets the rows of
- * the query, in their order if the plan sorts its output. The columns are
+ * the query, in their order if the plan sorts its output, and
+ * {@code COPY ... FROM} loads each file into a table of the memory source
+ * with the columns of the result, which then has the rows of the query; an
+ * empty string comes back from a CSV file as {@code NULL}. The columns are
  * renamed {@code c0}, {@code c1} and so on, since a result may have two
  * columns of the same name. A plan that fails in FyrQL is left out, and so
  * is a Parquet file of a result with a {@code HUGEINT} of 39 digits, which
- * a {@code DECIMAL(38,0)} does not hold; the report counts both. No
- * temporary file is left behind.
+ * a {@code DECIMAL(38,0)} does not hold, and the load of a CSV file of a
+ * result with nested columns, which CSV does not hold; the report counts
+ * them. The engine has only the memory source registered, the sources of
+ * the formats come with their modules. No temporary file is left behind.
  */
 class WriteRoundTripTest {
 
@@ -62,15 +67,15 @@ class WriteRoundTripTest {
     Path dir;
 
     @Test
-    void duckDbReadsTheRowsOfRandomQueriesFromTheirFiles() throws IOException {
+    void duckDbAndCopyFromReadTheRowsOfRandomQueriesFromTheirFiles() throws IOException {
         int checked = 0;
         int failed = 0;
         int tooLarge = 0;
+        int nestedInCsv = 0;
         long rowsWritten = 0;
         List<String> unexplained = new ArrayList<>();
         try (FyrQL engine = RandomTables.engine(RandomTables.rows(RandomRun.SEED), CodegenMode.OFF,
-                Executor.threadsFromSystemProperty(), List.of(CsvConnector.builder("csv").build(),
-                        JsonConnector.builder("json").build(), ParquetConnector.builder("parquet").build()));
+                Executor.threadsFromSystemProperty());
                 DuckDbReference duck = new DuckDbReference()) {
             for (int i = 0; i < RandomRun.QUERIES; i++) {
                 PlanNode plan = renamed(new PlanGenerator(RandomRun.random(i)).plan(3));
@@ -119,6 +124,16 @@ class WriteRoundTripTest {
                         unexplained.add("query " + i + " to " + format + ":\n" + report.indent(2) + "  sql: " + sql);
                         continue;
                     }
+                    if (format.equals("csv") && schema.fields().stream().anyMatch(f -> f.type().isNested())) {
+                        nestedInCsv++;
+                    } else {
+                        report = loaded(engine, file, format, schema, rows);
+                        if (report != null) {
+                            unexplained.add("query " + i + " from " + format + ":\n" + report.indent(2) + "  sql: "
+                                    + sql);
+                            continue;
+                        }
+                    }
                     rowsWritten += count;
                 }
                 checked++;
@@ -130,12 +145,62 @@ class WriteRoundTripTest {
         }
         String report = "Random results written: " + RandomRun.QUERIES + " queries, seed " + RandomRun.SEED + ", "
                 + checked + " results in " + FORMATS.size() + " formats with " + rowsWritten + " rows read back, "
-                + failed + " failed in FyrQL, " + tooLarge + " not in Parquet with a HUGEINT of 39 digits\n"
+                + failed + " failed in FyrQL, " + tooLarge + " not in Parquet with a HUGEINT of 39 digits, "
+                + nestedInCsv + " not loaded from CSV with nested columns\n"
                 + "  unexplained: " + unexplained.size() + "\n" + String.join("\n", unexplained.stream()
                         .limit(20).toList());
         System.out.println(report);
         assertTrue(unexplained.isEmpty(), report);
         assertTrue(checked > RandomRun.QUERIES / 2, checked + " of " + RandomRun.QUERIES + " results checked");
+    }
+
+    /**
+     * Loads a file with {@code COPY ... FROM} into a new table of the memory
+     * source with the columns of the result, all of them nullable, and
+     * compares its rows with the ones of the result in any order; the table
+     * is dropped again.
+     *
+     * @return what differs, or {@code null} if the table has the rows of the result
+     */
+    private static String loaded(FyrQL engine, Path file, String format, Schema schema, List<Object[]> rows) {
+        List<Schema.Field> fields = new ArrayList<>();
+        for (Schema.Field f : schema.fields()) {
+            fields.add(new Schema.Field(f.name(), f.type(), true));
+        }
+        String back = RandomTables.SOURCE + ".back";
+        Writer writer = engine.connector(RandomTables.SOURCE).writer().orElseThrow();
+        try (Sink sink = writer.create(TableRef.of(RandomTables.SOURCE, "back"), new Schema(fields))) {
+            sink.commit();
+        }
+        try {
+            long count = engine.update("COPY " + back + " FROM '" + WrittenFiles.path(file) + "'");
+            if (count != rows.size()) {
+                return count + " rows loaded, the query gives " + rows.size();
+            }
+            List<Object[]> expected = format.equals("csv") ? emptyAsNull(rows) : rows;
+            ResultComparison.Outcome same = ResultComparison.compare(schema, expected,
+                    engine.rows("SELECT * FROM " + back), false);
+            return same.same() ? null : same.report();
+        } catch (RuntimeException e) {
+            return e.toString();
+        } finally {
+            engine.update("DROP TABLE " + back);
+        }
+    }
+
+    /** Returns the rows with an empty string as {@code NULL}, as FyrQL reads them from a CSV file. */
+    private static List<Object[]> emptyAsNull(List<Object[]> rows) {
+        List<Object[]> out = new ArrayList<>();
+        for (Object[] row : rows) {
+            Object[] e = row.clone();
+            for (int c = 0; c < e.length; c++) {
+                if ("".equals(e[c])) {
+                    e[c] = null;
+                }
+            }
+            out.add(e);
+        }
+        return out;
     }
 
     /** Returns the plan with its columns named {@code c0}, {@code c1} and so on. */

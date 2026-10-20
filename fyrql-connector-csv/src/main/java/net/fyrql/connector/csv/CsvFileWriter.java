@@ -144,8 +144,9 @@ final class CsvFileWriter implements Sink {
         };
     }
 
+    /** Returns the first value that is present, such as of an option and its other names. */
     @SafeVarargs
-    private static <T> Optional<T> first(Optional<T>... values) {
+    static <T> Optional<T> first(Optional<T>... values) {
         for (Optional<T> v : values) {
             if (v.isPresent()) {
                 return v;

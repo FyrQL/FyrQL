@@ -210,7 +210,8 @@ class ConnectionTest {
             assertEquals("crm", c.getCatalog());
             SQLException e = assertThrows(SQLException.class, () -> c.setCatalog("erp"));
             assertEquals("3D000", e.getSQLState());
-            assertEquals("There is no source erp; the sources are Shop, crm", e.getMessage());
+            assertEquals("There is no source erp; the sources are Shop, crm, csv, json, parquet", e.getMessage(),
+                    "with the implicit sources of the formats of files");
             assertEquals("crm", c.getCatalog());
             c.setCatalog(null);
             assertEquals("crm", c.getCatalog());

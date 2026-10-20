@@ -18,7 +18,9 @@ import java.util.Objects;
 
 /**
  * {@code COPY (query) TO 'path' (options)}, or {@code COPY table TO ...},
- * which is the query {@code SELECT * FROM table}.
+ * which is the query {@code SELECT * FROM table}, or
+ * {@code COPY table (columns) TO ...}, which is
+ * {@code SELECT columns FROM table}.
  *
  * @param query the rows to write
  * @param path the file to write, as written

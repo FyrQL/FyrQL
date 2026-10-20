@@ -280,7 +280,8 @@ class CsvConnectorTest {
         errors.add(Map.entry("Patterns of file names are not supported yet: *.csv",
                 () -> c.bind("read_csv", List.of("*.csv"), Map.of())));
         errors.add(Map.entry("Invalid named parameter \"foo\" for function read_csv; supported are header, delim, sep, quote,"
-                + " nullstr", () -> c.bind("read_csv", List.of(tsv.toString()), Map.of("foo", 1L))));
+                + " nullstr, dateformat, timestampformat", () -> c.bind("read_csv", List.of(tsv.toString()),
+                        Map.of("foo", 1L))));
         errors.add(Map.entry("The argument delim of read_csv must be one character",
                 () -> c.bind("read_csv", List.of(tsv.toString()), Map.of("delim", ";;"))));
         errors.add(Map.entry("The argument header of read_csv must be a BOOLEAN",

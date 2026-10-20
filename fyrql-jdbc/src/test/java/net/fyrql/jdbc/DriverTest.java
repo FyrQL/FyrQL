@@ -171,8 +171,8 @@ class DriverTest {
         String url = "jdbc:fyrql:?config=" + path(config).replace(" ", "%20") + "&pushdown=false";
         try (Connection c = driver.connect(url, null)) {
             FyrQL engine = c.unwrap(FyrQL.class);
-            assertEquals(List.of("files"), engine.sources());
-            assertEquals("files", c.getCatalog(), "the only source is the default");
+            assertEquals(List.of("files", "json", "parquet"), engine.sources(), "with the implicit sources");
+            assertEquals("files", c.getCatalog(), "the only registered source is the default");
             assertFalse(engine.pushdown(), "the URL wins over the file");
             assertEquals(CodegenMode.OFF, engine.codegen());
             assertEquals(List.of(3L), first(c, "SELECT count(*) FROM t"));

@@ -20,7 +20,7 @@ import java.util.Map;
 /**
  * A {@link Connector} that also writes files of some formats, for
  * {@code COPY ... TO 'file' (FORMAT format, ...)}. The engine looks for the
- * format among the registered sources, as it does for table functions.
+ * format among its sources, as it does for table functions.
  * <p>
  * The file is written under a temporary name in its directory and gets
  * its name with the commit of the sink, replacing a file of that name;

@@ -24,7 +24,7 @@ import java.util.Optional;
 /**
  * What the binder needs to know of the tables: names resolved along the
  * search path, the columns of a table, and the tables of table function
- * calls. The engine implements it. Errors are {@link SqlException}s without
+ * calls and of files. The engine implements it. Errors are {@link SqlException}s without
  * a position; the binder adds the position of the name in the query.
  */
 public interface CatalogView {
@@ -70,6 +70,24 @@ public interface CatalogView {
      * @throws SqlException if there is no such function or the arguments do not fit
      */
     TableRef tableFunction(String name, List<Object> arguments, Map<String, Object> namedArguments);
+
+    /**
+     * Returns the table that reads a file with given columns, for
+     * {@code COPY ... FROM}. The default reads no files.
+     *
+     * @param format the format, such as {@code csv}
+     * @param path the path of the file as the statement names it
+     * @param schema the columns to read, by their names and types
+     * @param options the options of the statement besides the format, by
+     *        names in lower case, in their order
+     * @return a table with the given columns or, for a format whose files
+     *         hold their own columns, such as Parquet, with those of the file
+     * @throws SqlException if no source reads the format, the path is no
+     *         file, or an option or a column does not fit the format
+     */
+    default TableRef fileTable(String format, String path, Schema schema, Map<String, String> options) {
+        throw new SqlException("Not supported: reading files", Position.UNKNOWN);
+    }
 
     /**
      * Returns the table function that reads a file named in {@code FROM}, as

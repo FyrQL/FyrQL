@@ -17,6 +17,9 @@ import net.fyrql.catalog.SearchPath;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ColumnPath;
+import net.fyrql.connector.ConnectorFactory;
+import net.fyrql.connector.FileReaderProvider;
+import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.RemotePlan;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
@@ -45,12 +48,18 @@ import net.fyrql.sql.bind.BoundStatement;
 import net.fyrql.sql.parse.Parameters;
 import net.fyrql.sql.parse.SqlParser;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.ServiceLoader;
+import java.util.Set;
 
 /**
  * The engine: registered connectors, a catalog over them, and the
@@ -68,13 +77,19 @@ import java.util.Objects;
  * {@link Builder#codegen}.
  * <p>
  * Besides queries, {@link #sql(String)} runs the statements that write:
- * {@code COPY ... TO} a file, {@code CREATE TABLE [AS]},
- * {@code INSERT INTO} and {@code DROP TABLE} in a source that writes
- * tables. Such a statement runs to its end before {@code sql} returns, and
+ * {@code COPY ... TO} a file, and {@code CREATE TABLE [AS]},
+ * {@code INSERT INTO}, {@code COPY ... FROM} a file and {@code DROP TABLE}
+ * in a source that writes tables. Such a statement runs to its end before {@code sql} returns, and
  * its result is one row with the column {@code Count}, the number of rows
  * written, as in DuckDB; {@link #update(String)} returns the number
  * alone. Each statement is a transaction of its own in the source it
  * writes, as far as the source allows.
+ * <p>
+ * The formats of files come with their modules: with
+ * {@code fyrql-connector-csv}, {@code fyrql-connector-json} or
+ * {@code fyrql-connector-parquet} on the class path, the engine reads and
+ * writes the format without a registered source of it, see
+ * {@link Builder#implicitSources(boolean)}.
  *
  * <pre>{@code
  * try (FyrQL engine = FyrQL.builder().register(memory).register(csv).build()) {
@@ -198,7 +213,11 @@ public final class FyrQL implements AutoCloseable {
         return c;
     }
 
-    /** Returns the names of the registered sources, in the order of their registration. */
+    /**
+     * Returns the names of the sources: the registered ones in the order of
+     * their registration, then the implicit ones, see
+     * {@link Builder#implicitSources(boolean)}.
+     */
     public List<String> sources() {
         return List.copyOf(connectors.keySet());
     }
@@ -592,6 +611,7 @@ public final class FyrQL implements AutoCloseable {
         StringBuilder sb = new StringBuilder(Explain.header(statement)).append('\n');
         PlanNode input = switch (statement) {
             case BoundStatement.Copy c -> c.input();
+            case BoundStatement.CopyFrom c -> c.input();
             case BoundStatement.Create c -> c.input();
             case BoundStatement.Insert i -> i.input();
             default -> null;
@@ -723,6 +743,8 @@ public final class FyrQL implements AutoCloseable {
         private Boolean pushdown;
         private int threads;
         private boolean preserveOrder = true;
+        private boolean implicitSources = true;
+        private ClassLoader classLoader;
 
         private Builder() {
         }
@@ -847,12 +869,41 @@ public final class FyrQL implements AutoCloseable {
         }
 
         /**
+         * Sets whether the engine adds a source for the formats of files
+         * that no registered source reads and writes; on by default. Each
+         * {@link ConnectorFactory} on the class path with
+         * {@link ConnectorFactory#fileFormats() formats of files}, such as
+         * that of {@code fyrql-connector-parquet}, then becomes a source
+         * without options, named after its type, unless registered sources
+         * read and write all its formats or one has that name. The engine
+         * closes these sources; they follow the registered ones in
+         * {@link #sources()} and are never the default source by themselves.
+         */
+        public Builder implicitSources(boolean enabled) {
+            this.implicitSources = enabled;
+            return this;
+        }
+
+        /**
+         * Sets the class loader in which the engine looks for the factories
+         * of the implicit sources; by default the one that loaded the
+         * engine.
+         *
+         * @see #implicitSources(boolean)
+         */
+        public Builder classLoader(ClassLoader loader) {
+            this.classLoader = Objects.requireNonNull(loader, "loader");
+            return this;
+        }
+
+        /**
          * Builds the engine.
          *
          * @throws IllegalArgumentException if the default source is not registered, or the system property
          *         {@value CodegenMode#PROPERTY}, {@value Optimizer.Options#PROPERTY} or
          *         {@value Executor#THREADS_PROPERTY} has an unknown value
-         * @throws IllegalStateException    if code generation is {@code ALWAYS} without a compiler
+         * @throws IllegalStateException    if code generation is {@code ALWAYS} without a compiler, or an
+         *         implicit source cannot be created
          */
         public FyrQL build() {
             CodegenMode mode = codegenMode != null ? codegenMode : CodegenMode.fromSystemProperty();
@@ -860,12 +911,77 @@ public final class FyrQL implements AutoCloseable {
                     : Codegen.loadCompiler());
             Optimizer.Options options = pushdown == null ? Optimizer.Options.fromSystemProperty()
                     : pushdown ? Optimizer.Options.DEFAULT : Optimizer.Options.NO_PUSHDOWN;
+            int engineThreads = threads > 0 ? threads : Executor.threadsFromSystemProperty();
             String source = defaultSource != null ? defaultSource
                     : connectors.size() == 1 ? connectors.keySet().iterator().next() : null;
-            return new FyrQL(connectors, new SearchPath(source, defaultSchema),
-                    functions != null ? functions : FunctionRegistry.standard(), new MemoryBudget(memoryBudget),
-                    batchSize, codegen, options, threads > 0 ? threads : Executor.threadsFromSystemProperty(),
-                    preserveOrder);
+            // A copy, so that the builder can build again with the sources registered so far.
+            Map<String, Connector> sources = new LinkedHashMap<>(connectors);
+            List<Connector> implicit = implicitSources ? addImplicitSources(sources) : List.of();
+            try {
+                return new FyrQL(sources, new SearchPath(source, defaultSchema),
+                        functions != null ? functions : FunctionRegistry.standard(),
+                        new MemoryBudget(memoryBudget), batchSize, codegen, options, engineThreads, preserveOrder);
+            } catch (RuntimeException | Error e) {
+                close(implicit, e);
+                throw e;
+            }
+        }
+
+        /** Adds the implicit sources to the sources and returns them. */
+        private List<Connector> addImplicitSources(Map<String, Connector> sources) {
+            Set<String> written = new HashSet<>();
+            Set<String> read = new HashSet<>();
+            for (Connector c : sources.values()) {
+                if (c instanceof FileWriterProvider p) {
+                    for (String f : p.fileFormats()) {
+                        written.add(f.toLowerCase(Locale.ROOT));
+                    }
+                }
+                if (c instanceof FileReaderProvider p) {
+                    for (String f : p.fileFormats()) {
+                        read.add(f.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+            List<ConnectorFactory> factories = new ArrayList<>();
+            for (ConnectorFactory f : ServiceLoader.load(ConnectorFactory.class,
+                    classLoader != null ? classLoader : FyrQL.class.getClassLoader())) {
+                if (!f.fileFormats().isEmpty()) {
+                    factories.add(f);
+                }
+            }
+            factories.sort(Comparator.comparing(ConnectorFactory::type));
+            List<Connector> added = new ArrayList<>();
+            for (ConnectorFactory f : factories) {
+                List<String> formats = f.fileFormats().stream().map(s -> s.toLowerCase(Locale.ROOT)).toList();
+                if (sources.containsKey(f.type()) || written.containsAll(formats) && read.containsAll(formats)) {
+                    continue;
+                }
+                Connector c;
+                try {
+                    c = f.create(f.type(), Map.of(), Path.of(""));
+                } catch (RuntimeException e) {
+                    IllegalStateException failure = new IllegalStateException(
+                            "Cannot create the implicit source " + f.type() + ": " + e.getMessage(), e);
+                    close(added, failure);
+                    throw failure;
+                }
+                sources.put(f.type(), c);
+                added.add(c);
+                written.addAll(formats);
+                read.addAll(formats);
+            }
+            return added;
+        }
+
+        private static void close(List<Connector> connectors, Throwable failure) {
+            for (Connector c : connectors) {
+                try {
+                    c.close();
+                } catch (RuntimeException e) {
+                    failure.addSuppressed(e);
+                }
+            }
         }
     }
 }

@@ -16,6 +16,7 @@ import net.fyrql.core.type.DataType.Decimal;
 import net.fyrql.core.type.DataType.Scalar;
 import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Casts;
+import net.fyrql.core.value.Conversions;
 import net.fyrql.core.vector.BigIntVector;
 import net.fyrql.core.vector.BooleanVector;
 import net.fyrql.core.vector.BytesVector;
@@ -25,6 +26,8 @@ import net.fyrql.core.vector.SmallIntVector;
 import net.fyrql.core.vector.TinyIntVector;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
+
+import java.util.function.ToLongFunction;
 
 /**
  * Reads the fields of one column into a vector, straight from the
@@ -36,7 +39,9 @@ import net.fyrql.core.vector.Vectors;
  * for a {@code BOOLEAN} the words of {@link Casts#parse}; for a
  * {@code VARCHAR} ASCII text. Every other field, and every field of another
  * type, is made a string and read by {@link Casts#parse}, so that the value
- * and the error are always those of the string.
+ * and the error are always those of the string. A {@code DATE} or a
+ * {@code TIMESTAMP} with a format of {@code strptime} is read in that format
+ * only.
  */
 abstract class FieldParser {
 
@@ -63,6 +68,26 @@ abstract class FieldParser {
     /** Returns a parser for a type that reads the given string as {@code NULL}, with a fresh builder. */
     static FieldParser of(DataType type, String nullString, int capacity) {
         FieldParser parser = create(type, nullString, capacity);
+        parser.start();
+        return parser;
+    }
+
+    /**
+     * Returns a parser as {@link #of(DataType, String, int)} does, except
+     * that a {@code DATE} or a {@code TIMESTAMP} is read in a format, if
+     * one is given.
+     *
+     * @param dateFormat reads a date as the microseconds of its start, or {@code null}
+     * @param timestampFormat reads a timestamp as microseconds, or {@code null}
+     */
+    static FieldParser of(DataType type, String nullString, int capacity, ToLongFunction<String> dateFormat,
+            ToLongFunction<String> timestampFormat) {
+        ToLongFunction<String> format = type == DataType.DATE ? dateFormat
+                : type == DataType.TIMESTAMP ? timestampFormat : null;
+        if (format == null) {
+            return of(type, nullString, capacity);
+        }
+        FieldParser parser = new FormatParser(type, nullString, capacity, format);
         parser.start();
         return parser;
     }
@@ -373,6 +398,35 @@ abstract class FieldParser {
                 bytes[i] = (byte) c;
             }
             builder.appendBytes(bytes, 0, length);
+            return true;
+        }
+    }
+
+    /** {@code DATE} or {@code TIMESTAMP} in a format of {@code strptime}; a field in another form is an error. */
+    private static final class FormatParser extends FieldParser {
+        private final ToLongFunction<String> format;
+        private final boolean date;
+        private Vector.Builder builder;
+
+        FormatParser(DataType type, String nullString, int capacity, ToLongFunction<String> format) {
+            super(type, nullString, capacity);
+            this.format = format;
+            this.date = type == DataType.DATE;
+        }
+
+        @Override
+        void started(Vector.Builder builder) {
+            this.builder = builder;
+        }
+
+        @Override
+        boolean fast(char[] buf, int offset, int length) {
+            long micros = format.applyAsLong(new String(buf, offset, length));
+            if (date) {
+                ((IntVector.Builder) builder).appendInt(Conversions.timestampToDate(micros));
+            } else {
+                ((BigIntVector.Builder) builder).appendLong(micros);
+            }
             return true;
         }
     }
