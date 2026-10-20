@@ -42,6 +42,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * interpreter goes operand by operand and the compiled code row by row, so
  * that another row may fail first; the test counts those cases.
  * <p>
+ * An expression the compiler does not take on by its kind, such as one with
+ * a value of a nested type like {@code map()}, is left to the interpreter
+ * in the engine as well; the test skips it and counts it. Any other
+ * expression that is not compiled is a difference.
+ * <p>
  * The number of expressions and the seed come from
  * {@code -Dfyrql.random.queries} and {@code -Dfyrql.random.seed}.
  */
@@ -54,6 +59,7 @@ class CodegenEquivalenceTest {
         List<String> failures = new ArrayList<>();
         int[] messages = {0};
         int[] checked = {0};
+        int skipped = 0;
         for (int q = 0; q < RandomRun.QUERIES; q++) {
             SplittableRandom random = RandomRun.random(q);
             String table = q % 3 == 0 ? "e" : q % 3 == 1 ? "p" : "q";
@@ -63,6 +69,10 @@ class CodegenEquivalenceTest {
             ExpressionGenerator g = new ExpressionGenerator(random, schema.types());
             Expression e = g.any(1 + random.nextInt(4));
             Expression condition = g.condition(1 + random.nextInt(4));
+            if (!compiler.supports(e) || !compiler.supports(condition)) {
+                skipped++;
+                continue;
+            }
             CompiledProjection p = compiler.projection(e, schema);
             CompiledFilter f = compiler.filter(condition, schema);
             if (p == null || f == null) {
@@ -81,7 +91,7 @@ class CodegenEquivalenceTest {
         }
         CodegenStatistics s = compiler.statistics();
         System.out.println("CodegenEquivalenceTest: " + RandomRun.QUERIES + " expressions and conditions, "
-                + checked[0] + " batches checked, " + messages[0] + " errors with another message; " + s);
+                + checked[0] + " batches checked, " + skipped + " skipped as not supported, " + messages[0] + " errors with another message; " + s);
         assertEquals(0, s.failures(), "compilations failed");
         assertTrue(failures.isEmpty(), () -> failures.size() + " differences, the first:\n"
                 + String.join("\n\n", failures.subList(0, Math.min(3, failures.size()))));
