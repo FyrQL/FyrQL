@@ -361,7 +361,9 @@ class MetadataTest {
                     "bi 19 0 10 null", "hi 39 0 10 null", "f 7 null 10 null", "d 15 null 10 null",
                     "dec 38 10 10 null", "v " + unbounded + " null null " + unbounded,
                     "bl " + unbounded + " null null " + unbounded, "dt 10 0 null null", "ts 26 6 null null",
-                    "u 36 null null null", "li null null null null", "ld null null null null",
+                    "u 36 null null null", "tm 15 6 null null", "tz 32 6 null null",
+                    "iv " + unbounded + " null null null",
+                    "li null null null null", "ld null null null null",
                     "lb null null null null", "sa null null null null", "st null null null null",
                     "m null null null null", "ll null null null null"), sizes);
 
@@ -411,11 +413,14 @@ class MetadataTest {
                     "VARCHAR 12 2147483647 null 0-0 true 3 '",
                     "BOOLEAN 16 1 null 0-0 false 2 null",
                     "DATE 91 10 null 0-0 false 2 DATE '",
+                    "TIME 92 15 null 6-6 false 2 TIME '",
                     "TIMESTAMP 93 26 null 6-6 false 2 TIMESTAMP '",
                     "UUID 1111 36 null 0-0 false 2 null",
+                    "INTERVAL 1111 2147483647 null 0-0 false 2 INTERVAL '",
                     "MAP 1111 null null 0-0 false 2 null",
                     "STRUCT 2002 null null 0-0 false 2 null",
-                    "LIST 2003 null null 0-0 false 2 null"), rows);
+                    "LIST 2003 null null 0-0 false 2 null",
+                    "TIMESTAMP WITH TIME ZONE 2014 32 null 6-6 false 2 TIMESTAMPTZ '"), rows);
         }
     }
 

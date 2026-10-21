@@ -19,6 +19,7 @@ import net.fyrql.core.type.DataType.Scalar;
 import net.fyrql.core.type.DataType.Struct;
 import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -36,6 +37,8 @@ import java.util.UUID;
 /**
  * Turns the values that DuckDB's JDBC driver returns into the Java values
  * of FyrQL: {@code LocalDate} to days, {@code Timestamp} to microseconds,
+ * {@code LocalTime} and {@code OffsetDateTime} to microseconds, the text of
+ * an interval to an {@code Interval},
  * {@code Blob} to bytes, {@code Struct} and {@code Array} to lists, and
  * numbers to the box of the type.
  */
@@ -91,6 +94,12 @@ public final class Normalizer {
                 case TIMESTAMP -> v instanceof Timestamp t ? Conversions.toMicros(t.toLocalDateTime())
                         : Conversions.toMicros((java.time.LocalDateTime) v);
                 case UUID -> v instanceof UUID u ? u : UUID.fromString(v.toString());
+                case TIME -> v instanceof java.time.LocalTime t ? t.toNanoOfDay() / 1000
+                        : Conversions.parseTime(v.toString());
+                case TIMESTAMPTZ -> v instanceof java.time.OffsetDateTime t ? Conversions.toMicros(
+                        t.withOffsetSameInstant(java.time.ZoneOffset.UTC).toLocalDateTime())
+                        : Conversions.parseTimestampTz(v.toString(), java.time.ZoneOffset.UTC);
+                case INTERVAL -> v instanceof Interval i ? i : Interval.parse(v.toString());
             };
         } catch (SQLException e) {
             throw new IllegalStateException("Cannot read a " + type + " from DuckDB", e);

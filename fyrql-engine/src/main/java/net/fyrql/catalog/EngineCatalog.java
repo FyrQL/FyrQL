@@ -25,11 +25,13 @@ import net.fyrql.sql.bind.CatalogView;
 import java.io.UncheckedIOException;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.time.ZoneId;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * The catalog of an engine for the binder: names through the
@@ -41,6 +43,7 @@ import java.util.Optional;
 public final class EngineCatalog implements CatalogView {
 
     private final Map<String, Connector> sources;
+    private final Supplier<ZoneId> zone;
     private final NameResolver resolver;
     private final Map<String, TableFunctionProvider> functions = new LinkedHashMap<>();
     private final Map<String, FileWriterProvider> fileWriters = new LinkedHashMap<>();
@@ -49,8 +52,23 @@ public final class EngineCatalog implements CatalogView {
     /** The formats of files that a module of their own brings. */
     private static final List<String> MODULE_FORMATS = List.of("csv", "json", "parquet");
 
-    /** A catalog over sources by name, in the order of their registration. */
+    /**
+     * A catalog over sources by name, in the order of their registration, in
+     * the time zone of the JVM.
+     */
     public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath) {
+        this(sources, searchPath, ZoneId::systemDefault);
+    }
+
+    /**
+     * A catalog over sources by name, in the order of their registration.
+     *
+     * @param zone the time zone of the session, which the catalog adds to
+     *        the options of files and table functions, see
+     *        {@link FileWriterProvider#TIME_ZONE}
+     */
+    public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone) {
+        this.zone = zone;
         this.sources = new LinkedHashMap<>(sources);
         this.resolver = new NameResolver(sources, searchPath);
         Connector preferred = searchPath.defaultSource() == null ? null : sources.get(searchPath.defaultSource());
@@ -100,7 +118,17 @@ public final class EngineCatalog implements CatalogView {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public EngineCatalog withSearchPath(SearchPath searchPath) {
-        return searchPath.equals(searchPath()) ? this : new EngineCatalog(sources, searchPath);
+        return searchPath.equals(searchPath()) ? this : new EngineCatalog(sources, searchPath, zone);
+    }
+
+    /** Returns options with {@link FileWriterProvider#TIME_ZONE} added unless they have it. */
+    public Map<String, String> withTimeZone(Map<String, String> options) {
+        if (options.containsKey(FileWriterProvider.TIME_ZONE)) {
+            return options;
+        }
+        Map<String, String> with = new LinkedHashMap<>(options);
+        with.put(FileWriterProvider.TIME_ZONE, zone.get().getId());
+        return with;
     }
 
     /** Returns the names of the table functions, in lower case. */
@@ -158,7 +186,7 @@ public final class EngineCatalog implements CatalogView {
         }
         checkLocal(path);
         try {
-            return provider.fileTable(f, path, schema, options);
+            return provider.fileTable(f, path, schema, withTimeZone(options));
         } catch (IllegalArgumentException | UncheckedIOException e) {
             throw new SqlException(e.getMessage(), Position.UNKNOWN);
         }
@@ -227,6 +255,7 @@ public final class EngineCatalog implements CatalogView {
         for (Map.Entry<String, Object> e : namedArguments.entrySet()) {
             named.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
         }
+        named.putIfAbsent(FileWriterProvider.TIME_ZONE, zone.get().getId());
         try {
             return provider.bind(function, arguments, named);
         } catch (IllegalArgumentException | UncheckedIOException e) {

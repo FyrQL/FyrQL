@@ -93,7 +93,7 @@ class MemoryConnectorTest {
         assertEquals("id BIGINT NOT NULL", schema.fields().get(0).toString());
         assertEquals(DataType.decimal(10, 2), schema.type(2));
         assertEquals(DataType.DATE, schema.type(3));
-        assertEquals(DataType.TIMESTAMP, schema.type(4));
+        assertEquals(DataType.TIMESTAMPTZ, schema.type(4));
         assertEquals("STRUCT(city VARCHAR, zip INTEGER)", schema.type(5).sqlName());
         assertEquals("VARCHAR[]", schema.type(6).sqlName());
         assertEquals("MAP(VARCHAR, INTEGER)", schema.type(7).sqlName());
@@ -101,11 +101,11 @@ class MemoryConnectorTest {
         assertEquals(List.of("orders"), c.catalog().tables("main"));
         assertEquals(2, c.catalog().rowCount(ref).getAsLong());
 
-        ScanPlan plan = c.plan(ref, ScanRequest.columns(List.of(0, 2, 3, 5, 6, 7)));
+        ScanPlan plan = c.plan(ref, ScanRequest.columns(List.of(0, 2, 3, 4, 5, 6, 7)));
         List<Batch> batches = Batches.readAll(c.open(c.splits(plan).get(0)));
         assertEquals(2, batches.size(), "one row per batch");
         Object[] first = batches.get(0).row(0);
-        assertEquals(Arrays.asList(1L, new BigDecimal("5.50"), (int) LocalDate.of(2026, 1, 2).toEpochDay(),
+        assertEquals(Arrays.asList(1L, new BigDecimal("5.50"), (int) LocalDate.of(2026, 1, 2).toEpochDay(), 0L,
                 List.of("Bonn", 53111), List.of("a", "b"), Map.of("x", 1)), Arrays.asList(first));
         Object[] second = batches.get(1).row(0);
         assertEquals(2L, second[0]);

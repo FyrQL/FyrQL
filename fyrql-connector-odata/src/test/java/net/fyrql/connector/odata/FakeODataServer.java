@@ -18,6 +18,7 @@ import com.sun.net.httpserver.HttpServer;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -27,8 +28,10 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
@@ -604,11 +607,25 @@ public final class FakeODataServer implements AutoCloseable {
                 case BLOB -> "Edm.Binary";
                 case DATE -> "Edm.Date";
                 case TIMESTAMP -> version == ODataVersion.V2 ? "Edm.DateTime" : "Edm.DateTimeOffset";
+                case TIMESTAMPTZ -> "Edm.DateTimeOffset";
+                case TIME -> version == ODataVersion.V2 ? "Edm.Time" : "Edm.TimeOfDay";
+                case INTERVAL -> "Edm.Duration";
                 default -> throw new IllegalArgumentException("No type of OData for " + type);
             };
         }
 
-        /** Returns the {@code $metadata} of the service. */
+        /** Returns an interval of days and microseconds of one sign as a duration of ISO 8601. */
+    static String duration(Interval i) {
+        if (i.months() != 0 || i.days() < 0 != i.micros() < 0 && i.days() != 0 && i.micros() != 0) {
+            throw new IllegalArgumentException("No duration of OData: " + i);
+        }
+        boolean negative = i.days() < 0 || i.micros() < 0;
+        String time = Duration.ofNanos(Math.abs(i.micros()) * 1000).toString().substring(1);
+        return (negative ? "-P" : "P") + (i.days() != 0 ? Math.abs(i.days()) + "D" : "")
+                + (time.equals("T0S") && i.days() != 0 ? "" : time);
+    }
+
+    /** Returns the {@code $metadata} of the service. */
         String metadata() {
             StringBuilder types = new StringBuilder();
             StringBuilder container = new StringBuilder();
@@ -1113,6 +1130,11 @@ public final class FakeODataServer implements AutoCloseable {
                     }
                 }
                 case "Edm.Date" -> g.writeString(LocalDate.ofEpochDay((Integer) v).toString());
+                case "Edm.Time" -> g.writeString(v instanceof Long micros ? Duration.ofNanos(micros * 1000).toString()
+                        : v.toString());
+                case "Edm.TimeOfDay" -> g.writeString(v instanceof Long micros
+                        ? LocalTime.ofNanoOfDay(micros * 1000).toString() : v.toString());
+                case "Edm.Duration" -> g.writeString(v instanceof Interval i ? duration(i) : v.toString());
                 default -> g.writeString(v.toString());
             }
         }

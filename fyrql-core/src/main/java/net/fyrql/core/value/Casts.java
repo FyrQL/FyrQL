@@ -19,6 +19,8 @@ import net.fyrql.core.type.Values;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -32,9 +34,12 @@ import java.util.Map;
  * value cast to an integral type is rounded half away from zero, and a
  * decimal is rescaled the same way. Every type converts to and from
  * {@code VARCHAR}; the numeric types convert among each other and to
- * {@code BOOLEAN}; {@code DATE} and {@code TIMESTAMP} convert into each
- * other. A list converts to a list whose element type its elements convert
- * to, a map to a map likewise, which fails if two keys become equal, and a
+ * {@code BOOLEAN}; {@code DATE}, {@code TIMESTAMP} and {@code TIMESTAMP WITH
+ * TIME ZONE} convert into each other, {@code TIMESTAMP} to {@code TIME}. The
+ * conversions between {@code TIMESTAMP WITH TIME ZONE} and the local types
+ * and text take place in a time zone, UTC unless one is given. A list
+ * converts to a list whose element type its elements convert to, a map to
+ * a map likewise, which fails if two keys become equal, and a
  * struct to a struct by the names of the fields, without regard to case: a
  * field of the target takes the field of the source with its name, or
  * {@code NULL} if there is none, and at least one name must match. A string
@@ -67,10 +72,64 @@ public final class Casts {
         if (from == Scalar.BOOLEAN && to.isNumeric() || from.isNumeric() && to == Scalar.BOOLEAN) {
             return true;
         }
-        if (from == Scalar.DATE && to == Scalar.TIMESTAMP || from == Scalar.TIMESTAMP && to == Scalar.DATE) {
+        if (isLocalDateTime(from) && (isLocalDateTime(to) || to == Scalar.TIMESTAMPTZ)
+                || from == Scalar.TIMESTAMPTZ && isLocalDateTime(to) || from == Scalar.TIMESTAMP && to == Scalar.TIME) {
             return true;
         }
         return allowedNested(from, to);
+    }
+
+    private static boolean isLocalDateTime(DataType type) {
+        return type == Scalar.DATE || type == Scalar.TIMESTAMP;
+    }
+
+    /**
+     * Tells whether a cast from one type to another depends on the time
+     * zone: one between {@code TIMESTAMP WITH TIME ZONE} and {@code VARCHAR},
+     * {@code DATE} or {@code TIMESTAMP}, also inside nested types.
+     */
+    public static boolean needsZone(DataType from, DataType to) {
+        if (from == Scalar.TIMESTAMPTZ || to == Scalar.TIMESTAMPTZ) {
+            return !from.equals(to);
+        }
+        if (from instanceof DataType.ListType f && to instanceof DataType.ListType t) {
+            return needsZone(f.element(), t.element());
+        }
+        if (from instanceof DataType.MapType f && to instanceof DataType.MapType t) {
+            return needsZone(f.key(), t.key()) || needsZone(f.value(), t.value());
+        }
+        if (from instanceof DataType.Struct f && to instanceof DataType.Struct t) {
+            for (DataType.Struct.Field field : t.fields()) {
+                int i = f.find(field.name());
+                if (i >= 0 && needsZone(f.fields().get(i).type(), field.type())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return from.isNested() && to == Scalar.VARCHAR && mentions(from, Scalar.TIMESTAMPTZ)
+                || to.isNested() && from == Scalar.VARCHAR && mentions(to, Scalar.TIMESTAMPTZ);
+    }
+
+    /** Tells whether a type is or contains a scalar type. */
+    public static boolean mentions(DataType type, Scalar scalar) {
+        if (type == scalar) {
+            return true;
+        }
+        if (type instanceof DataType.ListType l) {
+            return mentions(l.element(), scalar);
+        }
+        if (type instanceof DataType.MapType m) {
+            return mentions(m.key(), scalar) || mentions(m.value(), scalar);
+        }
+        if (type instanceof DataType.Struct s) {
+            for (DataType.Struct.Field f : s.fields()) {
+                if (mentions(f.type(), scalar)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -80,6 +139,16 @@ public final class Casts {
      * @throws ConversionException if the value does not convert
      */
     public static Object cast(Object value, DataType from, DataType to) {
+        return cast(value, from, to, ZoneOffset.UTC);
+    }
+
+    /**
+     * Converts a value in a time zone; see the class description.
+     *
+     * @throws ArithmeticException if the value is out of range
+     * @throws ConversionException if the value does not convert
+     */
+    public static Object cast(Object value, DataType from, DataType to, ZoneId zone) {
         if (value == null || from.equals(to)) {
             return value;
         }
@@ -87,10 +156,10 @@ public final class Casts {
             throw new ConversionException("Cannot cast " + from + " to " + to);
         }
         if (to == Scalar.VARCHAR) {
-            return format(value, from);
+            return format(value, from, zone);
         }
         if (from == Scalar.VARCHAR) {
-            return parse((String) value, to);
+            return parse((String) value, to, zone);
         }
         if (from == Scalar.BOOLEAN) {
             return numeric(((Boolean) value) ? 1L : 0L, Scalar.BIGINT, to);
@@ -98,16 +167,28 @@ public final class Casts {
         if (to == Scalar.BOOLEAN) {
             return isNonZero(value, from);
         }
-        if (from == Scalar.DATE) {
-            return Conversions.dateToTimestamp((Integer) value);
-        }
-        if (from == Scalar.TIMESTAMP) {
-            return Conversions.timestampToDate((Long) value);
+        if (from == Scalar.DATE || from == Scalar.TIMESTAMP || from == Scalar.TIMESTAMPTZ) {
+            return temporal(value, from, to, zone);
         }
         if (to.isNested()) {
-            return nested(value, from, to, false);
+            return nested(value, from, to, false, zone);
         }
         return numeric(value, from, to);
+    }
+
+    /** Converts between {@code DATE}, {@code TIMESTAMP}, {@code TIMESTAMP WITH TIME ZONE} and {@code TIME}. */
+    private static Object temporal(Object value, DataType from, DataType to, ZoneId zone) {
+        long local = switch ((Scalar) from) {
+            case DATE -> Conversions.dateToTimestamp((Integer) value);
+            case TIMESTAMP -> (Long) value;
+            default -> ZonedDates.toLocal((Long) value, zone);
+        };
+        return switch ((Scalar) to) {
+            case DATE -> Conversions.timestampToDate(local);
+            case TIMESTAMP -> local;
+            case TIME -> Dates.timeOf(local);
+            default -> ZonedDates.toInstant(local, zone);
+        };
     }
 
     /**
@@ -118,14 +199,19 @@ public final class Casts {
      * {@code NULL} as a whole.
      */
     public static Object tryCast(Object value, DataType from, DataType to) {
+        return tryCast(value, from, to, ZoneOffset.UTC);
+    }
+
+    /** Converts a value as {@link #tryCast(Object, DataType, DataType)} does, in a time zone. */
+    public static Object tryCast(Object value, DataType from, DataType to, ZoneId zone) {
         if (value == null || from.equals(to)) {
             return value;
         }
         if (from.isNested() && to.isNested() && allowed(from, to)) {
-            return nested(value, from, to, true);
+            return nested(value, from, to, true, zone);
         }
         try {
-            return cast(value, from, to);
+            return cast(value, from, to, zone);
         } catch (ArithmeticException | ConversionException e) {
             return null;
         }
@@ -156,26 +242,28 @@ public final class Casts {
     }
 
     /** Converts a list, map or struct to another type of its kind, element by element. */
-    private static Object nested(Object value, DataType from, DataType to, boolean safe) {
+    private static Object nested(Object value, DataType from, DataType to, boolean safe, ZoneId zone) {
         if (from instanceof DataType.ListType f && to instanceof DataType.ListType t) {
             List<Object> result = new ArrayList<>();
             for (Object element : (List<?>) value) {
-                result.add(safe ? tryCast(element, f.element(), t.element()) : cast(element, f.element(), t.element()));
+                result.add(safe ? tryCast(element, f.element(), t.element(), zone)
+                        : cast(element, f.element(), t.element(), zone));
             }
             return result;
         }
         if (from instanceof DataType.MapType f && to instanceof DataType.MapType t) {
             Map<Object, Object> result = new LinkedHashMap<>();
             for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
-                Object key = safe ? tryCast(e.getKey(), f.key(), t.key()) : cast(e.getKey(), f.key(), t.key());
+                Object key = safe ? tryCast(e.getKey(), f.key(), t.key(), zone)
+                        : cast(e.getKey(), f.key(), t.key(), zone);
                 if (key == null || result.containsKey(key)) {
                     if (safe) {
                         return null;
                     }
                     throw new ConversionException("Map keys must be unique after the cast to " + to);
                 }
-                result.put(key, safe ? tryCast(e.getValue(), f.value(), t.value())
-                        : cast(e.getValue(), f.value(), t.value()));
+                result.put(key, safe ? tryCast(e.getValue(), f.value(), t.value(), zone)
+                        : cast(e.getValue(), f.value(), t.value(), zone));
             }
             return result;
         }
@@ -187,13 +275,18 @@ public final class Casts {
             int i = f.find(field.name());
             Object v = i < 0 ? null : values.get(i);
             DataType type = i < 0 ? field.type() : f.fields().get(i).type();
-            result.add(safe ? tryCast(v, type, field.type()) : cast(v, type, field.type()));
+            result.add(safe ? tryCast(v, type, field.type(), zone) : cast(v, type, field.type(), zone));
         }
         return result;
     }
 
-    /** Formats a value of a type as its {@code VARCHAR} form, as DuckDB prints it. */
+    /** Formats a value of a type as its {@code VARCHAR} form, as DuckDB prints it, in UTC. */
     public static String format(Object value, DataType from) {
+        return format(value, from, ZoneOffset.UTC);
+    }
+
+    /** Formats a value of a type as its {@code VARCHAR} form, as DuckDB prints it, in a time zone. */
+    public static String format(Object value, DataType from, ZoneId zone) {
         if (value == null) {
             return null;
         }
@@ -205,7 +298,7 @@ public final class Casts {
             StringBuilder b = new StringBuilder("{");
             for (int i = 0; i < values.size(); i++) {
                 b.append(i > 0 ? ", " : "").append('\'').append(s.fields().get(i).name().replace("'", "\\'"))
-                        .append("': ").append(nestedElement(values.get(i), s.fields().get(i).type()));
+                        .append("': ").append(nestedElement(values.get(i), s.fields().get(i).type(), zone));
             }
             return b.append('}').toString();
         }
@@ -213,7 +306,7 @@ public final class Casts {
             StringBuilder b = new StringBuilder("[");
             int i = 0;
             for (Object v : (List<?>) value) {
-                b.append(i++ > 0 ? ", " : "").append(nestedElement(v, l.element()));
+                b.append(i++ > 0 ? ", " : "").append(nestedElement(v, l.element(), zone));
             }
             return b.append(']').toString();
         }
@@ -221,8 +314,8 @@ public final class Casts {
             StringBuilder b = new StringBuilder("{");
             int i = 0;
             for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
-                b.append(i++ > 0 ? ", " : "").append(nestedElement(e.getKey(), m.key())).append('=')
-                        .append(nestedElement(e.getValue(), m.value()));
+                b.append(i++ > 0 ? ", " : "").append(nestedElement(e.getKey(), m.key(), zone)).append('=')
+                        .append(nestedElement(e.getValue(), m.value(), zone));
             }
             return b.append('}').toString();
         }
@@ -233,6 +326,9 @@ public final class Casts {
             case BLOB -> Conversions.formatBlob((byte[]) value);
             case DATE -> Conversions.formatDate((Integer) value);
             case TIMESTAMP -> Conversions.formatTimestamp((Long) value);
+            case TIME -> Conversions.formatTime((Long) value);
+            case TIMESTAMPTZ -> Conversions.formatTimestampTz((Long) value, zone);
+            case INTERVAL -> value.toString();
         };
     }
 
@@ -244,11 +340,11 @@ public final class Casts {
      * starts or ends with whitespace, or contains one of
      * {@code , ' " [ ] { } ( ) : =}.
      */
-    private static String nestedElement(Object value, DataType type) {
+    private static String nestedElement(Object value, DataType type, ZoneId zone) {
         if (value == null) {
             return "NULL";
         }
-        String s = format(value, type);
+        String s = format(value, type, zone);
         return type.isNested() || !needsQuotes(s) ? s : "'" + s.replace("'", "\\'") + "'";
     }
 
@@ -268,8 +364,13 @@ public final class Casts {
         return c == ' ' || c >= '\t' && c <= '\r';
     }
 
-    /** Parses the {@code VARCHAR} form of a value of a scalar or decimal type. */
+    /** Parses the {@code VARCHAR} form of a value of a scalar or decimal type, in UTC. */
     public static Object parse(String s, DataType to) {
+        return parse(s, to, ZoneOffset.UTC);
+    }
+
+    /** Parses the {@code VARCHAR} form of a value of a scalar or decimal type, in a time zone. */
+    public static Object parse(String s, DataType to, ZoneId zone) {
         if (to instanceof Decimal d) {
             return Values.toDecimal(Conversions.parseDecimal(s), d);
         }
@@ -287,6 +388,9 @@ public final class Casts {
             case DATE -> Conversions.parseDate(s);
             case TIMESTAMP -> Conversions.parseTimestamp(s);
             case UUID -> Conversions.parseUuid(s);
+            case TIME -> Conversions.parseTime(s);
+            case TIMESTAMPTZ -> Conversions.parseTimestampTz(s, zone);
+            case INTERVAL -> Interval.parse(s);
         };
     }
 

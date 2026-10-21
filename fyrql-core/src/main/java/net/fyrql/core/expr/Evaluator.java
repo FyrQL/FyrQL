@@ -27,6 +27,8 @@ import net.fyrql.core.vector.IntVector;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
 
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -77,10 +79,11 @@ public final class Evaluator {
             case Expression.Coalesce c -> coalesce(c, in);
             case Expression.Cast c when c.operand() instanceof Expression.Literal l && in.rowCount() > 0 ->
                     // Once rather than for every row, which gives the same values and fails alike.
-                    constant(c.target(), c.safe() ? Casts.tryCast(l.value(), l.type(), c.target())
-                            : Casts.cast(l.value(), l.type(), c.target()), in.rowCount());
-            case Expression.Cast c -> c.safe() ? tryCast(eval(c.operand(), in), c.operand().type(), c.target())
-                    : cast(eval(c.operand(), in), c.operand().type(), c.target());
+                    constant(c.target(), c.safe() ? Casts.tryCast(l.value(), l.type(), c.target(), c.zoneOrUtc())
+                            : Casts.cast(l.value(), l.type(), c.target(), c.zoneOrUtc()), in.rowCount());
+            case Expression.Cast c -> c.safe()
+                    ? tryCast(eval(c.operand(), in), c.operand().type(), c.target(), c.zoneOrUtc())
+                    : cast(eval(c.operand(), in), c.operand().type(), c.target(), c.zoneOrUtc());
             case Expression.Like l -> like(l, in);
             case Expression.IsDistinct d -> isDistinct(d, in);
             case Expression.Call c -> call(c, in);
@@ -199,29 +202,42 @@ public final class Evaluator {
 
     /** Casts every value of a vector to a type; the vector itself if the type is the same. */
     public static Vector cast(Vector v, DataType from, DataType to) {
+        return cast(v, from, to, ZoneOffset.UTC);
+    }
+
+    /** Casts every value of a vector to a type in a time zone; the vector itself if the type is the same. */
+    public static Vector cast(Vector v, DataType from, DataType to, ZoneId zone) {
         if (from.equals(to)) {
             return v;
         }
         Vector.Builder b = Vectors.builder(to, v.size());
         for (int i = 0; i < v.size(); i++) {
-            b.append(Casts.cast(v.get(i), from, to));
+            b.append(Casts.cast(v.get(i), from, to, zone));
         }
         return b.build();
     }
 
     /** Casts every value of a vector to a type, {@code NULL} where the value does not convert. */
     public static Vector tryCast(Vector v, DataType from, DataType to) {
+        return tryCast(v, from, to, ZoneOffset.UTC);
+    }
+
+    /** Casts every value of a vector to a type in a time zone, {@code NULL} where the value does not convert. */
+    public static Vector tryCast(Vector v, DataType from, DataType to, ZoneId zone) {
         if (from.equals(to)) {
             return v;
         }
         Vector.Builder b = Vectors.builder(to, v.size());
         for (int i = 0; i < v.size(); i++) {
-            b.append(Casts.tryCast(v.get(i), from, to));
+            b.append(Casts.tryCast(v.get(i), from, to, zone));
         }
         return b.build();
     }
 
     private static Vector arithmetic(Expression.Arithmetic a, Batch in) {
+        if (TypeRules.isTemporalArithmetic(a.left().type(), a.right().type())) {
+            return temporalArithmetic(a, in);
+        }
         if (a.left().type() == DataType.DATE || a.right().type() == DataType.DATE) {
             return dateArithmetic(a, in);
         }
@@ -325,6 +341,24 @@ public final class Evaluator {
                 b.append(x - y);
             } else {
                 b.append(ScalarOps.shiftDate(a.op(), x, y));
+            }
+        }
+        return b.build();
+    }
+
+    /** Arithmetic with times of day, timestamps and intervals, see {@link ScalarOps#temporal}. */
+    private static Vector temporalArithmetic(Expression.Arithmetic a, Batch in) {
+        Vector l = eval(a.left(), in);
+        Vector r = eval(a.right(), in);
+        DataType lt = a.left().type();
+        DataType rt = a.right().type();
+        int n = in.rowCount();
+        Vector.Builder b = Vectors.builder(a.type(), n);
+        for (int i = 0; i < n; i++) {
+            if (l.isNull(i) || r.isNull(i)) {
+                b.appendNull();
+            } else {
+                b.append(ScalarOps.temporal(a.op(), l.get(i), r.get(i), lt, rt));
             }
         }
         return b.build();

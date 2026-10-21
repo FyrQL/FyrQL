@@ -71,7 +71,9 @@ record UrlSettings(Map<String, String> values, List<String> unknownProperties) {
             new Key("threads", "The most threads on which one query runs at a time; the number of processors by"
                     + " default", List.of()),
             new Key("preserveOrder", "Whether rows that no ORDER BY orders come in the order of their sources",
-                    List.of("true", "false")));
+                    List.of("true", "false")),
+            new Key("timeZone", "The time zone of the session, such as Europe/Berlin, in which a timestamp with"
+                    + " time zone is shown; the one of the JVM by default", List.of()));
 
     private static final List<String> IGNORED = List.of("user", "password");
 

@@ -21,6 +21,7 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 
 import java.math.BigDecimal;
+import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -235,6 +236,12 @@ public final class Expressions {
         return new Expression.Call(f.specialize(Arrays.asList(arguments)), Arrays.asList(arguments));
     }
 
+    /** Calls a built-in function by name as {@link #call(String, Expression...)} does, in a time zone. */
+    public static Expression call(ZoneId zone, String function, Expression... arguments) {
+        ScalarFunction f = STANDARD.resolve(function, Arrays.stream(arguments).map(Expression::type).toList());
+        return new Expression.Call(f.specialize(Arrays.asList(arguments)).inZone(zone), Arrays.asList(arguments));
+    }
+
     /**
      * Returns the value of an expression without columns, or throws if it
      * has a column; {@code random} counts as a column.
@@ -418,7 +425,7 @@ public final class Expressions {
             }
             case Expression.If i -> new Expression.If(c.get(0), c.get(1), c.get(2));
             case Expression.Coalesce co -> new Expression.Coalesce(c);
-            case Expression.Cast ca -> new Expression.Cast(c.get(0), ca.target(), ca.safe());
+            case Expression.Cast ca -> new Expression.Cast(c.get(0), ca.target(), ca.safe(), ca.zone());
             case Expression.Like l -> new Expression.Like(c.get(0), c.get(1), l.caseInsensitive());
             case Expression.IsDistinct d -> new Expression.IsDistinct(c.get(0), c.get(1), d.negated());
             case Expression.Call call -> new Expression.Call(call.function(), c);

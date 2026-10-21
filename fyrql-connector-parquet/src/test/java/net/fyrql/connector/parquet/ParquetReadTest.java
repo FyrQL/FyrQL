@@ -528,6 +528,9 @@ class ParquetReadTest {
                 case DataType.Scalar s when s == DataType.DATE -> "CAST(" + column + " - DATE '1970-01-01' AS VARCHAR)";
                 case DataType.Scalar s when s == DataType.TIMESTAMP -> duckTypes.get(c).contains("TIME ZONE")
                         ? "epoch_us(" + column + ")" : "epoch_us(CAST(" + column + " AS TIMESTAMP))";
+                case DataType.Scalar s when s == DataType.TIMESTAMPTZ -> "epoch_us(" + column + ")";
+                case DataType.Scalar s when s == DataType.TIME -> "(hour(" + column + ") * 3600 + minute(" + column
+                        + ") * 60) * 1000000 + microsecond(" + column + ")";
                 default -> "CAST(" + column + " AS VARCHAR)";
             });
         }

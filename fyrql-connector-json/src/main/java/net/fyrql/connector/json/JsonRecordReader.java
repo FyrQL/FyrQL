@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -62,6 +63,7 @@ public final class JsonRecordReader implements BatchReader {
     private final JsonInput input;
     private final JsonLayout layout;
     private final boolean ignoreErrors;
+    private final ZoneId zone;
     private final int batchSize;
     private final Schema output;
     /** What is read of each column, or {@code null} if nothing is. */
@@ -81,6 +83,7 @@ public final class JsonRecordReader implements BatchReader {
         this.input = input;
         this.layout = layout;
         this.ignoreErrors = options.ignoreErrors();
+        this.zone = options.zone();
         this.batchSize = batchSize;
         Schema schema = layout.schema();
         this.wanted = new Wanted[schema.size()];
@@ -368,7 +371,7 @@ public final class JsonRecordReader implements BatchReader {
                     p.nextToken();
                     Object k;
                     try {
-                        k = keyType == DataType.VARCHAR ? key : Casts.parse(key, keyType);
+                        k = keyType == DataType.VARCHAR ? key : Casts.parse(key, keyType, zone);
                     } catch (RuntimeException e) {
                         p.skipChildren();
                         if (ignoreErrors) {
@@ -415,7 +418,7 @@ public final class JsonRecordReader implements BatchReader {
                     return s;
                 }
                 try {
-                    return Casts.parse(s, type);
+                    return Casts.parse(s, type, zone);
                 } catch (RuntimeException e) {
                     throw new ValueException("cannot read \"" + s + "\" as " + type + ": " + e.getMessage());
                 }

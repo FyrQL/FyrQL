@@ -313,7 +313,7 @@ class SqlParserTest {
     @Test
     void intervalsAreANumberAndAUnit() {
         assertEquals("SELECT (DATE '1998-12-01' - INTERVAL '90' DAY), (DATE '1994-01-01' + INTERVAL '1' YEAR),"
-                + " (d + INTERVAL '3' MONTHS), (ts - INTERVAL '36' HOUR) FROM t",
+                + " (d + INTERVAL '3 months'), (ts - INTERVAL '36' HOUR) FROM t",
                 print("SELECT DATE '1998-12-01' - INTERVAL '90' DAY, DATE '1994-01-01' + INTERVAL 1 year,"
                         + " d + INTERVAL '3 months', ts - INTERVAL '36' HOUR FROM t"));
         SqlExpr.Interval i = assertInstanceOf(SqlExpr.Interval.class, items("SELECT INTERVAL '90' DAY (3)").get(0));
@@ -400,7 +400,7 @@ class SqlParserTest {
         assertEquals("SELECT lag(a, 2, 0) OVER (ORDER BY b ASC NULLS LAST), lead(a) OVER () FROM t",
                 print("select lag(a, 2, 0) over (order by b), lead(a) over () from t"));
         assertEquals("SELECT count(*) OVER (ORDER BY d ASC NULLS LAST RANGE BETWEEN INTERVAL '1' DAY PRECEDING"
-                + " AND INTERVAL '2' DAYS FOLLOWING) FROM t",
+                + " AND INTERVAL '2 days' FOLLOWING) FROM t",
                 print("select count(*) over (order by d range between interval 1 day preceding"
                         + " and interval '2 days' following) from t"));
         assertEquals("SELECT string_agg(a, ',' ORDER BY a DESC NULLS LAST) OVER (), count(DISTINCT a) OVER"
@@ -506,11 +506,10 @@ class SqlParserTest {
                 Map.entry("SELECT (1, 2)", "Not supported: row values@1:8"),
                 Map.entry("SELECT * EXCEPT (a) FROM t", "Not supported: * EXCEPT@1:8"),
                 Map.entry("SELECT E'a'", "Not supported: a string with a prefix@1:8"),
-                Map.entry("SELECT TIME '10:00'", "Not supported: TIME literals@1:8"),
                 Map.entry("SELECT 1 LIMIT 2, 3", "Not supported: LIMIT with an offset before the count@1:10"),
                 Map.entry("SELECT a.b(1)", "Not supported: qualified function names@1:8"),
                 Map.entry("FROM t", "Not supported: FROM QUERY@1:1"),
-                Map.entry("SELECT CAST(a AS TIME)", "Type TIME is not supported@1:8"),
+                Map.entry("SELECT CAST(a AS TIMETZ)", "Type TIMETZ is not supported@1:8"),
                 Map.entry("SELECT * FROM a JOIN b", "Syntax error: JOIN needs ON, USING or NATURAL@1:17"),
                 Map.entry("SELECT * FROM a CROSS JOIN b ON true", "Syntax error: CROSS JOIN takes no join condition@1:17"),
                 Map.entry("SELECT `a` FROM t", "Syntax error at or near \"`a`\"@1:8"),

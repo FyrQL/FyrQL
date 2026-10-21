@@ -25,6 +25,7 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.sql.SqlException;
 import org.junit.jupiter.api.Test;
 
+import java.time.ZoneId;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -198,18 +199,19 @@ class NameResolverTest {
         Map<String, Connector> sources = new LinkedHashMap<>(sources());
         sources.put("a", new Functions("a"));
         sources.put("b", new Functions("b"));
-        EngineCatalog first = new EngineCatalog(sources, SearchPath.none());
+        // The catalog adds the time zone of the session to the named arguments.
+        EngineCatalog first = new EngineCatalog(sources, SearchPath.none(), () -> ZoneId.of("UTC"));
         assertEquals(List.of("read_csv", "read_a", "read_b"), first.tableFunctions());
         Map<String, Object> named = new LinkedHashMap<>();
         named.put("Delim", ";");
         named.put("HEADER", true);
         named.put("delim", ",");
-        assertEquals("a.main.read_csv[x.csv]{delim=,, header=true}",
+        assertEquals("a.main.read_csv[x.csv]{delim=,, header=true, timezone=UTC}",
                 first.tableFunction("READ_CSV", List.of("x.csv"), named).toString());
-        assertEquals("b.main.read_b[1]{}", first.tableFunction("read_b", List.of(1L), Map.of()).toString());
-        EngineCatalog preferB = new EngineCatalog(sources, new SearchPath("b", "main"));
-        assertEquals("b.main.read_csv[x.csv]{}", preferB.tableFunction("read_csv", List.of("x.csv"), Map.of())
-                .toString());
+        assertEquals("b.main.read_b[1]{timezone=UTC}", first.tableFunction("read_b", List.of(1L), Map.of()).toString());
+        EngineCatalog preferB = new EngineCatalog(sources, new SearchPath("b", "main"), () -> ZoneId.of("UTC"));
+        assertEquals("b.main.read_csv[x.csv]{timezone=UTC}",
+                preferB.tableFunction("read_csv", List.of("x.csv"), Map.of()).toString());
         assertEquals("read_csv needs an argument",
                 assertThrows(SqlException.class, () -> first.tableFunction("read_csv", List.of(), Map.of()))
                         .getMessage());

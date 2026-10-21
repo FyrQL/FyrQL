@@ -20,7 +20,8 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The calendar arithmetic of {@code DATE} and {@code TIMESTAMP}, measured
+ * The calendar arithmetic of {@code DATE}, {@code TIMESTAMP}, {@code TIME}
+ * and {@code INTERVAL}, measured
  * against DuckDB 1.5.6: the range of dates, and the parts that
  * {@code date_part} extracts, {@code date_trunc} truncates to and
  * {@code date_diff} counts. The calendar is the proleptic Gregorian one,
@@ -71,7 +72,10 @@ public final class Dates {
         YEARWEEK("yearweek"),
         ISOYEAR("isoyear"),
         ERA("era"),
-        JULIAN("julian");
+        JULIAN("julian"),
+        TIMEZONE("timezone"),
+        TIMEZONE_HOUR("timezone_hour"),
+        TIMEZONE_MINUTE("timezone_minute");
 
         private static final Map<String, Part> BY_NAME = new HashMap<>();
 
@@ -217,6 +221,7 @@ public final class Dates {
             }
             case ISOYEAR -> date.get(IsoFields.WEEK_BASED_YEAR);
             case ERA -> year > 0 ? 1 : 0;
+            case TIMEZONE, TIMEZONE_HOUR, TIMEZONE_MINUTE -> 0;
             case EPOCH, JULIAN -> throw new ConversionException("Specifier type not implemented for DATEPART");
         };
     }
@@ -244,7 +249,8 @@ public final class Dates {
             case MONTH -> date.withDayOfMonth(1);
             case WEEK, YEARWEEK -> date.with(ChronoField.DAY_OF_WEEK, 1);
             case ISOYEAR -> date.with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 1).with(ChronoField.DAY_OF_WEEK, 1);
-            case ERA -> throw new ConversionException("Specifier type not implemented for DATETRUNC");
+            case ERA, TIMEZONE, TIMEZONE_HOUR, TIMEZONE_MINUTE ->
+                    throw new ConversionException("Specifier type not implemented for DATETRUNC");
             default -> date;
         };
         long truncated = switch (part) {
@@ -286,8 +292,208 @@ public final class Dates {
             case MILLISECOND -> (endDays * SECONDS_PER_DAY * 1000 + endTime / 1000)
                     - (startDays * SECONDS_PER_DAY * 1000 + startTime / 1000);
             case MICROSECOND -> Math.subtractExact(timestamp(endDays, endTime), timestamp(startDays, startTime));
-            case ERA -> throw new ConversionException("Specifier type not implemented for DATEDIFF");
+            case ERA, TIMEZONE, TIMEZONE_HOUR, TIMEZONE_MINUTE ->
+                    throw new ConversionException("Specifier type not implemented for DATEDIFF");
         };
+    }
+
+    /**
+     * Checks that a timestamp is none of the two values with which DuckDB
+     * stands for infinity, nor below them.
+     *
+     * @throws ArithmeticException otherwise
+     */
+    public static long checkTimestamp(long micros) {
+        if (micros >= Long.MAX_VALUE || micros <= -Long.MAX_VALUE) {
+            throw new ArithmeticException("Timestamp out of range");
+        }
+        return micros;
+    }
+
+    /**
+     * Adds months, then days to the date of a timestamp and keeps its time
+     * of day; a day of the month beyond the end of the new month becomes its
+     * last day.
+     *
+     * @throws ArithmeticException if the date leaves the range of DuckDB
+     */
+    public static long addMonthsAndDays(long micros, int months, int days) {
+        try {
+            LocalDate date = LocalDate.ofEpochDay(dayOf(micros)).plusMonths(months).plusDays(days);
+            return timestamp(checkDays(date.toEpochDay()), timeOf(micros));
+        } catch (DateTimeException e) {
+            throw new ArithmeticException("Date out of range");
+        }
+    }
+
+    /**
+     * Adds an interval to a timestamp: the months and days as
+     * {@link #addMonthsAndDays} adds them, then the microseconds.
+     *
+     * @throws ArithmeticException if the result is out of range
+     */
+    public static long add(long micros, Interval interval) {
+        long shifted = interval.months() == 0 && interval.days() == 0 ? micros
+                : addMonthsAndDays(micros, interval.months(), interval.days());
+        return checkTimestamp(Math.addExact(shifted, interval.micros()));
+    }
+
+    /**
+     * Subtracts one timestamp from another: the whole days, rounded towards
+     * zero, and the microseconds that remain, with the same sign.
+     *
+     * @throws ArithmeticException if the difference does not fit 64 bits
+     */
+    public static Interval subtract(long a, long b) {
+        long difference = Math.subtractExact(a, b);
+        return Interval.of(0, Math.toIntExact(difference / MICROS_PER_DAY), difference % MICROS_PER_DAY);
+    }
+
+    /** Adds microseconds to a time of day around the clock, as {@code TIME + INTERVAL} does. */
+    public static long addToTime(long time, long micros) {
+        return Math.floorMod(time % MICROS_PER_DAY + micros % MICROS_PER_DAY, MICROS_PER_DAY);
+    }
+
+    /**
+     * Returns a part of a time of day, as {@code date_part} extracts it:
+     * the hours, minutes, seconds, milliseconds and microseconds, and zero
+     * for the parts of the time zone.
+     *
+     * @throws ConversionException for the parts of a date
+     */
+    public static long extractTime(Part part, long time) {
+        return switch (part) {
+            case HOUR, MINUTE, SECOND, MILLISECOND, MICROSECOND -> extract(part, 0, time);
+            case TIMEZONE, TIMEZONE_HOUR, TIMEZONE_MINUTE -> 0;
+            default -> throw new ConversionException("\"time\" units \"" + part.name().toLowerCase(Locale.ROOT)
+                    + "\" not recognized");
+        };
+    }
+
+    /**
+     * Returns a part of an interval, as {@code date_part} extracts it: the
+     * years and the months beyond them, the days, the hours of the
+     * microseconds and the minutes, seconds, milliseconds and microseconds
+     * beyond the hours and minutes, each with the sign of its component.
+     *
+     * @throws ConversionException for the parts that intervals do not have
+     */
+    public static long extract(Part part, Interval interval) {
+        long months = interval.months();
+        long micros = interval.micros();
+        return switch (part) {
+            case YEAR -> months / 12;
+            case MONTH -> months % 12;
+            case DAY -> interval.days();
+            case DECADE -> months / 120;
+            case CENTURY -> months / 1_200;
+            case MILLENNIUM -> months / 12_000;
+            case QUARTER -> months % 12 / 3 + 1;
+            case HOUR -> micros / MICROS_PER_HOUR;
+            case MINUTE -> micros % MICROS_PER_HOUR / MICROS_PER_MINUTE;
+            case SECOND -> micros % MICROS_PER_MINUTE / MICROS_PER_SECOND;
+            case MILLISECOND -> micros % MICROS_PER_MINUTE / 1000;
+            case MICROSECOND -> micros % MICROS_PER_MINUTE;
+            default -> throw new ConversionException("interval units \"" + part.name().toLowerCase(Locale.ROOT)
+                    + "\" not recognized");
+        };
+    }
+
+    /**
+     * Truncates an interval to a part, as {@code date_trunc} does: the
+     * months to whole millennia, centuries, decades, years or quarters, the
+     * days to whole weeks, the microseconds to whole hours, minutes, seconds
+     * or milliseconds; the smaller components become zero. As in DuckDB, an
+     * ISO year is a year, a week of the year a week, a day of the week or
+     * the year a day, and the epoch a second.
+     *
+     * @throws ConversionException for the parts that intervals do not have
+     */
+    public static Interval trunc(Part part, Interval interval) {
+        int months = interval.months();
+        int days = interval.days();
+        long micros = interval.micros();
+        return switch (part) {
+            case MILLENNIUM -> Interval.ofMonths(months / 12_000 * 12_000);
+            case CENTURY -> Interval.ofMonths(months / 1_200 * 1_200);
+            case DECADE -> Interval.ofMonths(months / 120 * 120);
+            case YEAR, ISOYEAR -> Interval.ofMonths(months / 12 * 12);
+            case QUARTER -> Interval.ofMonths(months / 3 * 3);
+            case MONTH -> Interval.ofMonths(months);
+            case WEEK, YEARWEEK -> Interval.of(months, days / 7 * 7, 0);
+            case DAY, DOW, ISODOW, DOY -> Interval.of(months, days, 0);
+            case HOUR -> Interval.of(months, days, micros / MICROS_PER_HOUR * MICROS_PER_HOUR);
+            case MINUTE -> Interval.of(months, days, micros / MICROS_PER_MINUTE * MICROS_PER_MINUTE);
+            case SECOND, EPOCH -> Interval.of(months, days, micros / MICROS_PER_SECOND * MICROS_PER_SECOND);
+            case MILLISECOND -> Interval.of(months, days, micros / 1000 * 1000);
+            case MICROSECOND -> interval;
+            default -> throw new ConversionException("interval units \"" + part.name().toLowerCase(Locale.ROOT)
+                    + "\" not recognized");
+        };
+    }
+
+    /**
+     * Returns the {@code age} of one timestamp at another, as DuckDB and
+     * PostgreSQL compute it: the differences of the years, months, days and
+     * the time of day, each negative one borrowed from the next larger field,
+     * a day from the number of days of the month of the later timestamp;
+     * computed for the earlier timestamp first and negated if so.
+     */
+    public static Interval age(long a, long b) {
+        LocalDate dateA = LocalDate.ofEpochDay(dayOf(a));
+        LocalDate dateB = LocalDate.ofEpochDay(dayOf(b));
+        long timeA = timeOf(a);
+        long timeB = timeOf(b);
+        long years = dateA.getYear() - dateB.getYear();
+        long months = dateA.getMonthValue() - dateB.getMonthValue();
+        long days = dateA.getDayOfMonth() - dateB.getDayOfMonth();
+        long hours = timeA / MICROS_PER_HOUR - timeB / MICROS_PER_HOUR;
+        long minutes = timeA % MICROS_PER_HOUR / MICROS_PER_MINUTE - timeB % MICROS_PER_HOUR / MICROS_PER_MINUTE;
+        long seconds = timeA % MICROS_PER_MINUTE / MICROS_PER_SECOND - timeB % MICROS_PER_MINUTE / MICROS_PER_SECOND;
+        long micros = timeA % MICROS_PER_SECOND - timeB % MICROS_PER_SECOND;
+        boolean flipped = a < b;
+        if (flipped) {
+            years = -years;
+            months = -months;
+            days = -days;
+            hours = -hours;
+            minutes = -minutes;
+            seconds = -seconds;
+            micros = -micros;
+        }
+        while (micros < 0) {
+            micros += MICROS_PER_SECOND;
+            seconds--;
+        }
+        while (seconds < 0) {
+            seconds += 60;
+            minutes--;
+        }
+        while (minutes < 0) {
+            minutes += 60;
+            hours--;
+        }
+        while (hours < 0) {
+            hours += 24;
+            days--;
+        }
+        LocalDate borrowFrom = flipped ? dateA : dateB;
+        while (days < 0) {
+            days += borrowFrom.lengthOfMonth();
+            months--;
+        }
+        while (months < 0) {
+            months += 12;
+            years--;
+        }
+        long time = hours * MICROS_PER_HOUR + minutes * MICROS_PER_MINUTE + seconds * MICROS_PER_SECOND + micros;
+        long totalMonths = years * 12 + months;
+        if (flipped) {
+            totalMonths = -totalMonths;
+            days = -days;
+            time = -time;
+        }
+        return Interval.of(Math.toIntExact(totalMonths), Math.toIntExact(days), time);
     }
 
     private static long year(int days) {

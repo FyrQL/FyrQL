@@ -48,6 +48,7 @@ final class FakeFilter {
     private static final Pattern DATE = Pattern.compile("\\d{4}-\\d{2}-\\d{2}");
     private static final Pattern DATE_TIME = Pattern.compile(
             "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})");
+    private static final Pattern TIME_OF_DAY = Pattern.compile("\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?");
     private static final Pattern NUMBER = Pattern.compile("-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?[LlMmDdFf]?");
     private static final Pattern PATH = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*");
 
@@ -69,7 +70,7 @@ final class FakeFilter {
     }
 
     private enum Kind {
-        NULL, BOOLEAN, NUMBER, STRING, DATE, DATE_TIME, DATE_TIME_OFFSET, GUID
+        NULL, BOOLEAN, NUMBER, STRING, DATE, DATE_TIME, DATE_TIME_OFFSET, TIME, GUID
     }
 
     /** A node of a filter. */
@@ -249,6 +250,7 @@ final class FakeFilter {
             case "Edm.Date" -> l.kind() == Kind.DATE;
             case "Edm.DateTime" -> l.kind() == Kind.DATE_TIME;
             case "Edm.DateTimeOffset" -> l.kind() == Kind.DATE_TIME_OFFSET;
+            case "Edm.Time", "Edm.TimeOfDay" -> l.kind() == Kind.TIME;
             default -> false;
         };
         if (!fits) {
@@ -322,6 +324,10 @@ final class FakeFilter {
                     requireV2(t);
                     return new Literal(Kind.DATE_TIME_OFFSET, offset(body), (char) 0);
                 }
+                case "time" -> {
+                    requireV2(t);
+                    return new Literal(Kind.TIME, java.time.Duration.parse(body).toNanos() / 1000, (char) 0);
+                }
                 case "guid" -> {
                     requireV2(t);
                     return new Literal(Kind.GUID, UUID.fromString(body), (char) 0);
@@ -336,6 +342,10 @@ final class FakeFilter {
         if (DATE.matcher(t).matches()) {
             requireV4(t);
             return new Literal(Kind.DATE, (int) LocalDate.parse(t).toEpochDay(), (char) 0);
+        }
+        if (TIME_OF_DAY.matcher(t).matches()) {
+            requireV4(t);
+            return new Literal(Kind.TIME, java.time.LocalTime.parse(t).toNanoOfDay() / 1000, (char) 0);
         }
         if (DATE_TIME.matcher(t).matches()) {
             requireV4(t);

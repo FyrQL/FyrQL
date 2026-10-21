@@ -24,7 +24,9 @@ import java.util.List;
  * The dialect of MySQL 8. Identifiers are in backticks; a string literal
  * doubles its quotes and its backslashes. {@code HUGEINT} is
  * {@code DECIMAL(39,0)}, {@code VARCHAR} is {@code TEXT}, {@code TIMESTAMP}
- * is {@code DATETIME(6)}, {@code UUID} is {@code CHAR(36)}; integers are
+ * is {@code DATETIME(6)}, {@code TIMESTAMP WITH TIME ZONE} a {@code DATETIME(6)}
+ * in UTC, {@code INTERVAL} is {@code VARCHAR(64)}, {@code UUID} is
+ * {@code CHAR(36)}; integers are
  * written plain, since a cast knows only {@code SIGNED}; {@code NaN} and
  * the infinities have no literal. There is no {@code FULL JOIN} and no
  * {@code ILIKE}, which is written as {@code LIKE} over {@code lower}; the
@@ -75,6 +77,9 @@ public final class MySqlDialect extends StandardDialect {
             case DATE -> "DATE";
             case TIMESTAMP -> "DATETIME(6)";
             case UUID -> "CHAR(36)";
+            case TIME -> "TIME(6)";
+            case TIMESTAMPTZ -> "DATETIME(6)";
+            case INTERVAL -> "VARCHAR(64)";
         };
     }
 
@@ -88,10 +93,11 @@ public final class MySqlDialect extends StandardDialect {
             case HUGEINT -> "DECIMAL(39,0)";
             case FLOAT -> "FLOAT";
             case DOUBLE -> "DOUBLE";
-            case VARCHAR, UUID -> "CHAR";
+            case VARCHAR, UUID, INTERVAL -> "CHAR";
             case BLOB -> "BINARY";
             case DATE -> "DATE";
-            case TIMESTAMP -> "DATETIME(6)";
+            case TIMESTAMP, TIMESTAMPTZ -> "DATETIME(6)";
+            case TIME -> "TIME(6)";
         };
     }
 
@@ -120,6 +126,17 @@ public final class MySqlDialect extends StandardDialect {
 
     @Override
     String uuidLiteral(java.util.UUID value) {
+        return string(value.toString());
+    }
+
+    /** An instant as the {@code DATETIME} in UTC that stores it. */
+    @Override
+    String timestampTzLiteral(long micros) {
+        return timestampLiteral(micros);
+    }
+
+    @Override
+    String intervalLiteral(net.fyrql.core.value.Interval value) {
         return string(value.toString());
     }
 
@@ -182,7 +199,8 @@ public final class MySqlDialect extends StandardDialect {
 
     @Override
     boolean storesExactly(DataType type) {
-        return exactNumber(type) || type == Scalar.VARCHAR || type == Scalar.DATE || type == Scalar.TIMESTAMP;
+        return exactNumber(type) || type == Scalar.VARCHAR || type == Scalar.DATE || type == Scalar.TIMESTAMP
+                || type == Scalar.TIME;
     }
 
     @Override

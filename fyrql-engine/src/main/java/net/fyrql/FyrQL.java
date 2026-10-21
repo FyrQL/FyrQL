@@ -31,6 +31,7 @@ import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.ZonedDates;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.Codegen;
 import net.fyrql.exec.CodegenMode;
@@ -51,6 +52,7 @@ import net.fyrql.sql.parse.Parameters;
 import net.fyrql.sql.parse.SqlParser;
 
 import java.nio.file.Path;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -114,15 +116,20 @@ public final class FyrQL implements AutoCloseable {
     private final Executor executor;
     private final Codegen codegen;
     private final Writes writes;
+    /** The time zone the session starts with, to which {@code RESET TimeZone} returns. */
+    private final ZoneId initialZone;
+    private volatile ZoneId zone;
 
     private FyrQL(Map<String, Connector> connectors, SearchPath searchPath, FunctionRegistry functions,
             MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options, int threads,
-            boolean preserveOrder) {
+            boolean preserveOrder, ZoneId zone) {
         this.connectors = Collections.unmodifiableMap(new LinkedHashMap<>(connectors));
-        this.catalog = new EngineCatalog(this.connectors, searchPath);
+        this.catalog = new EngineCatalog(this.connectors, searchPath, this::timeZone);
         this.catalogTables = new CatalogTables(this.connectors);
         this.functions = functions;
-        this.binder = new Binder(catalog, functions);
+        this.initialZone = zone;
+        this.zone = zone;
+        this.binder = new Binder(catalog, functions, this::timeZone);
         this.optimizer = new Optimizer(this::connector, options);
         this.codegen = codegen;
         this.writes = new Writes(this);
@@ -208,6 +215,22 @@ public final class FyrQL implements AutoCloseable {
         return new Builder();
     }
 
+    /**
+     * Returns the time zone of the session, in which values of
+     * {@code TIMESTAMP WITH TIME ZONE} are shown and their calendar computes:
+     * that of the builder, until {@code SET TimeZone} changes it. The engine
+     * is one session; every connection of the JDBC driver has an engine of
+     * its own.
+     */
+    public ZoneId timeZone() {
+        return zone;
+    }
+
+    /** Applies {@code SET} or {@code RESET} of a setting, the time zone. */
+    void apply(BoundStatement.Set setting) {
+        zone = setting.value() == null ? initialZone : ZonedDates.zone(setting.value());
+    }
+
     /** Returns the connector of a source. */
     public Connector connector(String source) {
         Connector c = connectors.get(source);
@@ -276,7 +299,7 @@ public final class FyrQL implements AutoCloseable {
 
     private Binder binder(SearchPath searchPath) {
         EngineCatalog c = catalog.withSearchPath(searchPath);
-        return c == catalog ? binder : new Binder(c, functions);
+        return c == catalog ? binder : new Binder(c, functions, this::timeZone);
     }
 
     /**
@@ -749,6 +772,7 @@ public final class FyrQL implements AutoCloseable {
         private boolean preserveOrder = true;
         private boolean implicitSources = true;
         private ClassLoader classLoader;
+        private ZoneId timeZone = ZoneId.systemDefault();
 
         private Builder() {
         }
@@ -889,6 +913,18 @@ public final class FyrQL implements AutoCloseable {
         }
 
         /**
+         * Sets the time zone of the session, in which values of
+         * {@code TIMESTAMP WITH TIME ZONE} are shown, compared with local
+         * dates and timestamps, and computed in the calendar; by default the
+         * time zone of the JVM, as in DuckDB. {@code SET TimeZone} changes
+         * it for the engine, {@code RESET TimeZone} returns to this one.
+         */
+        public Builder timeZone(ZoneId zone) {
+            this.timeZone = Objects.requireNonNull(zone, "zone");
+            return this;
+        }
+
+        /**
          * Sets the class loader in which the engine looks for the factories
          * of the implicit sources; by default the one that loaded the
          * engine.
@@ -928,7 +964,8 @@ public final class FyrQL implements AutoCloseable {
                 }
                 return new FyrQL(sources, new SearchPath(source, defaultSchema),
                         functions != null ? functions : FunctionRegistry.standard(),
-                        new MemoryBudget(memoryBudget), batchSize, codegen, options, engineThreads, preserveOrder);
+                        new MemoryBudget(memoryBudget), batchSize, codegen, options, engineThreads, preserveOrder,
+                        timeZone);
             } catch (RuntimeException | Error e) {
                 close(implicit, e);
                 throw e;

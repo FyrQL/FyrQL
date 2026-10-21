@@ -37,7 +37,10 @@ import java.util.Map;
  * {@code DECIMAL(p,s)} is {@code Decimal128(p, s)}, {@code VARCHAR} is
  * {@code Utf8}, {@code BLOB} is {@code Binary}, {@code DATE} is
  * {@code Date(DAY)}, {@code TIMESTAMP} is {@code Timestamp(MICROSECOND)}
- * without a time zone, {@code UUID} is the canonical extension type
+ * without a time zone, {@code TIME} is {@code Time(MICROSECOND, 64)},
+ * {@code TIMESTAMP WITH TIME ZONE} is {@code Timestamp(MICROSECOND, "UTC")},
+ * {@code INTERVAL} is {@code Interval(MONTH_DAY_NANO)}, {@code UUID} is
+ * the canonical extension type
  * {@code arrow.uuid} over {@code FixedSizeBinary(16)}, {@code LIST} is
  * {@code List} with the element {@code item}, {@code STRUCT} is
  * {@code Struct} and {@code MAP} is {@code Map} with the entries
@@ -49,11 +52,13 @@ import java.util.Map;
  * {@code FLOAT}, {@code Decimal256} up to precision 38, {@code LargeUtf8},
  * {@code LargeBinary}, {@code Utf8View} and {@code BinaryView}, any other
  * {@code FixedSizeBinary} as {@code BLOB}, {@code Date(MILLISECOND)},
- * {@code Timestamp} in seconds, milliseconds or nanoseconds without a time
- * zone (nanoseconds are cut to microseconds), {@code FixedSizeList} as
- * {@code LIST}, and an extension type FyrQL does not know as its storage
- * type. A time zone, {@code Time}, {@code Interval}, {@code Duration},
- * {@code Union}, {@code LargeList}, list views, {@code RunEndEncoded} and
+ * {@code Timestamp} in seconds, milliseconds or nanoseconds (nanoseconds
+ * are cut to microseconds), with a time zone as
+ * {@code TIMESTAMP WITH TIME ZONE}, {@code Time} in every unit as
+ * {@code TIME}, {@code Interval} of every unit and {@code Duration} as
+ * {@code INTERVAL}, {@code FixedSizeList} as {@code LIST}, and an extension
+ * type FyrQL does not know as its storage type. {@code Union},
+ * {@code LargeList}, list views, {@code RunEndEncoded} and
  * a dictionary inside a nested type fail with an {@link ArrowTypeException};
  * a dictionary at the top is decoded by {@link ArrowToBatch}.
  */
@@ -125,6 +130,9 @@ public final class ArrowTypes {
             case DATE -> new ArrowType.Date(DateUnit.DAY);
             case TIMESTAMP -> new ArrowType.Timestamp(TimeUnit.MICROSECOND, null);
             case UUID -> UuidType.INSTANCE;
+            case TIME -> new ArrowType.Time(TimeUnit.MICROSECOND, 64);
+            case TIMESTAMPTZ -> new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC");
+            case INTERVAL -> new ArrowType.Interval(org.apache.arrow.vector.types.IntervalUnit.MONTH_DAY_NANO);
             case HUGEINT -> throw new AssertionError(type);
         };
     }
@@ -176,13 +184,10 @@ public final class ArrowTypes {
             case ArrowType.BinaryView b -> DataType.BLOB;
             case ArrowType.FixedSizeBinary b -> isUuid(field) ? DataType.UUID : DataType.BLOB;
             case ArrowType.Date d -> DataType.DATE;
-            case ArrowType.Timestamp t -> {
-                if (t.getTimezone() != null) {
-                    throw new ArrowTypeException(path, "a timestamp with the time zone " + t.getTimezone()
-                            + " has no type in FyrQL");
-                }
-                yield DataType.TIMESTAMP;
-            }
+            case ArrowType.Timestamp t -> t.getTimezone() != null ? DataType.TIMESTAMPTZ : DataType.TIMESTAMP;
+            case ArrowType.Time t -> DataType.TIME;
+            case ArrowType.Interval i -> DataType.INTERVAL;
+            case ArrowType.Duration d -> DataType.INTERVAL;
             case ArrowType.List l -> DataType.listOf(toFyrQL(child(field, 0, path), path + "." + child(field, 0,
                     path).getName()));
             case ArrowType.FixedSizeList l -> DataType.listOf(toFyrQL(child(field, 0, path), path + "."

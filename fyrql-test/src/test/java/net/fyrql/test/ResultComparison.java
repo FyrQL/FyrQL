@@ -90,7 +90,8 @@ public final class ResultComparison {
      * floats agree if they lie within the given number of units in the last
      * place of each other, as results of transcendental functions differ
      * between math libraries. With a tolerance of 0 this is
-     * {@link #compare(Schema, List, List, boolean)}.
+     * {@link #compare(Schema, List, List, boolean)}; otherwise the report
+     * shows the first row that differs and then the report of that method.
      */
     public static Outcome compare(Schema schema, List<Object[]> expected, List<Object[]> actual, boolean ordered,
             int ulps) {
@@ -102,9 +103,11 @@ public final class ResultComparison {
         for (int i = 0; i < e.size(); i++) {
             for (int c = 0; c < schema.size(); c++) {
                 if (!close(e.get(i)[c], a.get(i)[c], schema.type(c), ulps)) {
+                    // The first row that differs, then the rows that differ exactly, as a multiset if unordered.
                     return new Outcome(false, "row " + i + " differs at column " + c + " (" + schema.name(c)
                             + "): expected " + canonical(schema, List.<Object[]>of(e.get(i))).get(0) + ", actual "
-                            + canonical(schema, List.<Object[]>of(a.get(i))).get(0) + "\n");
+                            + canonical(schema, List.<Object[]>of(a.get(i))).get(0) + "\n"
+                            + compare(schema, expected, actual, ordered).report());
                 }
             }
         }

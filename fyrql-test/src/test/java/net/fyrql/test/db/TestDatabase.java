@@ -15,6 +15,7 @@ import net.fyrql.connector.jdbc.JdbcConnector;
 import net.fyrql.connector.jdbc.JdbcDialect;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.Interval;
 import net.fyrql.sql.render.SqlRenderer;
 import org.postgresql.PGConnection;
 
@@ -100,8 +101,27 @@ public record TestDatabase(JdbcDialect dialect, String url, String user, String 
      * Creates a table in the default schema under a name, quoted as given,
      * with the types the dialect writes for the schema, and fills it with
      * rows of Java values; an existing table of the name is dropped first.
+     * An interval is its text where only PostgreSQL has a type for it, as
+     * the connector writes it.
      */
     public void load(String table, Schema schema, List<Object[]> rows) {
+        if (dialect != JdbcDialect.POSTGRESQL && schema.types().contains(DataType.INTERVAL)) {
+            List<Schema.Field> fields = new ArrayList<>();
+            for (Schema.Field f : schema.fields()) {
+                fields.add(f.type() == DataType.INTERVAL ? new Schema.Field(f.name(), DataType.VARCHAR, f.nullable())
+                        : f);
+            }
+            List<Object[]> text = new ArrayList<>();
+            for (Object[] row : rows) {
+                Object[] copy = row.clone();
+                for (int c = 0; c < copy.length; c++) {
+                    copy[c] = copy[c] instanceof Interval i ? i.toString() : copy[c];
+                }
+                text.add(copy);
+            }
+            schema = new Schema(fields);
+            rows = text;
+        }
         SqlRenderer renderer = new SqlRenderer(dialect.sql(), t -> {
             throw new UnsupportedOperationException("The renderer only writes tables here");
         });
@@ -177,7 +197,8 @@ public record TestDatabase(JdbcDialect dialect, String url, String user, String 
             case Short s -> p.setShort(i, s);
             case Integer n when type == DataType.DATE -> p.setDate(i, new java.sql.Date(n * 86_400_000L), utc);
             case Integer n -> p.setInt(i, n);
-            case Long n when type == DataType.TIMESTAMP -> {
+            case Long n when type == DataType.TIME -> p.setTime(i, new java.sql.Time(n / 1000), utc);
+            case Long n when type == DataType.TIMESTAMP || type == DataType.TIMESTAMPTZ -> {
                 Timestamp t = new Timestamp(Math.floorDiv(n, 1_000_000L) * 1000);
                 t.setNanos((int) Math.floorMod(n, 1_000_000L) * 1000);
                 p.setTimestamp(i, t, utc);
@@ -191,6 +212,7 @@ public record TestDatabase(JdbcDialect dialect, String url, String user, String 
             case byte[] b -> p.setBytes(i, b);
             case UUID u when typeName.equals("UUID") -> p.setObject(i, u);
             case UUID u -> p.setString(i, u.toString());
+            case Interval iv -> p.setString(i, iv.toString());
             default -> throw new IllegalArgumentException("No value of a column: " + v);
         }
     }

@@ -203,7 +203,7 @@ class DriverTest {
     void thePropertyInfoDescribesTheKeys() throws SQLException {
         DriverPropertyInfo[] info = driver.getPropertyInfo("jdbc:fyrql:?codegen=always", new Properties());
         assertEquals(List.of("config", "defaultSource", "defaultSchema", "batchSize", "memoryBudget", "codegen",
-                "codegenThreshold", "pushdown", "threads", "preserveOrder"),
+                "codegenThreshold", "pushdown", "threads", "preserveOrder", "timeZone"),
                 Arrays.stream(info).map(i -> i.name).toList());
         DriverPropertyInfo codegen = info[5];
         assertEquals("always", codegen.value);
@@ -212,7 +212,7 @@ class DriverTest {
         assertTrue(codegen.description.startsWith("When expressions are compiled"));
         assertNull(info[0].value);
         assertNull(info[0].choices);
-        assertEquals(10, driver.getPropertyInfo("jdbc:fyrql:?colour=red", null).length, "a bad URL is no error here");
+        assertEquals(11, driver.getPropertyInfo("jdbc:fyrql:?colour=red", null).length, "a bad URL is no error here");
     }
 
     private void failsToConnect(String url, String message) {

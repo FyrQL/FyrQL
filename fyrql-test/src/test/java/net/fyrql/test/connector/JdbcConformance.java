@@ -20,6 +20,7 @@ import net.fyrql.core.plan.Plans;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.sql.render.GenericDialect;
 import net.fyrql.sql.render.H2Dialect;
@@ -158,29 +159,40 @@ public final class JdbcConformance {
     public static Target h2(String mode, Consumer<JdbcConnector.Builder> settings) {
         boolean oracle = mode.equals("Oracle");
         return new Target(TestDatabases.h2Mode(mode), "H2 in the mode " + mode, items(true),
-                H2Dialect.INSTANCE::typeName, t -> oracle && t == DataType.DATE ? DataType.TIMESTAMP : t,
-                (t, v) -> !oracle ? v : t == DataType.DATE ? (Integer) v * 86_400_000_000L : "".equals(v) ? null : v,
+                H2Dialect.INSTANCE::typeName, t -> oracle && t == DataType.DATE ? DataType.TIMESTAMP
+                        : t == DataType.INTERVAL ? DataType.VARCHAR : t,
+                (t, v) -> v instanceof Interval i ? i.toString() : !oracle ? v
+                        : t == DataType.DATE ? (Integer) v * 86_400_000_000L : "".equals(v) ? null : v,
                 oracle ? ORACLE_PUSHED : GENERIC_PUSHED, settings);
     }
 
     /**
      * Derby, read through the generic dialect with {@code FETCH FIRST}: no
      * {@code TINYINT}, which is a {@code SMALLINT}, no {@code UUID}, which
-     * is a {@code CHAR(36)}, and no decimal as wide as a {@code HUGEINT}.
+     * is a {@code CHAR(36)}, no decimal as wide as a {@code HUGEINT}, and no
+     * timestamp with a time zone, which is one in UTC.
      */
     public static Target derby() {
         return new Target(TestDatabases.derby(), "Derby", items(false), t -> sql92(t, "SMALLINT", "BLOB", "TIMESTAMP",
-                "CHAR(36)"), t -> t == DataType.TINYINT ? DataType.SMALLINT : t == DataType.UUID ? DataType.VARCHAR : t,
-                (t, v) -> v instanceof Byte b ? (Object) (short) b : v instanceof UUID u ? u.toString() : v,
+                "CHAR(36)"), t -> t == DataType.TINYINT ? DataType.SMALLINT
+                        : t == DataType.UUID || t == DataType.INTERVAL ? DataType.VARCHAR
+                        : t == DataType.TIMESTAMPTZ ? DataType.TIMESTAMP : t,
+                (t, v) -> v instanceof Byte b ? (Object) (short) b : v instanceof UUID || v instanceof Interval
+                        ? v.toString() : v,
                 GENERIC_PUSHED, b -> b.limitStyle(GenericDialect.LimitStyle.FETCH_FIRST));
     }
 
-    /** HSQLDB, read through the generic dialect, whose {@code REAL} is a {@code DOUBLE}. */
+    /**
+     * HSQLDB, read through the generic dialect, whose {@code REAL} is a
+     * {@code DOUBLE}, with a timestamp in UTC for one with a time zone.
+     */
     public static Target hsqldb() {
         return new Target(TestDatabases.hsqldb(), "HSQLDB", items(true),
                 t -> t == DataType.HUGEINT ? "DECIMAL(39,0)" : sql92(t, "TINYINT", "VARBINARY(100)", "TIMESTAMP(6)",
-                        "UUID"), t -> t == DataType.FLOAT ? DataType.DOUBLE : t,
-                (t, v) -> v instanceof Float f ? (Object) (double) f : v, GENERIC_PUSHED, b -> {
+                        "UUID"), t -> t == DataType.FLOAT ? DataType.DOUBLE : t == DataType.INTERVAL ? DataType.VARCHAR
+                        : t == DataType.TIMESTAMPTZ ? DataType.TIMESTAMP : t,
+                (t, v) -> v instanceof Float f ? (Object) (double) f : v instanceof Interval i ? i.toString() : v,
+                GENERIC_PUSHED, b -> {
                 });
     }
 
@@ -202,6 +214,9 @@ public final class JdbcConformance {
             case DATE -> "DATE";
             case TIMESTAMP -> timestamp;
             case UUID -> uuid;
+            case TIME -> "TIME";
+            case TIMESTAMPTZ -> timestamp;
+            case INTERVAL -> "VARCHAR(64)";
             case HUGEINT -> throw new IllegalArgumentException("No type for HUGEINT");
         };
     }
@@ -217,7 +232,8 @@ public final class JdbcConformance {
                 field("i", DataType.INTEGER), field("bi", DataType.BIGINT), field("de", DataType.decimal(9, 2)),
                 field("f", DataType.FLOAT), field("d", DataType.DOUBLE), field("s", DataType.VARCHAR),
                 field("bl", DataType.BLOB), field("dt", DataType.DATE), field("ts", DataType.TIMESTAMP),
-                field("u", DataType.UUID)));
+                field("u", DataType.UUID), field("tm", DataType.TIME), field("tz", DataType.TIMESTAMPTZ),
+                field("iv", DataType.INTERVAL)));
         if (hugeint) {
             fields.add(field("h", DataType.HUGEINT));
         }
@@ -232,7 +248,9 @@ public final class JdbcConformance {
      * The table {@code items} as it comes back from the database: a type
      * the database does not have is stored as the type the dialect writes
      * for it, {@code TINYINT} in PostgreSQL as {@code SMALLINT}, {@code UUID}
-     * in MySQL as {@code CHAR(36)}, which is read as {@code VARCHAR}.
+     * in MySQL as {@code CHAR(36)}, which is read as {@code VARCHAR}, a
+     * timestamp with a time zone where only PostgreSQL and H2 have one as
+     * one in UTC, an interval where only PostgreSQL has one as its text.
      */
     public static Schema stored(JdbcDialect dialect) {
         List<Schema.Field> fields = new ArrayList<>();
@@ -249,6 +267,13 @@ public final class JdbcConformance {
         if (dialect == JdbcDialect.MYSQL && type == DataType.UUID) {
             return DataType.VARCHAR;
         }
+        boolean instants = dialect == JdbcDialect.POSTGRESQL || dialect == JdbcDialect.H2;
+        if (type == DataType.TIMESTAMPTZ && !instants) {
+            return DataType.TIMESTAMP;
+        }
+        if (type == DataType.INTERVAL && dialect != JdbcDialect.POSTGRESQL) {
+            return DataType.VARCHAR;
+        }
         return type;
     }
 
@@ -259,6 +284,9 @@ public final class JdbcConformance {
         }
         if (value instanceof UUID u && dialect == JdbcDialect.MYSQL) {
             return u.toString();
+        }
+        if (value instanceof Interval i && dialect != JdbcDialect.POSTGRESQL) {
+            return i.toString();
         }
         return value;
     }
@@ -306,8 +334,11 @@ public final class JdbcConformance {
             }
             // 1950-01-01 to 2049-12-31.
             case DATE -> random.nextInt(-7305, 29_220);
-            case TIMESTAMP -> random.nextLong(-7305L * 86_400_000_000L, 29_220L * 86_400_000_000L);
+            case TIMESTAMP, TIMESTAMPTZ -> random.nextLong(-7305L * 86_400_000_000L, 29_220L * 86_400_000_000L);
             case UUID -> new UUID(random.nextLong(), random.nextLong());
+            case TIME -> random.nextLong(86_400) * 1_000_000L;
+            case INTERVAL -> net.fyrql.core.value.Interval.of(random.nextInt(-24, 25), random.nextInt(-40, 41),
+                    random.nextLong(-100_000, 100_001) * 1_000_000L);
         };
     }
 
@@ -377,6 +408,9 @@ public final class JdbcConformance {
             "SELECT id, dt FROM items WHERE dt > DATE '2000-01-01'",
             "SELECT id, dt FROM items WHERE dt BETWEEN DATE '1960-01-01' AND DATE '1970-12-31'",
             "SELECT id, ts FROM items WHERE ts < TIMESTAMP '2001-01-01 00:00:00'",
+            "SELECT id, tm FROM items WHERE tm < TIME '12:00:00'",
+            "SELECT id, tz FROM items WHERE tz >= TIMESTAMPTZ '2000-01-01 00:00:00+00'",
+            "SELECT id, tz, tm FROM items WHERE tz IS NOT NULL ORDER BY tz DESC, id LIMIT 3",
             "SELECT id, u FROM items WHERE u IS NULL",
             "SELECT id, bl FROM items WHERE bl IS NOT NULL",
             "SELECT id, i FROM items WHERE i IS NULL OR i > 500",

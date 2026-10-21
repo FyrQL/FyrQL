@@ -16,7 +16,9 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.DataType.Decimal;
 import net.fyrql.core.type.DataType.Scalar;
 import net.fyrql.core.type.Values;
+import net.fyrql.core.value.Conversions;
 import net.fyrql.core.value.Dates;
+import net.fyrql.core.value.Interval;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -155,6 +157,63 @@ public final class ScalarOps {
     }
 
     /**
+     * Arithmetic on {@code TIME}, {@code TIMESTAMP}, {@code DATE} and
+     * {@code INTERVAL} values as {@link net.fyrql.core.type.TypeRules#add}
+     * and its siblings type it; {@code null} for a division by zero. The
+     * operands are not {@code null}.
+     *
+     * @throws ArithmeticException if the result is out of range
+     */
+    public static Object temporal(ArithmeticOp op, Object l, Object r, DataType lt, DataType rt) {
+        if (lt == Scalar.INTERVAL && rt == Scalar.INTERVAL) {
+            Interval x = (Interval) l;
+            Interval y = (Interval) r;
+            return op == ArithmeticOp.ADD ? x.plus(y) : x.minus(y);
+        }
+        if (op == ArithmeticOp.MULTIPLY) {
+            return lt == Scalar.INTERVAL ? scale((Interval) l, r, rt) : scale((Interval) r, l, lt);
+        }
+        if (op == ArithmeticOp.DIVIDE) {
+            double divisor = toDouble(r, rt);
+            return divisor == 0 ? null : ((Interval) l).dividedBy(divisor);
+        }
+        if (lt == Scalar.INTERVAL) {
+            return temporal(op, r, l, rt, lt);
+        }
+        if (rt == Scalar.INTERVAL) {
+            Interval shift = op == ArithmeticOp.SUBTRACT ? ((Interval) r).negate() : (Interval) r;
+            return switch ((Scalar) lt) {
+                case TIME -> Dates.addToTime((Long) l, shift.micros());
+                case DATE -> Dates.add(Conversions.dateToTimestamp((Integer) l), shift);
+                default -> Dates.add((Long) l, shift);
+            };
+        }
+        if (op == ArithmeticOp.ADD) {
+            // A date and a time of day.
+            return lt == Scalar.DATE ? Dates.timestamp((Integer) l, (Long) r) : Dates.timestamp((Integer) r, (Long) l);
+        }
+        return Dates.subtract(micros(l, lt), micros(r, rt));
+    }
+
+    private static long micros(Object value, DataType type) {
+        return type == Scalar.DATE ? Conversions.dateToTimestamp((Integer) value) : (Long) value;
+    }
+
+    private static Interval scale(Interval interval, Object factor, DataType type) {
+        if (type.isIntegral()) {
+            BigInteger big = factor instanceof BigInteger b ? b : BigInteger.valueOf(((Number) factor).longValue());
+            if (big.bitLength() < 64) {
+                return interval.times(big.longValue());
+            }
+        }
+        return interval.times(toDouble(factor, type));
+    }
+
+    private static double toDouble(Object value, DataType type) {
+        return type instanceof Decimal ? ((BigDecimal) value).doubleValue() : ((Number) value).doubleValue();
+    }
+
+    /**
      * Arithmetic on Java values of the operand type, giving a value of the
      * result type, or {@code null} where the operation gives {@code NULL};
      * the operands are not {@code null}.
@@ -222,13 +281,16 @@ public final class ScalarOps {
     }
 
     /**
-     * Negates a Java value of a numeric type.
+     * Negates a Java value of a numeric type or an interval.
      *
      * @throws ArithmeticException on overflow
      */
     public static Object negate(Object x, DataType type) {
         if (type instanceof Decimal) {
             return ((BigDecimal) x).negate();
+        }
+        if (type == Scalar.INTERVAL) {
+            return ((Interval) x).negate();
         }
         return switch ((Scalar) type) {
             case TINYINT, SMALLINT, INTEGER, BIGINT -> Values.box(negate(((Number) x).longValue(), type), type);

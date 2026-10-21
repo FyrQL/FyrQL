@@ -142,16 +142,22 @@ class ArrowTypesTest {
     }
 
     @Test
+    void timesInstantsIntervalsAndDurationsOfEveryUnit() {
+        for (TimeUnit unit : TimeUnit.values()) {
+            assertEquals(DataType.TIMESTAMPTZ, ArrowTypes.toFyrQL(field("tz", new ArrowType.Timestamp(unit,
+                    "Europe/Berlin"))));
+            assertEquals(DataType.TIME, ArrowTypes.toFyrQL(field("t", new ArrowType.Time(unit,
+                    unit == TimeUnit.SECOND || unit == TimeUnit.MILLISECOND ? 32 : 64))));
+            assertEquals(DataType.INTERVAL, ArrowTypes.toFyrQL(field("du", new ArrowType.Duration(unit))));
+        }
+        for (IntervalUnit unit : IntervalUnit.values()) {
+            assertEquals(DataType.INTERVAL, ArrowTypes.toFyrQL(field("i", new ArrowType.Interval(unit))));
+        }
+    }
+
+    @Test
     void typesWithoutATypeInFyrQLFailWithTheNameOfTheField() {
         Map<Field, String> expected = Map.ofEntries(
-                Map.entry(field("tz", new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC")),
-                        "Field tz: a timestamp with the time zone UTC has no type in FyrQL"),
-                Map.entry(field("t", new ArrowType.Time(TimeUnit.MICROSECOND, 64)),
-                        "Field t: the Arrow type Time(MICROSECOND, 64) has no type in FyrQL"),
-                Map.entry(field("i", new ArrowType.Interval(IntervalUnit.DAY_TIME)),
-                        "Field i: the Arrow type Interval(DAY_TIME) has no type in FyrQL"),
-                Map.entry(field("du", new ArrowType.Duration(TimeUnit.SECOND)),
-                        "Field du: the Arrow type Duration(SECOND) has no type in FyrQL"),
                 Map.entry(field("un", new ArrowType.Union(UnionMode.Sparse, new int[] {0}),
                         field("a", new ArrowType.Int(32, true))),
                         "Field un: the Arrow type Union(Sparse, [0]) has no type in FyrQL"),
@@ -164,8 +170,9 @@ class ArrowTypesTest {
                 Map.entry(field("s", ArrowType.Struct.INSTANCE),
                         "Field s: a struct without fields has no type in FyrQL"),
                 Map.entry(field("n", ArrowType.Struct.INSTANCE, field("a", ArrowType.Utf8.INSTANCE),
-                        field("l", ArrowType.List.INSTANCE, field("item", new ArrowType.Duration(TimeUnit.SECOND)))),
-                        "Field n.l.item: the Arrow type Duration(SECOND) has no type in FyrQL"),
+                        field("l", ArrowType.List.INSTANCE, field("item", ArrowType.LargeList.INSTANCE,
+                                field("item", ArrowType.Utf8.INSTANCE)))),
+                        "Field n.l.item: the Arrow type LargeList has no type in FyrQL"),
                 Map.entry(new Field("dict", new FieldType(true, new ArrowType.Int(32, true),
                         new DictionaryEncoding(7, false, null)), null),
                         "Field dict: a dictionary-encoded field must be decoded first"));
@@ -174,7 +181,8 @@ class ArrowTypesTest {
             assertEquals(message, e.getMessage());
         });
         ArrowTypeException e = assertThrows(ArrowTypeException.class, () -> ArrowTypes.toFyrQL(
-                field("n", ArrowType.Struct.INSTANCE, field("x", new ArrowType.Duration(TimeUnit.SECOND)))));
+                field("n", ArrowType.Struct.INSTANCE, field("x", ArrowType.LargeList.INSTANCE,
+                        field("item", ArrowType.Utf8.INSTANCE)))));
         assertEquals("n.x", e.field());
     }
 

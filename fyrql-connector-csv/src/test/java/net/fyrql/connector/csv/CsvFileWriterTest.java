@@ -219,7 +219,7 @@ class CsvFileWriterTest {
         Schema schema = Schema.of(new Schema.Field("n", DataType.INTEGER));
         Path file = dir.resolve("n.csv");
         assertEquals("The CSV file " + file + " has an unknown option force_quote; known are header, delimiter,"
-                + " delim, sep, quote, escape, nullstr, null, dateformat, timestampformat, compression",
+                + " delim, sep, quote, escape, nullstr, null, dateformat, timestampformat, timezone, compression",
                 assertThrows(IllegalArgumentException.class, () -> write(file, schema, Map.of("force_quote", "n")))
                         .getMessage());
         assertEquals("The option header of the CSV file " + file + " must be true, false, on or off: maybe",

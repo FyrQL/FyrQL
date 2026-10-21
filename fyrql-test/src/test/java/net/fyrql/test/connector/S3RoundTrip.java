@@ -151,6 +151,10 @@ abstract class S3RoundTrip {
     @MethodSource("tablesAndFormats")
     void aTableGoesToS3AndBack(String table, String format) throws IOException {
         String query = "SELECT * FROM memory." + table;
+        if (format.equals("parquet") && (table.equals("p") || table.equals("e"))) {
+            // As in DuckDB, a Parquet file holds no interval with a negative part, which these tables have.
+            query = "SELECT * EXCLUDE (" + (table.equals("p") ? "iv" : "eiv") + ") FROM memory." + table;
+        }
         if (format.equals("parquet") && table.equals("e")) {
             query += " WHERE eh IS NULL OR eh BETWEEN -" + MAX_38_DIGITS + " AND " + MAX_38_DIGITS;
         }

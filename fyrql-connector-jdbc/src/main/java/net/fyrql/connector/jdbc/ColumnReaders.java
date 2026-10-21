@@ -15,6 +15,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.DataType.Decimal;
 import net.fyrql.core.type.DataType.Scalar;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -26,6 +27,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Calendar;
@@ -95,8 +97,15 @@ final class ColumnReaders {
         if (dialect == JdbcDialect.SQLITE) {
             return sqlite(type);
         }
-        if (dialect == JdbcDialect.GENERIC && (type == DataType.DATE || type == DataType.TIMESTAMP)) {
+        if (dialect == JdbcDialect.GENERIC && (type == DataType.DATE || type == DataType.TIMESTAMP
+                || type == DataType.TIMESTAMPTZ || type == DataType.TIME)) {
             Calendar utc = utc();
+            if (type == DataType.TIME) {
+                return (rs, c) -> {
+                    java.sql.Time v = rs.getTime(c, utc);
+                    return v == null ? null : Math.floorMod(v.getTime(), MILLIS_PER_DAY) * 1000L;
+                };
+            }
             return type == DataType.DATE ? (rs, c) -> {
                 java.sql.Date v = rs.getDate(c, utc);
                 return v == null ? null : Math.toIntExact(Math.floorDiv(v.getTime(), MILLIS_PER_DAY));
@@ -162,6 +171,21 @@ final class ColumnReaders {
                 return v == null ? null : Conversions.toMicros(v);
             };
             case UUID -> (rs, c) -> uuid(rs.getObject(c));
+            case TIME -> (rs, c) -> {
+                LocalTime v = rs.getObject(c, LocalTime.class);
+                // PostgreSQL's driver gives 24:00:00 as the last nanosecond of the day, never a value of its own.
+                return v == null ? null : v.equals(LocalTime.MAX) ? 86_400_000_000L : v.toNanoOfDay() / 1000;
+            };
+            case TIMESTAMPTZ -> (rs, c) -> {
+                OffsetDateTime v = rs.getObject(c, OffsetDateTime.class);
+                return v == null ? null
+                        : Conversions.toMicros(v.withOffsetSameInstant(ZoneOffset.UTC).toLocalDateTime());
+            };
+            // The text of PostgreSQL in its default style, with + before a part of another sign than the first.
+            case INTERVAL -> (rs, c) -> {
+                String v = rs.getString(c);
+                return v == null ? null : Interval.parse(v.replace("+", ""));
+            };
         };
     }
 
@@ -217,6 +241,10 @@ final class ColumnReaders {
             case DATE -> Conversions.parseDate(text(v, type));
             case TIMESTAMP -> Conversions.parseTimestamp(text(v, type));
             case UUID -> uuid(v instanceof byte[] ? v : text(v, type));
+            case TIME -> Conversions.parseTime(text(v, type));
+            // An instant is stored as its timestamp in UTC.
+            case TIMESTAMPTZ -> Conversions.parseTimestamp(text(v, type));
+            case INTERVAL -> Interval.parse(text(v, type));
         };
     }
 

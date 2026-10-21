@@ -166,9 +166,12 @@ class JsonSchemaInferenceTest {
         assertEquals("a DATE[]", columns("[{'a': ['2020-01-02', null]}]"));
         assertEquals("a STRUCT(b TIMESTAMP)", columns("[{'a': {'b': '2020-01-02T03:04:05Z'}}]"));
         assertEquals("u UUID", columns("[{'u': '123E4567-E89B-12D3-A456-426614174000'}]"));
+        // Times of day in any of their forms, as DuckDB reads them.
+        assertEquals("a TIME", columns("[{'a': '12:34:56'}, {'a': '1:02'}, {'a': '24:00:00'}, {'a': '01:00:00.5'}]"));
         for (String other : List.of("'2020-01-02T03:04:05.5'", "'2020-01-02 03:04:05Z'", "'2020-01-02 03:04'",
                 "'2020-01-02 03:04:05.1234567'", "'2020-01-02 24:00:00'", "'2020-02-30'", "'2020/01/02'",
-                "'{123e4567-e89b-12d3-a456-426614174000}'", "'12:34:56'", "'1e3'", "'true'")) {
+                "'{123e4567-e89b-12d3-a456-426614174000}'", "'12:34:56+02'", "'12:34:56Z'", "'1 day'", "'1e3'",
+                "'true'")) {
             assertEquals("a VARCHAR", columns("[{'a': " + other + "}]"), other);
         }
     }

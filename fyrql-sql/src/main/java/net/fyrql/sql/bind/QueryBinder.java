@@ -25,6 +25,9 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.type.TypeRules;
 import net.fyrql.core.value.Casts;
+import net.fyrql.core.value.ConversionException;
+import net.fyrql.core.value.Dates;
+import net.fyrql.core.value.Interval;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.FromItem;
 import net.fyrql.sql.ast.OrderItem;
@@ -455,7 +458,8 @@ final class QueryBinder {
             fields.add(new Schema.Field("col" + c, type));
             for (int r = 0; r < rows.size(); r++) {
                 Expression e = columns.get(c).get(r).expression();
-                rows.get(r)[c] = Literals.evaluate(e.type().equals(type) ? e : new Expression.Cast(e, type),
+                rows.get(r)[c] = Literals.evaluate(e.type().equals(type) ? e
+                        : ZoneBinding.expression(new Expression.Cast(e, type), context.zone()),
                         v.rows().get(r).get(c).position());
             }
         }
@@ -1688,7 +1692,8 @@ final class QueryBinder {
                 throw new SqlException("No function matches " + function.sqlName() + " with an argument of type "
                         + b.type(), a.position());
             }
-            return b.kind() == ExpressionBinder.Kind.STRING ? Literals.lazily(b.literal(), type, a.position())
+            return b.kind() == ExpressionBinder.Kind.STRING
+                    ? Literals.lazily(b.literal(), type, a.position(), binder.zone())
                     : new Expression.Cast(b.expression(), type);
         }
 
@@ -1724,14 +1729,23 @@ final class QueryBinder {
             if (x == null) {
                 return PlanNode.FrameBound.of(kind);
             }
-            boolean temporal = key == DataType.DATE || key == DataType.TIMESTAMP;
+            boolean temporal = key == DataType.DATE || key == DataType.TIMESTAMP || key == DataType.TIMESTAMPTZ;
             if (x instanceof SqlExpr.Interval i) {
                 if (!temporal) {
                     throw new SqlException("Cannot use an INTERVAL as the offset of a " + unit + " frame"
                             + (key == null ? "" : " over an order key of type " + key), x.position());
                 }
-                return new PlanNode.FrameBound(kind, new Expression.Literal(DataType.BIGINT, count(i)),
-                        intervalUnit(i));
+                PlanNode.FrameBound bound = intervalBound(kind, i);
+                if (key == DataType.TIMESTAMPTZ && !PlanNode.Frame.isTimeUnit(bound.unit())
+                        && Long.valueOf(0).equals(bound.offset().value())) {
+                    // No time at all, the same in every unit.
+                    bound = new PlanNode.FrameBound(kind, bound.offset(), PlanNode.IntervalUnit.SECOND);
+                }
+                if (key == DataType.TIMESTAMPTZ && !PlanNode.Frame.isTimeUnit(bound.unit())) {
+                    throw new SqlException("Not supported: an offset of days, months or years in a RANGE frame"
+                            + " over an order key of type " + key, x.position());
+                }
+                return bound;
             }
             if (SqlTrees.containsNameOutsideAggregates(x)) {
                 throw new SqlException("Not supported: a frame offset that is not a constant", x.position());
@@ -1764,7 +1778,8 @@ final class QueryBinder {
                         x.position());
             }
             Expression e = v.type().equals(type) ? v.expression()
-                    : v.kind() == ExpressionBinder.Kind.STRING ? Literals.lazily(v.literal(), type, x.position())
+                    : v.kind() == ExpressionBinder.Kind.STRING
+                    ? Literals.lazily(v.literal(), type, x.position(), context.zone())
                     : new Expression.Cast(v.expression(), type);
             Object value = Literals.evaluate(e, x.position());
             Expression.Literal offset = new Expression.Literal(type, value);
@@ -1772,21 +1787,43 @@ final class QueryBinder {
             return ExpressionBinder.check(() -> new PlanNode.FrameBound(kind, offset, u), p, null);
         }
 
-        private static long count(SqlExpr.Interval i) {
+        /**
+         * The offset of an interval of a single unit: a number of months,
+         * days, or of the largest unit of time that divides the microseconds.
+         */
+        private static PlanNode.FrameBound intervalBound(PlanNode.BoundKind kind, SqlExpr.Interval i) {
+            Interval value;
             try {
-                return Long.parseLong(i.value());
-            } catch (NumberFormatException e) {
-                throw new SqlException("The interval '" + i.value() + "' is not a whole number", i.position());
+                value = Interval.parse(i.text());
+            } catch (ConversionException | ArithmeticException e) {
+                throw new SqlException(e.getMessage(), i.position());
             }
-        }
-
-        private static PlanNode.IntervalUnit intervalUnit(SqlExpr.Interval i) {
-            String unit = i.unit().endsWith("S") ? i.unit().substring(0, i.unit().length() - 1) : i.unit();
-            try {
-                return PlanNode.IntervalUnit.valueOf(unit);
-            } catch (IllegalArgumentException e) {
-                throw new SqlException("Not supported: the interval unit " + i.unit(), i.position());
+            long micros = value.micros();
+            long count;
+            PlanNode.IntervalUnit unit;
+            if (value.days() == 0 && micros == 0) {
+                count = value.months();
+                unit = PlanNode.IntervalUnit.MONTH;
+            } else if (value.months() == 0 && micros == 0) {
+                count = value.days();
+                unit = PlanNode.IntervalUnit.DAY;
+            } else if (value.months() == 0 && value.days() == 0) {
+                unit = micros % Dates.MICROS_PER_HOUR == 0 ? PlanNode.IntervalUnit.HOUR
+                        : micros % Dates.MICROS_PER_MINUTE == 0 ? PlanNode.IntervalUnit.MINUTE
+                        : micros % Dates.MICROS_PER_SECOND == 0 ? PlanNode.IntervalUnit.SECOND
+                        : micros % 1000 == 0 ? PlanNode.IntervalUnit.MILLISECOND : PlanNode.IntervalUnit.MICROSECOND;
+                count = micros / switch (unit) {
+                    case HOUR -> Dates.MICROS_PER_HOUR;
+                    case MINUTE -> Dates.MICROS_PER_MINUTE;
+                    case SECOND -> Dates.MICROS_PER_SECOND;
+                    case MILLISECOND -> 1000;
+                    default -> 1;
+                };
+            } else {
+                throw new SqlException("Not supported: an interval of more than one unit as the offset of a frame",
+                        i.position());
             }
+            return new PlanNode.FrameBound(kind, new Expression.Literal(DataType.BIGINT, count), unit);
         }
 
         /**
@@ -2015,6 +2052,12 @@ final class QueryBinder {
             throw new SqlException("Wrong number of arguments for the aggregate " + name, p);
         }
         Expression argument = binder.bind(f.arguments().get(0));
+        Expression instant = null;
+        if (function == AggregateFunction.STRING_AGG && Casts.mentions(argument.type(), DataType.Scalar.TIMESTAMPTZ)) {
+            // The text of an instant depends on the time zone, which only a cast holds; it is ordered by the instant.
+            instant = argument;
+            argument = new Expression.Cast(argument, DataType.VARCHAR);
+        }
         List<SortKey> order = new ArrayList<>();
         int column = input.applyAsInt(argument);
         for (OrderItem o : f.orderBy()) {
@@ -2023,7 +2066,13 @@ final class QueryBinder {
                     || !SqlPrinter.print(o.expression()).equals(SqlPrinter.print(f.arguments().get(0))))) {
                 checkOrderLiteral(o.expression());
             }
-            order.add(new SortKey(input.applyAsInt(binder.bind(o.expression())), o.ascending(), o.nullsFirst()));
+            Expression key = binder.bind(o.expression());
+            int keyColumn = input.applyAsInt(key);
+            if (f.distinct() && keyColumn != column && !key.equals(instant)) {
+                throw new SqlException("In a DISTINCT aggregate, ORDER BY expressions must appear in the argument"
+                        + " list", p);
+            }
+            order.add(new SortKey(keyColumn, o.ascending(), o.nullsFirst()));
         }
         AggregateCall call = ExpressionBinder.check(() -> new AggregateCall(function, column, f.distinct(),
                 outputName), p, null);

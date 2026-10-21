@@ -19,11 +19,13 @@ import net.fyrql.sql.ast.Query;
 import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.Statement;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * Turns a parsed query into a logical plan: resolves the names of tables
@@ -54,7 +56,10 @@ import java.util.Objects;
  * <li>{@code WITH} is expanded at every use. {@code UNION} types a column
  * as {@code VARCHAR} if one side is text, otherwise as the common type.</li>
  * <li>{@code current_date} and {@code now()} stand for the time of the
- * binding, as a {@code DATE} and a {@code TIMESTAMP} without time zone.</li>
+ * binding, as a {@code DATE} in the time zone of the session and a
+ * {@code TIMESTAMP WITH TIME ZONE}. Every cast, function and comparison
+ * that depends on the time zone computes in that of the session, see
+ * {@link ZoneBinding}.</li>
  * <li>A parameter {@code ?} of a prepared query takes the type its context
  * gives a bare {@code NULL}, see {@link #prepare}.</li>
  * <li>A statement that writes binds to the plan of the rows it writes,
@@ -68,10 +73,18 @@ public final class Binder {
 
     private final CatalogView catalog;
     private final FunctionRegistry functions;
+    private final Supplier<ZoneId> zone;
 
+    /** A binder in the time zone of the JVM. */
     public Binder(CatalogView catalog, FunctionRegistry functions) {
+        this(catalog, functions, ZoneId::systemDefault);
+    }
+
+    /** A binder in the time zone the supplier gives at each binding, the time zone of the session. */
+    public Binder(CatalogView catalog, FunctionRegistry functions, Supplier<ZoneId> zone) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.functions = Objects.requireNonNull(functions, "functions");
+        this.zone = Objects.requireNonNull(zone, "zone");
     }
 
     /**
@@ -80,16 +93,18 @@ public final class Binder {
      * @throws SqlException if the query does not bind
      */
     public PlanNode bind(Query query) {
-        return bind(query, LocalDateTime.now());
+        return bind(query, Instant.now(), zone.get());
     }
 
     /**
-     * Binds a query with {@code current_date} and {@code now()} at a given time.
+     * Binds a query with {@code current_date} and {@code now()} at a given
+     * time and in a time zone.
      *
      * @throws SqlException if the query does not bind
      */
-    public PlanNode bind(Query query, LocalDateTime now) {
-        return new QueryBinder(catalog, context(now, ParameterTypes.none())).query(query);
+    public PlanNode bind(Query query, Instant now, ZoneId zone) {
+        return ZoneBinding.plan(new QueryBinder(catalog, context(now, zone, ParameterTypes.none())).query(query),
+                zone);
     }
 
     /**
@@ -108,12 +123,12 @@ public final class Binder {
 
     /**
      * Binds a query with parameters at the current time, see
-     * {@link #prepare(Query, List, LocalDateTime)}.
+     * {@link #prepare(Query, List, Instant, ZoneId)}.
      *
      * @throws SqlException if the query does not bind, or the type of a parameter cannot be inferred
      */
     public Prepared prepare(Query query, List<SqlExpr.Parameter> parameters) {
-        return prepare(query, parameters, LocalDateTime.now());
+        return prepare(query, parameters, Instant.now(), zone.get());
     }
 
     /**
@@ -136,12 +151,13 @@ public final class Binder {
      *        {@code n} at index {@code n - 1}
      * @throws SqlException if the query does not bind, or the type of a parameter cannot be inferred
      */
-    public Prepared prepare(Query query, List<SqlExpr.Parameter> parameters, LocalDateTime now) {
+    public Prepared prepare(Query query, List<SqlExpr.Parameter> parameters, Instant now, ZoneId zone) {
         ParameterTypes types = ParameterTypes.inferred();
-        new QueryBinder(catalog, context(now, types)).query(query);
+        new QueryBinder(catalog, context(now, zone, types)).query(query);
         List<DataType> result = parameterTypes(types, parameters);
-        PlanNode plan = new QueryBinder(catalog, context(now, ParameterTypes.fixed(types.types()))).query(query);
-        return new Prepared(plan, result);
+        PlanNode plan = new QueryBinder(catalog, context(now, zone, ParameterTypes.fixed(types.types())))
+                .query(query);
+        return new Prepared(ZoneBinding.plan(plan, zone), result);
     }
 
     /**
@@ -151,17 +167,18 @@ public final class Binder {
      * @throws SqlException if the statement does not bind
      */
     public BoundStatement bind(Statement statement) {
-        return bind(statement, LocalDateTime.now());
+        return bind(statement, Instant.now(), zone.get());
     }
 
     /**
      * Binds a statement with {@code current_date} and {@code now()} at a
-     * given time.
+     * given time and in a time zone.
      *
      * @throws SqlException if the statement does not bind
      */
-    public BoundStatement bind(Statement statement, LocalDateTime now) {
-        return new StatementBinder(catalog, context(now, ParameterTypes.none())).statement(statement);
+    public BoundStatement bind(Statement statement, Instant now, ZoneId zone) {
+        return ZoneBinding.statement(new StatementBinder(catalog, context(now, zone, ParameterTypes.none()))
+                .statement(statement), zone);
     }
 
     /**
@@ -180,29 +197,30 @@ public final class Binder {
 
     /**
      * Binds a statement with parameters at the current time, see
-     * {@link #prepare(Statement, List, LocalDateTime)}.
+     * {@link #prepare(Statement, List, Instant, ZoneId)}.
      *
      * @throws SqlException if the statement does not bind, or the type of a parameter cannot be inferred
      */
     public PreparedStatement prepare(Statement statement, List<SqlExpr.Parameter> parameters) {
-        return prepare(statement, parameters, LocalDateTime.now());
+        return prepare(statement, parameters, Instant.now(), zone.get());
     }
 
     /**
      * Binds a statement with parameters, as
-     * {@link #prepare(Query, List, LocalDateTime)} binds a query. In
+     * {@link #prepare(Query, List, Instant, ZoneId)} binds a query. In
      * {@code VALUES} of an {@code INSERT}, a parameter takes the type of
      * the column its value goes to.
      *
      * @throws SqlException if the statement does not bind, or the type of a parameter cannot be inferred
      */
-    public PreparedStatement prepare(Statement statement, List<SqlExpr.Parameter> parameters, LocalDateTime now) {
+    public PreparedStatement prepare(Statement statement, List<SqlExpr.Parameter> parameters, Instant now,
+            ZoneId zone) {
         ParameterTypes types = ParameterTypes.inferred();
-        new StatementBinder(catalog, context(now, types)).statement(statement);
+        new StatementBinder(catalog, context(now, zone, types)).statement(statement);
         List<DataType> result = parameterTypes(types, parameters);
-        BoundStatement bound = new StatementBinder(catalog, context(now, ParameterTypes.fixed(types.types())))
-                .statement(statement);
-        return new PreparedStatement(bound, result);
+        BoundStatement bound = new StatementBinder(catalog, context(now, zone,
+                ParameterTypes.fixed(types.types()))).statement(statement);
+        return new PreparedStatement(ZoneBinding.statement(bound, zone), result);
     }
 
     /** Returns the types the first binding found for the parameters, in their order. */
@@ -219,7 +237,7 @@ public final class Binder {
         return result;
     }
 
-    private BindContext context(LocalDateTime now, ParameterTypes parameters) {
-        return new BindContext(functions, new HashSet<>(functions.names()), now, parameters);
+    private BindContext context(Instant now, ZoneId zone, ParameterTypes parameters) {
+        return new BindContext(functions, new HashSet<>(functions.names()), now, zone, parameters);
     }
 }

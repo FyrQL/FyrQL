@@ -50,8 +50,9 @@ import java.util.UUID;
  * service may filter by the column:
  * <ul>
  * <li>{@code Edm.SByte} to {@code Edm.Int64} and {@code Edm.Decimal} with
- * its facets, {@code Edm.Date}, {@code Edm.DateTime} and
- * {@code Edm.DateTimeOffset}, by every comparison, exactly; a literal the
+ * its facets, {@code Edm.Date}, {@code Edm.DateTime},
+ * {@code Edm.DateTimeOffset}, {@code Edm.Time} and {@code Edm.TimeOfDay},
+ * by every comparison, exactly; a literal the
  * column cannot hold, such as {@code 1.5} for an integer, turns a range
  * into one of the values the column holds;</li>
  * <li>{@code Edm.Boolean} and {@code Edm.Guid} by {@code =} and
@@ -71,12 +72,15 @@ import java.util.UUID;
  * {@code Precision} says that there is none; such a column compares by
  * ranges of the unit it is sent in, so that {@code ts <= x} becomes
  * {@code ts lt x + unit}. {@code FLOAT}, {@code DOUBLE}, binary values and
- * collections have no counterpart beyond {@code IS [NOT] NULL}.
+ * collections have no counterpart beyond {@code IS [NOT] NULL}, nor has
+ * {@code Edm.Duration}, since FyrQL compares a month as 30 days. A
+ * {@code TIME} compares like a {@code TIMESTAMP}.
  * <p>
  * Literals are written as the version wants them: in version 2
  * {@code datetime'2024-01-01T00:00:00'}, {@code datetimeoffset'...Z'},
- * {@code guid'...'}, {@code 12L} for {@code Edm.Int64} and {@code 1.5M}
- * for {@code Edm.Decimal}; in version 4 without prefixes and suffixes;
+ * {@code time'PT13H20M'}, {@code guid'...'}, {@code 12L} for
+ * {@code Edm.Int64} and {@code 1.5M} for {@code Edm.Decimal}; in version 4
+ * without prefixes and suffixes, a time of day as {@code 13:20:00};
  * quotes in strings doubled.
  */
 final class ODataFilters {
@@ -462,8 +466,9 @@ final class ODataFilters {
             case "Edm.Decimal" -> type instanceof DataType.Decimal d
                     ? new Unit(Number.NUMBER, BigDecimal.ONE.scaleByPowerOfTen(-d.scale()), false) : null;
             case "Edm.Date" -> type == DataType.DATE ? new Unit(Number.TIME, MICROS_PER_DAY, false) : null;
-            case "Edm.DateTime", "Edm.DateTimeOffset" -> {
-                if (type != DataType.TIMESTAMP) {
+            case "Edm.DateTime", "Edm.DateTimeOffset", "Edm.Time", "Edm.TimeOfDay" -> {
+                boolean time = edm.equals("Edm.Time") || edm.equals("Edm.TimeOfDay");
+                if (time ? type != DataType.TIME : type != DataType.TIMESTAMP && type != DataType.TIMESTAMPTZ) {
                     yield null;
                 }
                 int digits = version == ODataVersion.V2 ? 3 : 6;
@@ -573,6 +578,10 @@ final class ODataFilters {
     private static BigDecimal value(Target t, Unit unit, DataType common, Expression.Literal literal) {
         Object v = literal.value();
         if (unit.number() == Number.TIME) {
+            // An instant and a time of day compare only with their own type, a date and a timestamp with either.
+            if (t.type() == DataType.TIMESTAMPTZ || t.type() == DataType.TIME) {
+                return literal.type() == t.type() ? BigDecimal.valueOf((Long) v) : null;
+            }
             if (literal.type() == DataType.DATE) {
                 return BigDecimal.valueOf((Integer) v).multiply(MICROS_PER_DAY);
             }
@@ -643,6 +652,18 @@ final class ODataFilters {
                 }
                 return Conversions.formatDate((int) days);
             }
+            case "Edm.Time", "Edm.TimeOfDay" -> {
+                long micros;
+                try {
+                    micros = value.longValueExact();
+                } catch (ArithmeticException e) {
+                    return null;
+                }
+                if (micros < 0 || micros >= MICROS_PER_DAY.longValueExact()) {
+                    return null;
+                }
+                return v2 ? "time'" + duration(micros) + "'" : timeOfDay(micros);
+            }
             default -> {
                 long micros;
                 try {
@@ -686,6 +707,45 @@ final class ODataFilters {
             end--;
         }
         return text + "." + digits.substring(0, end);
+    }
+
+    /** Returns a time of day as {@code hh:mm:ss} with as many digits of a second as it needs. */
+    private static String timeOfDay(long micros) {
+        String text = String.format("%02d:%02d:%02d", micros / 3_600_000_000L, micros / 60_000_000L % 60,
+                micros / 1_000_000L % 60);
+        return text + fraction(micros % 1_000_000L);
+    }
+
+    /** Returns a time of day as a duration of ISO 8601 such as {@code PT13H20M5.5S}. */
+    private static String duration(long micros) {
+        StringBuilder text = new StringBuilder("PT");
+        long hours = micros / 3_600_000_000L;
+        long minutes = micros / 60_000_000L % 60;
+        long seconds = micros / 1_000_000L % 60;
+        long fraction = micros % 1_000_000L;
+        if (hours > 0) {
+            text.append(hours).append('H');
+        }
+        if (minutes > 0) {
+            text.append(minutes).append('M');
+        }
+        if (seconds > 0 || fraction > 0 || hours == 0 && minutes == 0) {
+            text.append(seconds).append(fraction(fraction)).append('S');
+        }
+        return text.toString();
+    }
+
+    /** Returns the microseconds of a second as a fraction without trailing zeros, empty for none. */
+    private static String fraction(long micros) {
+        if (micros == 0) {
+            return "";
+        }
+        String digits = String.format("%06d", micros);
+        int end = digits.length();
+        while (digits.charAt(end - 1) == '0') {
+            end--;
+        }
+        return "." + digits.substring(0, end);
     }
 
     /** Returns the literal of a GUID. */

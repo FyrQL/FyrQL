@@ -22,8 +22,8 @@ import net.fyrql.core.type.DataType;
  * accessors of the implementations avoid the boxing.
  */
 public sealed interface Vector permits BooleanVector, TinyIntVector, SmallIntVector, IntVector, BigIntVector,
-        HugeIntVector, FloatVector, DoubleVector, DecimalVector, BytesVector, UuidVector, StructVector, ListVector,
-        MapVector {
+        HugeIntVector, FloatVector, DoubleVector, DecimalVector, BytesVector, UuidVector, IntervalVector,
+        StructVector, ListVector, MapVector {
 
     /** Returns the type of the values. */
     DataType type();

@@ -202,7 +202,7 @@ class JsonFileWriterTest {
         }
         assertEquals(List.of(), files());
         assertEquals("The JSON file " + file + " has an unknown option header; known are array, dateformat,"
-                + " timestampformat, compression", assertThrows(IllegalArgumentException.class,
+                + " timestampformat, timezone, compression", assertThrows(IllegalArgumentException.class,
                         () -> write(file, schema, Map.of("header", "true"))).getMessage());
         assertEquals("The option compression of the JSON file " + file + " must be gzip, none or auto, not zstd",
                 assertThrows(IllegalArgumentException.class, () -> write(file, schema, Map.of("compression",

@@ -51,7 +51,9 @@ import java.util.Set;
  * {@code INT32} or {@code INT64}, against an integer or a decimal whose
  * comparison in the common type is exact;</li>
  * <li>{@code DATE}, or {@code TIMESTAMP} in milliseconds or microseconds,
- * against a {@code DATE} or a {@code TIMESTAMP};</li>
+ * against a {@code DATE} or a {@code TIMESTAMP}; {@code TIMESTAMP WITH TIME
+ * ZONE} and {@code TIME} in milliseconds or microseconds against their own
+ * type;</li>
  * <li>{@code VARCHAR} of {@code STRING}, {@code ENUM} or {@code JSON},
  * against a {@code VARCHAR}, in the order of the unsigned bytes, as in
  * FyrQL.</li>
@@ -357,9 +359,14 @@ final class FilterTranslation {
             unit = MICROS_PER_DAY;
         } else if (leaf.getPrimitiveTypeName() == PrimitiveType.PrimitiveTypeName.INT64
                 && annotation instanceof LogicalTypeAnnotation.TimestampLogicalTypeAnnotation ts
-                && ts.getUnit() != LogicalTypeAnnotation.TimeUnit.NANOS && type == DataType.TIMESTAMP) {
+                && ts.getUnit() != LogicalTypeAnnotation.TimeUnit.NANOS
+                && (type == DataType.TIMESTAMP || type == DataType.TIMESTAMPTZ)) {
             kind = Kind.TIME;
             unit = ts.getUnit() == LogicalTypeAnnotation.TimeUnit.MILLIS ? BigDecimal.valueOf(1000) : BigDecimal.ONE;
+        } else if (integral && annotation instanceof LogicalTypeAnnotation.TimeLogicalTypeAnnotation t
+                && t.getUnit() != LogicalTypeAnnotation.TimeUnit.NANOS && type == DataType.TIME) {
+            kind = Kind.TIME;
+            unit = t.getUnit() == LogicalTypeAnnotation.TimeUnit.MILLIS ? BigDecimal.valueOf(1000) : BigDecimal.ONE;
         } else if (leaf.getPrimitiveTypeName() == PrimitiveType.PrimitiveTypeName.BINARY
                 && (annotation instanceof LogicalTypeAnnotation.StringLogicalTypeAnnotation
                         || annotation instanceof LogicalTypeAnnotation.EnumLogicalTypeAnnotation
@@ -461,6 +468,11 @@ final class FilterTranslation {
         private BigDecimal exact(DataType common, Expression.Literal literal) {
             Object v = literal.value();
             if (kind == Kind.TIME) {
+                if (literal.type() == DataType.TIMESTAMPTZ || literal.type() == DataType.TIME
+                        || type == DataType.TIMESTAMPTZ || type == DataType.TIME) {
+                    // An instant or a time of day compares only with its own type.
+                    return literal.type() == type ? BigDecimal.valueOf((Long) v) : null;
+                }
                 if (literal.type() == DataType.DATE) {
                     return BigDecimal.valueOf((Integer) v).multiply(MICROS_PER_DAY);
                 }

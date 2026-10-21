@@ -51,7 +51,9 @@ final class JdbcTypes {
                 case BLOB -> Types.VARBINARY;
                 case DATE -> Types.DATE;
                 case TIMESTAMP -> Types.TIMESTAMP;
-                case UUID -> Types.OTHER;
+                case UUID, INTERVAL -> Types.OTHER;
+                case TIME -> Types.TIME;
+                case TIMESTAMPTZ -> Types.TIMESTAMP_WITH_TIMEZONE;
             };
         };
     }
@@ -67,6 +69,8 @@ final class JdbcTypes {
                 case HUGEINT -> java.math.BigDecimal.class;
                 case DATE -> java.sql.Date.class;
                 case TIMESTAMP -> java.sql.Timestamp.class;
+                case TIME -> java.sql.Time.class;
+                case TIMESTAMPTZ -> java.time.OffsetDateTime.class;
                 default -> s.javaClass();
             };
         };
@@ -88,7 +92,9 @@ final class JdbcTypes {
                 case DATE -> 10;
                 case TIMESTAMP -> 26;
                 case UUID -> 36;
-                case VARCHAR, BLOB -> UNBOUNDED;
+                case TIME -> 15;
+                case TIMESTAMPTZ -> 32;
+                case VARCHAR, BLOB, INTERVAL -> UNBOUNDED;
             };
             default -> UNBOUNDED;
         };
@@ -99,7 +105,7 @@ final class JdbcTypes {
         if (type instanceof DataType.Decimal d) {
             return d.scale();
         }
-        return type == DataType.TIMESTAMP ? 6 : 0;
+        return type == DataType.TIMESTAMP || type == DataType.TIME || type == DataType.TIMESTAMPTZ ? 6 : 0;
     }
 
     /** Returns the most characters of the text of a value. */
@@ -118,7 +124,9 @@ final class JdbcTypes {
                 case DATE -> 10;
                 case TIMESTAMP -> 26;
                 case UUID -> 36;
-                case VARCHAR, BLOB -> UNBOUNDED;
+                case TIME -> 15;
+                case TIMESTAMPTZ -> 32;
+                case VARCHAR, BLOB, INTERVAL -> UNBOUNDED;
             };
             default -> UNBOUNDED;
         };

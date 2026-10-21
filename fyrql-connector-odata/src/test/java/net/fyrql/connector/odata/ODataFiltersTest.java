@@ -19,6 +19,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.type.TypeRules;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.value.DataGenerator;
 import net.fyrql.core.vector.Batch;
 import org.junit.jupiter.api.Test;
@@ -275,6 +276,38 @@ class ODataFiltersTest {
         assertEquals("Tso lt datetimeoffset'0001-01-01T00:00:00.001Z'", V2.exact(cmp(ComparisonOp.LE, col("Tso"),
                 ts("0001-01-01 00:00:00"))));
         assertNull(V2.exact(cmp(ComparisonOp.GT, col("Tso"), ts("9999-12-31 23:59:59.9995"))));
+    }
+
+    @Test
+    void timesOfDayAndInstants() {
+        List<ODataFilters.Target> targets = new ArrayList<>(List.of(
+                new ODataFilters.Target("Clock", "Edm.TimeOfDay", null, DataType.TIME, true, true, true, true),
+                new ODataFilters.Target("Zoned", "Edm.DateTimeOffset", "6", DataType.TIMESTAMPTZ, true, true, true,
+                        true),
+                new ODataFilters.Target("Span", "Edm.Duration", null, DataType.INTERVAL, true, true, true, true)));
+        ODataFilters v4 = new ODataFilters(ODataVersion.V4, targets);
+        targets.set(0, new ODataFilters.Target("Clock", "Edm.Time", "3", DataType.TIME, true, true, true, true));
+        ODataFilters v2 = new ODataFilters(ODataVersion.V2, targets);
+        Expression clock = new Expression.Column(0, DataType.TIME);
+        Expression zoned = new Expression.Column(1, DataType.TIMESTAMPTZ);
+        Expression span = new Expression.Column(2, DataType.INTERVAL);
+        Expression.Literal half = lit(DataType.TIME, Conversions.parseTime("13:20:00.5"));
+        // A time of day compares as a timestamp does, in its own literals.
+        assertEquals("Clock ge 13:20:00.5 and Clock lt 13:20:00.500001", v4.exact(cmp(ComparisonOp.EQ, clock, half)));
+        assertEquals("Clock lt 13:20:00.500001", v4.exact(cmp(ComparisonOp.LE, clock, half)));
+        assertEquals("Clock eq time'PT13H20M0.5S'", v2.exact(cmp(ComparisonOp.EQ, clock, half)));
+        assertEquals("Clock lt time'PT0S'", v2.exact(cmp(ComparisonOp.LT, clock, lit(DataType.TIME, 0L))));
+        assertNull(v2.exact(cmp(ComparisonOp.LE, clock, lit(DataType.TIME, Conversions.parseTime("24:00:00")))));
+        // An instant compares with instants only.
+        long ten = Conversions.parseTimestampTz("2024-07-01 10:00:00Z", java.time.ZoneOffset.UTC);
+        assertEquals("Zoned eq 2024-07-01T10:00:00Z", v4.exact(cmp(ComparisonOp.EQ, zoned,
+                lit(DataType.TIMESTAMPTZ, ten))));
+        // Version 2 sends milliseconds of a service that may hold finer values.
+        assertEquals("Zoned ge datetimeoffset'2024-07-01T10:00:00.001Z'", v2.exact(cmp(ComparisonOp.GT, zoned,
+                lit(DataType.TIMESTAMPTZ, ten))));
+        assertNull(v4.exact(cmp(ComparisonOp.EQ, zoned, lit(DataType.TIMESTAMP, ten))));
+        // A month is 30 days in FyrQL, which a service does not know.
+        assertNull(v4.hint(cmp(ComparisonOp.LT, span, lit(DataType.INTERVAL, Interval.parse("1 day")))));
     }
 
     @Test

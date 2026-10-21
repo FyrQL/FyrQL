@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.7.5</version>
+		<version>0.8.0</version>
 	</parent>
 
 	<artifactId>fyrql-test</artifactId>
@@ -30,6 +30,11 @@
 		<fyrql.test.containers>false</fyrql.test.containers>
 		<!-- Where the TPC-H tests write their files, one directory per scale factor, kept from run to run. -->
 		<fyrql.tpch.dir>${project.build.directory}/tpch</fyrql.tpch.dir>
+		<!--
+		  Whether the runs codegen-always and no-pushdown are skipped, so that a selection through -Dtest= runs only
+		  once: -Dfyrql.test.extra.skip=true.
+		-->
+		<fyrql.test.extra.skip>false</fyrql.test.extra.skip>
 	</properties>
 
 	<dependencies>
@@ -228,7 +233,11 @@
 						<classpathDependencyExclude>io.github.stefan-zobel:fyrql-jdbc-all</classpathDependencyExclude>
 						<classpathDependencyExclude>io.github.stefan-zobel:fyrql-flight-sql-all</classpathDependencyExclude>
 					</classpathDependencyExcludes>
-					<argLine>${arrow.add-opens}</argLine>
+					<!--
+					  In UTC: the JDBC driver of DuckDB turns a TIMESTAMP WITH TIME ZONE into a Java value through the
+					  time zone of the JVM and gets the instant wrong around a change of summer time.
+					-->
+					<argLine>${arrow.add-opens} -Duser.timezone=UTC</argLine>
 					<systemPropertyVariables>
 						<fyrql.test.containers>${fyrql.test.containers}</fyrql.test.containers>
 						<fyrql.tpch.dir>${fyrql.tpch.dir}</fyrql.tpch.dir>
@@ -248,6 +257,7 @@
 							<goal>test</goal>
 						</goals>
 						<configuration>
+							<skipTests>${fyrql.test.extra.skip}</skipTests>
 							<systemPropertyVariables>
 								<fyrql.codegen>always</fyrql.codegen>
 							</systemPropertyVariables>
@@ -268,6 +278,7 @@
 							<goal>test</goal>
 						</goals>
 						<configuration>
+							<skipTests>${fyrql.test.extra.skip}</skipTests>
 							<systemPropertyVariables>
 								<fyrql.pushdown>off</fyrql.pushdown>
 							</systemPropertyVariables>
@@ -311,7 +322,7 @@
 									<goal>test</goal>
 								</goals>
 								<configuration>
-									<argLine>-Xmx8g ${arrow.add-opens}</argLine>
+									<argLine>-Xmx8g ${arrow.add-opens} -Duser.timezone=UTC</argLine>
 									<systemPropertyVariables>
 										<fyrql.tpch.sf>1</fyrql.tpch.sf>
 									</systemPropertyVariables>

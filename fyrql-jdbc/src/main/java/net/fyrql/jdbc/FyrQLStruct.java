@@ -15,6 +15,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.value.Casts;
 
 import java.sql.SQLException;
+import java.time.ZoneId;
 import java.sql.Struct;
 import java.util.List;
 import java.util.Map;
@@ -29,13 +30,16 @@ final class FyrQLStruct implements Struct {
 
     private final DataType.Struct type;
     private final List<?> values;
+    private final ZoneId zone;
 
     /**
      * @param values the values of the fields, as the engine holds them
+     * @param zone the time zone of the session, in which an instant is shown
      */
-    FyrQLStruct(DataType.Struct type, List<?> values) {
+    FyrQLStruct(DataType.Struct type, List<?> values, ZoneId zone) {
         this.type = type;
         this.values = values;
+        this.zone = zone;
     }
 
     /** Returns the type of the struct. */
@@ -57,7 +61,7 @@ final class FyrQLStruct implements Struct {
     public Object[] getAttributes() {
         Object[] result = new Object[values.size()];
         for (int i = 0; i < result.length; i++) {
-            result[i] = JdbcValues.toObject(values.get(i), type.fields().get(i).type());
+            result[i] = JdbcValues.toObject(values.get(i), type.fields().get(i).type(), zone);
         }
         return result;
     }

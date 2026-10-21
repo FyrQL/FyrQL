@@ -20,6 +20,7 @@ import net.fyrql.core.vector.DoubleVector;
 import net.fyrql.core.vector.FloatVector;
 import net.fyrql.core.vector.HugeIntVector;
 import net.fyrql.core.vector.IntVector;
+import net.fyrql.core.vector.IntervalVector;
 import net.fyrql.core.vector.SmallIntVector;
 import net.fyrql.core.vector.TinyIntVector;
 import net.fyrql.core.vector.UuidVector;
@@ -58,7 +59,7 @@ final class ParquetLeaf {
     /** What a value becomes. */
     enum Target {
         BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, HUGEINT, FLOAT, DOUBLE, FLOAT16, TIMESTAMP, INT96, TIME,
-        DECIMAL, BYTES, UUID
+        TIME_OF_DAY, DECIMAL, BYTES, UUID, INTERVAL
     }
 
     private final PrimitiveType.PrimitiveTypeName physical;
@@ -112,6 +113,9 @@ final class ParquetLeaf {
                 case DOUBLE -> Target.DOUBLE;
                 case TIMESTAMP -> p.getPrimitiveTypeName() == PrimitiveType.PrimitiveTypeName.INT96 ? Target.INT96
                         : Target.TIMESTAMP;
+                case TIMESTAMPTZ -> Target.TIMESTAMP;
+                case TIME -> Target.TIME_OF_DAY;
+                case INTERVAL -> Target.INTERVAL;
                 case VARCHAR -> annotation instanceof LogicalTypeAnnotation.TimeLogicalTypeAnnotation ? Target.TIME
                         : Target.BYTES;
                 case BLOB -> Target.BYTES;
@@ -146,7 +150,8 @@ final class ParquetLeaf {
     boolean isPlain() {
         return switch (physical) {
             case INT32 -> target == Target.INTEGER && mask == -1;
-            case INT64 -> target == Target.BIGINT && mask == -1 || target == Target.TIMESTAMP && nanos == 1_000L;
+            case INT64 -> target == Target.BIGINT && mask == -1
+                    || (target == Target.TIMESTAMP || target == Target.TIME_OF_DAY) && nanos == 1_000L;
             case BINARY, FIXED_LEN_BYTE_ARRAY -> target == Target.BYTES;
             case BOOLEAN, FLOAT, DOUBLE -> true;
             case INT96 -> false;
@@ -183,7 +188,7 @@ final class ParquetLeaf {
             case INTEGER -> ((IntVector.Builder) b).appendInt((int) v);
             case BIGINT -> ((BigIntVector.Builder) b).appendLong(v);
             case HUGEINT -> ((HugeIntVector.Builder) b).appendHalves(0, v);
-            case TIMESTAMP -> ((BigIntVector.Builder) b).appendLong(micros(v));
+            case TIMESTAMP, TIME_OF_DAY -> ((BigIntVector.Builder) b).appendLong(micros(v));
             case TIME -> ((BytesVector.Builder) b).appendString(time(Math.multiplyExact(v, nanos), utc));
             case DECIMAL -> addUnscaled(b, v);
             default -> throw new IllegalStateException(target + " from an integer");
@@ -231,6 +236,13 @@ final class ParquetLeaf {
                 int p = bytes.position();
                 short bits = (short) ((bytes.get(p) & 0xff) | (bytes.get(p + 1) & 0xff) << 8);
                 ((FloatVector.Builder) b).appendFloat(Float.float16ToFloat(bits));
+            }
+            case INTERVAL -> {
+                // Months, days and milliseconds as three little-endian integers, the milliseconds unsigned.
+                ByteBuffer bytes = value.toByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                int p = bytes.position();
+                ((IntervalVector.Builder) b).appendInterval(bytes.getInt(p), bytes.getInt(p + 4),
+                        Integer.toUnsignedLong(bytes.getInt(p + 8)) * 1_000L);
             }
             case INT96 -> {
                 ByteBuffer bytes = value.toByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);

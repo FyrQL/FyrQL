@@ -234,7 +234,9 @@ final class Metadata {
                 case BLOB -> Types.VARBINARY;
                 case DATE -> Types.DATE;
                 case TIMESTAMP -> Types.TIMESTAMP;
-                case UUID -> Types.OTHER;
+                case UUID, INTERVAL -> Types.OTHER;
+                case TIME -> Types.TIME;
+                case TIMESTAMPTZ -> Types.TIMESTAMP_WITH_TIMEZONE;
             };
         };
     }
@@ -258,7 +260,9 @@ final class Metadata {
                 case DATE -> 10;
                 case TIMESTAMP -> 26;
                 case UUID -> 36;
-                case VARCHAR, BLOB -> Integer.MAX_VALUE;
+                case TIME -> 15;
+                case TIMESTAMPTZ -> 32;
+                case VARCHAR, BLOB, INTERVAL -> Integer.MAX_VALUE;
             };
             default -> null;
         };

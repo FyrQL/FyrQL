@@ -44,7 +44,8 @@ public interface FileReaderProvider {
      *        the table those of the file instead, which the engine then
      *        casts to the given ones by position
      * @param options the options of the statement besides the format, as
-     *        for {@link FileWriterProvider#openFile}
+     *        for {@link FileWriterProvider#openFile}, with
+     *        {@link FileWriterProvider#TIME_ZONE}
      * @throws IllegalArgumentException with a message for the user if an
      *         option is unknown, which names the known ones, or does not
      *         fit, if a column has a type the format cannot hold, or if the

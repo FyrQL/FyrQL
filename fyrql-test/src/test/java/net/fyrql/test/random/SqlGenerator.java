@@ -591,7 +591,8 @@ final class SqlGenerator {
                     }
                 }
                 case 9 -> {
-                    if (plain && !floating) {
+                    // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.
+                    if (plain && !floating && t != DataType.INTERVAL) {
                         return new SqlExpr.FunctionCall("list", List.of(x), distinct, false, own, P);
                     }
                 }
@@ -729,7 +730,8 @@ final class SqlGenerator {
         WindowSpec.FrameUnit unit = total ? pick(List.of(WindowSpec.FrameUnit.values()))
                 : pick(List.of(WindowSpec.FrameUnit.RANGE, WindowSpec.FrameUnit.GROUPS));
         boolean offsets = unit != WindowSpec.FrameUnit.RANGE
-                || key != null && (key.isNumeric() || key == DataType.DATE || key == DataType.TIMESTAMP);
+                || key != null && (key.isNumeric() || key == DataType.DATE || key == DataType.TIMESTAMP
+                        || key == DataType.TIMESTAMPTZ);
         for (int attempt = 0; attempt < 10; attempt++) {
             WindowSpec.BoundKind start = pick(List.of(WindowSpec.BoundKind.UNBOUNDED_PRECEDING,
                     WindowSpec.BoundKind.PRECEDING, WindowSpec.BoundKind.CURRENT_ROW, WindowSpec.BoundKind.FOLLOWING));
@@ -756,8 +758,10 @@ final class SqlGenerator {
             offset = chance(10) ? new SqlExpr.Literal(LiteralKind.NUMBER, n + ".5", P) : number(n);
         } else if (key == DataType.DATE && chance(50)) {
             offset = number(n * random.nextInt(1, 40));
-        } else if (key == DataType.DATE || key == DataType.TIMESTAMP) {
+        } else if (key == DataType.DATE || key == DataType.TIMESTAMP || key == DataType.TIMESTAMPTZ) {
+            // An instant only by the units of time, which are the same in every time zone.
             String u = key == DataType.DATE ? pick(List.of("DAY", "MONTH", "YEAR", "HOUR"))
+                    : key == DataType.TIMESTAMPTZ ? pick(List.of("HOUR", "MINUTE", "SECOND"))
                     : pick(List.of("YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND"));
             long count = u.equals("YEAR") || u.equals("MONTH") ? n : n * random.nextLong(1, 100);
             offset = new SqlExpr.Interval(Long.toString(count), u, P);
@@ -813,7 +817,8 @@ final class SqlGenerator {
                     }
                 }
                 case 8 -> {
-                    if (plain && !floating) {
+                    // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.
+                    if (plain && !floating && t != DataType.INTERVAL) {
                         call = new SqlExpr.FunctionCall("list", List.of(x), distinct, false, own, P);
                     }
                 }

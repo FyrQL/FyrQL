@@ -559,7 +559,9 @@ public sealed interface PlanNode {
      *        {@code null} for every other function
      * @param orderBy the order in which the values reach the function, over
      *        the columns of the input; empty for the order of the input. A
-     *        {@code DISTINCT} aggregate can only be ordered by its own column.
+     *        {@code DISTINCT} aggregate can only be ordered by its own column,
+     *        a {@code string_agg} also by a column whose text its own is, as
+     *        the binder orders the text of an instant by the instant
      */
     record AggregateCall(AggregateFunction function, int column, boolean distinct, String name, String separator,
             List<SortKey> orderBy) {
@@ -577,7 +579,7 @@ public sealed interface PlanNode {
                 throw new IllegalArgumentException("A separator for " + function);
             }
             for (SortKey k : orderBy) {
-                if (distinct && k.column() != column) {
+                if (distinct && k.column() != column && function != AggregateFunction.STRING_AGG) {
                     throw new IllegalArgumentException(
                             "In a DISTINCT aggregate, ORDER BY expressions must appear in the argument list");
                 }
@@ -609,7 +611,7 @@ public sealed interface PlanNode {
                 case SUM -> t.isIntegral() ? DataType.HUGEINT
                         : t instanceof Decimal d ? DataType.decimal(DataType.MAX_DECIMAL_PRECISION, d.scale())
                         : DataType.DOUBLE;
-                case AVG -> DataType.DOUBLE;
+                case AVG -> t == DataType.TIME || t == DataType.INTERVAL ? t : DataType.DOUBLE;
                 case STRING_AGG -> DataType.VARCHAR;
                 case LIST -> DataType.listOf(t);
                 case BOOL_AND, BOOL_OR -> DataType.BOOLEAN;
@@ -627,7 +629,8 @@ public sealed interface PlanNode {
                 throw new IllegalArgumentException("No column " + column + " for " + function);
             }
             if ((function == AggregateFunction.SUM || function == AggregateFunction.AVG)
-                    && !input.type(column).isNumeric()) {
+                    && !input.type(column).isNumeric() && !(function == AggregateFunction.AVG
+                    && (input.type(column) == DataType.TIME || input.type(column) == DataType.INTERVAL))) {
                 throw new IllegalArgumentException(function + " of " + input.type(column));
             }
             if ((function == AggregateFunction.BOOL_AND || function == AggregateFunction.BOOL_OR)
@@ -946,6 +949,12 @@ public sealed interface PlanNode {
             }
         }
 
+        /** Tells whether a unit is one of time, from hours down, which shifts an instant without a calendar. */
+        public static boolean isTimeUnit(IntervalUnit unit) {
+            return unit == IntervalUnit.HOUR || unit == IntervalUnit.MINUTE || unit == IntervalUnit.SECOND
+                    || unit == IntervalUnit.MILLISECOND || unit == IntervalUnit.MICROSECOND;
+        }
+
         /** Tells whether a bound has an offset. */
         public boolean hasOffset() {
             return start.offset() != null || end.offset() != null;
@@ -954,7 +963,8 @@ public sealed interface PlanNode {
         /**
          * Checks the offsets of a {@code RANGE} frame against the order of
          * the window, which must then be one key: a numeric key takes plain
-         * numbers, a {@code DATE} or {@code TIMESTAMP} key intervals.
+         * numbers, a {@code DATE} or {@code TIMESTAMP} key intervals, a
+         * {@code TIMESTAMP WITH TIME ZONE} key intervals of hours and less.
          *
          * @throws IllegalArgumentException if an offset does not fit the order
          */
@@ -971,7 +981,8 @@ public sealed interface PlanNode {
                     continue;
                 }
                 boolean fits = b.unit() == null ? key.isNumeric() && b.offset().type().isNumeric()
-                        : key == DataType.DATE || key == DataType.TIMESTAMP;
+                        : key == DataType.DATE || key == DataType.TIMESTAMP
+                                || key == DataType.TIMESTAMPTZ && isTimeUnit(b.unit());
                 if (!fits) {
                     throw new IllegalArgumentException("A RANGE offset of type " + b.offset().type()
                             + (b.unit() == null ? "" : " " + b.unit()) + " for an order key of type " + key);

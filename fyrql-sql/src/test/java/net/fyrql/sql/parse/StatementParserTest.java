@@ -131,7 +131,7 @@ class StatementParserTest {
         cases.put("CREATE TEMP TABLE t (a INTEGER)", "Not supported: TEMP TABLE@1:19");
         cases.put("CREATE TABLE t (a INTEGER) WITH (fillfactor = 70)", "Not supported: table options@1:14");
         cases.put("CREATE TABLE t (a, b) AS SELECT 1, 2", "Not supported: column names before AS@1:14");
-        cases.put("CREATE TABLE t (a TIME)", "Type TIME is not supported (column a)@1:14");
+        cases.put("CREATE TABLE t (a TIMETZ)", "Type TIMETZ is not supported (column a)@1:14");
         cases.put("CREATE TABLE t (a INTEGER[3])",
                 "Arrays of a fixed size are not supported: INTEGER[3] (column a)@1:14");
         cases.put("INSERT INTO t DEFAULT VALUES", "Not supported: DEFAULT VALUES@1:13");

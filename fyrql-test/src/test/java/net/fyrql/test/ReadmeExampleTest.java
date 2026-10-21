@@ -60,9 +60,9 @@ import static net.fyrql.core.expr.Expressions.mul;
 /**
  * The examples of the README: the query, with the data it describes, whose
  * printed rows and plan are those of the README, the window functions and
- * the statements that write over the same data, the same query through the
- * JDBC driver, and the generated code of a filter and of the pipeline of
- * TPC-H Q6, which the README shows.
+ * the statements that write over the same data, the values of the time zone
+ * of the session, the same query through the JDBC driver, and the generated
+ * code of a filter and of the pipeline of TPC-H Q6, which the README shows.
  */
 class ReadmeExampleTest {
 
@@ -224,6 +224,33 @@ class ReadmeExampleTest {
                             Scan mem.main.orders (id BIGINT, customerId INTEGER, amount DECIMAL(10,2))
                           Scan csv.main.customers (id BIGINT, region VARCHAR)%s
                 """.formatted(pipeline, parallel, parallel), plan);
+    }
+
+    @Test
+    void theTimeZoneExampleRuns() {
+        List<Object> values;
+        String before;
+        String reset;
+        try (FyrQL engine = FyrQL.builder().build()) {
+            before = engine.timeZone().getId();
+            // As in the README, with each value as its text.
+            engine.update("SET TimeZone = 'Europe/Berlin'");
+            values = Arrays.asList(engine.rows("""
+                    SELECT CAST(TIMESTAMPTZ '2024-03-30 12:00:00+01' + INTERVAL 1 DAY AS VARCHAR),
+                           CAST(TIMESTAMPTZ '2024-03-30 12:00:00+01' + INTERVAL 24 HOURS AS VARCHAR),
+                           CAST(date_trunc('day', TIMESTAMPTZ '2024-10-27 12:00:00+01') AS VARCHAR),
+                           CAST(timezone('America/New_York', TIMESTAMPTZ '2024-10-27 12:00:00+01') AS VARCHAR),
+                           CAST(TIMESTAMPTZ '2024-10-27 12:00:00+01' AT TIME ZONE 'America/New_York' AS VARCHAR),
+                           CAST(TIME '23:30:00' + INTERVAL '45 minutes' AS VARCHAR),
+                           CAST(TIMESTAMP '2024-03-31 12:00:00' - TIMESTAMP '2024-01-01 00:00:00' AS VARCHAR),
+                           current_setting('TimeZone'), typeof(now())""").get(0));
+            engine.update("RESET TimeZone");
+            reset = engine.timeZone().getId();
+        }
+        assertEquals(List.of("2024-03-31 12:00:00+02", "2024-03-31 13:00:00+02", "2024-10-27 00:00:00+02",
+                "2024-10-27 07:00:00", "2024-10-27 07:00:00", "00:15:00", "90 days 12:00:00", "Europe/Berlin",
+                "TIMESTAMP WITH TIME ZONE"), values);
+        assertEquals(before, reset);
     }
 
     @Test

@@ -55,6 +55,8 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -73,8 +75,10 @@ import java.util.zip.GZIPInputStream;
  * CSV and TSV files as tables in the schema {@code main}: every
  * {@code .csv} or {@code .tsv} file of a directory, or files added one by
  * one. The schema comes from the header and a sample of rows, as DuckDB
- * sniffs it ({@code BOOLEAN}, {@code BIGINT}, {@code DOUBLE}, {@code DATE},
- * {@code TIMESTAMP}, otherwise {@code VARCHAR}), unless it is given. Unless
+ * sniffs it ({@code BOOLEAN}, {@code BIGINT}, {@code DOUBLE}, {@code TIME},
+ * {@code DATE}, {@code TIMESTAMP}, {@code TIMESTAMP WITH TIME ZONE} for
+ * timestamps of which some have an offset or a time zone, otherwise
+ * {@code VARCHAR}), unless it is given. Unless
  * set, whether the first line is a header is decided as DuckDB decides it:
  * a file of one line has one; otherwise it has one if the lines after the
  * first are all text, or if a value of the first line does not fit the type
@@ -99,7 +103,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
 
     /** The types a column is tried against, in order; the first that fits every sampled value wins. */
     private static final List<DataType> SNIFF_ORDER = List.of(DataType.BOOLEAN, DataType.BIGINT, DataType.DOUBLE,
-            DataType.DATE, DataType.TIMESTAMP);
+            DataType.TIME, DataType.DATE, DataType.TIMESTAMP, DataType.TIMESTAMPTZ);
 
     private static final List<String> TABLE_FUNCTIONS = List.of("read_csv", "read_csv_auto");
 
@@ -142,9 +146,12 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * @param remote the file if it is in another store than the local
      *        one, which is read as a whole in one part; {@code null} for a
      *        local one, and for a table not looked up yet
+     * @param zone the time zone in which a text without an offset is read
+     *        as a {@code TIMESTAMP WITH TIME ZONE}
      */
     record Table(Path file, char delimiter, char quote, boolean header, String nullString, Charset charset,
-            Schema schema, long rows, String dateFormat, String timestampFormat, boolean gzip, FileObject remote) {
+            Schema schema, long rows, String dateFormat, String timestampFormat, boolean gzip, FileObject remote,
+            ZoneId zone) {
 
         /** Returns where the file is, for messages. */
         String location() {
@@ -158,7 +165,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
 
     /** A call of a table function: the file in its current version and how to read it. */
     private record Call(String file, String version, long size, char delimiter, char quote, Boolean header,
-            String nullString, String dateFormat, String timestampFormat) {
+            String nullString, String dateFormat, String timestampFormat, ZoneId zone) {
     }
 
     /** A file in its current version read with given columns and options. */
@@ -274,10 +281,10 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         Table t = tables.get(table);
         try {
             Table sniffed = sniff(new Table(null, t.delimiter(), t.quote(), false, t.nullString(), t.charset(), null,
-                    -1, null, null, t.gzip(), remote(p.location())), p.header(), sampleRows);
+                    -1, null, null, t.gzip(), remote(p.location()), t.zone()), p.header(), sampleRows);
             return p.schema() == null ? sniffed : new Table(null, sniffed.delimiter(), sniffed.quote(),
                     sniffed.header(), sniffed.nullString(), sniffed.charset(), p.schema(), sniffed.rows(), null, null,
-                    sniffed.gzip(), sniffed.remote());
+                    sniffed.gzip(), sniffed.remote(), sniffed.zone());
         } catch (IllegalArgumentException | UncheckedIOException e) {
             throw new IllegalArgumentException("The table " + table + " of the CSV source " + name + ": "
                     + e.getMessage(), e);
@@ -343,6 +350,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         String nullString = "";
         String dateFormat = null;
         String timestampFormat = null;
+        ZoneId zone = ZoneOffset.UTC;
         for (Map.Entry<String, Object> e : namedArguments.entrySet()) {
             Object value = e.getValue();
             switch (e.getKey()) {
@@ -352,6 +360,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 case "nullstr" -> nullString = string(function, e.getKey(), value);
                 case "dateformat", "date_format" -> dateFormat = format(function, e.getKey(), value);
                 case "timestampformat", "timestamp_format" -> timestampFormat = format(function, e.getKey(), value);
+                case FileWriterProvider.TIME_ZONE ->
+                        zone = FileWriterProvider.timeZone(string(function, e.getKey(), value));
                 default -> throw new IllegalArgumentException("Invalid named parameter \"" + e.getKey()
                         + "\" for function " + function + "; supported are header, delim, sep, quote, nullstr,"
                         + " dateformat, timestampformat");
@@ -360,11 +370,11 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         Call call;
         if (remote != null) {
             call = new Call(remote.location(), remote.version(), remote.size(), delimiter, quote, header, nullString,
-                    dateFormat, timestampFormat);
+                    dateFormat, timestampFormat, zone);
         } else {
             try {
                 call = new Call(file.toString(), Files.getLastModifiedTime(file).toString(), Files.size(file),
-                        delimiter, quote, header, nullString, dateFormat, timestampFormat);
+                        delimiter, quote, header, nullString, dateFormat, timestampFormat, zone);
             } catch (IOException e) {
                 throw new IllegalArgumentException("Cannot read " + path + ": " + e.getMessage(), e);
             }
@@ -374,7 +384,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
             Table t = new Table(local, call.delimiter(), call.quote(), false, call.nullString(), charset, null,
-                    -1, call.dateFormat(), call.timestampFormat(), gzip, object);
+                    -1, call.dateFormat(), call.timestampFormat(), gzip, object, call.zone());
             String generated = CALL_PREFIX + callCount.incrementAndGet();
             callTables.put(generated, sniff(t, call.header(), sampleRows));
             return generated;
@@ -464,6 +474,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         String nullString = CsvFileWriter.first(o.string("nullstr"), o.string("null")).orElse("");
         String dateFormat = o.get("dateformat", null, CsvConnector::checked).orElse(null);
         String timestampFormat = o.get("timestampformat", null, CsvConnector::checked).orElse(null);
+        ZoneId zone = o.get(FileWriterProvider.TIME_ZONE, null, FileWriterProvider::timeZone).orElse(ZoneOffset.UTC);
         boolean gzip = CsvFileWriter.gzip(o, lower, owner);
         o.rejectUnknown();
         if (escape.isPresent() && escape.get() != quote) {
@@ -506,7 +517,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         String table = calls.computeIfAbsent(call, k -> {
             String generated = CALL_PREFIX + callCount.incrementAndGet();
             callTables.put(generated, new Table(local, delimiter, quote, header, nullString, charset, schema, -1,
-                    dateFormat, timestampFormat, gzip, object));
+                    dateFormat, timestampFormat, gzip, object, zone));
             return generated;
         });
         return TableRef.of(name, table);
@@ -774,7 +785,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             }
             for (int c = 0; c < columns.size(); c++) {
                 parsers[c] = FieldParser.of(output.type(c), table.nullString(), batchSize, dateFormat,
-                        timestampFormat);
+                        timestampFormat, table.zone());
                 positions.get(columns.get(c)).add(c);
             }
             targets = new int[positions.size()][];
@@ -970,7 +981,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         }
         return new Table(table.file(), table.delimiter(), table.quote(), hasHeader, table.nullString(),
                 table.charset(), new Schema(fields), rowCount(table, rows, hasHeader, sampleRows),
-                table.dateFormat(), table.timestampFormat(), table.gzip(), table.remote());
+                table.dateFormat(), table.timestampFormat(), table.gzip(), table.remote(), table.zone());
     }
 
     /**
@@ -1083,8 +1094,13 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             DataType.BOOLEAN, java.util.regex.Pattern.compile("(?i)true|false"),
             DataType.BIGINT, java.util.regex.Pattern.compile("[+-]?\\d+"),
             DataType.DOUBLE, java.util.regex.Pattern.compile("[+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?"),
+            DataType.TIME, java.util.regex.Pattern.compile("\\d{1,2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?"),
             DataType.DATE, java.util.regex.Pattern.compile("\\d{4}-\\d{2}-\\d{2}"),
-            DataType.TIMESTAMP, java.util.regex.Pattern.compile("\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?"));
+            DataType.TIMESTAMP,
+            java.util.regex.Pattern.compile("\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?: UTC)?"),
+            // An offset, Z or the name of a time zone, or none, as a column may hold both.
+            DataType.TIMESTAMPTZ, java.util.regex.Pattern.compile("\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}"
+                    + "(?:\\.\\d+)?(?:Z|[+-]\\d{2}(?::?\\d{2})?| ?[A-Za-z][A-Za-z0-9_/+-]*)?"));
 
     /** Collects the files of a CSV connector. */
     public static final class Builder {
@@ -1176,7 +1192,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             String lower = file.toString().toLowerCase(Locale.ROOT);
             char d = delimiter != null ? delimiter : lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
             tables.put(table, new Table(file, d, quote, false, nullString, charset, null, -1, null, null,
-                    lower.endsWith(".gz"), null));
+                    lower.endsWith(".gz"), null, ZoneOffset.UTC));
             headers.put(table, header);
             return this;
         }
@@ -1197,7 +1213,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             String lower = location.toLowerCase(Locale.ROOT);
             char d = delimiter != null ? delimiter : lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
             tables.put(table, new Table(null, d, quote, false, nullString, charset, null, -1, null, null,
-                    lower.endsWith(".gz"), null));
+                    lower.endsWith(".gz"), null, ZoneOffset.UTC));
             headers.put(table, header);
             locations.put(table, location);
             return this;
@@ -1238,7 +1254,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 Table t = sniff(e.getValue(), headers.get(e.getKey()), sampleRows);
                 Schema schema = schemas.getOrDefault(e.getKey(), t.schema());
                 withSchemas.put(e.getKey(), new Table(t.file(), t.delimiter(), t.quote(), t.header(), t.nullString(),
-                        t.charset(), schema, t.rows(), t.dateFormat(), t.timestampFormat(), t.gzip(), null));
+                        t.charset(), schema, t.rows(), t.dateFormat(), t.timestampFormat(), t.gzip(), null,
+                        t.zone()));
             }
             return new CsvConnector(name, withSchemas, pending, batchSize, sampleRows, charset, splitSize);
         }

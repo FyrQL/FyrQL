@@ -330,6 +330,8 @@ public final class SqlPrinter {
                     case STRING -> b.append(string(l.text()));
                     case DATE -> b.append("DATE ").append(string(l.text()));
                     case TIMESTAMP -> b.append("TIMESTAMP ").append(string(l.text()));
+                    case TIME -> b.append("TIME ").append(string(l.text()));
+                    case TIMESTAMPTZ -> b.append("TIMESTAMPTZ ").append(string(l.text()));
                 }
             }
             case SqlExpr.Parameter p -> b.append('?');
@@ -463,7 +465,12 @@ public final class SqlPrinter {
                 }
                 b.append('}');
             }
-            case SqlExpr.Interval i -> b.append("INTERVAL ").append(string(i.value())).append(' ').append(i.unit());
+            case SqlExpr.Interval i -> {
+                b.append("INTERVAL ").append(string(i.value()));
+                if (i.unit() != null) {
+                    b.append(' ').append(i.unit());
+                }
+            }
         }
     }
 

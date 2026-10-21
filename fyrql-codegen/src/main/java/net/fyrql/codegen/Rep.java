@@ -69,7 +69,7 @@ enum Rep {
             case TINYINT -> BYTE;
             case SMALLINT -> SHORT;
             case INTEGER, DATE -> INT;
-            case BIGINT, TIMESTAMP -> LONG;
+            case BIGINT, TIMESTAMP, TIME, TIMESTAMPTZ -> LONG;
             case FLOAT -> FLOAT;
             case DOUBLE -> DOUBLE;
             default -> OBJECT;

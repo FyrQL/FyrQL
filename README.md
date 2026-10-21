@@ -127,8 +127,9 @@ Plans can also be built in Java from the nodes of `PlanNode`, starting with
 `engine.scan(TableRef.of("mem", "orders"))`, and run with `engine.execute(plan)`.
 The builder takes further settings: `defaultSource` and `defaultSchema` for short names,
 `functions` for a `FunctionRegistry` with functions of the application, `memoryBudget`,
-`batchSize`, `pushdown`, `threads`, `preserveOrder`, and `implicitSources` and
-`classLoader` for the sources of the file formats (see [Writing](#writing)). Before a plan
+`batchSize`, `pushdown`, `threads`, `preserveOrder`, `timeZone` for the
+[time zone](#time-zone) of the session, and `implicitSources` and `classLoader` for the
+sources of the file formats (see [Writing](#writing)). Before a plan
 runs, the [optimizer](#optimizer) rewrites it, every scan is narrowed to the columns in use, and with pushdown (the default, or the system property `fyrql.pushdown` set to `on`
 or `off`) the source of a scan takes over what it can of the filter, aggregation, sort and
 limit above it; `explain` shows that as `[pushed: ...]`. A source may only take over what
@@ -150,7 +151,9 @@ and JDBC write tables; see [Writing](#writing).
   nested collections become `STRUCT`, `LIST` and `MAP` values. The tables that SQL creates
   in it hold their rows as batches, until the engine closes.
 - `fyrql-connector-csv`: CSV and TSV files of a directory or one by one, with the types
-  inferred from a sample as DuckDB's `read_csv` infers them. A scan reads integers,
+  inferred from a sample as DuckDB's `read_csv` infers them, a time of day such as
+  `12:30:00` as a `TIME` and a timestamp with an offset or a zone, such as
+  `2024-07-01 14:00:00+02`, as a `TIMESTAMPTZ`. A scan reads integers,
   decimals of up to 18 digits, dates, booleans and ASCII strings straight from the
   characters of the file into the columns; a field of another type, or in a form such as
   `+1`, `1e3` or ` 1`, is read as a string is cast, with the same value and error. A file
@@ -159,7 +162,7 @@ and JDBC write tables; see [Writing](#writing).
   `timestampformat`.
 - `fyrql-connector-json`: JSON files (`.json`, `.jsonl`, `.ndjson`, also with `.gz`) that
   hold an array of records or a sequence of them. The columns are inferred from a sample
-  as DuckDB's `read_json` infers them; objects and arrays become `STRUCT`, `MAP` and `LIST`
+  as DuckDB's `read_json` infers them, a time of day as a `TIME`; objects and arrays become `STRUCT`, `MAP` and `LIST`
   values, and a field whose values do not unite is `VARCHAR` with the JSON text. A scan
   streams the file and skips the values of the columns, and of the fields of structs,
   that it does not need; a file in S3 is read in one part. The table
@@ -178,7 +181,7 @@ and JDBC write tables; see [Writing](#writing).
   no filter, but uses the filters to skip the row groups in which no row can pass, by their
   statistics, dictionaries and Bloom filters, and the pages of a row group, by its column
   index: comparisons, `BETWEEN`, `IN` and `IS NULL` on integers, decimals, dates,
-  timestamps, strings and booleans, also on fields of structs, under `AND`, `OR` and
+  times of day, timestamps with and without a time zone, strings and booleans, also on fields of structs, under `AND`, `OR` and
   `NOT`. `explain` does not show these filters; `recordReads(true)` keeps the row groups
   and columns each scan read. parquet-java holds the column chunks of a row group in
   memory, compressed, outside the memory budget of the engine. A file in S3 is read in
@@ -214,10 +217,11 @@ and JDBC write tables; see [Writing](#writing).
   aggregates, that the database evaluates exactly as FyrQL; a join of tables of the same
   database runs in the database as one statement, also the semi or anti join of an
   `EXISTS`, `NOT EXISTS` or `IN` over its tables, as `WHERE [NOT] EXISTS (...)`. The
-  result is read in parts of the fetch size. A type FyrQL does not have, such as `TIME`,
-  `INTERVAL`, JSON or an array, is read as `VARCHAR`; a timestamp with a time zone is
-  its instant in UTC, and PostgreSQL's `numeric` without a precision is `DOUBLE`, as in
-  DuckDB. `recordStatements(true)` keeps every statement sent. With `splitRows(n)`, a
+  result is read in parts of the fetch size. A `TIME` is a `TIME`, a timestamp with a
+  time zone a `TIMESTAMPTZ` and PostgreSQL's `interval` an `INTERVAL`; a type FyrQL does
+  not have, such as a time with a time zone, the intervals of other databases, JSON or an
+  array, is read as `VARCHAR`, and PostgreSQL's `numeric` without a precision is
+  `DOUBLE`, as in DuckDB. `recordStatements(true)` keeps every statement sent. With `splitRows(n)`, a
   scan of a table of more than `n` rows is read in parts on several threads, see
   [Parallel execution](#parallel-execution).
 - `fyrql-connector-s3`: the objects of S3, and of stores with its API such as MinIO, as
@@ -298,22 +302,24 @@ database takes over depends on how it compares and orders values:
 | A database takes over | H2 | SQLite | PostgreSQL | MySQL |
 | --- | --- | --- | --- | --- |
 | comparisons, `BETWEEN`, `IN` on integers and `BOOLEAN` | yes | yes | yes | yes |
-| the same on `DECIMAL`, `DATE` and `TIMESTAMP` | yes | no | yes | yes |
+| the same on `DECIMAL`, `DATE`, `TIME` and `TIMESTAMP` | yes | no | yes | yes |
+| the same on `TIMESTAMPTZ` | yes | no | yes | no |
 | `=`, `<>`, `IN`, `IS DISTINCT FROM` on `VARCHAR` | yes | yes | yes | no |
 | `<`, `>`, `BETWEEN` and `ORDER BY` on `VARCHAR` | no | yes | no | no |
-| anything on `FLOAT`, `DOUBLE`, `HUGEINT`, `BLOB` or `UUID` | no | no | no | no |
+| anything on `FLOAT`, `DOUBLE`, `HUGEINT`, `BLOB`, `UUID` or `INTERVAL` | no | no | no | no |
 | `AND`, `OR`, `NOT`, `IS NULL` over the above | yes | yes | yes | yes |
 | arithmetic, casts, `LIKE`, `CASE`, functions | no | no | no | no |
 | `ORDER BY` over the columns above, and `LIMIT` | yes | yes | yes | yes |
 | `GROUP BY` over the columns compared with `=` above | yes | yes | yes | yes |
 | `count(*)` and `count` of any column | yes | yes | yes | yes |
-| `min`, `max` on integers, `DECIMAL`, `DATE` and `TIMESTAMP` | yes | integers | yes | yes |
+| `min`, `max` on the integers, decimals, dates and times compared above | yes | integers | yes | yes |
 | `sum` on integers | yes | no | yes | yes |
 | `avg`, `DISTINCT`, other aggregates, or over `FLOAT` and `DOUBLE` | no | no | no | no |
 
 SQLite stores decimals, dates and timestamps as numbers or text; H2 orders strings by
 their UTF-16 units and PostgreSQL by the collation of the database, where FyrQL orders
-them by their bytes; MySQL compares strings without regard to case. A filter is taken
+them by their bytes; MySQL compares strings without regard to case. An instant is sent
+as a literal with its offset, which PostgreSQL and H2 compare as the instant it is. A filter is taken
 over in parts, conjunct by conjunct; the order only as a whole, and the limit only with
 all filters and the order. An aggregation is taken over as a whole, only with all
 filters, and becomes `SELECT groups, aggregates FROM table WHERE ... GROUP BY groups`.
@@ -346,9 +352,9 @@ A hint holds wherever the filter holds: the database returns at least the rows t
 satisfy the filter, and the engine filters them once more, so a scan with a hint keeps
 no limit in the database. The connector reads dates and timestamps with the getters of
 JDBC 4.0 and a calendar in UTC, so that a time in a gap of daylight saving time and a
-date before 1582 keep their values; a timestamp with a time zone, such as Oracle's
-`TIMESTAMP WITH LOCAL TIME ZONE` or SQL Server's `DATETIMEOFFSET`, is its instant in UTC
-and filtered by the engine. The quote of identifiers comes from the driver; the schemas
+date before 1582 keep their values; a time of day is read in milliseconds, and a
+timestamp with a time zone, such as Oracle's `TIMESTAMP WITH LOCAL TIME ZONE` or SQL
+Server's `DATETIMEOFFSET`, is a `TIMESTAMPTZ`; the engine filters both. The quote of identifiers comes from the driver; the schemas
 are those of the metadata, or its catalogs if it has no schemas, without the schemas of
 the database itself (`INFORMATION_SCHEMA` and those starting with `SYS`), and
 `schemas` and `defaultSchema` set them where the metadata does not tell. The builder and
@@ -376,18 +382,18 @@ not check, and a query with `pushdown(false)` shows whether it holds:
 
 | An OData service gets | as a hint | taken over with `trustFilters` |
 | --- | --- | --- |
-| comparisons, `BETWEEN`, `IN`, `IS DISTINCT FROM` on integers, `DECIMAL`, `DATE`, `TIMESTAMP` | yes | yes |
+| comparisons, `BETWEEN`, `IN`, `IS DISTINCT FROM` on integers, `DECIMAL`, `DATE`, `TIME`, `TIMESTAMP`, `TIMESTAMPTZ` | yes | yes |
 | `=`, `<>` on `BOOLEAN` and `UUID` | yes | yes |
 | `=`, `IN` and `LIKE 'a%'`, `'%a'`, `'%a%'` on `VARCHAR` | yes | no |
 | `IS NULL` on any column of a primitive type | yes | yes |
-| `<>`, `<`, `>` on `VARCHAR`; anything else on `FLOAT`, `DOUBLE`, `BLOB`, `STRUCT`, `LIST` | no | no |
+| `<>`, `<`, `>` on `VARCHAR`; anything else on `FLOAT`, `DOUBLE`, `BLOB`, `INTERVAL`, `STRUCT`, `LIST` | no | no |
 | `AND`, `OR`, `NOT` over the above | yes | yes |
 | arithmetic, functions, casts other than to a number type that holds every value | no | no |
 
 A part without counterpart drops out of an `AND` of a hint and leaves an `OR` without
 one. `NOT` moves inward and is never sent, since a comparison with `null` is false in
 OData rather than unknown. A literal is written as the version wants it, such as
-`datetime'2024-01-01T00:00:00'` and `12L` in version 2; one that the column cannot hold,
+`datetime'2024-01-01T00:00:00'`, `time'PT13H20M'` and `12L` in version 2; one that the column cannot hold,
 such as `1.5` for an integer, turns a range into one of the values the column holds. A
 timestamp compares by ranges of the unit in which the service sends it, the millisecond
 in version 2 and the microsecond in version 4, unless its facet `Precision` says that
@@ -485,16 +491,20 @@ An unknown option fails with a message that lists the known ones. A CSV file is 
 as DuckDB writes it, byte for byte: in UTF-8 with line feeds, a field in quotes only
 where it holds the delimiter, the quote or a line break or equals the null string, so
 that an empty string is `""` and a `NULL` is nothing, and a nested value as its text,
-such as `[1, NULL]`. A JSON file holds numbers as numbers, `NaN` and `Infinity` as
-DuckDB writes them, dates and timestamps as strings, a `BLOB` as a string with `\x`
+such as `[1, NULL]`; a `TIMESTAMPTZ` is written in the time zone of the session, such
+as `2024-07-01 14:00:00+02`, in both formats. A JSON file holds numbers as numbers, `NaN`
+and `Infinity` as DuckDB writes them, dates, times, timestamps and intervals as strings, a `BLOB` as a string with `\x`
 escapes, structs and maps as objects and lists as arrays. Neither keeps the types: read
 back, the types are inferred anew, so that a `TINYINT` comes back as a `BIGINT` and a
 `DECIMAL` from a CSV file as a `DOUBLE`, and DuckDB reads a number with a fraction from
 JSON as a `DOUBLE`. A Parquet file holds the types that DuckDB's `read_parquet` reads
 back as they were, nested ones to any depth, with a `TIMESTAMP` in microseconds not
-adjusted to UTC and a `UUID` of the logical type `UUID`, except for `HUGEINT`, which it
+adjusted to UTC, a `TIMESTAMPTZ` in microseconds adjusted to UTC, a `TIME` in
+microseconds and a `UUID` of the logical type `UUID`, except for `HUGEINT`, which it
 holds as a `DECIMAL(38,0)`: a value of 39 digits fails with the name of its column, where
-DuckDB writes a `HUGEINT` as a `DOUBLE`. Its metadata has the key `writer.model.name`
+DuckDB writes a `HUGEINT` as a `DOUBLE`. An `INTERVAL` is held as DuckDB holds it, in
+twelve bytes of months, days and milliseconds, so that a part of a millisecond is lost
+and an interval with a negative part fails. Its metadata has the key `writer.model.name`
 with the value `fyrql`.
 
 **Formats.** The reader and the writer of a format come with the module of the format:
@@ -578,14 +588,18 @@ source learns of a new or dropped table at once.
 | `BLOB` | `VARBINARY` | `BYTEA` | `BLOB` | `BLOB` | `BLOB` |
 | `DATE` | `DATE` | `DATE` | `DATE` | `DATE` | `DATE` |
 | `TIMESTAMP` | `TIMESTAMP(6)` | `TIMESTAMP` | `DATETIME(6)` | `TIMESTAMP` | `TIMESTAMP` |
+| `TIME` | `TIME(6)` | `TIME` | `TIME(6)` | `TIME` | `TIME` |
+| `TIMESTAMPTZ` | `TIMESTAMP(6) WITH TIME ZONE` | `TIMESTAMPTZ` | `DATETIME(6)` in UTC | `TIMESTAMP` in UTC | `TIMESTAMP` in UTC |
+| `INTERVAL` | `VARCHAR` | `INTERVAL` | `VARCHAR(64)` | `VARCHAR` | `VARCHAR(64)` |
 | `UUID` | `UUID` | `UUID` | `CHAR(36)` | `UUID` | `CHAR(36)` |
 
 A column of a type without a name in the dialect, such as a `HUGEINT` in SQLite or a
 `STRUCT`, `LIST` or `MAP` in any database, fails the statement before it creates the
 table, with the column and the dialect. Read back, a table may have other types than
 those it was created with, as the database reports them: PostgreSQL has no `TINYINT`,
-SQLite keeps the declared names only as its affinities, and MySQL and the generic dialect
-store a `UUID` as text. A database through the generic dialect takes strings of up to
+SQLite keeps the declared names only as its affinities, MySQL and the generic dialect
+store a `UUID` as text, an instant stored in UTC comes back as a `TIMESTAMP`, and an
+interval stored as text as a `VARCHAR`. A database through the generic dialect takes strings of up to
 4,000 characters. With MySQL, `rewriteBatchedStatements=true` in the URL sends a batch
 as one statement, which is much faster.
 
@@ -747,8 +761,8 @@ as `${env:NAME}`, or `${env:NAME:-default}`, and a system property as `${sys:nam
 that secrets need not be in the file. The settings under `engine` are those of the
 builder: `defaultSource`, `defaultSchema`, `batchSize`, `memoryBudget` (such as `512MB`),
 `codegen` (`off`, `auto` or `always`), `codegenThreshold`, `pushdown`, `threads` and
-`preserveOrder` (see [Parallel execution](#parallel-execution)), and `implicitSources`
-(see [Writing](#writing)). A file whose name ends in `.json` is read as JSON.
+`preserveOrder` (see [Parallel execution](#parallel-execution)), `implicitSources`
+(see [Writing](#writing)) and `timeZone` (see [Time zone](#time-zone)). A file whose name ends in `.json` is read as JSON.
 `FyrQLConfig.builder(path)` returns the builder instead, so that an application can add
 sources of its own, such as tables in memory.
 A third section, `server`, holds the settings of the [Flight SQL server](#flight-sql-server),
@@ -860,8 +874,8 @@ The CSV file gives `amount` the type `DOUBLE`, as DuckDB would, and so the sums 
 
 The keys of the URL are `config` and the settings of the engine of the
 [configuration file](#configuration-file): `defaultSource`, `defaultSchema`, `batchSize`,
-`memoryBudget`, `codegen`, `codegenThreshold`, `pushdown`, `threads` and `preserveOrder`,
-which win over those of the file. The same keys may come as properties of the connection, which win over the URL;
+`memoryBudget`, `codegen`, `codegenThreshold`, `pushdown`, `threads`, `preserveOrder`
+and `timeZone`, which win over those of the file. The same keys may come as properties of the connection, which win over the URL;
 `getPropertyInfo` describes them, so that tools offer them. Keys are matched without
 regard to case, values in the URL are decoded from `%xx`, and a blank value counts as not
 set. The properties `user` and `password`, which tools always send, are ignored; another
@@ -919,13 +933,21 @@ DuckDB writes it, such as `[1, NULL]` or `{'a': 1}`:
 | `BLOB` | `VARBINARY` | `byte[]` |
 | `DATE` | `DATE` | `java.sql.Date` |
 | `TIMESTAMP` | `TIMESTAMP` | `java.sql.Timestamp` |
+| `TIME` | `TIME` | `java.sql.Time` |
+| `TIMESTAMPTZ` | `TIMESTAMP_WITH_TIMEZONE` | `java.time.OffsetDateTime` |
+| `INTERVAL` | `OTHER` | `net.fyrql.core.value.Interval` |
 | `UUID` | `OTHER` | `java.util.UUID` |
 | `T[]` | `ARRAY` | `java.sql.Array` |
 | `STRUCT(...)` | `STRUCT` | `java.sql.Struct` |
 | `MAP(K, V)` | `OTHER` | `java.util.Map` |
 
-`getObject(i, LocalDate.class)`, `LocalDateTime`, `BigInteger` and `String` work as
-well, and the elements of arrays, structs and maps are converted alike.
+`getObject(i, LocalDate.class)`, `LocalDateTime`, `LocalTime`, `Instant`,
+`OffsetDateTime`, `ZonedDateTime`, `Duration` (of an interval without months), `Period`
+(of one without a time), `BigInteger` and `String` work as well, and the elements of
+arrays, structs and maps are converted alike. A `java.sql.Time` holds milliseconds, a
+`LocalTime` the microseconds; an instant is given, and its local values and its text
+are read, in the [time zone](#time-zone) of the session. Parameters take the same
+classes.
 
 A statement that writes runs with `executeUpdate`, `executeLargeUpdate` or `execute`,
 which returns `false` and leaves the number of rows written to `getUpdateCount`.
@@ -1003,21 +1025,27 @@ The types map as follows:
 | `VARCHAR`, `BLOB` | `Utf8`, `Binary` |
 | `DATE` | `Date(DAY)` |
 | `TIMESTAMP` | `Timestamp(MICROSECOND)` without a time zone |
+| `TIME` | `Time(MICROSECOND, 64)` |
+| `TIMESTAMPTZ` | `Timestamp(MICROSECOND, "UTC")` |
+| `INTERVAL` | `Interval(MONTH_DAY_NANO)` |
 | `UUID` | the extension type `arrow.uuid` over `FixedSizeBinary(16)` |
 | `T[]` | `List` with the element `item` |
 | `STRUCT(...)` | `Struct` |
 | `MAP(K, V)` | `Map` with the entries `key` and `value` |
 
-A `HUGEINT` of 39 digits does not fit and fails with an error that names the column.
+A `HUGEINT` of 39 digits does not fit and fails with an error that names the column,
+as does an `INTERVAL` whose microseconds do not fit into 64 bits of nanoseconds.
 Read back from Arrow, the same types give the same values, and besides them: unsigned
 integers as the next larger type with a sign, up to `HUGEINT` for a `UInt64`; `Null` as
 `INTEGER`, `Float16` as `FLOAT`, `Decimal256` up to precision 38; `LargeUtf8`,
 `LargeBinary`, `Utf8View` and `BinaryView`, and any other `FixedSizeBinary` as `BLOB`;
 `Date(MILLISECOND)`; a `Timestamp` without a time zone in seconds, milliseconds or
-nanoseconds, cut to microseconds; `FixedSizeList` as a list; an extension type FyrQL
+nanoseconds, cut to microseconds, and one with a time zone in any unit as a
+`TIMESTAMPTZ`; a `Time` in any unit as a `TIME`; an `Interval` in any unit and a
+`Duration` as an `INTERVAL`; `FixedSizeList` as a list; an extension type FyrQL
 does not know as its storage type; and a column encoded with a dictionary as its values.
-A time zone, `Time`, `Interval`, `Duration`, `Union`, `LargeList`, list views,
-`RunEndEncoded` and a dictionary inside a nested type are an error that names the field.
+A `Union`, `LargeList`, list views, `RunEndEncoded` and a dictionary inside a nested
+type are an error that names the field.
 
 ## Flight SQL server
 
@@ -1142,7 +1170,9 @@ with flight_sql.connect("grpc://127.0.0.1:32010", autocommit=True) as conn, conn
 server has no transactions. `fetch_arrow_table()` gives a `pyarrow.Table` in the types of
 [Arrow](#arrow), with the
 type of FyrQL of each column in the field metadata `ARROW:FLIGHT:SQL:TYPE_NAME`; a
-`HUGEINT` comes as `decimal128(38, 0)`, a `TIMESTAMP` as `timestamp[us]`, a `UUID` as
+`HUGEINT` comes as `decimal128(38, 0)`, a `TIMESTAMP` as `timestamp[us]`, a
+`TIMESTAMPTZ` as `timestamp[us, tz=UTC]`, a `TIME` as `time64[us]`, an `INTERVAL` as
+`month_day_nano_interval`, a `UUID` as
 the extension type `arrow.uuid`, whose values pyarrow gives as `uuid.UUID`, and lists,
 structs and maps as those of pyarrow. With `users`, the client
 signs in with `db_kwargs={"username": "alice", "password": ...}`; with `token`, with
@@ -1177,7 +1207,9 @@ and the tests run the 22 TPC-H queries and statements that write through it. Its
 `executeBatch` of a `PreparedStatement` sends all sets of values at once and gives one
 count, the sum. It names the type of a column after
 its Arrow type, so that `DECIMAL(p,s)` and `HUGEINT` are both `DECIMAL`, returned as
-`BigDecimal`, and a `DATE` is a `java.sql.Date`; the types of FyrQL are in the type
+`BigDecimal`, a `DATE` is a `java.sql.Date`, a `TIME` a `java.sql.Time` in
+milliseconds and an `INTERVAL` a `PeriodDuration` of the driver; the types of FyrQL are
+in the type
 names of `getColumns` of its `DatabaseMetaData`.
 
 ## Code generation
@@ -1510,13 +1542,15 @@ forms follow DuckDB 1.5.6.
 - `UNION [ALL]`, `EXCEPT [ALL]`, `INTERSECT [ALL]`, `WITH`.
 - Expressions: arithmetic with `+ - * / % //`, comparisons, `AND`, `OR`, `NOT`, `BETWEEN`,
   `IN (...)`, `LIKE`, `ILIKE`, `IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`, `CASE`, `CAST`,
-  `TRY_CAST`, `::`, `||`, `EXTRACT(... FROM ...)`.
+  `TRY_CAST`, `::`, `||`, `EXTRACT(... FROM ...)`, `AT TIME ZONE`.
 - Parameters `?` in prepared queries, through `engine.prepare`, a `PreparedStatement` of
   the JDBC driver or a prepared statement of the Flight SQL server, typed by their
   context (see [Using the engine](#using-the-engine)); named parameters such as `:name`
   are not taken.
 - Types: `BOOLEAN`, `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `HUGEINT`, `FLOAT`,
-  `DOUBLE`, `DECIMAL(p,s)`, `VARCHAR`, `DATE`, `TIMESTAMP`, and nested to any depth
+  `DOUBLE`, `DECIMAL(p,s)`, `VARCHAR`, `DATE`, `TIME`, `TIMESTAMP`,
+  `TIMESTAMP WITH TIME ZONE` (or `TIMESTAMPTZ`), `INTERVAL` (see
+  [Time zone](#time-zone)), and nested to any depth
   `T[]`, `STRUCT(name T, ...)` and `MAP(K, V)`. Literals are typed as in DuckDB, and a
   bare `NULL` or a string literal takes the type of its context.
 - Nested values: lists `[1, 2]` (or `ARRAY[1, 2]`), structs `{'a': 1, 'b': 'x'}` (or
@@ -1540,9 +1574,12 @@ forms follow DuckDB 1.5.6.
   `exp`, `power`, `pi`, `random`; `length`, `lower`, `upper`, `substring`, `trim`,
   `ltrim`, `rtrim`, `replace`, `contains`, `starts_with`, `ends_with`, `strpos`, `left`,
   `right`, `repeat`, `reverse`, `lpad`, `rpad`, `split_part`, `concat`, `concat_ws`;
-  `current_date`, `now`, `year` to `second` and the other parts of a date, `date_part`,
-  `date_trunc`, `date_diff`, `epoch`, `epoch_ms`, `last_day`, `monthname`, `dayname`,
-  `make_date`, `make_timestamp`, `strftime`, `strptime`, `try_strptime`; `list_value`,
+  `current_date`, `now`, `current_time`, `localtimestamp`, `current_setting`, `year`
+  to `microsecond` and the other parts of a date, a time or an interval, `date_part`,
+  `date_trunc`, `date_diff`, `age`, `epoch`, `epoch_ms`, `epoch_us`, `epoch_ns`,
+  `last_day`, `monthname`, `dayname`, `make_date`, `make_time`, `make_timestamp`,
+  `make_timestamptz`, `to_timestamp`, `to_years` to `to_microseconds`, `timezone`,
+  `strftime` (with `%z` and `%Z`), `strptime`, `try_strptime`; `list_value`,
   `list_extract`, `len`, `array_length`, `list_contains`, `list_sort`,
   `list_reverse_sort`, `map`, `map_extract`, `map_extract_value`, `struct_extract`,
   `struct_pack`; and DuckDB's aliases of these names.
@@ -1555,8 +1592,9 @@ forms follow DuckDB 1.5.6.
   frame of `ROWS`, `RANGE` or `GROUPS`, `BETWEEN` any two of `UNBOUNDED PRECEDING`,
   `n PRECEDING`, `CURRENT ROW`, `n FOLLOWING` and `UNBOUNDED FOLLOWING`, and
   `EXCLUDE CURRENT ROW`, `GROUP`, `TIES` or `NO OTHERS`. The offset of a `RANGE` frame is
-  a number for a numeric order, and a number of days or an interval such as
-  `INTERVAL 1 MONTH` for a `DATE` or `TIMESTAMP`. `IGNORE NULLS` goes with `lag`, `lead`,
+  a number for a numeric order, a number of days or an interval such as
+  `INTERVAL 1 MONTH` for a `DATE` or `TIMESTAMP`, and an interval of hours, minutes or
+  seconds for a `TIMESTAMPTZ`. `IGNORE NULLS` goes with `lag`, `lead`,
   `first_value`, `last_value` and `nth_value`. A window may be named in the `WINDOW`
   clause and used as `OVER w`; `QUALIFY` filters the rows by the values of window
   functions. Over an aggregation, a window function reads the groups and aggregates, as
@@ -1605,7 +1643,8 @@ ORDER BY c.region
 
 with the rows `[north, 1]` and `[south, 2]`.
 
-*Not yet supported*: the type `INTERVAL`, `PIVOT`, `SEMI JOIN` and `ANTI JOIN` in SQL,
+*Not yet supported*: the type `TIME WITH TIME ZONE` (`TIMETZ`), an offset of a `RANGE`
+frame over a `TIME`, and one of days, months or years over a `TIMESTAMPTZ`, `PIVOT`, `SEMI JOIN` and `ANTI JOIN` in SQL,
 lambdas, slices such as `l[1:2]`, structs without names
 (`row(1, 'a')`), arrays of a fixed size (`INTEGER[3]`), and `WITH RECURSIVE`. Of the
 subqueries: those in `ORDER BY`, `GROUP BY`, `ON` and the arguments of aggregates;
@@ -1625,18 +1664,21 @@ Known differences from DuckDB:
 - Files in S3 need a registered source of the type `s3`, rather than the extension
   `httpfs` and `CREATE SECRET`. Locations of `gs://`, `az://`, `http://` and `https://`,
   `**` in a pattern and a pattern before the last part of a location are not supported.
-- `now()` is a `TIMESTAMP` without time zone.
 - On several threads, the last binary digits of `sum` and `avg` over `FLOAT` and
   `DOUBLE`, and which error is reported when rows of several parts of a source fail, may
   change from run to run, as in DuckDB; see [Parallel execution](#parallel-execution).
 - A JDBC source with `splitRows` reads the parts of a table in transactions of their
   own, each with its own state of the table; while others write to the table, a result
   may mix states, and a row whose key column changes may be missing or come twice.
-- `INTERVAL '90' DAY` (also `INTERVAL 1 year` and `INTERVAL '3 months'`) exists only
-  as a constant added to or subtracted from a constant date or timestamp, such as
-  `DATE '1998-12-01' - INTERVAL '90' DAY`, and is computed when the query is bound.
-  A `DATE` shifted by days, months or years stays a `DATE`, where DuckDB gives a
-  `TIMESTAMP`.
+- A constant `DATE` plus or minus an interval constant of days, months or years, such
+  as `DATE '1998-12-01' - INTERVAL '90' DAY`, is computed when the query is bound and
+  stays a `DATE`, so that a filter against it can go to a source; DuckDB gives a
+  `TIMESTAMP`. With a column, or an interval with a time of day, the result is a
+  `TIMESTAMP` as in DuckDB.
+- `current_time` is a `TIME` in the time zone of the session; DuckDB gives a
+  `TIME WITH TIME ZONE`.
+- `list(x ORDER BY x)` orders intervals as `ORDER BY` does, by the value they compare
+  by; DuckDB 1.5.6 orders them there by their months, days and microseconds as written.
 - `SELECT DISTINCT` cannot be ordered by a column that is not selected.
 - A string literal is not converted to the type of a function argument, as in
   `sqrt('4')`.
@@ -1666,9 +1708,9 @@ Known differences from DuckDB:
   `NULL`, unlike for the same `EXISTS` as a condition of `WHERE`; FyrQL finds none.
 - Of a Parquet file, FyrQL reads the types it does not have as others: an unsigned
   integer as the next wider type with a sign, up to `HUGEINT` for a `UBIGINT`; a `TIME`
-  as a `VARCHAR` with the text DuckDB gives it; a timestamp in nanoseconds as a
-  `TIMESTAMP` in microseconds, cut toward zero as DuckDB casts it, and a timestamp
-  adjusted to UTC as its instant in UTC, where DuckDB gives a `TIMESTAMPTZ`. A list in
+  adjusted to UTC or in nanoseconds as a `VARCHAR` with the text DuckDB gives it; a
+  timestamp in nanoseconds as a `TIMESTAMP` or a `TIMESTAMPTZ` in microseconds, cut
+  toward zero as DuckDB casts it. A list in
   one of the older forms whose repeated group has one field and is named `array` or ends
   in `_tuple` is a list of that group, such as `STRUCT(x INTEGER)[]`, as the specification
   of Parquet has it; DuckDB takes the field as the element, `INTEGER[]`. A string is not
@@ -1677,9 +1719,9 @@ Known differences from DuckDB:
   error that names the codec and the file.
 - Of an OData service, FyrQL reads the types it does not have as others: an
   `Edm.Decimal` without a `Precision`, with one above 38 or with a `Scale` of `variable`
-  or `floating` as a `DOUBLE`, an `Edm.DateTimeOffset` as a `TIMESTAMP` with its instant
-  in UTC, an `Edm.Time`, `Edm.TimeOfDay` or `Edm.Duration` as a `VARCHAR` with the text
-  the service sends, and a member of an enumeration as a `VARCHAR` with its name.
+  or `floating` as a `DOUBLE`, and a member of an enumeration as a `VARCHAR` with its
+  name. An `Edm.Time` or `Edm.TimeOfDay` is a `TIME`, an `Edm.Duration` an `INTERVAL`,
+  which no filter goes to the service for, and an `Edm.DateTimeOffset` a `TIMESTAMPTZ`.
   `Edm.Stream`, the geographic types and navigation properties are no columns.
 - A select list unnests one list, which may appear in several items; DuckDB unnests
   several lists side by side. `unnest` in a `LEFT JOIN`, with named arguments such as
@@ -1707,6 +1749,57 @@ Known differences from DuckDB:
   `NULL` would; as the argument of a function, that is the first type the function takes
   of `BIGINT`, `DOUBLE`, `INTEGER` and so on, where DuckDB may choose another, and alone
   in the select list it has none and needs a cast.
+
+### Time zone
+
+A `TIMESTAMPTZ` (`TIMESTAMP WITH TIME ZONE`) is an instant, held as microseconds since
+1970 in UTC, and it is shown, cast and taken apart in the time zone of the session, as
+in DuckDB. That zone is the one of the JVM, unless the builder sets another with
+`timeZone(ZoneId)`, the [configuration file](#configuration-file) with `timeZone` under
+`engine`, or the URL of the [JDBC driver](#jdbc-driver) with `timeZone`; the
+[Flight SQL server](#flight-sql-server) takes the one of its configuration file.
+`SET TimeZone = 'Europe/Berlin'` changes it for the engine, `RESET TimeZone` restores
+the one it was built with, and `SHOW TimeZone` and `current_setting('TimeZone')` give
+it. A zone is a name of the tz database, such as `Europe/Berlin` or `UTC`, or an
+abbreviation such as `PST`; an offset such as `+02:00` is none. The zone belongs to the
+engine: each connection of the JDBC driver has an engine of its own, and all clients of
+the Flight SQL server share one.
+
+In the zone of the session, a literal or a string without an offset is read; `now()` and
+`current_timestamp` give the instant of the query, and `current_date`, `current_time`
+and `localtimestamp` its local values; the parts such as `year` and `hour`,
+`date_trunc`, `date_diff`, `strftime`, `age` and the casts to and from `DATE`,
+`TIMESTAMP` and `VARCHAR` compute. Adding an interval moves the months and days in the
+calendar of the zone, also over a change of daylight saving time, and the hours,
+minutes and seconds on the instant. A local time in a gap moves forward; one that
+occurs twice takes the later offset, while a day added into it keeps the offset it
+comes from, as in DuckDB. `x AT TIME ZONE 'zone'` and `timezone('zone', x)` turn an
+instant into the `TIMESTAMP` it is in that zone, and a `TIMESTAMP` into the instant it
+is there. The sources of CSV and JSON write an instant in the zone of the session and
+read text without an offset in it. In Berlin, where the clocks went forward on
+31 March 2024:
+
+```sql
+SET TimeZone = 'Europe/Berlin';
+SELECT TIMESTAMPTZ '2024-03-30 12:00:00+01' + INTERVAL 1 DAY,                -- 2024-03-31 12:00:00+02
+       TIMESTAMPTZ '2024-03-30 12:00:00+01' + INTERVAL 24 HOURS,             -- 2024-03-31 13:00:00+02
+       date_trunc('day', TIMESTAMPTZ '2024-10-27 12:00:00+01'),             -- 2024-10-27 00:00:00+02
+       TIMESTAMPTZ '2024-10-27 12:00:00+01' AT TIME ZONE 'America/New_York', -- 2024-10-27 07:00:00
+       TIME '23:30:00' + INTERVAL '45 minutes',                              -- 00:15:00
+       TIMESTAMP '2024-03-31 12:00:00' - TIMESTAMP '2024-01-01 00:00:00'     -- 90 days 12:00:00
+```
+
+A `TIME` is a time of day from `00:00:00` to `24:00:00` in microseconds, and arithmetic
+with it wraps around midnight. An `INTERVAL` has months, days and microseconds, written
+as `1 year 2 months -3 days 04:05:06.5`. Two intervals compare as in DuckDB, with 24
+hours to a day and 30 days to a month, so that `INTERVAL '1 month' = INTERVAL '30 days'`,
+while arithmetic keeps the three parts apart. In Java, an `INTERVAL` is a
+`net.fyrql.core.value.Interval`, and a `TIME` and a `TIMESTAMPTZ` are `Long`s of
+microseconds since midnight and since 1970 in UTC; the memory connector takes
+`LocalTime`, `Instant`, `OffsetDateTime`, `ZonedDateTime`, `Duration` and `Period` as
+well. A plan built in Java from the nodes of `PlanNode` has no time zone: only the binder
+gives the casts and functions of a query the zone of the session, and such a plan
+computes in UTC.
 
 ## Modules
 

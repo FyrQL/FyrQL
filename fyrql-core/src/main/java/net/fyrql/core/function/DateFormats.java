@@ -12,9 +12,12 @@
 package net.fyrql.core.function;
 
 import net.fyrql.core.value.ConversionException;
+import net.fyrql.core.value.Conversions;
 import net.fyrql.core.value.Dates;
+import net.fyrql.core.value.ZonedDates;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.LongFunction;
@@ -23,14 +26,17 @@ import java.util.function.ToLongFunction;
 /**
  * The formats of {@code strftime} and {@code strptime}, with a subset of the
  * specifiers of DuckDB 1.5.6 and its rules, measured against it:
- * {@code %Y %y %m %d %H %M %S %f %j %a %A %b %B %p %I %%}, and the forms
+ * {@code %Y %y %m %d %H %M %S %f %j %a %A %b %B %p %I %z %Z %%}, and the forms
  * {@code %-y %-m %-d %-H %-M %-S %-j %-I} that print no leading zeros. Any
  * other specifier is an error.
  * <p>
  * Writing: {@code %Y} prints a year from 0 to 9999 with four digits and
  * any other one as it is, a year before 1 BC with a minus sign; {@code %y}
  * the last two digits of the year without its sign; {@code %f} the six
- * digits of the microseconds; names are English.
+ * digits of the microseconds; names are English; {@code %z} the offset of
+ * the time zone as {@code +HH} or {@code +HH:MM}, {@code +00} for a value
+ * without a zone, {@code %Z} the name of the time zone, nothing for a value
+ * without a zone.
  * <p>
  * Reading: leading and trailing whitespace is skipped; a run of whitespace
  * in the format matches a nonempty run of whitespace; a number has at most
@@ -40,8 +46,10 @@ import java.util.function.ToLongFunction;
  * {@code %y} below 69 lies in the 2000s; {@code %p} turns hours up to 12
  * into the 24-hour clock; {@code %j} counts days from January 1 of the year
  * unless {@code %m} or {@code %d} is read too, a month name does not
- * count. Missing fields default to
- * 1900-01-01 00:00:00.
+ * count; {@code %z} reads an offset {@code Z} or {@code +HH[[:]MM]} with a
+ * sign, {@code %Z} the name of a time zone up to the next whitespace, and
+ * either makes the result a {@code TIMESTAMP WITH TIME ZONE}. Missing
+ * fields default to 1900-01-01 00:00:00.
  */
 public final class DateFormats {
 
@@ -53,7 +61,7 @@ public final class DateFormats {
     private static final String[] MONTH_ABBREVIATIONS = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep",
         "Oct", "Nov", "Dec"};
 
-    private static final String SPECIFIERS = "YymdHMSfjaAbBpI";
+    private static final String SPECIFIERS = "YymdHMSfjaAbBpIzZ";
     private static final String UNPADDED_SPECIFIERS = "ymdHMSjI";
 
     private DateFormats() {
@@ -65,6 +73,21 @@ public final class DateFormats {
 
     /** A parsed format: the literal text around the specifiers, one piece more than specifiers. */
     record Format(String text, List<String> literals, List<Specifier> specifiers) {
+
+        /** Tells whether the format reads or writes a time zone, with {@code %z} or {@code %Z}. */
+        boolean zoned() {
+            for (Specifier s : specifiers) {
+                if (s.letter() == 'z' || s.letter() == 'Z') {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    /** Tells whether a format reads a time zone, so that {@code strptime} gives a {@code TIMESTAMP WITH TIME ZONE}. */
+    public static boolean isZoned(String format) {
+        return parse(format).zoned();
     }
 
     /**
@@ -152,6 +175,14 @@ public final class DateFormats {
 
     /** Writes a date or timestamp, given as its day and the microseconds since midnight, in a format. */
     static String format(Format format, int days, long time) {
+        return format(format, days, time, 0, "");
+    }
+
+    /**
+     * Writes a local date and time in a format, with the offset in seconds
+     * and the name of the time zone for {@code %z} and {@code %Z}.
+     */
+    static String format(Format format, int days, long time, int offset, String zone) {
         LocalDate date = LocalDate.ofEpochDay(days);
         int hour = (int) (time / Dates.MICROS_PER_HOUR);
         StringBuilder b = new StringBuilder();
@@ -181,6 +212,16 @@ public final class DateFormats {
                 case 'b' -> b.append(MONTH_ABBREVIATIONS[date.getMonthValue() - 1]);
                 case 'B' -> b.append(MONTH_NAMES[date.getMonthValue() - 1]);
                 case 'p' -> b.append(hour < 12 ? "AM" : "PM");
+                case 'z' -> {
+                    // With the seconds of an offset that has them, such as a local mean time, as DuckDB writes it.
+                    Conversions.appendOffset(b, offset, false);
+                    int seconds = Math.abs(offset) % 60;
+                    if (seconds != 0) {
+                        b.append(Math.abs(offset) / 60 % 60 == 0 ? ":00:" : ":").append(seconds < 10 ? "0" : "")
+                                .append(seconds);
+                    }
+                }
+                case 'Z' -> b.append(zone);
                 default -> throw new IllegalStateException("Specifier %" + s.letter());
             }
         }
@@ -205,6 +246,27 @@ public final class DateFormats {
      *         or names no valid date
      */
     static long parse(Format format, String s) {
+        return parse(format, s, null);
+    }
+
+    /**
+     * Reads a timestamp in a format that may contain {@code %z} or
+     * {@code %Z}: the instant, the local date and time in the zone that the
+     * string names, or in the given zone if it names none.
+     *
+     * @return the microseconds since 1970-01-01 00:00:00 UTC
+     */
+    static long parseZoned(Format format, String s, ZoneId zone) {
+        Object[] named = new Object[1];
+        long local = parse(format, s, named);
+        if (named[0] instanceof Integer offset) {
+            return Math.subtractExact(local, offset * Dates.MICROS_PER_SECOND);
+        }
+        return ZonedDates.toInstant(local, named[0] instanceof ZoneId z ? z : zone);
+    }
+
+    /** Reads a timestamp; an offset or zone the string names goes to the first element of {@code named}. */
+    private static long parse(Format format, String s, Object[] named) {
         int n = s.length();
         int pos = skipSpaces(s, 0);
         int year = 1900;
@@ -259,6 +321,21 @@ public final class DateFormats {
                                 letter == 'b' ? "an abbreviated month name" : "a full month name");
                         pos += names[k].length();
                         month = k + 1;
+                    }
+                    case 'z' -> pos = offset(format, s, pos, named);
+                    case 'Z' -> {
+                        int end = pos;
+                        while (end < n && !isSpace(s.charAt(end))) {
+                            end++;
+                        }
+                        if (end == pos) {
+                            throw mismatch(format, s, "Expected a time zone");
+                        }
+                        ZoneId z = ZonedDates.zone(s.substring(pos, end));
+                        if (named != null) {
+                            named[0] = z;
+                        }
+                        pos = end;
                     }
                     case 'p' -> {
                         if (pos + 2 > n || Character.toLowerCase(s.charAt(pos + 1)) != 'm'
@@ -323,6 +400,34 @@ public final class DateFormats {
                 : Dates.makeDate(year, month, day);
         return Dates.timestamp(days, hour * Dates.MICROS_PER_HOUR + minute * Dates.MICROS_PER_MINUTE
                 + second * Dates.MICROS_PER_SECOND + micros);
+    }
+
+    /** Reads an offset {@code Z} or {@code +HH[[:]MM]} with a sign at a position and returns the position after it. */
+    private static int offset(Format format, String s, int pos, Object[] named) {
+        int n = s.length();
+        int seconds;
+        if (pos < n && s.charAt(pos) == 'Z') {
+            seconds = 0;
+            pos++;
+        } else {
+            if (pos + 3 > n || s.charAt(pos) != '+' && s.charAt(pos) != '-' || !Character.isDigit(s.charAt(pos + 1))
+                    || !Character.isDigit(s.charAt(pos + 2))) {
+                throw mismatch(format, s, "Expected +HH[MM] or -HH[MM]");
+            }
+            int sign = s.charAt(pos) == '-' ? -1 : 1;
+            seconds = Integer.parseInt(s, pos + 1, pos + 3, 10) * 3600;
+            pos += 3;
+            int p = pos < n && s.charAt(pos) == ':' ? pos + 1 : pos;
+            if (p + 2 <= n && Character.isDigit(s.charAt(p)) && Character.isDigit(s.charAt(p + 1))) {
+                seconds += Integer.parseInt(s, p, p + 2, 10) * 60;
+                pos = p + 2;
+            }
+            seconds *= sign;
+        }
+        if (named != null) {
+            named[0] = seconds;
+        }
+        return pos;
     }
 
     /**

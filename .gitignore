@@ -1,5 +1,6 @@
-target/
 spikes/
+target/
+tools/
 .mvn/wrapper/maven-wrapper.jar
 *.log
 .idea/

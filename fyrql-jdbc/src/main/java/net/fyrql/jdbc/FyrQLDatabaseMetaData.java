@@ -169,7 +169,8 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
 
     /** Returns the digits after the point, or of the fraction of a second; {@code null} where there are none. */
     private static Integer decimalDigits(DataType type) {
-        if (type instanceof DataType.Decimal || type == DataType.TIMESTAMP) {
+        if (type instanceof DataType.Decimal || type == DataType.TIMESTAMP || type == DataType.TIME
+                || type == DataType.TIMESTAMPTZ) {
             return JdbcTypes.scale(type);
         }
         return type.isIntegral() || type == DataType.DATE ? 0 : null;
@@ -210,8 +211,12 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
         if (type == DataType.VARCHAR) {
             prefix = "'";
             suffix = "'";
-        } else if (type == DataType.DATE || type == DataType.TIMESTAMP) {
+        } else if (type == DataType.DATE || type == DataType.TIMESTAMP || type == DataType.TIME
+                || type == DataType.INTERVAL) {
             prefix = type.sqlName() + " '";
+            suffix = "'";
+        } else if (type == DataType.TIMESTAMPTZ) {
+            prefix = "TIMESTAMPTZ '";
             suffix = "'";
         }
         boolean decimal = type instanceof DataType.Decimal;

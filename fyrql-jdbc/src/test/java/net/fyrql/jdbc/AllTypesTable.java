@@ -15,6 +15,7 @@ import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -58,6 +59,9 @@ public final class AllTypesTable {
             field("dt", DataType.DATE),
             field("ts", DataType.TIMESTAMP),
             field("u", DataType.UUID),
+            field("tm", DataType.TIME),
+            field("tz", DataType.TIMESTAMPTZ),
+            field("iv", DataType.INTERVAL),
             field("li", DataType.listOf(DataType.INTEGER)),
             field("ld", DataType.listOf(DataType.DATE)),
             field("lb", DataType.listOf(DataType.BLOB)),
@@ -70,7 +74,8 @@ public final class AllTypesTable {
             new Object[] {true, (byte) 1, (short) 2, 3, 4L, new BigInteger("170141183460469231731687303715884105727"),
                     1.5f, 2.5, new BigDecimal("1234567890123456789012345678.0123456789"), "abc",
                     new byte[] {(byte) 0xAA, 0}, day("2024-02-29"), micros("2024-02-29T12:34:56.123456"),
-                    UUID.fromString("123e4567-e89b-12d3-a456-426614174000"),
+                    UUID.fromString("123e4567-e89b-12d3-a456-426614174000"), 45_296_123_456L,
+                    micros("2024-02-29T12:34:56.123456"), Interval.parse("1 year 2 months -3 days 04:05:06.789"),
                     list(1, null, 3),
                     list(day("2024-02-29"), null),
                     list(new byte[] {1}, null),
@@ -80,7 +85,7 @@ public final class AllTypesTable {
                     list(list(1, 2), null, list(), list((Object) null))},
             new Object[SCHEMA.size()],
             new Object[] {false, (byte) 0, (short) 0, 0, 0L, BigInteger.ZERO, 0f, 0.0, new BigDecimal("0E-10"), "",
-                    new byte[0], 0, 0L, new UUID(0, 0),
+                    new byte[0], 0, 0L, new UUID(0, 0), 0L, 0L, Interval.of(0, 0, 0),
                     list(), list(), list(), list(), list(null, null, null), map(), list()});
 
     private AllTypesTable() {

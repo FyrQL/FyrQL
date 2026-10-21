@@ -21,6 +21,7 @@ import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -31,7 +32,9 @@ import java.util.regex.Pattern;
  * for the text formats. Parsing accepts surrounding whitespace, as DuckDB
  * does, and throws {@link ConversionException} on invalid input. A
  * {@code DATE} is the number of days since 1970-01-01, a {@code TIMESTAMP}
- * the number of microseconds since 1970-01-01 00:00:00.
+ * the number of microseconds since 1970-01-01 00:00:00, a {@code TIME} the
+ * number of microseconds since midnight, a {@code TIMESTAMP WITH TIME ZONE}
+ * the number of microseconds since 1970-01-01 00:00:00 UTC.
  */
 public final class Conversions {
 
@@ -407,6 +410,231 @@ public final class Conversions {
             return q;
         }
         return t.regionMatches(true, p, " utc", 0, 4) ? p + 4 : p;
+    }
+
+    private static final String TIME_FORMAT = "expected format is ([YYYY-MM-DD ]HH:MM:SS[.MS])";
+
+    /**
+     * Parses a time of day as DuckDB does: surrounding whitespace, an
+     * optional date and a space or {@code T} before it, which are ignored, a
+     * date or {@code epoch} alone being midnight,
+     * then {@code H:M[:S[.ffffff]]} with one or two digits per field and a
+     * fraction of any length cut off after six digits, then an optional
+     * {@code Z} or offset as {@link #parseTimestamp} reads it, which is
+     * ignored. {@code 24:00:00} is the end of the day.
+     *
+     * @return the microseconds since midnight, 0 to 86,400,000,000
+     */
+    public static long parseTime(String s) {
+        String t = s.strip();
+        int n = t.length();
+        int p = 0;
+        Matcher m = DATE_PARTS.matcher(t);
+        if (t.equalsIgnoreCase("epoch") || m.matches()) {
+            // A date alone is its midnight.
+            return 0;
+        }
+        if (m.lookingAt() && m.end() < n && (t.charAt(m.end()) == ' ' || t.charAt(m.end()) == 'T')) {
+            p = m.end() + 1;
+        }
+        int start = p;
+        p = digits(t, p, 2);
+        if (p == start || p == n || t.charAt(p) != ':') {
+            throw timeOutOfRange(s);
+        }
+        int hour = Integer.parseInt(t, start, p, 10);
+        start = ++p;
+        p = digits(t, p, 2);
+        if (p == start) {
+            throw timeOutOfRange(s);
+        }
+        int minute = Integer.parseInt(t, start, p, 10);
+        int second = 0;
+        long micros = 0;
+        if (p < n && t.charAt(p) == ':') {
+            start = ++p;
+            p = digits(t, p, 2);
+            if (p == start) {
+                throw timeOutOfRange(s);
+            }
+            second = Integer.parseInt(t, start, p, 10);
+            if (p < n && t.charAt(p) == '.') {
+                start = ++p;
+                p = digits(t, p, Integer.MAX_VALUE);
+                micros = sixDigits(t, start, p);
+            }
+        }
+        p = zone(t, p);
+        if (p != n || minute > 59 || second > 59 || hour > 24
+                || hour == 24 && (minute != 0 || second != 0 || micros != 0)) {
+            throw timeOutOfRange(s);
+        }
+        return hour * 3_600_000_000L + minute * 60_000_000L + second * MICROS_PER_SECOND + micros;
+    }
+
+    private static ConversionException timeOutOfRange(String s) {
+        return new ConversionException("time field value out of range: \"" + s + "\", " + TIME_FORMAT);
+    }
+
+    /** The first six digits of a fraction as microseconds, the digits after them cut off. */
+    private static long sixDigits(String t, int from, int to) {
+        long value = 0;
+        for (int i = 0; i < 6; i++) {
+            value = value * 10 + (from + i < to ? t.charAt(from + i) - '0' : 0);
+        }
+        return value;
+    }
+
+    /**
+     * Formats a time of day as DuckDB does: {@code HH:mm:ss}, with the
+     * fraction of a second only if it is not zero, without trailing zeros;
+     * the end of the day is {@code 24:00:00}.
+     */
+    public static String formatTime(long micros) {
+        StringBuilder b = new StringBuilder(15);
+        appendTime(b, micros);
+        return b.toString();
+    }
+
+    private static void appendTime(StringBuilder b, long micros) {
+        append2(b, (int) (micros / 3_600_000_000L)).append(':');
+        append2(b, (int) (micros % 3_600_000_000L / 60_000_000L)).append(':');
+        append2(b, (int) (micros % 60_000_000L / MICROS_PER_SECOND));
+        Interval.fraction(b, micros % MICROS_PER_SECOND);
+    }
+
+    private static final String TIMESTAMPTZ_FORMAT =
+            "expected format is (YYYY-MM-DD HH:MM:SS[.US][\u00B1HH[:MM[:SS]]| ZONE])";
+
+    /**
+     * Parses a timestamp with time zone as DuckDB does: a date as
+     * {@link #parseDate} reads it, optionally followed by a {@code T} or a
+     * space and a time {@code H:M[:S[.ffffff]]}, then optionally {@code Z},
+     * an offset {@code +HH[[:]MM[[:]SS]]} with a sign, or a space and the name
+     * of a time zone ({@link ZonedDates#zone}). Without a zone the date and
+     * time are local in the given time zone. {@code epoch} is 1970-01-01
+     * 00:00:00 UTC.
+     *
+     * @return the microseconds since 1970-01-01 00:00:00 UTC
+     * @throws ConversionException if the string is no timestamp or names an unknown time zone
+     */
+    public static long parseTimestampTz(String s, ZoneId zone) {
+        String t = s.strip();
+        if (t.equalsIgnoreCase("epoch")) {
+            return 0;
+        }
+        DateParse d = parseDateParts(t, s);
+        if (d == null) {
+            throw invalidTimestampTz(s);
+        }
+        int n = t.length();
+        int p = d.end;
+        long time = 0;
+        if (p + 1 < n && (t.charAt(p) == ' ' || t.charAt(p) == 'T') && Character.isDigit(t.charAt(p + 1))) {
+            int start = ++p;
+            p = digits(t, p, 2);
+            if (p == n || t.charAt(p) != ':') {
+                throw invalidTimestampTz(s);
+            }
+            int hour = Integer.parseInt(t, start, p, 10);
+            start = ++p;
+            p = digits(t, p, 2);
+            if (p == start) {
+                throw invalidTimestampTz(s);
+            }
+            int minute = Integer.parseInt(t, start, p, 10);
+            int second = 0;
+            long micros = 0;
+            if (p < n && t.charAt(p) == ':') {
+                start = ++p;
+                p = digits(t, p, 2);
+                if (p == start) {
+                    throw invalidTimestampTz(s);
+                }
+                second = Integer.parseInt(t, start, p, 10);
+                if (p < n && t.charAt(p) == '.') {
+                    start = ++p;
+                    p = digits(t, p, Integer.MAX_VALUE);
+                    micros = sixDigits(t, start, p);
+                }
+            }
+            if (minute > 59 || second > 59 || hour > 24 || hour == 24 && (minute != 0 || second != 0 || micros != 0)) {
+                throw invalidTimestampTz(s);
+            }
+            time = hour * 3_600_000_000L + minute * 60_000_000L + second * MICROS_PER_SECOND + micros;
+        }
+        Integer offset = null;
+        ZoneId named = null;
+        if (p < n && t.charAt(p) == 'Z') {
+            offset = 0;
+            p++;
+        } else if (p < n && (t.charAt(p) == '+' || t.charAt(p) == '-')) {
+            int sign = t.charAt(p) == '-' ? -1 : 1;
+            int q = p + 1;
+            if (digits(t, q, 2) != q + 2) {
+                throw invalidTimestampTz(s);
+            }
+            int seconds = Integer.parseInt(t, q, q + 2, 10) * 3600;
+            q += 2;
+            for (int part = 0, factor = 60; part < 2; part++, factor = 1) {
+                int r = q < n && t.charAt(q) == ':' ? q + 1 : q;
+                if (digits(t, r, 2) != r + 2) {
+                    break;
+                }
+                seconds += Integer.parseInt(t, r, r + 2, 10) * factor;
+                q = r + 2;
+            }
+            offset = sign * seconds;
+            p = q;
+        } else if (p < n && t.charAt(p) == ' ') {
+            named = ZonedDates.zone(t.substring(p + 1).strip());
+            p = n;
+        }
+        if (p != n) {
+            throw invalidTimestampTz(s);
+        }
+        try {
+            long local = Math.addExact(Math.multiplyExact(d.days, MICROS_PER_DAY), time);
+            if (offset != null) {
+                return Math.subtractExact(local, offset * MICROS_PER_SECOND);
+            }
+            return ZonedDates.toInstant(local, named != null ? named : zone);
+        } catch (ArithmeticException e) {
+            throw invalidTimestampTz(s);
+        }
+    }
+
+    private static ConversionException invalidTimestampTz(String s) {
+        return new ConversionException("invalid timestamp field format: \"" + s + "\", " + TIMESTAMPTZ_FORMAT);
+    }
+
+    /**
+     * Formats a timestamp with time zone as DuckDB does: the local date and
+     * time in the time zone as {@link #formatTimestamp} formats them, then
+     * the offset as {@code +HH}, or {@code +HH:MM} if it has minutes; the
+     * seconds of an offset of local mean time are left out.
+     */
+    public static String formatTimestampTz(long micros, ZoneId zone) {
+        int offset = ZonedDates.offsetSeconds(micros, zone);
+        StringBuilder b = new StringBuilder(formatTimestamp(micros + offset * MICROS_PER_SECOND));
+        appendOffset(b, offset, false);
+        return b.toString();
+    }
+
+    /**
+     * Appends an offset in seconds as {@code +HH} or {@code +HH:MM}, or as
+     * {@code +HHMM} always with the minutes if compact.
+     */
+    public static void appendOffset(StringBuilder b, int offset, boolean compact) {
+        int abs = Math.abs(offset);
+        b.append(offset < 0 ? '-' : '+');
+        append2(b, abs / 3600);
+        int minutes = abs / 60 % 60;
+        if (compact) {
+            append2(b, minutes);
+        } else if (minutes != 0) {
+            append2(b.append(':'), minutes);
+        }
     }
 
     /** Converts a date and time to microseconds since 1970-01-01 00:00:00. */

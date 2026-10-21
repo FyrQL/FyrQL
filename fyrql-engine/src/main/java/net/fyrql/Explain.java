@@ -63,7 +63,8 @@ final class Explain {
      * {@code Create table source.schema.t (a INTEGER NOT NULL, b VARCHAR)}
      * with {@code [or replace]} or {@code [if not exists]},
      * {@code Insert into source.schema.t} or
-     * {@code Drop table [if exists] source.schema.t}.
+     * {@code Drop table [if exists] source.schema.t}, or the setting of
+ * {@code SET} and {@code RESET}: {@code Set TimeZone = 'UTC'}, {@code Reset TimeZone}.
      */
     static String header(BoundStatement statement) {
         return switch (statement) {
@@ -90,6 +91,8 @@ final class Explain {
             case BoundStatement.Drop d -> d.table() == null
                     ? "Drop table if exists " + String.join(".", d.name()) + " [no such table]"
                     : "Drop table " + (d.ifExists() ? "if exists " : "") + d.table();
+            case BoundStatement.Set s -> s.value() == null ? "Reset " + s.name()
+                    : "Set " + s.name() + " = '" + s.value().replace("'", "''") + "'";
             case BoundStatement.Query q -> throw new IllegalArgumentException("A query has a plan, not a header");
         };
     }

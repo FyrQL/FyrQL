@@ -48,6 +48,8 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -340,6 +342,8 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
                 case "dateformat", "date_format" -> o.withDateFormat(string(function, key, value));
                 case "timestampformat", "timestamp_format" -> o.withTimestampFormat(
                         string(function, key, value));
+                case FileWriterProvider.TIME_ZONE -> o.withZone(FileWriterProvider.timeZone(
+                        string(function, key, value)));
                 default -> throw new IllegalArgumentException("Invalid named parameter \"" + key
                         + "\" for function " + function + "; supported are format, sample_size, ignore_errors,"
                         + " map_inference_threshold, field_appearance_threshold, dateformat, timestampformat");
@@ -446,6 +450,7 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         String dateFormat = o.get("dateformat", null, JsonConnector::checked).orElse(null);
         String timestampFormat = o.get("timestampformat", null, JsonConnector::checked).orElse(null);
         boolean ignoreErrors = o.bool("ignore_errors").orElse(false);
+        ZoneId zone = o.get(FileWriterProvider.TIME_ZONE, null, FileWriterProvider::timeZone).orElse(ZoneOffset.UTC);
         boolean gzip = JsonFileWriter.gzip(o, lower, owner);
         o.rejectUnknown();
         if (records.isPresent() && array.isPresent()) {
@@ -458,7 +463,8 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         JsonOptions read = JsonOptions.DEFAULT
                 .withFormat(records.orElse(array.map(a -> a ? JsonFormat.ARRAY : JsonFormat.NEWLINE_DELIMITED)
                         .orElse(JsonFormat.AUTO)))
-                .withIgnoreErrors(ignoreErrors).withDateFormat(dateFormat).withTimestampFormat(timestampFormat);
+                .withIgnoreErrors(ignoreErrors).withDateFormat(dateFormat).withTimestampFormat(timestampFormat)
+                .withZone(zone);
         Path absolute = null;
         FileObject remote = null;
         FileCall call;

@@ -19,18 +19,19 @@ import net.fyrql.core.function.DateFormats;
 import net.fyrql.core.function.ScalarFunction;
 import net.fyrql.core.function.StructExtract;
 import net.fyrql.core.function.StructPack;
+import net.fyrql.core.function.ZonedOperators;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.TypeRules;
 import net.fyrql.core.value.Casts;
-import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.ConversionException;
 import net.fyrql.core.value.Dates;
+import net.fyrql.core.value.Interval;
+import net.fyrql.core.value.ZonedDates;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.ast.SqlExpr;
 
 import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -185,6 +186,11 @@ final class ExpressionBinder {
         return scope;
     }
 
+    /** Returns the time zone of the session. */
+    java.time.ZoneId zone() {
+        return context.zone();
+    }
+
     /** Binds an expression; a bare {@code NULL} becomes an {@code INTEGER}. */
     Expression bind(SqlExpr e) {
         return bound(e).expression();
@@ -228,7 +234,7 @@ final class ExpressionBinder {
             case SqlExpr.FunctionCall f -> call(f);
             case SqlExpr.Index x -> index(bound(x.base()), x.index(), x.position());
             case SqlExpr.StructValue s -> structValue(s);
-            case SqlExpr.Interval i -> throw intervalNotSupported(i);
+            case SqlExpr.Interval i -> Bound.typed(interval(i));
             case SqlExpr.Window w -> throw new SqlException(windowError(), w.position());
         };
     }
@@ -264,8 +270,18 @@ final class ExpressionBinder {
         return subqueries;
     }
 
-    private static SqlException intervalNotSupported(SqlExpr.Interval i) {
-        return new SqlException("Not supported: INTERVAL except as a constant added to a date", i.position());
+    /** {@code INTERVAL '...'}, read as DuckDB reads it. */
+    private static Expression.Literal interval(SqlExpr.Interval i) {
+        try {
+            return new Expression.Literal(DataType.INTERVAL, Interval.parse(i.text()));
+        } catch (ConversionException | ArithmeticException e) {
+            throw new SqlException(e.getMessage(), i.position());
+        }
+    }
+
+    /** Converts a literal as {@link Literals#lazily} does, in the time zone of the session. */
+    private Expression lazily(Expression.Literal literal, DataType target, Position position) {
+        return Literals.lazily(literal, target, position, context.zone());
     }
 
     private Bound literal(SqlExpr.Literal l) {
@@ -274,10 +290,14 @@ final class ExpressionBinder {
             case STRING -> new Bound(new Expression.Literal(DataType.VARCHAR, l.text()), Kind.STRING);
             case BOOLEAN -> Bound.typed(new Expression.Literal(DataType.BOOLEAN, Boolean.parseBoolean(l.text())));
             case NULL -> Bound.nullLiteral();
-            case DATE -> Bound.typed(Literals.lazily(new Expression.Literal(DataType.VARCHAR, l.text()), DataType.DATE,
+            case DATE -> Bound.typed(lazily(new Expression.Literal(DataType.VARCHAR, l.text()), DataType.DATE,
                     l.position()));
-            case TIMESTAMP -> Bound.typed(Literals.lazily(new Expression.Literal(DataType.VARCHAR, l.text()),
+            case TIMESTAMP -> Bound.typed(lazily(new Expression.Literal(DataType.VARCHAR, l.text()),
                     DataType.TIMESTAMP, l.position()));
+            case TIME -> Bound.typed(lazily(new Expression.Literal(DataType.VARCHAR, l.text()), DataType.TIME,
+                    l.position()));
+            case TIMESTAMPTZ -> Bound.typed(lazily(new Expression.Literal(DataType.VARCHAR, l.text()),
+                    DataType.TIMESTAMPTZ, l.position()));
         };
     }
 
@@ -298,6 +318,10 @@ final class ExpressionBinder {
                 } finally {
                     expanding.remove(key);
                 }
+            }
+            if (key.equals("localtime") || key.equals("localtimestamp")) {
+                // Keywords of SQL that the parser reads as names.
+                return call(new SqlExpr.FunctionCall(key, List.of(), i.position()));
             }
         }
         throw notFound(i);
@@ -410,7 +434,7 @@ final class ExpressionBinder {
             return args;
         }
         Expression converted = value.isNull() ? typed(value, target).expression()
-                : target == DataType.VARCHAR ? value.expression() : Literals.lazily(value.literal(), target, position);
+                : target == DataType.VARCHAR ? value.expression() : lazily(value.literal(), target, position);
         return List.of(args.get(0), Bound.typed(converted));
     }
 
@@ -474,23 +498,27 @@ final class ExpressionBinder {
     }
 
     private Bound arithmetic(ArithmeticOp op, SqlExpr.Binary b) {
-        if (b.left() instanceof SqlExpr.Interval || b.right() instanceof SqlExpr.Interval) {
-            return intervalArithmetic(op, b);
-        }
         Bound l = bound(b.left());
         Bound r = bound(b.right());
+        Bound shifted = constantDateShift(op, l, r, b);
+        if (shifted != null) {
+            return shifted;
+        }
         if (l.isNull() && r.isNull()) {
             l = typed(l, DataType.BIGINT);
             r = typed(r, DataType.BIGINT);
         } else if (l.isNull()) {
-            l = typed(l, nullOperand(op, r.type()));
+            l = typed(l, nullOperand(op, r.type(), true, b.position()));
         } else if (r.isNull()) {
-            r = typed(r, nullOperand(op, l.type()));
+            r = typed(r, nullOperand(op, l.type(), false, b.position()));
         }
         l = adaptInteger(l, r.type());
         r = adaptInteger(r, l.type());
         DataType lt = l.type();
         DataType rt = r.type();
+        if (lt == DataType.TIMESTAMPTZ || rt == DataType.TIMESTAMPTZ) {
+            return zonedArithmetic(op, l, r, b.position());
+        }
         Expression left = l.expression();
         Expression right = r.expression();
         return foldNull(check(() -> new Expression.Arithmetic(op, left, right), b.position(),
@@ -498,73 +526,74 @@ final class ExpressionBinder {
     }
 
     /**
-     * {@code date + INTERVAL 'n' unit} and {@code date - INTERVAL 'n' unit}
-     * over a constant {@code DATE} or {@code TIMESTAMP}, computed here, as
-     * FyrQL has no interval type. A {@code DATE} shifted by days, months or
-     * years stays a {@code DATE} (DuckDB gives a {@code TIMESTAMP}); a
-     * {@code DATE} shifted by hours, minutes or seconds and a
-     * {@code TIMESTAMP} give a {@code TIMESTAMP}. The end of a month is
-     * kept within the month, as in {@code 2024-01-31 + 1 MONTH} is
-     * {@code 2024-02-29}.
-     *
-     * @throws SqlException for an interval anywhere else
+     * Arithmetic with a {@code TIMESTAMP WITH TIME ZONE}, which depends on
+     * the time zone and is therefore a call of a function that holds it:
+     * {@code add} for an instant plus an interval, {@code subtract} for an
+     * instant minus an interval or minus another instant, a local date or
+     * timestamp first becoming an instant in the time zone.
      */
-    private Bound intervalArithmetic(ArithmeticOp op, SqlExpr.Binary b) {
-        SqlExpr.Interval interval = b.right() instanceof SqlExpr.Interval i ? i : (SqlExpr.Interval) b.left();
-        SqlExpr other = b.right() == interval ? b.left() : b.right();
-        boolean subtract = op == ArithmeticOp.SUBTRACT;
-        if (other instanceof SqlExpr.Interval || !(op == ArithmeticOp.ADD || subtract && b.right() == interval)) {
-            throw intervalNotSupported(interval);
+    private Bound zonedArithmetic(ArithmeticOp op, Bound l, Bound r, Position position) {
+        DataType lt = l.type();
+        DataType rt = r.type();
+        Expression left = l.expression();
+        Expression right = r.expression();
+        if (op == ArithmeticOp.SUBTRACT && isDated(lt) && isDated(rt)) {
+            left = as(l, DataType.TIMESTAMPTZ);
+            right = as(r, DataType.TIMESTAMPTZ);
         }
-        Expression base = bound(other).expression();
-        DataType type = base.type();
-        if (!Expressions.isConstant(base) || type != DataType.DATE && type != DataType.TIMESTAMP) {
-            throw intervalNotSupported(interval);
+        ScalarFunction function = op == ArithmeticOp.ADD ? ZonedOperators.add(lt, rt)
+                : op == ArithmeticOp.SUBTRACT ? ZonedOperators.subtract(left.type(), right.type()) : null;
+        if (function == null) {
+            throw new SqlException("No operator " + op.symbol() + " for " + lt + " and " + rt, position);
         }
-        Object value = Literals.evaluate(base, other.position());
+        return foldNull(new Expression.Call(function, List.of(left, right)));
+    }
+
+    private static boolean isDated(DataType type) {
+        return type == DataType.DATE || type == DataType.TIMESTAMP || type == DataType.TIMESTAMPTZ;
+    }
+
+    /**
+     * {@code date + INTERVAL '...'} and {@code date - INTERVAL '...'} over a
+     * constant {@code DATE} and an interval literal without a time of day,
+     * computed here: the result stays a {@code DATE}, where DuckDB gives a
+     * {@code TIMESTAMP}, so that a filter of a date column against it can
+     * go to a source as it is. The end of a month is kept within the month,
+     * as in {@code 2024-01-31 + 1 MONTH} is {@code 2024-02-29}. Every other
+     * interval arithmetic is an operator, see {@link TypeRules#add}.
+     *
+     * @return the date, or {@code null} for any other arithmetic
+     */
+    private Bound constantDateShift(ArithmeticOp op, Bound l, Bound r, SqlExpr.Binary b) {
+        Bound date;
+        SqlExpr.Interval interval;
+        if (b.right() instanceof SqlExpr.Interval i && !(b.left() instanceof SqlExpr.Interval)
+                && (op == ArithmeticOp.ADD || op == ArithmeticOp.SUBTRACT)) {
+            date = l;
+            interval = i;
+        } else if (b.left() instanceof SqlExpr.Interval i && !(b.right() instanceof SqlExpr.Interval)
+                && op == ArithmeticOp.ADD) {
+            date = r;
+            interval = i;
+        } else {
+            return null;
+        }
+        Interval shift = (Interval) (date == l ? r : l).literal().value();
+        if (date.isNull() || date.type() != DataType.DATE || !Expressions.isConstant(date.expression())
+                || shift.micros() != 0) {
+            return null;
+        }
+        Object value = Literals.evaluate(date.expression(), b.position());
         if (value == null) {
-            return nullOf(type);
+            return nullOf(DataType.DATE);
         }
-        long n;
         try {
-            n = Long.parseLong(interval.value());
-            n = subtract ? Math.negateExact(n) : n;
-        } catch (ArithmeticException | NumberFormatException e) {
-            throw new SqlException("The interval '" + interval.value() + "' is not a whole number",
-                    interval.position());
-        }
-        String unit = interval.unit().endsWith("S") ? interval.unit().substring(0, interval.unit().length() - 1)
-                : interval.unit();
-        boolean dateUnit = switch (unit) {
-            case "YEAR", "MONTH", "DAY" -> true;
-            case "HOUR", "MINUTE", "SECOND" -> false;
-            default -> throw new SqlException("Not supported: the interval unit " + interval.unit(),
-                    interval.position());
-        };
-        try {
-            if (type == DataType.DATE && dateUnit) {
-                LocalDate d = LocalDate.ofEpochDay((Integer) value);
-                d = switch (unit) {
-                    case "YEAR" -> d.plusYears(n);
-                    case "MONTH" -> d.plusMonths(n);
-                    default -> d.plusDays(n);
-                };
-                return Bound.typed(new Expression.Literal(DataType.DATE, Dates.checkDays(d.toEpochDay())));
-            }
-            LocalDateTime t = type == DataType.DATE ? LocalDate.ofEpochDay((Integer) value).atStartOfDay()
-                    : Conversions.toLocalDateTime((Long) value);
-            t = switch (unit) {
-                case "YEAR" -> t.plusYears(n);
-                case "MONTH" -> t.plusMonths(n);
-                case "DAY" -> t.plusDays(n);
-                case "HOUR" -> t.plusHours(n);
-                case "MINUTE" -> t.plusMinutes(n);
-                default -> t.plusSeconds(n);
-            };
-            return Bound.typed(new Expression.Literal(DataType.TIMESTAMP, Conversions.toMicros(t)));
+            Interval signed = op == ArithmeticOp.SUBTRACT ? shift.negate() : shift;
+            LocalDate d = LocalDate.ofEpochDay((Integer) value).plusMonths(signed.months()).plusDays(signed.days());
+            return Bound.typed(new Expression.Literal(DataType.DATE, Dates.checkDays(d.toEpochDay())));
         } catch (RuntimeException e) {
-            throw new SqlException("The date is out of range after INTERVAL '" + interval.value() + "' "
-                    + interval.unit(), interval.position());
+            throw new SqlException("The date is out of range after INTERVAL '" + interval.text() + "'",
+                    interval.position());
         }
     }
 
@@ -605,7 +634,26 @@ final class ExpressionBinder {
     }
 
     /** The type of a bare {@code NULL} next to an operand of a type: that type, if the operator takes it twice. */
-    private static DataType nullOperand(ArithmeticOp op, DataType other) {
+    private static DataType nullOperand(ArithmeticOp op, DataType other, boolean left, Position position) {
+        boolean add = op == ArithmeticOp.ADD;
+        boolean subtract = op == ArithmeticOp.SUBTRACT;
+        if (add || subtract) {
+            // As DuckDB: a date takes days, a timestamp and an instant an interval, but a NULL before a minus is
+            // of their own type; a time of day and an interval take an interval after a minus only.
+            if (other == DataType.DATE) {
+                return subtract && left ? DataType.DATE : DataType.INTEGER;
+            }
+            if (other == DataType.TIMESTAMP || other == DataType.TIMESTAMPTZ) {
+                return subtract && left ? other : DataType.INTERVAL;
+            }
+            if (other == DataType.TIME || other == DataType.INTERVAL) {
+                if (subtract && !left) {
+                    return DataType.INTERVAL;
+                }
+                throw new SqlException("Could not choose a best candidate for the operator " + op.symbol()
+                        + " of NULL and " + other.sqlName() + "; add an explicit cast", position);
+            }
+        }
         try {
             op.resultType(other, other);
             return other;
@@ -661,9 +709,9 @@ final class ExpressionBinder {
             r = typed(r, l.type());
         }
         if (l.kind() == Kind.STRING && r.kind() != Kind.STRING && r.type() != DataType.VARCHAR) {
-            l = Bound.typed(Literals.lazily(l.literal(), r.type(), position));
+            l = Bound.typed(lazily(l.literal(), r.type(), position));
         } else if (r.kind() == Kind.STRING && l.kind() != Kind.STRING && l.type() != DataType.VARCHAR) {
-            r = Bound.typed(Literals.lazily(r.literal(), l.type(), position));
+            r = Bound.typed(lazily(r.literal(), l.type(), position));
         }
         DataType lt = l.type();
         DataType rt = r.type();
@@ -806,7 +854,7 @@ final class ExpressionBinder {
             return typed(b, target).expression();
         }
         if (b.kind() == Kind.STRING) {
-            return Literals.lazily(b.literal(), target, position);
+            return lazily(b.literal(), target, position);
         }
         if (b.type() == DataType.VARCHAR && target != DataType.VARCHAR) {
             if (target.isNested()) {
@@ -931,7 +979,7 @@ final class ExpressionBinder {
         for (Bound b : values) {
             result.add(switch (b.kind()) {
                 case NULL, PARAMETER -> typed(b, target);
-                case STRING -> target == DataType.VARCHAR ? b : Bound.typed(Literals.lazily(b.literal(), target,
+                case STRING -> target == DataType.VARCHAR ? b : Bound.typed(lazily(b.literal(), target,
                         position));
                 case INTEGER -> target.isIntegral() ? new Bound(Literals.convert(b.literal(), target, position),
                         Kind.INTEGER) : b;
@@ -1006,7 +1054,7 @@ final class ExpressionBinder {
             if (b.isNull()) {
                 result.add(typed(b, type));
             } else if (b.kind() == Kind.STRING && type != DataType.VARCHAR) {
-                result.add(Bound.typed(Literals.lazily(b.literal(), type, position)));
+                result.add(Bound.typed(lazily(b.literal(), type, position)));
             } else if (b.kind() == Kind.INTEGER && type.isIntegral() && !b.type().equals(type)
                     && Literals.fits(b.literal(), type)) {
                 result.add(Bound.typed(Literals.convert(b.literal(), type, position)));
@@ -1054,7 +1102,7 @@ final class ExpressionBinder {
                 result.add(typed(b, target));
             } else if (b.kind() == Kind.STRING && target != DataType.VARCHAR
                     || b.kind() == Kind.INTEGER && target.isIntegral() && !b.type().equals(target)) {
-                result.add(Bound.typed(Literals.convert(b.literal(), target, position)));
+                result.add(Bound.typed(Literals.convert(b.literal(), target, position, context.zone())));
             } else {
                 result.add(b);
             }
@@ -1095,7 +1143,7 @@ final class ExpressionBinder {
             return typed(b, DataType.BOOLEAN).expression();
         }
         if (b.kind() == Kind.STRING) {
-            return Literals.lazily(b.literal(), DataType.BOOLEAN, position);
+            return lazily(b.literal(), DataType.BOOLEAN, position);
         }
         if (!Casts.allowed(b.type(), DataType.BOOLEAN)) {
             throw new SqlException("Cannot use a value of type " + b.type() + " as a condition", position);
@@ -1160,16 +1208,48 @@ final class ExpressionBinder {
                 if (!args.isEmpty()) {
                     throw arity(name, p);
                 }
-                return Bound.typed(new Expression.Literal(DataType.DATE,
-                        (int) context.now().toLocalDate().toEpochDay()));
+                return Bound.typed(new Expression.Literal(DataType.DATE, Dates.dayOf(localNow())));
             }
             case "now", "current_timestamp", "get_current_timestamp", "transaction_timestamp" -> {
                 if (!args.isEmpty()) {
                     throw arity(name, p);
                 }
-                long micros = context.now().toEpochSecond(ZoneOffset.UTC) * 1_000_000L
-                        + context.now().getNano() / 1_000;
-                return Bound.typed(new Expression.Literal(DataType.TIMESTAMP, micros));
+                return Bound.typed(new Expression.Literal(DataType.TIMESTAMPTZ, nowMicros()));
+            }
+            case "current_time", "current_localtime", "localtime" -> {
+                // DuckDB gives current_time a TIME WITH TIME ZONE, which FyrQL does not have.
+                if (!args.isEmpty()) {
+                    throw arity(name, p);
+                }
+                return Bound.typed(new Expression.Literal(DataType.TIME, Dates.timeOf(localNow())));
+            }
+            case "current_localtimestamp", "localtimestamp" -> {
+                if (!args.isEmpty()) {
+                    throw arity(name, p);
+                }
+                return Bound.typed(new Expression.Literal(DataType.TIMESTAMP, localNow()));
+            }
+            case "current_setting" -> {
+                if (args.size() != 1 || !(args.get(0) instanceof SqlExpr.Literal l)
+                        || l.kind() != SqlExpr.LiteralKind.STRING) {
+                    throw new SqlException("current_setting requires a constant name", p);
+                }
+                if (!l.text().equalsIgnoreCase("TimeZone")) {
+                    throw new SqlException("unrecognized configuration parameter \"" + l.text() + "\"", p);
+                }
+                return Bound.typed(new Expression.Literal(DataType.VARCHAR, ZonedDates.name(context.zone())));
+            }
+            case "age" -> {
+                if (args.size() == 1) {
+                    // The age at midnight of the current date.
+                    Bound x = bound(args.get(0));
+                    long midnight = Dates.timestamp(Dates.dayOf(localNow()), 0);
+                    Bound start = x.type() == DataType.TIMESTAMPTZ && !x.isNull()
+                            ? Bound.typed(new Expression.Literal(DataType.TIMESTAMPTZ,
+                                    ZonedDates.toInstant(midnight, context.zone())))
+                            : Bound.typed(new Expression.Literal(DataType.TIMESTAMP, midnight));
+                    return foldNull(call("age", List.of(start, x), p).expression());
+                }
             }
             case "greatest", "least" -> {
                 return foldNull(call(name, unifyInOrder(boundAll(args), name + " function", p), p).expression());
@@ -1283,6 +1363,17 @@ final class ExpressionBinder {
             types.add(a.kind() == Kind.PARAMETER ? "?" : a.isNull() ? "NULL" : a.type().sqlName());
         }
         throw new SqlException("No function matches " + name + "(" + String.join(", ", types) + ")", position);
+    }
+
+    /** The time of the query as microseconds since 1970-01-01 00:00:00 UTC. */
+    private long nowMicros() {
+        return Math.addExact(Math.multiplyExact(context.now().getEpochSecond(), 1_000_000L),
+                context.now().getNano() / 1_000);
+    }
+
+    /** The time of the query as the local timestamp in the time zone of the session. */
+    private long localNow() {
+        return ZonedDates.toLocal(nowMicros(), context.zone());
     }
 
     /** Checks that the format of strftime or strptime is a constant with known specifiers. */

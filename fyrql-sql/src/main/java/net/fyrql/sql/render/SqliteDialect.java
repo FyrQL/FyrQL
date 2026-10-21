@@ -60,7 +60,12 @@ public final class SqliteDialect extends StandardDialect {
             throw new IllegalArgumentException(name() + " has no type for HUGEINT");
         }
         // A column declared INTEGER holds 64 bits in SQLite, and a catalog reads it as BIGINT.
-        return type == Scalar.INTEGER ? "INT4" : type.sqlName();
+        return switch (type) {
+            case INTEGER -> "INT4";
+            case TIMESTAMPTZ -> "TIMESTAMP";
+            case INTERVAL -> "VARCHAR";
+            default -> type.sqlName();
+        };
     }
 
     @Override
@@ -105,6 +110,22 @@ public final class SqliteDialect extends StandardDialect {
 
     @Override
     String uuidLiteral(java.util.UUID value) {
+        return string(value.toString());
+    }
+
+    @Override
+    String timeLiteral(long micros) {
+        return string(Conversions.formatTime(micros));
+    }
+
+    /** An instant as the text of its timestamp in UTC. */
+    @Override
+    String timestampTzLiteral(long micros) {
+        return timestampLiteral(micros);
+    }
+
+    @Override
+    String intervalLiteral(net.fyrql.core.value.Interval value) {
         return string(value.toString());
     }
 

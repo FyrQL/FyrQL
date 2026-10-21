@@ -150,6 +150,18 @@ final class SqlText {
             return form == 0 ? new SqlExpr.Literal(type == DataType.DATE ? LiteralKind.DATE : LiteralKind.TIMESTAMP,
                     text, P) : form == 1 ? string(text) : cast(string(text), type);
         }
+        if (type == DataType.TIME || type == DataType.TIMESTAMPTZ) {
+            // An instant with its offset, which reads the same in every time zone.
+            String text = type == DataType.TIME ? Conversions.formatTime((Long) value)
+                    : Conversions.formatTimestampTz((Long) value, java.time.ZoneOffset.UTC);
+            int form = random.nextInt(3);
+            return form == 0 ? new SqlExpr.Literal(type == DataType.TIME ? LiteralKind.TIME : LiteralKind.TIMESTAMPTZ,
+                    text, P) : form == 1 ? string(text) : cast(string(text), type);
+        }
+        if (type == DataType.INTERVAL) {
+            String text = value.toString();
+            return chance(50) ? new SqlExpr.Interval(text, null, P) : cast(string(text), type);
+        }
         if (type == DataType.FLOAT || type == DataType.DOUBLE) {
             double d = ((Number) value).doubleValue();
             if (Double.isNaN(d) || Double.isInfinite(d) || chance(50)) {

@@ -30,7 +30,7 @@ import java.util.Set;
  * {@code T[]} is a list of {@code T}, {@code STRUCT(name T, ...)} (or
  * {@code ROW(...)}) a struct, whose field names keep their spelling and may
  * be in double quotes, and {@code MAP(K, V)} a map. The DuckDB types FyrQL
- * does not have, such as {@code TIME}, {@code INTERVAL}, {@code UNION},
+ * does not have, such as {@code TIME WITH TIME ZONE}, {@code UNION},
  * the unsigned integers or the arrays of a fixed size {@code T[n]}, are
  * errors.
  */
@@ -56,6 +56,10 @@ public final class TypeNames {
             Map.entry("TIMESTAMP", DataType.TIMESTAMP), Map.entry("DATETIME", DataType.TIMESTAMP),
             Map.entry("TIMESTAMP_US", DataType.TIMESTAMP),
             Map.entry("TIMESTAMP WITHOUT TIME ZONE", DataType.TIMESTAMP),
+            Map.entry("TIMESTAMPTZ", DataType.TIMESTAMPTZ),
+            Map.entry("TIMESTAMP WITH TIME ZONE", DataType.TIMESTAMPTZ),
+            Map.entry("TIME", DataType.TIME), Map.entry("TIME WITHOUT TIME ZONE", DataType.TIME),
+            Map.entry("INTERVAL", DataType.INTERVAL),
             Map.entry("UUID", DataType.UUID), Map.entry("GUID", DataType.UUID));
 
     private static final List<String> STRINGS = List.of("VARCHAR", "CHAR", "BPCHAR", "TEXT", "STRING", "NVARCHAR",

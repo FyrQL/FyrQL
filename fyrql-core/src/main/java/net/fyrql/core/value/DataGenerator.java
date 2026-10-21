@@ -167,6 +167,13 @@ public record DataGenerator(long seed, double nullRate, double edgeRate) {
             case TIMESTAMP -> small ? random.nextLong(-1_000_000_000L, 1_000_000_001L) * 1_000_000L
                     : random.nextLong(-62_000_000_000_000_000L, 253_000_000_000_000_000L);
             case UUID -> new UUID(random.nextLong(), random.nextLong());
+            case TIME -> small ? random.nextLong(0, 86_400) * 1_000_000L : random.nextLong(0, 86_400_000_000L);
+            case TIMESTAMPTZ -> small ? random.nextLong(-1_000_000_000L, 1_000_000_001L) * 1_000_000L
+                    : random.nextLong(-62_000_000_000_000_000L, 253_000_000_000_000_000L);
+            case INTERVAL -> small ? Interval.of(random.nextInt(-24, 25), random.nextInt(-40, 41),
+                    random.nextLong(-100_000, 100_001) * 1_000_000L)
+                    : Interval.of(random.nextInt(-100_000, 100_001), random.nextInt(-1_000_000, 1_000_001),
+                            random.nextLong(-1_000_000_000_000_000L, 1_000_000_000_000_001L));
         };
     }
 }

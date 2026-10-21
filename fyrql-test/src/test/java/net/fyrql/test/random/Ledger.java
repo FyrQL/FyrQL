@@ -44,6 +44,65 @@ final class Ledger {
     record Entry(String id, String description, String since, String fixed, Predicate<Outcome> matches) {
     }
 
+    /**
+     * Tells whether the rows of a difference agree once every value that
+     * reads as an interval is normalized, as both engines compare intervals.
+     */
+    private static boolean sameUpToEqualIntervals(Outcome o) {
+        if (o.kind() != Outcome.Kind.ROWS_DIFFER) {
+            return false;
+        }
+        List<String> expected = new java.util.ArrayList<>();
+        List<String> actual = new java.util.ArrayList<>();
+        List<String> firstExpected = new java.util.ArrayList<>();
+        List<String> firstActual = new java.util.ArrayList<>();
+        for (String line : o.report().split("\n")) {
+            String l = line.strip();
+            int e = l.indexOf("expected [");
+            int a = l.indexOf("], actual [");
+            if (l.startsWith("row ") && e >= 0 && a > e) {
+                firstExpected.add(normalized(l.substring(e + 9, a + 1)));
+                firstActual.add(normalized(l.substring(a + 10)));
+            } else if (l.startsWith("missing:")) {
+                expected.add(normalized(l.substring(8).strip()));
+            } else if (l.startsWith("extra:")) {
+                actual.add(normalized(l.substring(6).strip()));
+            }
+        }
+        if (expected.isEmpty() && actual.isEmpty()) {
+            // Only the first row that differs is known.
+            expected = firstExpected;
+            actual = firstActual;
+        }
+        java.util.Collections.sort(expected);
+        java.util.Collections.sort(actual);
+        return !expected.isEmpty() && expected.equals(actual);
+    }
+
+    /** A row of a report with each value that reads as an interval in its normalized form. */
+    private static String normalized(String row) {
+        StringBuilder out = new StringBuilder();
+        for (String token : row.split("((?<=[\\[\\],])|(?=[\\[\\],]))")) {
+            String t = token.strip();
+            if (t.isEmpty() || t.startsWith("'") || !t.matches(".*(year|mon|day|:).*")) {
+                out.append(token);
+                continue;
+            }
+            try {
+                net.fyrql.core.value.Interval i = net.fyrql.core.value.Interval.parse(t);
+                long micros = i.micros();
+                long days = i.days() + micros / 86_400_000_000L;
+                micros %= 86_400_000_000L;
+                long months = i.months() + days / 30;
+                days %= 30;
+                out.append("iv(").append(months).append(',').append(days).append(',').append(micros).append(')');
+            } catch (RuntimeException e) {
+                out.append(token);
+            }
+        }
+        return out.toString();
+    }
+
     static final List<Entry> ENTRIES = List.of(
             new Entry("duckdb-optimizer-errors", "An expression fails in one engine only, and DuckDB without its"
                     + " optimizer agrees with FyrQL: DuckDB folds constant expressions while planning and fails where"
@@ -78,8 +137,10 @@ final class Ledger {
             new Entry("comparison-without-common-type", "DuckDB binds a comparison of two types without a common"
                     + " type, such as DECIMAL and DATE, and fails only when a row reaches the cast; FyrQL rejects it"
                     + " while binding.", "1.5.6", null,
-                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().matches(
-                            ".*Cannot compare values of type (?!VARCHAR )\\S+ and type (?!VARCHAR )\\S+ - an explicit cast.*")),
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && (o.fyrqlError().matches(".*Cannot compare values"
+                            + " of type (?!VARCHAR ).+ and type (?!VARCHAR ).+ - an explicit cast.*")
+                            || o.fyrqlError().matches(".*Cannot compare values of type (VARCHAR and type (MAP|STRUCT)"
+                                    + "|(MAP|STRUCT).* and type VARCHAR ).*"))),
             new Entry("set-operation-without-common-type", "DuckDB unites two columns of types without a common"
                     + " type, such as DATE and DECIMAL, or a list and a VARCHAR, with a cast that fails only when a"
                     + " row reaches it; FyrQL rejects them while binding.", "1.5.6", null,
@@ -151,10 +212,75 @@ final class Ledger {
                     + " also without its optimizer, and fails where FyrQL never evaluates it: in a column no one"
                     + " reads, where no row reaches it, or in the bounds of a constant NULL BETWEEN, which FyrQL's"
                     + " binder drops as DuckDB's does.", "1.5.6", null, Ledger::failsAsAConstant),
+            new Entry("plan-without-zone", "A plan built in Java has no time zone of a session, which only the"
+                    + " binder gives the casts and functions of instants: it writes and reads an instant as text and"
+                    + " takes its local date and time in UTC, while its rendering runs in DuckDB in the time zone of"
+                    + " the session. Explained only where FyrQL agrees with DuckDB on the same SQL.", "1.5.6", null,
+                    o -> ((o.kind() == Outcome.Kind.ROWS_DIFFER || o.kind() == Outcome.Kind.DUCKDB_FAILS
+                            || o.kind() == Outcome.Kind.FYRQL_FAILS) && o.bound() == Outcome.Kind.SAME
+                            || o.kind() == Outcome.Kind.DUCKDB_FAILS && o.bound() == Outcome.Kind.BOTH_FAIL)
+                            && !RandomTables.ZONE.equals(java.time.ZoneOffset.UTC)
+                            && !RandomTables.ZONE.getId().equals("UTC")),
+            new Entry("interval-ties", "Intervals that both engines compare as equal but write differently, as 30"
+                    + " days, 720:00:00 and 1 month, keep the order of their input among equal sort keys, which"
+                    + " differs between the engines, and min, max and first may return either of them. Explained"
+                    + " where the rows agree with the intervals normalized.", "1.5.6", null,
+                    Ledger::sameUpToEqualIntervals),
+            new Entry("round-decimal-negative", "DuckDB rounds a decimal to negative places to 0 where the rounded"
+                    + " value needs one integral digit more than the decimal has, as in round(9.450, -1) = 0 while"
+                    + " round(19.450, -1) = 20; FyrQL rounds to 10.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER
+                            && o.sql().matches("(?s).*round\\(.*, \\(?-\\d+\\)?\\).*")),
+            new Entry("power-last-bit", "The math libraries of the two engines differ in the last bit of a large"
+                    + " power, as of power(-10, 23), which a cast to a decimal or to text shows.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.sql().matches("(?s).*\\bpow(er)?\\(.*")),
+            new Entry("window-value-filter", "DuckDB's parser takes first and last over a window as first_value and"
+                    + " last_value and rejects a FILTER on them; FyrQL takes them as aggregates with a filter.",
+                    "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS
+                            && o.duckError().contains("FILTER is not implemented for non-aggregate window functions")),
+            new Entry("avg-hugeint-range", "DuckDB averages HUGEINTs whose sum leaves the range of HUGEINT; FyrQL"
+                    + " sums them exactly and fails.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().contains("Out of range for HUGEINT")
+                            && o.sql().contains("avg(")),
+            new Entry("lead-lag-instant-text", "DuckDB writes an instant that lead or lag takes as the default of a"
+                    + " text in UTC; FyrQL writes it in the time zone of the session, as a cast does in both.",
+                    "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.sql().matches("(?s).*\\b(lead|lag)\\(.*")
+                            && o.report().contains("+00'") && !RandomTables.ZONE.getId().equals("UTC")),
+            new Entry("duckdb-part-errors", "DuckDB fails on a part that a time of day or an instant does not have,"
+                    + " as date_part('year', a TIME) or date_diff('timezone', ...), also where no row reaches it, as"
+                    + " in a filter after false AND or for a NULL; FyrQL fails only where a row reaches it.",
+                    "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS
+                            && (o.duckError().contains("Specifier type not implemented")
+                                    || o.duckError().contains("unsuccessful or closed pending query result")
+                                    && o.sql().matches("(?s).*date_part\\('[a-z_]+', .*"))),
+            new Entry("constant-in-list-cast", "DuckDB folds an IN list whose operands are all constants while"
+                    + " binding, also with the optimizer disabled, and casts every constant of the list to the common"
+                    + " type there even where the left operand is NULL; a HUGEINT beyond DECIMAL(38,10) fails. FyrQL"
+                    + " folds NULL IN (...) to NULL without casting the list.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.DUCKDB_FAILS
+                            && o.duckError().matches("(?s).*Could not cast value -?\\d+ to DECIMAL.*")
+                            && o.sql().matches("(?s).*CAST\\(NULL AS [A-Z]+\\) IN \\(.*")),
+            new Entry("subquery-aggregate-before-outer", "FyrQL computes the aggregate of a subquery that it"
+                    + " turns into a join for every group before it reads the rows of the outer query, and fails"
+                    + " where the aggregate fails also when the outer query has no row that needs it; DuckDB computes"
+                    + " it for the rows of the outer query only.", "1.5.6", null,
+                    o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().contains(" in Aggregate#")
+                            && o.plan() != null && Plans.nodes(o.plan()).stream().anyMatch(n ->
+                                    n instanceof PlanNode.Join j && j.type() == PlanNode.JoinType.SINGLE
+                                            && Plans.nodes(j.right()).stream()
+                                                    .anyMatch(r -> r instanceof PlanNode.Aggregate))),
             new Entry("join-empty-build", "FyrQL reads the right input of a join first and does not read the left"
                     + " input of an inner join or a semi join whose right input has no rows; DuckDB evaluates the"
                     + " expressions of the left input, also without its optimizer, and may fail there.", "1.5.6",
                     null, Ledger::skipsTheLeftInput),
+            new Entry("duckdb-join-skips-input", "DuckDB does not evaluate one input of an inner join or a"
+                    + " semi join when its hash table, built from the other input, holds no key that is not NULL;"
+                    + " which input it builds from depends on its plan, also without its optimizer. FyrQL reads both"
+                    + " inputs where the right one has rows, and fails in the left one where DuckDB gives no rows.",
+                    "1.5.6", null, Ledger::skippedByDuckDb),
             new Entry("subquery-null-column", "DuckDB keeps a bare NULL that a subquery selects untyped, so that"
                     + " an operator over it picks its overload as for a bare NULL, such as a BIGINT for %; FyrQL"
                     + " types the column INTEGER.", "1.5.6", null,
@@ -321,6 +447,26 @@ final class Ledger {
         } catch (RuntimeException e) {
             return true;
         }
+    }
+
+    /**
+     * Tells whether FyrQL failed, also against DuckDB without its optimizer,
+     * where DuckDB gives no rows, and the plan FyrQL ran has an inner or a
+     * semi join that computes expressions in its left input.
+     */
+    private static boolean skippedByDuckDb(Outcome o) {
+        if (o.kind() != Outcome.Kind.FYRQL_FAILS || o.unoptimized() != Outcome.Kind.FYRQL_FAILS
+                || !o.report().equals(TwoEngines.DUCKDB_ROWS + "0\n") || o.optimized() == null) {
+            return false;
+        }
+        for (PlanNode node : Plans.nodes(o.optimized())) {
+            if (node instanceof PlanNode.Join j && (j.type() == PlanNode.JoinType.INNER
+                    || j.type() == PlanNode.JoinType.SEMI) && Plans.nodes(j.left()).stream().anyMatch(n ->
+                    Plans.expressions(n).stream().anyMatch(e -> !(e instanceof Expression.Column)))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

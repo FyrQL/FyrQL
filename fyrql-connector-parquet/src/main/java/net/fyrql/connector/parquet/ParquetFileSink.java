@@ -14,9 +14,11 @@ package net.fyrql.connector.parquet;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.FileOutput;
 import net.fyrql.connector.FileStores;
+import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.Sink;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.Casts;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.BigIntVector;
 import net.fyrql.core.vector.BooleanVector;
@@ -26,6 +28,7 @@ import net.fyrql.core.vector.DoubleVector;
 import net.fyrql.core.vector.FloatVector;
 import net.fyrql.core.vector.HugeIntVector;
 import net.fyrql.core.vector.IntVector;
+import net.fyrql.core.vector.IntervalVector;
 import net.fyrql.core.vector.ListVector;
 import net.fyrql.core.vector.MapVector;
 import net.fyrql.core.vector.SmallIntVector;
@@ -36,6 +39,10 @@ import net.fyrql.core.vector.Vector;
 import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
+import org.apache.parquet.format.ConvertedType;
+import org.apache.parquet.format.FileMetaData;
+import org.apache.parquet.format.SchemaElement;
+import org.apache.parquet.format.Util;
 import org.apache.parquet.hadoop.ParquetFileWriter;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.api.WriteSupport;
@@ -47,10 +54,15 @@ import org.apache.parquet.io.api.RecordConsumer;
 import org.apache.parquet.schema.MessageType;
 
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
@@ -128,6 +140,8 @@ final class ParquetFileSink implements Sink {
             case "v2" -> ParquetProperties.WriterVersion.PARQUET_2_0;
             default -> throw new IllegalArgumentException(v);
         }).orElse(ParquetProperties.WriterVersion.PARQUET_1_0);
+        // A file holds instants in UTC.
+        o.string(FileWriterProvider.TIME_ZONE);
         o.rejectUnknown();
         MessageType message = ParquetSchemas.message(schema);
         ValueWriter[] columns = new ValueWriter[schema.size()];
@@ -141,7 +155,8 @@ final class ParquetFileSink implements Sink {
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot write " + location + ": " + e.getMessage(), e);
         }
-        Output output = new Output(file);
+        boolean intervals = schema.fields().stream().anyMatch(f -> Casts.mentions(f.type(), DataType.Scalar.INTERVAL));
+        Output output = new Output(file, intervals);
         try {
             ParquetWriter<Cursor> writer = new Builder(output, new RowSupport(message, schema, columns))
                     .withConf(new PlainParquetConfiguration())
@@ -197,6 +212,7 @@ final class ParquetFileSink implements Sink {
         }
         done = true;
         try {
+            output.holdBack();
             writer.close();
             file.commit();
         } catch (IOException e) {
@@ -238,7 +254,9 @@ final class ParquetFileSink implements Sink {
                 case TINYINT -> (out, v, r) -> out.addInteger(((TinyIntVector) v).getByte(r));
                 case SMALLINT -> (out, v, r) -> out.addInteger(((SmallIntVector) v).getShort(r));
                 case INTEGER, DATE -> (out, v, r) -> out.addInteger(((IntVector) v).getInt(r));
-                case BIGINT, TIMESTAMP -> (out, v, r) -> out.addLong(((BigIntVector) v).getLong(r));
+                case BIGINT, TIMESTAMP, TIME, TIMESTAMPTZ -> (out, v, r) -> out.addLong(((BigIntVector) v)
+                        .getLong(r));
+                case INTERVAL -> (out, v, r) -> out.addBinary(interval((IntervalVector) v, r, path));
                 case HUGEINT -> (out, v, r) -> out.addBinary(hugeint((HugeIntVector) v, r, path));
                 case FLOAT -> (out, v, r) -> out.addFloat(((FloatVector) v).getFloat(r));
                 case DOUBLE -> (out, v, r) -> out.addDouble(((DoubleVector) v).getDouble(r));
@@ -342,6 +360,27 @@ final class ParquetFileSink implements Sink {
      *
      * @throws IllegalArgumentException for a value of 39 digits
      */
+    /**
+     * An interval as DuckDB writes it: months, days and milliseconds as three
+     * little-endian unsigned integers, the milliseconds cut to 32 bits.
+     *
+     * @throws IllegalArgumentException if a part is negative, as in DuckDB
+     */
+    private static Binary interval(IntervalVector v, int row, String path) {
+        int months = v.getMonths(row);
+        int days = v.getDays(row);
+        long micros = v.getMicros(row);
+        if (months < 0 || days < 0 || micros < 0) {
+            throw new IllegalArgumentException("Parquet files do not support negative intervals, as "
+                    + v.get(row) + " of the column " + path + " is");
+        }
+        byte[] bytes = new byte[12];
+        putIntLittleEndian(bytes, 0, months);
+        putIntLittleEndian(bytes, 4, days);
+        putIntLittleEndian(bytes, 8, (int) (micros / 1000));
+        return Binary.fromConstantByteArray(bytes);
+    }
+
     private static Binary hugeint(HugeIntVector v, int row, String path) {
         long high = v.getHigh(row);
         long low = v.getLow(row);
@@ -363,6 +402,12 @@ final class ParquetFileSink implements Sink {
         java.util.Arrays.fill(bytes, 0, 16 - raw.length, (byte) (unscaled.signum() < 0 ? 0xff : 0));
         System.arraycopy(raw, 0, bytes, 16 - raw.length, raw.length);
         return bytes;
+    }
+
+    private static void putIntLittleEndian(byte[] bytes, int offset, int value) {
+        for (int i = 0; i < 4; i++) {
+            bytes[offset + i] = (byte) (value >>> (8 * i));
+        }
     }
 
     private static void putLong(byte[] bytes, int offset, long value) {
@@ -458,13 +503,60 @@ final class ParquetFileSink implements Sink {
     /**
      * The file being written as an output of parquet-java, which keeps the
      * stream so that a write can be abandoned without the footer.
+     * <p>
+     * parquet-java marks an interval with the converted type
+     * {@code INTERVAL} and the logical type {@code UNKNOWN}, which means a
+     * column of nothing but {@code NULL}s and which DuckDB reads so. For a
+     * schema with intervals the output holds back what the writer writes
+     * when it closes, the last row group and the footer, and writes the
+     * footer without that logical type, as DuckDB does.
      */
     private static final class Output implements OutputFile {
-        private final FileOutput file;
-        private OutputStream stream;
+        private static final byte[] MAGIC = "PAR1".getBytes(StandardCharsets.US_ASCII);
 
-        Output(FileOutput file) {
+        private final FileOutput file;
+        private final boolean intervals;
+        private OutputStream stream;
+        /** What is held back, or {@code null}. */
+        private ByteArrayOutputStream held;
+
+        Output(FileOutput file, boolean intervals) {
             this.file = file;
+            this.intervals = intervals;
+        }
+
+        /** Holds back what is written from now on if the schema has intervals. */
+        void holdBack() {
+            if (intervals) {
+                held = new ByteArrayOutputStream();
+            }
+        }
+
+        /** Writes what was held back, with the footer without the logical type of the intervals. */
+        private void release(OutputStream s) throws IOException {
+            if (held == null) {
+                return;
+            }
+            byte[] tail = held.toByteArray();
+            held = null;
+            int n = tail.length;
+            int length = n < 8 ? -1 : ByteBuffer.wrap(tail, n - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+            int start = n - 8 - length;
+            if (length < 0 || start < 0) {
+                throw new IOException("The footer of the Parquet file " + file.location() + " was not found");
+            }
+            FileMetaData footer = Util.readFileMetaData(new ByteArrayInputStream(tail, start, length));
+            for (SchemaElement e : footer.getSchema()) {
+                if (e.getConverted_type() == ConvertedType.INTERVAL) {
+                    e.unsetLogicalType();
+                }
+            }
+            ByteArrayOutputStream rewritten = new ByteArrayOutputStream();
+            Util.writeFileMetaData(footer, rewritten);
+            s.write(tail, 0, start);
+            rewritten.writeTo(s);
+            s.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(rewritten.size()).array());
+            s.write(MAGIC);
         }
 
         @Override
@@ -486,13 +578,13 @@ final class ParquetFileSink implements Sink {
 
                 @Override
                 public void write(int b) throws IOException {
-                    s.write(b);
+                    (held != null ? held : s).write(b);
                     position++;
                 }
 
                 @Override
                 public void write(byte[] b, int off, int len) throws IOException {
-                    s.write(b, off, len);
+                    (held != null ? held : s).write(b, off, len);
                     position += len;
                 }
 
@@ -503,7 +595,11 @@ final class ParquetFileSink implements Sink {
 
                 @Override
                 public void close() throws IOException {
-                    s.close();
+                    try {
+                        release(s);
+                    } finally {
+                        s.close();
+                    }
                 }
             };
         }

@@ -19,12 +19,14 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.DataGenerator;
+import net.fyrql.core.value.Interval;
 import net.fyrql.exec.CodegenMode;
 import net.fyrql.exec.Executor;
 import net.fyrql.test.DuckDbReference;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,20 +48,28 @@ public final class RandomTables {
     /** The tables by name. */
     public static final Map<String, Schema> SCHEMAS = new LinkedHashMap<>();
 
+    /**
+     * The time zone of the sessions of both engines: the system property
+     * {@code fyrql.random.timeZone}, {@code UTC} by default.
+     */
+    public static final ZoneId ZONE = ZoneId.of(System.getProperty("fyrql.random.timeZone", "UTC"));
+
     static {
         SCHEMAS.put("p", Schema.of(field("k", DataType.INTEGER), field("i", DataType.INTEGER),
                 field("l", DataType.BIGINT), field("t", DataType.TINYINT), field("s", DataType.SMALLINT),
                 field("h", DataType.HUGEINT), field("f", DataType.FLOAT), field("d", DataType.DOUBLE),
                 field("m", DataType.decimal(6, 2)), field("v", DataType.VARCHAR), field("b", DataType.BOOLEAN),
-                field("dt", DataType.DATE), field("ts", DataType.TIMESTAMP)));
+                field("dt", DataType.DATE), field("ts", DataType.TIMESTAMP), field("tm", DataType.TIME),
+                field("tz", DataType.TIMESTAMPTZ), field("iv", DataType.INTERVAL)));
         SCHEMAS.put("q", Schema.of(field("k", DataType.INTEGER), field("i", DataType.BIGINT),
                 field("m", DataType.decimal(10, 3)), field("v", DataType.VARCHAR), field("dt", DataType.DATE),
-                field("x", DataType.VARCHAR), field("n", DataType.SMALLINT)));
+                field("x", DataType.VARCHAR), field("n", DataType.SMALLINT), field("tz", DataType.TIMESTAMPTZ)));
         SCHEMAS.put("e", Schema.of(field("k", DataType.INTEGER), field("ei", DataType.INTEGER),
                 field("el", DataType.BIGINT), field("et", DataType.TINYINT), field("eh", DataType.HUGEINT),
                 field("ef", DataType.FLOAT), field("ed", DataType.DOUBLE), field("em", DataType.decimal(18, 4)),
                 field("ev", DataType.VARCHAR), field("eb", DataType.BOOLEAN), field("edt", DataType.DATE),
-                field("ets", DataType.TIMESTAMP)));
+                field("ets", DataType.TIMESTAMP), field("etm", DataType.TIME), field("etz", DataType.TIMESTAMPTZ),
+                field("eiv", DataType.INTERVAL)));
     }
 
     /** Strings of the small tables: letters in both cases, digits, pattern characters, and non-ASCII. */
@@ -100,6 +110,14 @@ public final class RandomTables {
         return rows;
     }
 
+    /** The changes of the summer time in Europe in 2024 and 2025, at 01:00 UTC. */
+    private static final List<Long> CHANGES = List.of(1_711_846_800_000_000L, 1_729_990_800_000_000L,
+            1_743_296_400_000_000L, 1_761_440_400_000_000L);
+
+    private static long pick(List<Long> values, SplittableRandom random) {
+        return values.get(random.nextInt(values.size()));
+    }
+
     /** A small value of a type: integers up to a few dozen, binary fractions, short strings, recent dates. */
     static Object smallValue(DataType type, SplittableRandom random) {
         if (type instanceof DataType.Decimal d) {
@@ -119,6 +137,14 @@ public final class RandomTables {
             case DATE -> 19_700 + random.nextInt(-400, 400);
             case TIMESTAMP -> (19_700L + random.nextInt(-400, 400)) * 86_400_000_000L
                     + random.nextLong(0, 86_400L) * 1_000_000L + (random.nextBoolean() ? 0 : random.nextInt(1000) * 1000L);
+            case TIME -> random.nextLong(0, 86_400L) * 1_000_000L
+                    + (random.nextBoolean() ? 0 : random.nextInt(1000) * 1000L);
+            // Instants around the changes of the summer time in Europe, half of them.
+            case TIMESTAMPTZ -> random.nextBoolean() ? pick(CHANGES, random) + random.nextLong(-3 * 3_600L, 3 * 3_600L)
+                    * 1_000_000L : (Long) smallValue(DataType.TIMESTAMP, random);
+            case INTERVAL -> Interval.of(random.nextInt(4) == 0 ? random.nextInt(-14, 15) : 0,
+                    random.nextInt(3) == 0 ? random.nextInt(-40, 41) : 0,
+                    random.nextInt(3) == 0 ? 0 : random.nextLong(-100_000, 100_001) * 1_000_000L);
             default -> throw new IllegalArgumentException("No small values of " + type);
         };
     }
@@ -150,7 +176,14 @@ public final class RandomTables {
         }
         FyrQL.Builder b = FyrQL.builder().register(memory.build());
         more.forEach(b::register);
-        return b.batchSize(16).codegen(codegen).threads(threads).build();
+        return b.batchSize(16).codegen(codegen).threads(threads).timeZone(ZONE).build();
+    }
+
+    /** Opens DuckDB in the time zone of the engines. */
+    static DuckDbReference duck() {
+        DuckDbReference duck = new DuckDbReference();
+        duck.execute("SET TimeZone = '" + ZONE.getId() + "'");
+        return duck;
     }
 
     /** Copies the tables of an engine into DuckDB under their plain names. */

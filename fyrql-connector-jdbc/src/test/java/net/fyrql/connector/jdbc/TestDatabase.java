@@ -116,7 +116,9 @@ record TestDatabase(JdbcDialect dialect, String url) {
                 field("i", DataType.INTEGER), field("bi", DataType.BIGINT), field("de", DataType.decimal(10, 2)),
                 field("f", DataType.FLOAT), field("d", DataType.DOUBLE), field("s", DataType.VARCHAR),
                 field("bl", DataType.BLOB), field("dt", DataType.DATE), field("ts", DataType.TIMESTAMP),
-                field("u", DataType.UUID)));
+                field("u", DataType.UUID), field("tm", DataType.TIME),
+                // SQLite stores an instant as its timestamp in UTC.
+                field("tz", dialect == JdbcDialect.SQLITE ? DataType.TIMESTAMP : DataType.TIMESTAMPTZ)));
         if (dialect != JdbcDialect.SQLITE) {
             fields.add(field("h", DataType.HUGEINT));
             fields.add(field("dw", DataType.decimal(38, 6)));
@@ -124,19 +126,23 @@ record TestDatabase(JdbcDialect dialect, String url) {
         return new Schema(fields);
     }
 
-    /** Three rows of {@link #allTypes}: ordinary values, {@code NULL}s, and extremes. */
+    /**
+     * Three rows of {@link #allTypes}: ordinary values, {@code NULL}s, and
+     * extremes; times of day in whole seconds, which a {@code TIME} without
+     * a precision keeps.
+     */
     static List<Object[]> allTypesRows(JdbcDialect dialect) {
         boolean wide = dialect != JdbcDialect.SQLITE;
         List<Object[]> rows = new ArrayList<>();
         rows.add(row(wide, 1, true, (byte) 1, (short) 2, 3, 4L, new BigDecimal("5.25"), 1.5f, 2.25, "x'y\\z",
                 new byte[] {0, 1, (byte) 0xFF}, 19_723, 1_704_164_645_123_456L,
-                UUID.fromString("123e4567-e89b-12d3-a456-426614174000"), new BigInteger("12345678901234567890"),
-                new BigDecimal("12345678901234567890123456789012.123456")));
+                UUID.fromString("123e4567-e89b-12d3-a456-426614174000"), 45_296_000_000L, 1_719_835_200_123_456L,
+                new BigInteger("12345678901234567890"), new BigDecimal("12345678901234567890123456789012.123456")));
         rows.add(row(wide, 2, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null));
+                null, null, null));
         rows.add(row(wide, 3, false, Byte.MIN_VALUE, Short.MAX_VALUE, Integer.MIN_VALUE, Long.MAX_VALUE,
                 new BigDecimal("-99999999.99"), -0.25f, 1e300, "", new byte[0], -719_162, -1L,
-                new UUID(0, 0), new BigInteger("-170141183460469231731687303715884105727"),
+                new UUID(0, 0), 86_399_000_000L, -1L, new BigInteger("-170141183460469231731687303715884105727"),
                 new BigDecimal("-0.000001")));
         return rows;
     }

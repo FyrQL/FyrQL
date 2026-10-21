@@ -13,6 +13,8 @@ package net.fyrql.connector;
 
 import net.fyrql.core.type.Schema;
 
+import java.time.DateTimeException;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 
@@ -28,6 +30,30 @@ import java.util.Map;
  */
 public interface FileWriterProvider {
 
+    /**
+     * The option that the engine adds to the options of {@link #openFile}
+     * and {@link FileReaderProvider#fileTable}, and to the named arguments
+     * of a {@linkplain TableFunctionProvider table function}, unless it is
+     * given: the ID of the time zone of the session, as
+     * {@link java.time.ZoneId#of(String)} reads it, in which a
+     * {@code TIMESTAMP WITH TIME ZONE} is written as text and a text without
+     * an offset is read as one. A connector reads text in UTC without it.
+     */
+    String TIME_ZONE = "timezone";
+
+    /**
+     * Reads the value of {@link #TIME_ZONE}.
+     *
+     * @throws IllegalArgumentException if it names no time zone
+     */
+    static ZoneId timeZone(String id) {
+        try {
+            return ZoneId.of(id, ZoneId.SHORT_IDS);
+        } catch (DateTimeException e) {
+            throw new IllegalArgumentException("Unknown time zone " + id, e);
+        }
+    }
+
     /** Returns the names of the formats, in lower case, such as {@code csv}. */
     List<String> fileFormats();
 
@@ -41,7 +67,8 @@ public interface FileWriterProvider {
      * @param options the options of the statement besides the format, by
      *        names in lower case, in their order; a value is the text of
      *        the option as written, without the quotes of a string, and
-     *        {@code true} for an option without a value
+     *        {@code true} for an option without a value; with
+     *        {@link #TIME_ZONE}
      * @throws IllegalArgumentException with a message for the user if an
      *         option is unknown, which names the known ones, or does not
      *         fit, or if a column has a type the format cannot hold

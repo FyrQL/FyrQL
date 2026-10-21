@@ -114,6 +114,14 @@ class CopyRoundTripTest {
     void duckDbAndFyrqlReadTheRowsOfTheTableFromTheFile(String table, String format) {
         String query = "SELECT * FROM memory." + table;
         Path file = dir.resolve(table + "." + format);
+        if (format.equals("parquet") && table.equals("p")) {
+            assertTrue(assertThrows(SqlException.class, () -> engine.update("COPY memory.p TO '" + path(file) + "'"))
+                    .getMessage().contains("Parquet files do not support negative intervals"));
+        }
+        if (format.equals("parquet") && (table.equals("p") || table.equals("e"))) {
+            // As in DuckDB, a Parquet file holds no interval with a negative part, which these tables have.
+            query = "SELECT * EXCLUDE (" + (table.equals("p") ? "iv" : "eiv") + ") FROM memory." + table;
+        }
         if (format.equals("parquet") && table.equals("e")) {
             assertTrue(assertThrows(SqlException.class, () -> engine.update("COPY memory.e TO '" + path(file) + "'"))
                     .getMessage().contains(" of the column eh has more than 38 digits; a Parquet file holds a HUGEINT"
@@ -251,7 +259,7 @@ class CopyRoundTripTest {
         Path gz = dir.resolve("q.tsv.gz");
         assertEquals(30, engine.update("COPY memory.q TO '" + path(gz) + "'"));
         try (InputStream in = new GZIPInputStream(Files.newInputStream(gz))) {
-            assertEquals("k\ti\tm\tv\tdt\tx\tn", new String(in.readAllBytes(), StandardCharsets.UTF_8).lines()
+            assertEquals("k\ti\tm\tv\tdt\tx\tn\ttz", new String(in.readAllBytes(), StandardCharsets.UTF_8).lines()
                     .findFirst().orElseThrow());
         }
 
@@ -270,7 +278,8 @@ class CopyRoundTripTest {
                 .stream().map(Object::toString).toList());
 
         assertEquals("The CSV file " + dir.resolve("x.csv") + " has an unknown option rows; known are header,"
-                + " delimiter, delim, sep, quote, escape, nullstr, null, dateformat, timestampformat, compression",
+                + " delimiter, delim, sep, quote, escape, nullstr, null, dateformat, timestampformat, timezone,"
+                + " compression",
                 assertThrows(SqlException.class, () -> engine.update("COPY memory.t TO '" + path(dir.resolve("x.csv"))
                         + "' (ROWS 3)")).getMessage().replace('/', java.io.File.separatorChar).split(" at line")[0]);
     }
@@ -303,6 +312,6 @@ class CopyRoundTripTest {
         }
         same(schema, some, copyFrom(tsv, schema, " (v, k)", ""), "COPY FROM " + tsv.getFileName());
         String error = assertThrows(RuntimeException.class, () -> copyFrom(tsv, schema, "", "")).getMessage();
-        assertTrue(error.contains(" has 2 fields, the header 7"), error);
+        assertTrue(error.contains(" has 2 fields, the header 8"), error);
     }
 }

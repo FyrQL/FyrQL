@@ -36,7 +36,9 @@ public interface TableFunctionProvider {
      * @param arguments the positional arguments as Java values of their
      *        types (see {@link net.fyrql.core.type.DataType})
      * @param namedArguments the named arguments, with the names in lower
-     *        case, in the order of the call
+     *        case, in the order of the call, and
+     *        {@link FileWriterProvider#TIME_ZONE} as a string at the end
+     *        unless the call has it
      * @throws IllegalArgumentException with a message for the user if the
      *         arguments do not fit or the table cannot be read
      */

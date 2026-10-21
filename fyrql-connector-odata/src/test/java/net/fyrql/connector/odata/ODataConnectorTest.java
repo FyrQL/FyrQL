@@ -54,6 +54,14 @@ class ODataConnectorTest {
     static final DataType STOP = DataType.struct(new DataType.Struct.Field("city", DataType.VARCHAR),
             new DataType.Struct.Field("at", DataType.TIMESTAMP));
 
+    /** The address of version 4, which has instants only. */
+    static final DataType ADDRESS_V4 = DataType.struct(new DataType.Struct.Field("street", DataType.VARCHAR),
+            new DataType.Struct.Field("zip", DataType.INTEGER),
+            new DataType.Struct.Field("since", DataType.TIMESTAMPTZ));
+
+    static final DataType STOP_V4 = DataType.struct(new DataType.Struct.Field("city", DataType.VARCHAR),
+            new DataType.Struct.Field("at", DataType.TIMESTAMPTZ));
+
     /** A column of every type that version 4 has. */
     static final Schema V4_TYPES = new Schema(List.of(new Schema.Field("id", DataType.INTEGER, false),
             new Schema.Field("flag", DataType.BOOLEAN, true), new Schema.Field("tiny", DataType.TINYINT, true),
@@ -62,10 +70,10 @@ class ODataConnectorTest {
             new Schema.Field("dbl", DataType.DOUBLE, true), new Schema.Field("amount", DataType.decimal(12, 2), true),
             new Schema.Field("name", DataType.VARCHAR, true), new Schema.Field("guid", DataType.UUID, true),
             new Schema.Field("bytes", DataType.BLOB, true), new Schema.Field("day", DataType.DATE, true),
-            new Schema.Field("at", DataType.TIMESTAMP, true), new Schema.Field("clock", DataType.VARCHAR, true),
-            new Schema.Field("address", ADDRESS, true),
+            new Schema.Field("at", DataType.TIMESTAMPTZ, true), new Schema.Field("clock", DataType.TIME, true),
+            new Schema.Field("address", ADDRESS_V4, true),
             new Schema.Field("tags", DataType.listOf(DataType.VARCHAR), true),
-            new Schema.Field("stops", DataType.listOf(STOP), true)));
+            new Schema.Field("stops", DataType.listOf(STOP_V4), true)));
 
     /** A column of every type that version 2 has. */
     static final Schema V2_TYPES = new Schema(List.of(new Schema.Field("id", DataType.INTEGER, false),
@@ -75,7 +83,7 @@ class ODataConnectorTest {
             new Schema.Field("dbl", DataType.DOUBLE, true), new Schema.Field("amount", DataType.decimal(12, 2), true),
             new Schema.Field("name", DataType.VARCHAR, false), new Schema.Field("guid", DataType.UUID, true),
             new Schema.Field("bytes", DataType.BLOB, true), new Schema.Field("at", DataType.TIMESTAMP, true),
-            new Schema.Field("stamp", DataType.TIMESTAMP, true), new Schema.Field("time", DataType.VARCHAR, true),
+            new Schema.Field("stamp", DataType.TIMESTAMPTZ, true), new Schema.Field("time", DataType.TIME, true),
             new Schema.Field("address", ADDRESS, true)));
 
     private final FakeODataServer server = FakeODataServer.start();
@@ -93,27 +101,31 @@ class ODataConnectorTest {
         return Conversions.parseDate(date);
     }
 
+    static long time(String time) {
+        return Conversions.parseTime(time);
+    }
+
     static List<Object[]> v4Rows() {
         List<Object[]> rows = new ArrayList<>();
         rows.add(new Object[] {1, true, (byte) -128, (short) -32768, (short) 255, Long.MIN_VALUE, 1.5f, 1.0E300,
                 new BigDecimal("1234567890.12"), "Ann", UUID.fromString("005056a2-0d31-1ee1-b4b6-56d0e1a5c3e8"),
-                new byte[] {0, 1, 2, -1}, day("2024-01-02"), micros("2024-01-02 03:04:05.123456"), "13:20:00",
+                new byte[] {0, 1, 2, -1}, day("2024-01-02"), micros("2024-01-02 03:04:05.123456"), time("13:20:00"),
                 Arrays.asList("Main St", 12345, micros("1999-12-31 23:59:59")), List.of("a", "b"),
                 List.of(Arrays.asList("Rome", micros("2024-05-06 07:08:09")))});
         rows.add(new Object[] {2, false, (byte) 127, (short) 32767, (short) 0, Long.MAX_VALUE, Float.NaN,
                 Double.NEGATIVE_INFINITY, new BigDecimal("-0.01"), "O'Neil & \"Sons\" \u00E4 \u20AC",
                 UUID.fromString("00000000-0000-0000-0000-000000000000"), new byte[0], day("1969-12-31"),
-                micros("1969-12-31 23:59:59.999999"), "00:00:00.5", Arrays.asList(null, null, null),
+                micros("1969-12-31 23:59:59.999999"), time("00:00:00.5"), Arrays.asList(null, null, null),
                 Arrays.asList("x", null), List.of()});
         rows.add(new Object[] {3, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
                 null, null, null});
         rows.add(new Object[] {4, true, (byte) 0, (short) 0, (short) 1, 0L, 0.0f, Double.POSITIVE_INFINITY,
                 new BigDecimal("0.00"), "", UUID.fromString("ffffffff-ffff-ffff-ffff-ffffffffffff"),
-                new byte[] {62, 63, -2}, day("0001-01-01"), micros("2000-02-29 00:00:00"), "23:59:59",
+                new byte[] {62, 63, -2}, day("0001-01-01"), micros("2000-02-29 00:00:00"), time("23:59:59"),
                 Arrays.asList("", 0, null), List.of(), Arrays.asList(Arrays.asList(null, null), null)});
         rows.add(new Object[] {5, false, (byte) 1, (short) 1, (short) 2, 1L, -2.5f, -1.0E-300,
                 new BigDecimal("99.90"), "last", UUID.fromString("123e4567-e89b-12d3-a456-426614174000"),
-                new byte[] {1}, day("9999-12-31"), micros("9999-12-31 21:59:59"), "12:00:00",
+                new byte[] {1}, day("9999-12-31"), micros("9999-12-31 21:59:59"), time("12:00:00"),
                 Arrays.asList("x", -1, micros("1970-01-01 00:00:00")), List.of("z"), List.of()});
         return rows;
     }
@@ -123,21 +135,21 @@ class ODataConnectorTest {
         rows.add(new Object[] {1, true, (byte) -128, (short) -32768, (short) 255, Long.MIN_VALUE, 1.5f, 1.0E300,
                 new BigDecimal("1234567890.12"), "Ann", UUID.fromString("005056a2-0d31-1ee1-b4b6-56d0e1a5c3e8"),
                 new byte[] {0, 1, 2, -1, -2, 62}, micros("2024-01-02 03:04:05.123"), micros("2024-01-02 03:04:05"),
-                "PT13H20M", Arrays.asList("Main St", 12345, micros("1999-12-31 23:59:59"))});
+                time("13:20:00"), Arrays.asList("Main St", 12345, micros("1999-12-31 23:59:59"))});
         rows.add(new Object[] {2, false, (byte) 127, (short) 32767, (short) 0, Long.MAX_VALUE, Float.NaN,
                 Double.NEGATIVE_INFINITY, new BigDecimal("-0.01"), "O'Neil & \"Sons\" \u00E4 \u20AC",
                 UUID.fromString("00000000-0000-0000-0000-000000000000"), new byte[0],
-                micros("1969-12-31 23:59:59.999"), micros("1900-01-01 00:00:00"), "PT0S",
+                micros("1969-12-31 23:59:59.999"), micros("1900-01-01 00:00:00"), 0L,
                 Arrays.asList(null, null, null)});
         rows.add(new Object[] {3, null, null, null, null, null, null, null, null, "", null, null, null, null, null,
                 null});
         rows.add(new Object[] {4, true, (byte) 0, (short) 0, (short) 1, 0L, 0.0f, Double.POSITIVE_INFINITY,
                 new BigDecimal("0.00"), " ", UUID.fromString("ffffffff-ffff-ffff-ffff-ffffffffffff"),
-                new byte[] {63}, micros("2000-02-29 00:00:00"), micros("2000-02-29 00:00:00"), "PT23H59M59S",
+                new byte[] {63}, micros("2000-02-29 00:00:00"), micros("2000-02-29 00:00:00"), time("23:59:59"),
                 Arrays.asList("", 0, null)});
         rows.add(new Object[] {5, false, (byte) 1, (short) 1, (short) 2, 1L, -2.5f, -1.0E-300,
                 new BigDecimal("99.90"), "last", UUID.fromString("123e4567-e89b-12d3-a456-426614174000"),
-                new byte[] {1}, micros("9999-12-31 23:59:59.999"), micros("1970-01-01 00:00:00"), "PT1H",
+                new byte[] {1}, micros("9999-12-31 23:59:59.999"), micros("1970-01-01 00:00:00"), time("01:00:00"),
                 Arrays.asList("x", -1, micros("1970-01-01 00:00:00"))});
         return rows;
     }
@@ -145,14 +157,13 @@ class ODataConnectorTest {
     /** Adds the entity set {@code Things} of every type of version 2 to a new service. */
     FakeODataServer.Service v2Service(String name) {
         return server.service(name, ODataVersion.V2).edmType("octet", "Edm.Byte")
-                .edmType("stamp", "Edm.DateTimeOffset").edmType("time", "Edm.Time")
                 .entitySet("Things", V2_TYPES, v2Rows(), "id");
     }
 
     /** Adds the entity set {@code Things} of every type of version 4 to a new service. */
     FakeODataServer.Service v4Service(String name) {
         return server.service(name, ODataVersion.V4).edmType("octet", "Edm.Byte")
-                .edmType("clock", "Edm.TimeOfDay").entitySet("Things", V4_TYPES, v4Rows(), "id");
+                .entitySet("Things", V4_TYPES, v4Rows(), "id");
     }
 
     ODataConnector.Builder builder(String... services) {

@@ -67,17 +67,18 @@ class DuckDbTypeRulesTest {
 
     /**
      * The arithmetic of dates and timestamps: for {@code DATE} or
-     * {@code TIMESTAMP} on either side of every operator and every scalar
-     * type on the other, DuckDB must accept the expression with the type
-     * that {@link Expression.ArithmeticOp#resultType} gives, or both must
-     * reject it; {@code TIMESTAMP - TIMESTAMP}, an {@code INTERVAL} in
-     * DuckDB, is rejected.
+     * {@code TIMESTAMP}, {@code TIME} or {@code INTERVAL} on either side of
+     * every operator and every scalar type on the other, DuckDB must accept
+     * the expression with the type that
+     * {@link Expression.ArithmeticOp#resultType} gives, or both must reject
+     * it. A {@code TIMESTAMP WITH TIME ZONE} is left out: its arithmetic
+     * depends on the time zone, which the binder gives a call of a function.
      */
     @Test
     void dateArithmeticResultTypes() throws SQLException {
         List<DataType> types = List.of(DataType.TINYINT, DataType.SMALLINT, DataType.INTEGER, DataType.BIGINT,
                 DataType.HUGEINT, DataType.FLOAT, DataType.DOUBLE, DataType.decimal(10, 2), DataType.VARCHAR,
-                DataType.BOOLEAN, DataType.DATE, DataType.TIMESTAMP);
+                DataType.BOOLEAN, DataType.DATE, DataType.TIMESTAMP, DataType.TIME, DataType.INTERVAL);
         List<String> mismatches = new ArrayList<>();
         try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
             StringBuilder create = new StringBuilder("CREATE TABLE t (");
@@ -89,7 +90,7 @@ class DuckDbTypeRulesTest {
                 for (int j = 0; j < types.size(); j++) {
                     DataType a = types.get(i);
                     DataType b = types.get(j);
-                    if (a != DataType.DATE && a != DataType.TIMESTAMP && b != DataType.DATE && b != DataType.TIMESTAMP) {
+                    if (!temporal(a) && !temporal(b)) {
                         continue;
                     }
                     for (Expression.ArithmeticOp op : Expression.ArithmeticOp.values()) {
@@ -101,8 +102,7 @@ class DuckDbTypeRulesTest {
                             actual = "ERROR";
                         }
                         String expected = expected(() -> op.resultType(a, b));
-                        boolean interval = actual.equals("INTERVAL") && expected.equals("ERROR");
-                        if (!actual.equals(expected) && !interval) {
+                        if (!actual.equals(expected)) {
                             mismatches.add(a.sqlName() + " " + op.symbol() + " " + b.sqlName() + ": DuckDB " + actual
                                     + ", rules " + expected);
                         }
@@ -111,6 +111,11 @@ class DuckDbTypeRulesTest {
             }
         }
         assertEquals(List.of(), mismatches);
+    }
+
+    private static boolean temporal(DataType type) {
+        return type == DataType.DATE || type == DataType.TIMESTAMP || type == DataType.TIME
+                || type == DataType.INTERVAL;
     }
 
     /**
@@ -126,6 +131,9 @@ class DuckDbTypeRulesTest {
         types.add(DataType.TIMESTAMP);
         types.add(DataType.BLOB);
         types.add(DataType.UUID);
+        types.add(DataType.TIME);
+        types.add(DataType.TIMESTAMPTZ);
+        types.add(DataType.INTERVAL);
         List<String> mismatches = new ArrayList<>();
         try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
             StringBuilder create = new StringBuilder("CREATE TABLE t (");
@@ -162,6 +170,9 @@ class DuckDbTypeRulesTest {
         types.add(DataType.VARCHAR);
         types.add(DataType.DATE);
         types.add(DataType.BOOLEAN);
+        types.add(DataType.TIME);
+        types.add(DataType.TIMESTAMPTZ);
+        types.add(DataType.INTERVAL);
         List<String> mismatches = new ArrayList<>();
         try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
             StringBuilder create = new StringBuilder("CREATE TABLE t (");
@@ -175,8 +186,10 @@ class DuckDbTypeRulesTest {
                     if (f == PlanNode.AggregateFunction.COUNT_STAR) {
                         continue;
                     }
-                    // DuckDB also offers avg(DATE) as a TIMESTAMP and sum(BOOLEAN) as a count; FyrQL does not.
-                    if (f == PlanNode.AggregateFunction.AVG && types.get(i) == DataType.DATE
+                    // DuckDB also offers avg(DATE) as a TIMESTAMP, avg(TIMESTAMPTZ) and sum(BOOLEAN) as a
+                    // count; FyrQL does not.
+                    if (f == PlanNode.AggregateFunction.AVG && (types.get(i) == DataType.DATE
+                            || types.get(i) == DataType.TIMESTAMPTZ)
                             || f == PlanNode.AggregateFunction.SUM && types.get(i) == DataType.BOOLEAN) {
                         continue;
                     }

@@ -266,7 +266,8 @@ final class PlanGenerator {
             case MIN, MAX -> scalar ? new AggregateCall(f, column, distinct, name) : null;
             case BOOL_AND, BOOL_OR -> type == DataType.BOOLEAN ? new AggregateCall(f, column, distinct, name) : null;
             case STRING_AGG, LIST, FIRST, LAST, ANY_VALUE -> {
-                if (floating || !scalar) {
+                // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.
+                if (floating || !scalar || f == AggregateFunction.LIST && type == DataType.INTERVAL) {
                     yield null;
                 }
                 SortKey order = new SortKey(column, chance(50), chance(30));
@@ -411,7 +412,8 @@ final class PlanGenerator {
             case BOOL_AND, BOOL_OR -> type == DataType.BOOLEAN ? new AggregateCall(f, column, false, name) : null;
             case FIRST, LAST -> total && scalar ? new AggregateCall(f, column, false, name) : null;
             case STRING_AGG, LIST, ANY_VALUE -> {
-                if (floating || !scalar) {
+                // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.
+                if (floating || !scalar || f == AggregateFunction.LIST && type == DataType.INTERVAL) {
                     yield null;
                 }
                 boolean d = distinct && f != AggregateFunction.ANY_VALUE;
@@ -447,7 +449,8 @@ final class PlanGenerator {
         FrameUnit unit = total ? pick(List.of(FrameUnit.values())) : pick(List.of(FrameUnit.RANGE, FrameUnit.GROUPS));
         DataType key = order.size() == 1 ? schema.type(order.get(0).column()) : null;
         boolean offsets = unit != FrameUnit.RANGE
-                || key != null && (key.isNumeric() || key == DataType.DATE || key == DataType.TIMESTAMP);
+                || key != null && (key.isNumeric() || key == DataType.DATE || key == DataType.TIMESTAMP
+                        || key == DataType.TIMESTAMPTZ);
         for (int attempt = 0; attempt < 10; attempt++) {
             BoundKind start = pick(List.of(BoundKind.UNBOUNDED_PRECEDING, BoundKind.PRECEDING, BoundKind.CURRENT_ROW,
                     BoundKind.FOLLOWING));
@@ -471,10 +474,12 @@ final class PlanGenerator {
         if (unit != FrameUnit.RANGE) {
             return FrameBound.of(kind, new Expression.Literal(DataType.BIGINT, n));
         }
-        if (key == DataType.DATE || key == DataType.TIMESTAMP) {
+        if (key == DataType.DATE || key == DataType.TIMESTAMP || key == DataType.TIMESTAMPTZ) {
+            // An instant only by the units of time, which are the same in every time zone.
             IntervalUnit u = key == DataType.DATE
                     ? pick(List.of(IntervalUnit.DAY, IntervalUnit.MONTH, IntervalUnit.YEAR, IntervalUnit.HOUR))
-                    : pick(List.of(IntervalUnit.values()));
+                    : key == DataType.TIMESTAMPTZ ? pick(List.of(IntervalUnit.HOUR, IntervalUnit.MINUTE,
+                    IntervalUnit.SECOND)) : pick(List.of(IntervalUnit.values()));
             long count = switch (u) {
                 case YEAR, MONTH -> n;
                 case DAY, HOUR -> n * random.nextInt(1, 40);

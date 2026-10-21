@@ -25,6 +25,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -43,6 +44,10 @@ public final class DuckDbReference implements AutoCloseable {
     public DuckDbReference() {
         try {
             connection = DriverManager.getConnection("jdbc:duckdb:");
+            // DuckDB takes the time zone of the system, FyrQL that of the JVM.
+            try (Statement s = connection.createStatement()) {
+                s.execute("SET TimeZone = '" + ZoneId.systemDefault().getId() + "'");
+            }
         } catch (SQLException e) {
             throw new IllegalStateException("Cannot open DuckDB", e);
         }

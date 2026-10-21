@@ -15,6 +15,9 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CreateTable.ColumnDefinition;
 import net.fyrql.sql.ast.DropTable;
+import net.fyrql.sql.ast.ResetVariable;
+import net.fyrql.sql.ast.SetVariable;
+import net.fyrql.sql.ast.ShowVariable;
 import net.fyrql.sql.ast.FromItem;
 import net.fyrql.sql.ast.InsertInto;
 import net.fyrql.sql.ast.OrderItem;
@@ -60,6 +63,7 @@ import net.sf.jsqlparser.expression.SignedExpression;
 import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.expression.StructType;
 import net.sf.jsqlparser.expression.TimeKeyExpression;
+import net.sf.jsqlparser.expression.TimezoneExpression;
 import net.sf.jsqlparser.expression.TrimFunction;
 import net.sf.jsqlparser.expression.WhenClause;
 import net.sf.jsqlparser.expression.WindowDefinition;
@@ -97,6 +101,9 @@ import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.create.table.CreateTable;
+import net.sf.jsqlparser.statement.ResetStatement;
+import net.sf.jsqlparser.statement.SetStatement;
+import net.sf.jsqlparser.statement.ShowStatement;
 import net.sf.jsqlparser.statement.drop.Drop;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.AllColumns;
@@ -175,6 +182,9 @@ final class JSqlParserAdapter {
             throw new SqlException("Only queries are supported, not " + words(statement), position(statement));
         }
         return switch (statement) {
+            case SetStatement s -> set(s);
+            case ShowStatement s -> new ShowVariable(s.getName(), position(statement));
+            case ResetStatement r -> new ResetVariable(r.getName(), position(statement));
             case CreateTable c -> createTable(c);
             case Insert i -> insert(i);
             case Drop d when "TABLE".equalsIgnoreCase(d.getType()) -> drop(d);
@@ -183,6 +193,16 @@ final class JSqlParserAdapter {
             default -> throw new SqlException("Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are"
                     + " supported, not " + words(statement), position(statement));
         };
+    }
+
+    /** {@code SET name = value} or {@code SET name value}, of one setting and one value. */
+    private SetVariable set(SetStatement s) {
+        if (s.getCount() != 1 || s.getExpressions(0).size() != 1 || s.getEffectParameter() != null) {
+            throw unsupported("this form of SET", s);
+        }
+        Expression value = s.getExpressions(0).get(0);
+        String text = value instanceof StringValue v ? v.getValue() : value.toString();
+        return new SetVariable(String.valueOf(s.getName(0)), text, position(s));
     }
 
     // ---- statements that write
@@ -876,6 +896,8 @@ final class JSqlParserAdapter {
             LiteralKind kind = switch (d.getType()) {
                 case DATE -> LiteralKind.DATE;
                 case TIMESTAMP -> LiteralKind.TIMESTAMP;
+                case TIME -> LiteralKind.TIME;
+                case TIMESTAMPTZ -> LiteralKind.TIMESTAMPTZ;
                 default -> throw unsupported(d.getType() + " literals", d);
             };
             return new SqlExpr.Literal(kind, stringValue(d.getValue(), d), position);
@@ -1014,6 +1036,14 @@ final class JSqlParserAdapter {
         if (e instanceof IntervalExpression iv) {
             return interval(iv, position);
         }
+        if (e instanceof TimezoneExpression tz) {
+            // x AT TIME ZONE a AT TIME ZONE b is timezone(b, timezone(a, x)).
+            SqlExpr result = expr(tz.getLeftExpression());
+            for (Expression zone : tz.getTimezoneExpressions()) {
+                result = new SqlExpr.FunctionCall("timezone", List.of(expr(zone), result), position);
+            }
+            return result;
+        }
         if (e instanceof LambdaExpression) {
             throw unsupported("lambda functions", e);
         }
@@ -1042,9 +1072,10 @@ final class JSqlParserAdapter {
 
     /**
      * {@code INTERVAL '90' DAY}, {@code INTERVAL 1 YEAR} or
-     * {@code INTERVAL '1 day'}: one number and one unit. A qualifier of two
-     * fields, such as {@code DAY TO SECOND}, is not supported; a precision
-     * such as {@code DAY (3)} is ignored.
+     * {@code INTERVAL '1 day 02:03:04'}: a number and a unit, or the text of
+     * an interval, which the binder reads. A qualifier of two fields, such
+     * as {@code DAY TO SECOND}, is not supported; a precision such as
+     * {@code DAY (3)} is ignored.
      */
     @SuppressWarnings("deprecation")
     private SqlExpr interval(IntervalExpression iv, Position position) {
@@ -1068,13 +1099,8 @@ final class JSqlParserAdapter {
             unit = iv.getIntervalType();
         }
         if (unit == null) {
-            // The unit inside the string: INTERVAL '1 day'.
-            String[] parts = value.strip().split("\\s+");
-            if (parts.length != 2) {
-                throw unsupported("an interval without a unit", iv);
-            }
-            value = parts[0];
-            unit = parts[1];
+            // The text of an interval: INTERVAL '1 day 02:03:04'.
+            return new SqlExpr.Interval(value, null, position);
         }
         unit = unit.strip().toUpperCase(Locale.ROOT);
         if (!unit.matches("[A-Z]+")) {

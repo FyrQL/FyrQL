@@ -33,11 +33,11 @@ import java.util.Set;
  * {@code variable} or {@code floating} it is {@code DOUBLE};</li>
  * <li>{@code Edm.String} is {@code VARCHAR}, {@code Edm.Guid} is
  * {@code UUID}, {@code Edm.Binary} is {@code BLOB};</li>
- * <li>{@code Edm.DateTime} of version 2 and {@code Edm.DateTimeOffset} are
- * {@code TIMESTAMP}, the latter as the instant in UTC; {@code Edm.Date} is
- * {@code DATE}; {@code Edm.Time}, {@code Edm.TimeOfDay} and
- * {@code Edm.Duration}, for which FyrQL has no type, are {@code VARCHAR}
- * with the text the service sends;</li>
+ * <li>{@code Edm.DateTime} of version 2 is {@code TIMESTAMP},
+ * {@code Edm.DateTimeOffset} is {@code TIMESTAMP WITH TIME ZONE};
+ * {@code Edm.Date} is {@code DATE}; {@code Edm.Time} of version 2, a
+ * duration that holds a time of day, and {@code Edm.TimeOfDay} are
+ * {@code TIME}; {@code Edm.Duration} is {@code INTERVAL};</li>
  * <li>a complex type is a {@code STRUCT} of its properties, those of its
  * base types first, a {@code Collection} a {@code LIST}, an enumeration
  * type {@code VARCHAR} with the names of its members, and a type
@@ -103,8 +103,17 @@ final class EdmTypes {
             case "Edm.Binary" -> {
                 return DataType.BLOB;
             }
-            case "Edm.DateTime", "Edm.DateTimeOffset" -> {
+            case "Edm.DateTime" -> {
                 return DataType.TIMESTAMP;
+            }
+            case "Edm.DateTimeOffset" -> {
+                return DataType.TIMESTAMPTZ;
+            }
+            case "Edm.Time", "Edm.TimeOfDay" -> {
+                return DataType.TIME;
+            }
+            case "Edm.Duration" -> {
+                return DataType.INTERVAL;
             }
             case "Edm.Date" -> {
                 return DataType.DATE;

@@ -22,6 +22,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.ConversionException;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.vector.Batch;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -31,6 +32,8 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -194,7 +197,7 @@ class CsvFileTableTest {
         errors.add(Map.entry("The CSV source csv reads no files of the format json",
                 () -> csv.fileTable("json", file.toString(), schema, Map.of())));
         errors.add(Map.entry("The CSV file " + file + " has an unknown option rows; known are header, delimiter,"
-                + " delim, sep, quote, escape, nullstr, null, dateformat, timestampformat, compression",
+                + " delim, sep, quote, escape, nullstr, null, dateformat, timestampformat, timezone, compression",
                 () -> csv.fileTable("csv", file.toString(), schema, Map.of("rows", "3"))));
         errors.add(Map.entry("Not supported: an escape other than the quote, for the CSV file " + file + "; a quote"
                 + " in a quoted value is read as two quotes",
@@ -264,6 +267,59 @@ class CsvFileTableTest {
                 .map(ServiceLoader.Provider::get).filter(f -> f.type().equals("csv")).findFirst().orElseThrow();
         assertEquals(List.of("csv"), factory.fileFormats());
         assertEquals(List.of("csv"), csv.fileFormats());
+    }
+
+    @Test
+    void timesAndIntervalsGoThereAndBackInTheTimeZoneOfTheSession() throws IOException {
+        Schema schema = Schema.of(new Schema.Field("id", DataType.INTEGER), new Schema.Field("tm", DataType.TIME),
+                new Schema.Field("tz", DataType.TIMESTAMPTZ), new Schema.Field("iv", DataType.INTERVAL));
+        ZoneId utc = ZoneOffset.UTC;
+        List<Object[]> rows = List.of(
+                new Object[] {1, Conversions.parseTime("12:34:56.789"),
+                    Conversions.parseTimestampTz("2024-07-01 12:00:00+00", utc),
+                    Interval.parse("1 year 2 months -3 days 04:05:06.789")},
+                new Object[] {2, Conversions.parseTime("24:00:00"),
+                    Conversions.parseTimestampTz("2024-01-01 00:00:00.5+00", utc), Interval.parse("-00:00:00.5")},
+                new Object[] {3, 0L, 0L, Interval.parse("0 seconds")},
+                new Object[] {4, null, null, null});
+        Path file = dir.resolve("times.csv");
+        Map<String, String> berlin = Map.of("timezone", "Europe/Berlin");
+        try (Sink sink = csv.openFile("csv", file.toString(), schema, berlin)) {
+            sink.write(Batch.ofRows(schema, rows));
+            sink.commit();
+        }
+        // What DuckDB 1.5 writes with SET TimeZone = 'Europe/Berlin'.
+        assertEquals("""
+                id,tm,tz,iv
+                1,12:34:56.789,2024-07-01 14:00:00+02,1 year 2 months -3 days 04:05:06.789
+                2,24:00:00,2024-01-01 01:00:00.5+01,-00:00:00.5
+                3,00:00:00,1970-01-01 01:00:00+01,00:00:00
+                4,,,
+                """, Files.readString(file));
+        assertEquals(Arrays.deepToString(rows.toArray()),
+                Arrays.deepToString(read(csv.fileTable("csv", file.toString(), schema, berlin)).toArray()));
+        // The sniffer reads the times of day and the instants, as DuckDB does, and an interval as text.
+        TableRef sniffed = csv.bind("read_csv", List.of(file.toString()), Map.of("timezone", "Europe/Berlin"));
+        assertEquals("id BIGINT, tm TIME, tz TIMESTAMP WITH TIME ZONE, iv VARCHAR",
+                describe(csv.catalog().schema(sniffed)));
+        assertEquals(rows.get(0)[2], read(sniffed).get(0)[2]);
+
+        // A timestamp without an offset is in the time zone of the session, also among others with one.
+        Path mixed = dir.resolve("mixed.csv");
+        Files.writeString(mixed, "t\n2024-01-01 12:00:00+02\n2024-07-01 12:00:00\n12:30\n");
+        assertEquals("t VARCHAR", describe(csv.catalog().schema(csv.bind("read_csv", List.of(mixed.toString()),
+                Map.of()))));
+        Files.writeString(mixed, "t\n2024-01-01 12:00:00+02\n2024-07-01 12:00:00\n2024-07-01 12:00:00 UTC\n");
+        TableRef both = csv.bind("read_csv", List.of(mixed.toString()), berlin.entrySet().stream()
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, e -> (Object) e.getValue())));
+        assertEquals("t TIMESTAMP WITH TIME ZONE", describe(csv.catalog().schema(both)));
+        assertEquals(Arrays.asList(Conversions.parseTimestampTz("2024-01-01 10:00:00Z", utc),
+                Conversions.parseTimestampTz("2024-07-01 10:00:00Z", utc),
+                Conversions.parseTimestampTz("2024-07-01 12:00:00Z", utc)),
+                read(both).stream().map(r -> r[0]).toList());
+        Files.writeString(mixed, "t\n1:02\n24:00:00\n12:30:00.5\n");
+        assertEquals("t TIME", describe(csv.catalog().schema(csv.bind("read_csv", List.of(mixed.toString()),
+                Map.of()))));
     }
 
     private static String describe(Schema schema) {

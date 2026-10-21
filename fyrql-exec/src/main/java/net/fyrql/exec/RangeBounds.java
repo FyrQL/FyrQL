@@ -76,7 +76,8 @@ final class RangeBounds {
         this.ascending = order.ascending();
         this.start = offset(frame.start());
         this.end = offset(frame.end());
-        boolean temporal = keyType == DataType.DATE || keyType == DataType.TIMESTAMP;
+        boolean temporal = keyType == DataType.DATE || keyType == DataType.TIMESTAMP
+                || keyType == DataType.TIMESTAMPTZ;
         DataType common = null;
         for (Offset o : new Offset[] {start, end}) {
             if (o != null) {
@@ -108,9 +109,9 @@ final class RangeBounds {
         return new Offset(b.kind(), t, v, null, subtract, negative);
     }
 
-    /** Returns a date or a timestamp in microseconds. */
+    /** Returns a date or a timestamp, local or an instant, in microseconds. */
     private long micros(Object v) {
-        if (keyType == DataType.TIMESTAMP) {
+        if (keyType != DataType.DATE) {
             return (Long) v;
         }
         try {

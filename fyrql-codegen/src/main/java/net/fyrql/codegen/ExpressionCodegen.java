@@ -22,6 +22,8 @@ import net.fyrql.core.value.Casts;
 import net.fyrql.core.vector.Vectors;
 
 import java.math.BigDecimal;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -411,7 +413,7 @@ final class ExpressionCodegen {
             case Expression.If i -> caseWhen(new Expression.Case(List.of(new Expression.When(i.condition(),
                     i.whenTrue())), i.whenFalse()));
             case Expression.Coalesce c -> coalesce(c);
-            case Expression.Cast c -> castOf(c.operand(), c.target(), c.safe());
+            case Expression.Cast c -> castOf(c.operand(), c.target(), c.safe(), c.zone());
             case Expression.Like l -> like(l);
             case Expression.IsDistinct d -> isDistinct(d);
             case Expression.Call c -> call(c);
@@ -444,12 +446,18 @@ final class ExpressionCodegen {
      * reaches it.
      */
     private Val castOf(Expression e, DataType to, boolean safe) {
+        return castOf(e, to, safe, null);
+    }
+
+    /** Generates an expression cast to a type in a time zone, UTC if it is {@code null}; see above. */
+    private Val castOf(Expression e, DataType to, boolean safe, ZoneId zone) {
         DataType from = e.type();
+        ZoneId z = zone == null ? ZoneOffset.UTC : zone;
         if (e instanceof Expression.Literal l && !from.equals(to) && !widening(from, to)) {
             Expression.Literal folded = null;
             try {
-                folded = new Expression.Literal(to, safe ? Casts.tryCast(l.value(), from, to)
-                        : Casts.cast(l.value(), from, to));
+                folded = new Expression.Literal(to, safe ? Casts.tryCast(l.value(), from, to, z)
+                        : Casts.cast(l.value(), from, to, z));
             } catch (RuntimeException failed) {
                 // The cast fails for the rows that reach it.
             }
@@ -457,11 +465,16 @@ final class ExpressionCodegen {
                 return gen(folded);
             }
         }
-        return cast(gen(e), from, to, safe);
+        return cast(gen(e), from, to, safe, Casts.needsZone(from, to) ? z : null);
     }
 
     /** Casts as {@link net.fyrql.core.expr.Evaluator#cast} or {@code tryCast} does. */
     private Val cast(Val v, DataType from, DataType to, boolean safe) {
+        return cast(v, from, to, safe, null);
+    }
+
+    /** Casts in a time zone, or as the cast without one if it is {@code null}. */
+    private Val cast(Val v, DataType from, DataType to, boolean safe, ZoneId zone) {
         if (from.equals(to)) {
             return v;
         }
@@ -478,7 +491,7 @@ final class ExpressionCodegen {
             body.open("try");
         }
         body.line("Object " + o + " = Casts.cast(" + v.rep().box(v.value(), from) + ", " + typeField(from) + ", "
-                + typeField(to) + ");");
+                + typeField(to) + (zone == null ? "" : ", " + objectField("java.time.ZoneId", zone)) + ");");
         body.open("if (" + o + " == null)").line(r.isNull() + " = true;").reopen("else")
                 .line(r.value() + " = " + tr.unbox(o, typeFieldIfDecimal(to)) + ";").close();
         if (safe) {
@@ -522,6 +535,9 @@ final class ExpressionCodegen {
     }
 
     private Val arithmetic(Expression.Arithmetic a) {
+        if (TypeRules.isTemporalArithmetic(a.left().type(), a.right().type())) {
+            return temporalArithmetic(a);
+        }
         if (a.left().type() == DataType.DATE || a.right().type() == DataType.DATE) {
             return dateArithmetic(a);
         }
@@ -602,6 +618,24 @@ final class ExpressionCodegen {
             body.line(res.value() + " = ScalarOps.shiftDate(Expression.ArithmeticOp." + a.op().name() + ", (long) "
                     + l.value() + ", (long) " + r.value() + ");");
         }
+        body.close();
+        return res;
+    }
+
+    /** Arithmetic with times of day, timestamps and intervals, through {@code ScalarOps.temporal}. */
+    private Val temporalArithmetic(Expression.Arithmetic a) {
+        Val l = gen(a.left());
+        Val r = gen(a.right());
+        DataType lt = a.left().type();
+        DataType rt = a.right().type();
+        Val res = declare(a.type());
+        String o = fresh("o");
+        body.open("if (" + or(l.isNull(), r.isNull()) + ")").line(res.isNull() + " = true;").reopen("else")
+                .line("Object " + o + " = ScalarOps.temporal(Expression.ArithmeticOp." + a.op().name() + ", "
+                        + l.rep().box(l.value(), lt) + ", " + r.rep().box(r.value(), rt) + ", " + typeField(lt) + ", "
+                        + typeField(rt) + ");")
+                .open("if (" + o + " == null)").line(res.isNull() + " = true;").reopen("else")
+                .line(res.value() + " = " + res.rep().unbox(o, typeFieldIfDecimal(a.type())) + ";").close();
         body.close();
         return res;
     }

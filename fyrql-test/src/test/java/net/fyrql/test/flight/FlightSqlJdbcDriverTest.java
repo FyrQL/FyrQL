@@ -110,6 +110,11 @@ class FlightSqlJdbcDriverTest {
     void everyTypeComesThroughTheDriverOfArrow() throws SQLException {
         Schema schema = AllTypesTable.SCHEMA;
         List<Object[]> expected = engine.rows("SELECT * FROM mem.t");
+        // The driver gives a TIME as a java.sql.Time, of milliseconds.
+        int tm = schema.indexOf("tm");
+        for (Object[] row : expected) {
+            row[tm] = row[tm] == null ? null : (Long) row[tm] / 1000 * 1000;
+        }
         List<Object[]> actual = new ArrayList<>();
         try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery("SELECT * FROM mem.t")) {
             ResultSetMetaData md = rs.getMetaData();
@@ -190,8 +195,26 @@ class FlightSqlJdbcDriverTest {
                         : ((Number) v).intValue();
                 case TIMESTAMP -> Conversions.toMicros((LocalDateTime) v);
                 case UUID -> (UUID) v;
+                case TIME -> v instanceof java.sql.Time t ? Math.floorMod(t.getTime(), 86_400_000L) * 1000
+                        : ((java.time.LocalTime) v).toNanoOfDay() / 1000;
+                case TIMESTAMPTZ -> v instanceof java.sql.Timestamp t ? Conversions.toMicros(LocalDateTime.ofInstant(
+                        t.toInstant(), java.time.ZoneOffset.UTC)) : Conversions.toMicros((LocalDateTime) v);
+                case INTERVAL -> interval(v);
             };
         };
+    }
+
+    /** The interval of a PeriodDuration of Arrow, whose class the driver shades. */
+    private static net.fyrql.core.value.Interval interval(Object periodDuration) {
+        try {
+            java.time.Period p = (java.time.Period) periodDuration.getClass().getMethod("getPeriod")
+                    .invoke(periodDuration);
+            java.time.Duration d = (java.time.Duration) periodDuration.getClass().getMethod("getDuration")
+                    .invoke(periodDuration);
+            return net.fyrql.core.value.Interval.of((int) p.toTotalMonths(), p.getDays(), d.toNanos() / 1000);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Not a PeriodDuration: " + periodDuration, e);
+        }
     }
 
     /**

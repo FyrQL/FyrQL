@@ -45,14 +45,16 @@ final class ExpressionGenerator {
     static final List<DataType> TYPES = List.of(DataType.BOOLEAN, DataType.TINYINT, DataType.SMALLINT,
             DataType.INTEGER, DataType.BIGINT, DataType.HUGEINT, DataType.FLOAT, DataType.DOUBLE,
             DataType.decimal(6, 2), DataType.decimal(10, 3), DataType.decimal(18, 4), DataType.decimal(38, 10),
-            DataType.VARCHAR, DataType.DATE, DataType.TIMESTAMP);
+            DataType.VARCHAR, DataType.DATE, DataType.TIMESTAMP, DataType.TIME, DataType.TIMESTAMPTZ,
+            DataType.INTERVAL);
 
     static final List<String> PARTS = List.of("year", "yr", "month", "mon", "day", "d", "decade", "century",
             "millennium", "microseconds", "us", "milliseconds", "ms", "second", "s", "minute", "m", "hour", "h",
-            "epoch", "dow", "isodow", "week", "w", "doy", "quarter", "yearweek", "isoyear", "era");
+            "epoch", "dow", "isodow", "week", "w", "doy", "quarter", "yearweek", "isoyear", "era", "timezone",
+            "timezone_hour", "timezone_minute");
 
     static final List<String> FORMATS = List.of("%Y-%m-%d", "%d/%m/%y", "%H:%M:%S", "%Y%m%d %H%M", "%a %b %-d %Y",
-            "%A, %B %d", "%I:%M %p", "%j", "%S.%f", "%-m/%-d/%Y %-H:%-M", "%%Y %Y");
+            "%A, %B %d", "%I:%M %p", "%j", "%S.%f", "%-m/%-d/%Y %-H:%-M", "%%Y %Y", "%Y-%m-%d %H:%M:%S%z");
 
     static final List<String> PATTERNS = List.of("%", "a%", "%a", "%a%", "_", "__", "a_", "%b_%", "A%", "%\u00DF%",
             "1%", "%.%", "");
@@ -81,7 +83,8 @@ final class ExpressionGenerator {
         FunctionRegistry registry = Expressions.functions();
         List<DataType> probes = List.of(DataType.BOOLEAN, DataType.TINYINT, DataType.SMALLINT, DataType.INTEGER,
                 DataType.BIGINT, DataType.HUGEINT, DataType.FLOAT, DataType.DOUBLE, DataType.decimal(10, 3),
-                DataType.VARCHAR, DataType.DATE, DataType.TIMESTAMP);
+                DataType.VARCHAR, DataType.DATE, DataType.TIMESTAMP, DataType.TIME, DataType.TIMESTAMPTZ,
+                DataType.INTERVAL);
         Map<String, List<List<DataType>>> signatures = new LinkedHashMap<>();
         for (String name : registry.names()) {
             if (LEFT_OUT.contains(name)) {

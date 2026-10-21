@@ -14,6 +14,7 @@ package net.fyrql.core.function;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.type.DataType;
 
+import java.time.ZoneId;
 import java.util.List;
 
 /**
@@ -77,6 +78,18 @@ public interface ScalarFunction {
      * @throws IllegalArgumentException if an argument must be a constant and is none
      */
     default ScalarFunction specialize(List<Expression> arguments) {
+        return this;
+    }
+
+    /**
+     * Returns the function for a call in a time zone: by default this
+     * function. A function whose result depends on the time zone, such as
+     * the parts of a {@code TIMESTAMP WITH TIME ZONE}, returns a variant that
+     * holds the zone, so that the interpreter, generated code and the
+     * folding of constants compute alike. A binder calls this for every call,
+     * after {@link #specialize}, with the time zone of the session.
+     */
+    default ScalarFunction inZone(ZoneId zone) {
         return this;
     }
 

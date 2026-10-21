@@ -104,7 +104,7 @@ class JdbcConnectorTest {
         boolean sqlite = dialect == JdbcDialect.SQLITE;
         String schema = sqlite ? "\"main\"" : "\"PUBLIC\"";
         assertEquals(List.of("SELECT t.\"id\", t.\"b\", t.\"ti\", t.\"si\", t.\"i\", t.\"bi\", t.\"de\", t.\"f\", "
-                + "t.\"d\", t.\"s\", t.\"bl\", t.\"dt\", t.\"ts\", t.\"u\""
+                + "t.\"d\", t.\"s\", t.\"bl\", t.\"dt\", t.\"ts\", t.\"u\", t.\"tm\", t.\"tz\""
                 + (sqlite ? "" : ", t.\"h\", t.\"dw\"") + " FROM " + schema + ".\"all_types\" t"),
                 connector.statements());
         assertThrows(IllegalArgumentException.class, () -> connector.catalog().schema(TableRef.of("db", "nope")));
@@ -296,7 +296,7 @@ class JdbcConnectorTest {
     }
 
     @Test
-    void aJoinOnInstantsStaysWithTheEngine() {
+    void aJoinOnInstantsGoesToH2() {
         TestDatabase db = TestDatabase.create(JdbcDialect.H2);
         db.execute("CREATE TABLE a (id INTEGER, tz TIMESTAMP WITH TIME ZONE)",
                 "CREATE TABLE b (id INTEGER, tz TIMESTAMP WITH TIME ZONE)",
@@ -304,12 +304,10 @@ class JdbcConnectorTest {
                 "INSERT INTO b VALUES (2, TIMESTAMP WITH TIME ZONE '2020-01-01 10:00:00+00')");
         JdbcConnector connector = db.connector("db");
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
+            // H2 compares the instants, not their local times.
             assertEquals(1, engine.rows("SELECT a.\"ID\", b.\"ID\" FROM a JOIN b ON a.\"TZ\" = b.\"TZ\"").size());
-            assertEquals(2, connector.statements().size(), connector.statements().toString());
-            connector.clearStatements();
-            // The instants are only read, and the join is on the ids.
-            assertEquals(0, engine.rows("SELECT a.\"TZ\", b.\"TZ\" FROM a JOIN b ON a.\"ID\" = b.\"ID\"").size());
             assertEquals(1, connector.statements().size(), connector.statements().toString());
+            assertTrue(connector.statements().get(0).contains("JOIN"), connector.statements().get(0));
         }
     }
 
@@ -669,40 +667,39 @@ class JdbcConnectorTest {
     @Test
     void anUnknownColumnTypeIsReadAsAString() {
         TestDatabase db = TestDatabase.create(JdbcDialect.H2);
-        db.execute("CREATE TABLE odd (t TIME, j JSON, a INTEGER ARRAY, n NUMERIC)",
-                "INSERT INTO odd VALUES (TIME '12:34:56', JSON '{\"a\":1}', ARRAY[1, 2], 15)");
+        db.execute("CREATE TABLE odd (t TIME WITH TIME ZONE, j JSON, a INTEGER ARRAY, n NUMERIC)",
+                "INSERT INTO odd VALUES (TIME WITH TIME ZONE '12:34:56+02', JSON '{\"a\":1}', ARRAY[1, 2], 15)");
         JdbcConnector connector = db.connector("db");
         Schema schema = connector.catalog().schema(TableRef.of("db", "ODD"));
         assertEquals(List.of(DataType.VARCHAR, DataType.VARCHAR, DataType.VARCHAR, DataType.VARCHAR), schema.types());
         Object[] row = rows(readAll(connector, TableRef.of("db", "ODD"))).get(0);
-        assertEquals("12:34:56", row[0]);
+        assertEquals("12:34:56+02", row[0]);
         assertEquals("15", row[3]);
     }
 
-    @Test
-    void aTimestampWithATimeZoneIsItsInstantInUtcAndFilteredByTheEngine() {
-        TestDatabase db = TestDatabase.create(JdbcDialect.H2);
+    @ParameterizedTest
+    @EnumSource(names = {"H2", "GENERIC"})
+    void aTimestampWithATimeZoneIsAnInstantThatOnlyH2Compares(JdbcDialect dialect) {
+        TestDatabase db = TestDatabase.create(dialect);
         db.execute("CREATE TABLE zoned (id INTEGER, tz TIMESTAMP WITH TIME ZONE)",
                 "INSERT INTO zoned VALUES (1, TIMESTAMP WITH TIME ZONE '2020-01-01 12:00:00+02'), "
                         + "(2, TIMESTAMP WITH TIME ZONE '2020-01-01 09:59:59+00')");
         JdbcConnector connector = db.connector("db");
+        assertEquals(DataType.TIMESTAMPTZ, connector.catalog().schema(TableRef.of("db", "ZONED")).type(1));
+        // The generic dialect leaves every instant to the engine, as a database may compare it in its session.
+        boolean pushed = dialect == JdbcDialect.H2;
+        long ten = Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 10, 0));
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
-            // The database would read the literal in the time zone of its session.
-            List<Object[]> rows = engine.rows("SELECT \"ID\", \"TZ\" FROM zoned WHERE \"TZ\" >= TIMESTAMP '2020-01-01 10:00:00'");
+            List<Object[]> rows = engine.rows("SELECT \"ID\", \"TZ\" FROM zoned"
+                    + " WHERE \"TZ\" >= TIMESTAMPTZ '2020-01-01 10:00:00+00'");
             assertEquals(1, rows.size());
             assertEquals(1, rows.get(0)[0]);
-            assertEquals(Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 10, 0)), rows.get(0)[1]);
-            assertFalse(connector.statements().get(0).contains("WHERE"), connector.statements().get(0));
-            assertEquals(1, engine.rows("SELECT \"ID\" FROM zoned WHERE \"ID\" = 1").size());
-            assertTrue(connector.statements().get(1).contains("WHERE"), connector.statements().get(1));
-            // The instants are neither grouped nor aggregated in the database either.
-            assertEquals(Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 10, 0)),
-                    engine.rows("SELECT max(\"TZ\") FROM zoned").get(0)[0]);
-            assertTrue(connector.statements().get(2).startsWith("SELECT t.\"TZ\" FROM"), connector.statements().get(2));
+            assertEquals(ten, rows.get(0)[1]);
+            assertEquals(pushed, connector.statements().get(0).contains("WHERE"), connector.statements().get(0));
+            assertEquals(ten, engine.rows("SELECT max(\"TZ\") FROM zoned").get(0)[0]);
+            assertEquals(pushed, connector.statements().get(1).contains("max("), connector.statements().get(1));
             assertEquals(2, engine.rows("SELECT \"TZ\", count(*) FROM zoned GROUP BY \"TZ\"").size());
-            assertFalse(connector.statements().get(3).contains("GROUP BY"), connector.statements().get(3));
-            assertEquals(2L, engine.rows("SELECT count(\"TZ\") FROM zoned").get(0)[0]);
-            assertTrue(connector.statements().get(4).startsWith("SELECT t.\"TZ\" FROM"), connector.statements().get(4));
+            assertEquals(pushed, connector.statements().get(2).contains("GROUP BY"), connector.statements().get(2));
         }
     }
 }

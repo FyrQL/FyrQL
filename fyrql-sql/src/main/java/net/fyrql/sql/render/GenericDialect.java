@@ -151,8 +151,10 @@ public final class GenericDialect extends StandardDialect {
             case VARCHAR -> "VARCHAR(4000)";
             case BLOB -> "BLOB";
             case DATE -> "DATE";
-            case TIMESTAMP -> "TIMESTAMP";
+            case TIMESTAMP, TIMESTAMPTZ -> "TIMESTAMP";
             case UUID -> "CHAR(36)";
+            case TIME -> "TIME";
+            case INTERVAL -> "VARCHAR(64)";
         };
     }
 

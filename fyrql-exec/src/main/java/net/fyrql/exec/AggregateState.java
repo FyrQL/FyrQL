@@ -45,7 +45,8 @@ import java.util.Arrays;
  * and {@code avg} over the integral types up to {@code BIGINT}, decimals,
  * {@code FLOAT} and {@code DOUBLE}, and for {@code min} and {@code max}
  * over these, except decimals of more than 18 digits, and over
- * {@code BOOLEAN}, {@code DATE} and {@code TIMESTAMP}. Its results are
+ * {@code BOOLEAN}, {@code DATE}, {@code TIMESTAMP}, {@code TIME} and
+ * {@code TIMESTAMP WITH TIME ZONE}. Its results are
  * those of the aggregation over objects in {@link HashAggregateOperator},
  * which covers the rest: exact sums that grow into a {@code BigInteger}
  * when a {@code long} overflows, the same conversion of a sum to a double
@@ -121,6 +122,7 @@ abstract class AggregateState {
             case MIN, MAX -> {
                 boolean max = function == AggregateFunction.MAX;
                 if (integral || type == DataType.BOOLEAN || type == DataType.DATE || type == DataType.TIMESTAMP
+                        || type == DataType.TIME || type == DataType.TIMESTAMPTZ
                         || type instanceof Decimal d && d.fitsLong()) {
                     yield new LongExtreme(call.column(), type, max);
                 }
@@ -620,7 +622,7 @@ abstract class AggregateState {
                     }
                     return IntVector.wrap(type, out, missing);
                 }
-                case BIGINT, TIMESTAMP -> {
+                case BIGINT, TIMESTAMP, TIME, TIMESTAMPTZ -> {
                     return BigIntVector.wrap(type, Arrays.copyOf(best, groups), missing);
                 }
                 default -> throw new IllegalStateException("No longs for " + type);

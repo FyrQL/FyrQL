@@ -30,6 +30,7 @@ import net.fyrql.sql.bind.BoundStatement;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -73,6 +74,10 @@ final class Writes {
             case BoundStatement.Create c -> create(c, context);
             case BoundStatement.Insert i -> insert(i, context);
             case BoundStatement.Drop d -> drop(d);
+            case BoundStatement.Set s -> {
+                engine.apply(s);
+                yield 0;
+            }
         };
     }
 
@@ -84,7 +89,8 @@ final class Writes {
                         : "; there are " + String.join(", ", engine.catalog().fileFormats())), Position.UNKNOWN));
         EngineCatalog.checkLocal(copy.path());
         Schema schema = copy.input().schema();
-        return write(() -> provider.openFile(copy.format(), copy.path(), schema, copy.options()), rows(copy.input()),
+        Map<String, String> options = engine.catalog().withTimeZone(copy.options());
+        return write(() -> provider.openFile(copy.format(), copy.path(), schema, options), rows(copy.input()),
                 null, null, context);
     }
 

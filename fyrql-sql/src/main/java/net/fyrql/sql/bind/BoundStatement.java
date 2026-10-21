@@ -25,8 +25,9 @@ import java.util.Objects;
 /**
  * A statement, bound: a query as its plan, or a statement that writes with
  * the plan of the rows it writes, which the engine optimizes and runs as
- * the plan of any query. Whether a table to create exists, or one to
- * write or drop, is checked when the statement runs.
+ * the plan of any query, or a setting of the session. Whether a table to
+ * create exists, or one to write or drop, is checked when the statement
+ * runs.
  */
 public sealed interface BoundStatement {
 
@@ -142,6 +143,19 @@ public sealed interface BoundStatement {
             if (table == null && !ifExists) {
                 throw new IllegalArgumentException("Only DROP TABLE IF EXISTS may name no table");
             }
+        }
+    }
+
+    /**
+     * {@code SET} or {@code RESET} of a setting of the session; its result
+     * is a count of 0.
+     *
+     * @param name the name of the setting as FyrQL spells it, e.g. {@code TimeZone}
+     * @param value the new value, checked, or {@code null} for the value the session started with
+     */
+    record Set(String name, String value) implements BoundStatement {
+        public Set {
+            Objects.requireNonNull(name, "name");
         }
     }
 }

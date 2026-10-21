@@ -108,6 +108,18 @@ public final class EdgeValues {
                     Conversions.parseTimestamp("9999-12-31 23:59:59.999999"),
                     Conversions.parseTimestamp("0001-01-01 00:00:00"));
             case UUID -> List.of(new UUID(0, 0), new UUID(-1, -1), new UUID(0x0123456789ABCDEFL, 0xFEDCBA9876543210L));
+            // Not 24:00:00, which the JDBC driver of DuckDB cannot read.
+            case TIME -> List.of(0L, 1L, 43_200_000_000L, 86_399_999_999L, 3_723_000_001L);
+            case TIMESTAMPTZ -> List.of(0L, -1L, 1L, 86_400_000_000L - 1, -86_400_000_000L,
+                    Conversions.parseTimestamp("9999-12-31 23:59:59.999999"),
+                    Conversions.parseTimestamp("0001-01-01 00:00:00"),
+                    Conversions.parseTimestamp("2024-03-31 01:30:00"),
+                    Conversions.parseTimestamp("2024-10-27 00:30:00"));
+            case INTERVAL -> List.of(Interval.ZERO, Interval.ofMonths(1), Interval.ofDays(30),
+                    Interval.ofMicros(Interval.MICROS_PER_MONTH), Interval.ofDays(1), Interval.ofMicros(1),
+                    Interval.ofMicros(-1), Interval.of(1, -30, 0), Interval.of(-1, 2, -3_600_000_000L),
+                    Interval.of(1_000_000, 0, 0), Interval.ofDays(-1_000_000),
+                    Interval.ofMicros(86_400_000_000L * 365 * 1000));
         };
     }
 

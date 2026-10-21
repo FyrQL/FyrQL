@@ -18,6 +18,7 @@ import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.ZoneId;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -44,6 +45,11 @@ import java.util.concurrent.ScheduledFuture;
 class FyrQLStatement implements Statement {
 
     final FyrQLConnection connection;
+
+    /** Returns the time zone of the session of the connection. */
+    ZoneId zone() {
+        return connection.engine().timeZone();
+    }
     private final int holdability;
     private FyrQLResultSet resultSet;
     private final List<FyrQLResultSet> kept = new ArrayList<>();

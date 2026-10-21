@@ -42,13 +42,14 @@ import java.util.regex.Pattern;
  * {@code +02:00}, with a fraction of a second and {@code Z}, and with a
  * fraction and an offset; a timestamp with an offset is its instant in
  * UTC;</li>
+ * <li>times of day {@code H:MM}, {@code H:MM:SS} with or without a
+ * fraction, up to {@code 24:00:00}, without an offset;</li>
  * <li>UUIDs in their canonical form of 36 characters, in any case.</li>
  * </ul>
  * Each form is a kind of its own: {@code 2020-01-02 03:04:05} and
  * {@code 2020-01-02 03:04:05.5} in one column make a {@code VARCHAR}, as in
  * DuckDB. A {@code dateformat} or {@code timestampformat} replaces the forms
- * of its type. Strings of a time of day stay {@code VARCHAR}; DuckDB reads
- * them as {@code TIME}, which FyrQL does not have.
+ * of its type.
  */
 final class StringKinds {
 
@@ -63,6 +64,8 @@ final class StringKinds {
     private static final Pattern ISO = Pattern.compile(
             "\\s*(\\d{4})-(\\d{1,2})-(\\d{1,2})T(\\d{1,2}):(\\d{1,2}):(\\d{1,2})(?:\\.(\\d{1,6}))?"
                     + "(Z|([+-])(\\d{2}):(\\d{2}))?\\s*");
+
+    private static final Pattern TIME = Pattern.compile("\\s*\\d{1,2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?\\s*");
 
     private static final Pattern UUID = Pattern.compile(
             "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
@@ -114,6 +117,7 @@ final class StringKinds {
             kinds.add(new Kind(DataType.TIMESTAMP, "ISO 8601 with T, a fraction and an offset",
                     s -> iso(s, true, 2)));
         }
+        kinds.add(new Kind(DataType.TIME, "time of day", s -> time(s)));
         kinds.add(new Kind(DataType.UUID, "UUID",
                 s -> s.length() == 36 && UUID.matcher(s).matches() ? Conversions.parseUuid(s) : null));
         return new StringKinds(kinds);
@@ -165,6 +169,18 @@ final class StringKinds {
         }
         try {
             return reader.applyAsLong(s);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** Reads a time of day, or returns {@code null} if the string has another form. */
+    private static Long time(String s) {
+        if (!TIME.matcher(s).matches()) {
+            return null;
+        }
+        try {
+            return Conversions.parseTime(s);
         } catch (RuntimeException e) {
             return null;
         }

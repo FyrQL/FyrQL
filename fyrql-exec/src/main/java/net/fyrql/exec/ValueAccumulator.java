@@ -19,6 +19,7 @@ import net.fyrql.core.type.DataType.Decimal;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Casts;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.value.Keys;
 import net.fyrql.core.value.Order;
 import net.fyrql.core.vector.Batch;
@@ -56,6 +57,9 @@ final class ValueAccumulator {
     private final List<Object[]> ordered;
     private long count;
     private long longSum;
+    /** The months and days of a sum of intervals, whose microseconds are in the sum of longs. */
+    private long monthSum;
+    private long daySum;
     private BigInteger bigSum;
     private double doubleSum;
     private BigDecimal decimalSum;
@@ -102,6 +106,8 @@ final class ValueAccumulator {
     void reset() {
         count = 0;
         longSum = 0;
+        monthSum = 0;
+        daySum = 0;
         bigSum = null;
         doubleSum = 0;
         if (type instanceof Decimal d) {
@@ -147,8 +153,13 @@ final class ValueAccumulator {
                     decimalSum = decimalSum.add((BigDecimal) value);
                 } else if (type == DataType.HUGEINT) {
                     bigSum = (bigSum == null ? BigInteger.ZERO : bigSum).add((BigInteger) value);
-                } else if (type.isIntegral()) {
+                } else if (type.isIntegral() || type == DataType.TIME) {
                     addLong(((Number) value).longValue());
+                } else if (type == DataType.INTERVAL) {
+                    Interval i = (Interval) value;
+                    monthSum += i.months();
+                    daySum += i.days();
+                    addLong(i.micros());
                 } else {
                     doubleSum += ((Number) value).doubleValue();
                 }
@@ -201,7 +212,9 @@ final class ValueAccumulator {
             case SUM, AVG -> {
                 if (type instanceof Decimal) {
                     decimalSum = decimalSum.add(other.decimalSum);
-                } else if (type.isIntegral()) {
+                } else if (type.isIntegral() || type == DataType.TIME || type == DataType.INTERVAL) {
+                    monthSum += other.monthSum;
+                    daySum += other.daySum;
                     if (other.bigSum != null) {
                         bigSum = (bigSum != null ? bigSum : BigInteger.valueOf(longSum)).add(other.bigSum);
                     } else {
@@ -253,6 +266,16 @@ final class ValueAccumulator {
             case AVG -> {
                 if (count == 0) {
                     yield null;
+                }
+                if (type == DataType.TIME) {
+                    // The mean time of day, rounded to microseconds, halves to the even neighbor.
+                    BigInteger sum = bigSum != null ? bigSum : BigInteger.valueOf(longSum);
+                    yield new BigDecimal(sum).divide(BigDecimal.valueOf(count), 0, java.math.RoundingMode.HALF_EVEN)
+                            .longValueExact();
+                }
+                if (type == DataType.INTERVAL) {
+                    BigInteger micros = bigSum != null ? bigSum : BigInteger.valueOf(longSum);
+                    yield Interval.quotient(monthSum, daySum, HashAggregateOperator.toDouble(micros), count);
                 }
                 // As DuckDB: the sum as a double, divided by the count and, for a decimal, its power of ten.
                 if (type instanceof Decimal d) {

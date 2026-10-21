@@ -22,6 +22,7 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneOffset;
 import java.util.BitSet;
 import java.util.Calendar;
@@ -71,8 +72,9 @@ final class JdbcBinding {
             case VARCHAR -> statement.setString(index, (String) v);
             case BLOB -> statement.setBytes(index, (byte[]) v);
             case DATE -> statement.setDate(index, ColumnReaders.date((Integer) v), utc);
-            case TIMESTAMP -> statement.setTimestamp(index, ColumnReaders.timestamp((Long) v), utc);
-            case UUID -> statement.setString(index, v.toString());
+            case TIMESTAMP, TIMESTAMPTZ -> statement.setTimestamp(index, ColumnReaders.timestamp((Long) v), utc);
+            case UUID, INTERVAL -> statement.setString(index, v.toString());
+            case TIME -> statement.setTime(index, new java.sql.Time((Long) v / 1000), utc);
         }
     }
 
@@ -144,6 +146,24 @@ final class JdbcBinding {
         if (type == DataType.UUID && uuidType(dialect)) {
             return (s, i, v) -> s.setObject(i, (UUID) v);
         }
+        if (type == DataType.TIME) {
+            return dialect == JdbcDialect.SQLITE ? (s, i, v) -> s.setString(i, Conversions.formatTime((Long) v))
+                    : (s, i, v) -> s.setObject(i, LocalTime.ofNanoOfDay((Long) v * 1000));
+        }
+        if (type == DataType.TIMESTAMPTZ) {
+            // An instant, as such where the database has a type for it, else as its timestamp in UTC.
+            return switch (dialect) {
+                case SQLITE -> (s, i, v) -> s.setString(i, Conversions.formatTimestamp((Long) v));
+                case POSTGRESQL, H2 -> (s, i, v) -> s.setObject(i, Conversions.toLocalDateTime((Long) v)
+                        .atOffset(ZoneOffset.UTC));
+                default -> withTimeZone ? (s, i, v) -> s.setObject(i, Conversions.toLocalDateTime((Long) v)
+                        .atOffset(ZoneOffset.UTC)) : (s, i, v) -> s.setObject(i, Conversions.toLocalDateTime((Long) v));
+            };
+        }
+        if (type == DataType.INTERVAL) {
+            return dialect == JdbcDialect.POSTGRESQL ? (s, i, v) -> s.setObject(i, v.toString(), Types.OTHER)
+                    : (s, i, v) -> s.setString(i, v.toString());
+        }
         // The calendar is not used for the other types.
         return (s, i, v) -> bind(s, i, type, v, null);
     }
@@ -172,6 +192,10 @@ final class JdbcBinding {
             case DATE -> Types.DATE;
             case TIMESTAMP -> Types.TIMESTAMP;
             case UUID -> uuidType(dialect) ? Types.OTHER : Types.VARCHAR;
+            case TIME -> Types.TIME;
+            case TIMESTAMPTZ -> dialect == JdbcDialect.POSTGRESQL || dialect == JdbcDialect.H2
+                    ? Types.TIMESTAMP_WITH_TIMEZONE : Types.TIMESTAMP;
+            case INTERVAL -> dialect == JdbcDialect.POSTGRESQL ? Types.OTHER : Types.VARCHAR;
         };
     }
 }

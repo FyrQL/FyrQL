@@ -51,6 +51,9 @@ public final class PostgresDialect extends StandardDialect {
             case DATE -> "DATE";
             case TIMESTAMP -> "TIMESTAMP";
             case UUID -> "UUID";
+            case TIME -> "TIME";
+            case TIMESTAMPTZ -> "TIMESTAMPTZ";
+            case INTERVAL -> "INTERVAL";
         };
     }
 
@@ -67,6 +70,16 @@ public final class PostgresDialect extends StandardDialect {
             default -> "-Infinity";
         };
         return "CAST(" + string(text) + " AS " + typeName(type) + ")";
+    }
+
+    @Override
+    String timestampTzLiteral(long micros) {
+        return "TIMESTAMPTZ " + string(net.fyrql.core.value.Conversions.formatTimestamp(micros) + "+00:00");
+    }
+
+    @Override
+    String intervalLiteral(net.fyrql.core.value.Interval value) {
+        return "CAST(" + string(value.toString()) + " AS INTERVAL)";
     }
 
     @Override
@@ -87,6 +100,7 @@ public final class PostgresDialect extends StandardDialect {
 
     @Override
     boolean storesExactly(DataType type) {
-        return exactNumber(type) || type == Scalar.VARCHAR || type == Scalar.DATE || type == Scalar.TIMESTAMP;
+        return exactNumber(type) || type == Scalar.VARCHAR || type == Scalar.DATE || type == Scalar.TIMESTAMP
+                || type == Scalar.TIME || type == Scalar.TIMESTAMPTZ;
     }
 }

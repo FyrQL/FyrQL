@@ -19,7 +19,10 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
 import net.fyrql.core.plan.TableRef;
+import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 import net.fyrql.exec.CodegenMode;
 import net.fyrql.exec.Executor;
 import net.fyrql.sql.SqlException;
@@ -35,7 +38,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -51,7 +56,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * renamed {@code c0}, {@code c1} and so on, since a result may have two
  * columns of the same name. A plan that fails in FyrQL is left out, and so
  * is a Parquet file of a result with a {@code HUGEINT} of 39 digits, which
- * a {@code DECIMAL(38,0)} does not hold, and the load of a CSV file of a
+ * a {@code DECIMAL(38,0)} does not hold, or with a negative part of an
+ * interval, which Parquet does not hold either, and the load of a CSV file of a
  * result with nested columns, which CSV does not hold; the report counts
  * them. The engine has only the memory source registered, the sources of
  * the formats come with their modules. No temporary file is left behind.
@@ -76,7 +82,7 @@ class WriteRoundTripTest {
         List<String> unexplained = new ArrayList<>();
         try (FyrQL engine = RandomTables.engine(RandomTables.rows(RandomRun.SEED), CodegenMode.OFF,
                 Executor.threadsFromSystemProperty());
-                DuckDbReference duck = new DuckDbReference()) {
+                DuckDbReference duck = RandomTables.duck()) {
             for (int i = 0; i < RandomRun.QUERIES; i++) {
                 PlanNode plan = renamed(new PlanGenerator(RandomRun.random(i)).plan(3));
                 boolean ordered = Plans.ordered(plan);
@@ -96,8 +102,9 @@ class WriteRoundTripTest {
                     try {
                         count = engine.update("COPY (" + sql + ") TO '" + WrittenFiles.path(file) + "'");
                     } catch (SqlException e) {
-                        if (format.equals("parquet") && e.getMessage().contains(" has more than 38 digits; a Parquet"
-                                + " file holds a HUGEINT as a DECIMAL(38,0)")) {
+                        if (format.equals("parquet") && (e.getMessage().contains(" has more than 38 digits; a Parquet"
+                                + " file holds a HUGEINT as a DECIMAL(38,0)")
+                                || e.getMessage().startsWith("Parquet files do not support negative intervals"))) {
                             tooLarge++;
                             continue;
                         }
@@ -113,8 +120,9 @@ class WriteRoundTripTest {
                         continue;
                     }
                     String report;
+                    List<Object[]> written = asWritten(format, schema, rows);
                     try {
-                        ResultComparison.Outcome same = WrittenFiles.duckDb(duck, file, format, schema, rows)
+                        ResultComparison.Outcome same = WrittenFiles.duckDb(duck, file, format, schema, written)
                                 .compare(ordered);
                         report = same.same() ? null : same.report();
                     } catch (RuntimeException e) {
@@ -127,7 +135,7 @@ class WriteRoundTripTest {
                     if (format.equals("csv") && schema.fields().stream().anyMatch(f -> f.type().isNested())) {
                         nestedInCsv++;
                     } else {
-                        report = loaded(engine, file, format, schema, rows);
+                        report = loaded(engine, file, format, schema, written);
                         if (report != null) {
                             unexplained.add("query " + i + " from " + format + ":\n" + report.indent(2) + "  sql: "
                                     + sql);
@@ -145,7 +153,8 @@ class WriteRoundTripTest {
         }
         String report = "Random results written: " + RandomRun.QUERIES + " queries, seed " + RandomRun.SEED + ", "
                 + checked + " results in " + FORMATS.size() + " formats with " + rowsWritten + " rows read back, "
-                + failed + " failed in FyrQL, " + tooLarge + " not in Parquet with a HUGEINT of 39 digits, "
+                + failed + " failed in FyrQL, " + tooLarge + " not in Parquet with a HUGEINT of 39 digits or a"
+                + " negative interval, "
                 + nestedInCsv + " not loaded from CSV with nested columns\n"
                 + "  unexplained: " + unexplained.size() + "\n" + String.join("\n", unexplained.stream()
                         .limit(20).toList());
@@ -186,6 +195,57 @@ class WriteRoundTripTest {
         } finally {
             engine.update("DROP TABLE " + back);
         }
+    }
+
+    /**
+     * Returns the rows as a file of the format holds them. Text: an instant
+     * whose offset in the time zone has seconds, a local mean time before
+     * the standard time of the zone, is written with the offset without its
+     * seconds, as DuckDB writes it, and reads back that much off. Parquet:
+     * an interval has whole milliseconds in 32 bits, as DuckDB writes it.
+     */
+    private static List<Object[]> asWritten(String format, Schema schema, List<Object[]> rows) {
+        List<Object[]> out = new ArrayList<>();
+        for (Object[] row : rows) {
+            Object[] e = row.clone();
+            for (int c = 0; c < e.length; c++) {
+                e[c] = asWritten(format.equals("parquet"), schema.type(c), e[c]);
+            }
+            out.add(e);
+        }
+        return out;
+    }
+
+    private static Object asWritten(boolean parquet, DataType type, Object value) {
+        if (value == null) {
+            return null;
+        }
+        return switch (type) {
+            case DataType.ListType l -> ((List<?>) value).stream().map(v -> asWritten(parquet, l.element(), v))
+                    .toList();
+            case DataType.Struct s -> {
+                List<Object> fields = new ArrayList<>();
+                for (int i = 0; i < s.fields().size(); i++) {
+                    fields.add(asWritten(parquet, s.fields().get(i).type(), ((List<?>) value).get(i)));
+                }
+                yield fields;
+            }
+            case DataType.MapType m -> {
+                Map<Object, Object> entries = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
+                    entries.put(asWritten(parquet, m.key(), e.getKey()), asWritten(parquet, m.value(), e.getValue()));
+                }
+                yield entries;
+            }
+            default -> {
+                if (parquet) {
+                    yield value instanceof Interval i ? Interval.of(i.months(), i.days(),
+                            Integer.toUnsignedLong((int) (i.micros() / 1000)) * 1000) : value;
+                }
+                yield type == DataType.TIMESTAMPTZ ? Conversions.parseTimestampTz(Conversions.formatTimestampTz(
+                        (Long) value, RandomTables.ZONE), RandomTables.ZONE) : value;
+            }
+        };
     }
 
     /** Returns the rows with an empty string as {@code NULL}, as FyrQL reads them from a CSV file. */

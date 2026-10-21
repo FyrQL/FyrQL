@@ -148,9 +148,10 @@ class ODataProfileTest {
             server.clearRequests();
             ODataConnectorTest.read(c, people, request);
             assertEquals("id lt 5", server.requests("/v2/People").get(0).parameters().get("$filter"));
-            // Of version 4 the column is of Edm.DateTimeOffset and keeps its type.
+            // Of version 4 the column is of Edm.DateTimeOffset, an instant.
             assertEquals(new Schema(List.of(PEOPLE.fields().get(0), PEOPLE.fields().get(1),
-                    PEOPLE.fields().get(2))), c.catalog().schema(new TableRef("erp", "v4", "People")));
+                    new Schema.Field("born", DataType.TIMESTAMPTZ, true))),
+                    c.catalog().schema(new TableRef("erp", "v4", "People")));
         }
     }
 

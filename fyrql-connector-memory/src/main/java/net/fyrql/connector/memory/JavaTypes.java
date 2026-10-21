@@ -16,6 +16,7 @@ import net.fyrql.core.type.DataType.Decimal;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
@@ -27,10 +28,15 @@ import java.lang.reflect.RecordComponent;
 import java.lang.reflect.Type;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.Period;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -46,9 +52,13 @@ import java.util.UUID;
  * matching scalar types; {@code BigInteger} to {@code HUGEINT};
  * {@code BigDecimal} to {@code DECIMAL(38,10)} unless a column type says
  * otherwise; {@code String} to {@code VARCHAR}; {@code byte[]} to
- * {@code BLOB}; {@code LocalDate} to {@code DATE}; {@code LocalDateTime}
- * and {@code Instant} to {@code TIMESTAMP}; {@code UUID} to
- * {@code UUID}.</li>
+ * {@code BLOB}; {@code LocalDate} to {@code DATE}; {@code LocalTime} to
+ * {@code TIME}; {@code LocalDateTime} to {@code TIMESTAMP};
+ * {@code Instant}, {@code OffsetDateTime} and {@code ZonedDateTime} to
+ * {@code TIMESTAMP WITH TIME ZONE}, as their instants; {@code Duration},
+ * {@code Period} and {@code Interval} to {@code INTERVAL}; {@code UUID} to
+ * {@code UUID}. A column of type {@code TIMESTAMP} takes an instant as its
+ * timestamp in UTC.</li>
  * <li>A record or a class with public getters maps to a {@code STRUCT}, a
  * {@code List} or array to a {@code LIST}, a {@code Map} to a
  * {@code MAP}, with the element types taken from the generic signature.</li>
@@ -208,8 +218,17 @@ public final class JavaTypes {
         if (c == LocalDate.class) {
             return DataType.DATE;
         }
-        if (c == LocalDateTime.class || c == Instant.class) {
+        if (c == LocalTime.class) {
+            return DataType.TIME;
+        }
+        if (c == LocalDateTime.class) {
             return DataType.TIMESTAMP;
+        }
+        if (c == Instant.class || c == OffsetDateTime.class || c == ZonedDateTime.class) {
+            return DataType.TIMESTAMPTZ;
+        }
+        if (c == Duration.class || c == Period.class || c == Interval.class) {
+            return DataType.INTERVAL;
         }
         if (c == UUID.class) {
             return DataType.UUID;
@@ -228,6 +247,16 @@ public final class JavaTypes {
             fields.add(new DataType.Struct.Field(p.name(), p.type()));
         }
         return new DataType.Struct(fields);
+    }
+
+    /** The instant of an {@code Instant}, {@code OffsetDateTime} or {@code ZonedDateTime}, or {@code null}. */
+    private static Instant instant(Object v) {
+        return switch (v) {
+            case Instant i -> i;
+            case OffsetDateTime o -> o.toInstant();
+            case ZonedDateTime z -> z.toInstant();
+            default -> null;
+        };
     }
 
     /** Converts a Java object to the FyrQL value of a type. */
@@ -269,8 +298,17 @@ public final class JavaTypes {
         }
         return switch ((DataType.Scalar) type) {
             case DATE -> v instanceof LocalDate d ? Math.toIntExact(d.toEpochDay()) : v;
+            case TIME -> v instanceof LocalTime t ? t.toNanoOfDay() / 1000 : v;
             case TIMESTAMP -> v instanceof LocalDateTime dt ? Conversions.toMicros(dt)
-                    : v instanceof Instant i ? Conversions.toMicros(LocalDateTime.ofInstant(i, ZoneOffset.UTC)) : v;
+                    : instant(v) instanceof Instant i ? Conversions.toMicros(LocalDateTime.ofInstant(i, ZoneOffset.UTC))
+                    : v;
+            case TIMESTAMPTZ -> instant(v) instanceof Instant i
+                    ? Conversions.toMicros(LocalDateTime.ofInstant(i, ZoneOffset.UTC)) : v;
+            case INTERVAL -> switch (v) {
+                case Duration d -> Interval.from(d);
+                case Period p -> Interval.from(p);
+                default -> v;
+            };
             case VARCHAR -> v instanceof String s ? s : v.toString();
             default -> v;
         };

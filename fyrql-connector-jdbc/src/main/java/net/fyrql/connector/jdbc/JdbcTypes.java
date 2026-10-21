@@ -36,16 +36,17 @@ import java.util.Locale;
  * DuckDB; more digits are {@code VARCHAR};</li>
  * <li>the character types and large objects are {@code VARCHAR}, the
  * binary ones {@code BLOB};</li>
- * <li>{@code DATE} is {@code DATE}; {@code TIMESTAMP} is
- * {@code TIMESTAMP}, and a timestamp with a time zone, such as
- * PostgreSQL's {@code timestamptz}, MySQL's {@code TIMESTAMP}, Oracle's
- * {@code TIMESTAMP WITH LOCAL TIME ZONE} or SQL Server's
- * {@code DATETIMEOFFSET}, is its instant in UTC, see
- * {@link #withTimeZone};</li>
+ * <li>{@code DATE} is {@code DATE}; {@code TIME} without a time zone is
+ * {@code TIME}; {@code TIMESTAMP} is {@code TIMESTAMP}, and a timestamp
+ * with a time zone, such as PostgreSQL's {@code timestamptz}, H2's
+ * {@code TIMESTAMP WITH TIME ZONE}, MySQL's {@code TIMESTAMP} or Oracle's
+ * {@code TIMESTAMP WITH LOCAL TIME ZONE}, is {@code TIMESTAMP WITH TIME
+ * ZONE}, see {@link #withTimeZone};</li>
+ * <li>PostgreSQL's {@code interval} is {@code INTERVAL};</li>
  * <li>a type named {@code uuid} is {@code UUID};</li>
- * <li>everything else, such as {@code TIME}, {@code INTERVAL}, JSON or
- * arrays, is {@code VARCHAR}, read as the driver writes it as a
- * string.</li>
+ * <li>everything else, such as {@code TIME WITH TIME ZONE}, the intervals
+ * of other databases, JSON or arrays, is {@code VARCHAR}, read as the
+ * driver writes it as a string.</li>
  * </ul>
  * SQLite has no types but the name a column was declared with. The name
  * is read as FyrQL reads a type name, except that {@code INTEGER} and
@@ -81,6 +82,9 @@ final class JdbcTypes {
         if (name.equals("UUID")) {
             return DataType.UUID;
         }
+        if (dialect == JdbcDialect.POSTGRESQL && name.equals("INTERVAL")) {
+            return DataType.INTERVAL;
+        }
         if (name.contains("UNSIGNED")) {
             String base = name.replace("UNSIGNED", "").replace("ZEROFILL", "").strip();
             switch (base) {
@@ -115,7 +119,10 @@ final class JdbcTypes {
                     Types.CLOB, Types.NCLOB -> DataType.VARCHAR;
             case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB -> DataType.BLOB;
             case Types.DATE -> DataType.DATE;
-            case Types.TIMESTAMP, Types.TIMESTAMP_WITH_TIMEZONE -> DataType.TIMESTAMP;
+            // PostgreSQL tells its timetz a TIME.
+            case Types.TIME -> name.contains("TZ") || name.contains("TIME ZONE") ? DataType.VARCHAR : DataType.TIME;
+            case Types.TIMESTAMP, Types.TIMESTAMP_WITH_TIMEZONE -> withTimeZone(dialect, jdbcType, typeName)
+                    ? DataType.TIMESTAMPTZ : DataType.TIMESTAMP;
             default -> DataType.VARCHAR;
         };
     }
@@ -135,17 +142,26 @@ final class JdbcTypes {
     }
 
     /**
-     * Tells whether a column holds instants, which the database shows and
-     * compares in the time zone of its session: a timestamp with a time
-     * zone, and MySQL's {@code TIMESTAMP}. FyrQL reads such a value as its
-     * instant in UTC, and the database evaluates no filter on it, since it
-     * would read a literal in the time zone of the session.
+     * Tells whether a column holds instants, which the database shows in the
+     * time zone of its session: a timestamp with a time zone, and MySQL's
+     * {@code TIMESTAMP}. FyrQL reads such a value as its instant; only
+     * PostgreSQL and H2, whose literals carry an offset, evaluate a filter
+     * on it, see {@link #comparesInstants}.
      */
     static boolean withTimeZone(JdbcDialect dialect, int jdbcType, String typeName) {
         String name = typeName == null ? "" : typeName.strip().toUpperCase(Locale.ROOT);
         return jdbcType == Types.TIMESTAMP_WITH_TIMEZONE || name.equals("TIMESTAMPTZ")
                 || name.contains("TIME ZONE") || name.equals("DATETIMEOFFSET")
                 || dialect == JdbcDialect.MYSQL && name.equals("TIMESTAMP");
+    }
+
+    /**
+     * Tells whether a database compares instants as FyrQL does, given
+     * literals with an offset; the others would read a literal in the time
+     * zone of their session.
+     */
+    static boolean comparesInstants(JdbcDialect dialect) {
+        return dialect == JdbcDialect.POSTGRESQL || dialect == JdbcDialect.H2;
     }
 
     /** The type of a column of SQLite by the name it was declared with. */

@@ -42,7 +42,11 @@ public sealed interface SqlExpr {
         /** {@code DATE '...'}; the text is the string. */
         DATE,
         /** {@code TIMESTAMP '...'}; the text is the string. */
-        TIMESTAMP
+        TIMESTAMP,
+        /** {@code TIME '...'}; the text is the string. */
+        TIME,
+        /** {@code TIMESTAMPTZ '...'}; the text is the string. */
+        TIMESTAMPTZ
     }
 
     /** The binary operators. */
@@ -357,16 +361,20 @@ public sealed interface SqlExpr {
 
     /**
      * {@code INTERVAL 'n' unit}, also {@code INTERVAL n unit} and
-     * {@code INTERVAL 'n unit'}: a whole number of years, months, days,
-     * hours, minutes or seconds. The unit is in upper case, as written,
-     * singular or plural. The binder takes an interval only as a constant
-     * added to or subtracted from a constant date or timestamp.
+     * {@code INTERVAL 'n' unit}, {@code INTERVAL n unit} or
+     * {@code INTERVAL 'text'}: a number and a unit in upper case, as written,
+     * singular or plural, or the text of an interval as DuckDB reads it, with
+     * the unit {@code null}.
      */
     record Interval(String value, String unit, Position position) implements SqlExpr {
         public Interval {
             Objects.requireNonNull(value, "value");
-            Objects.requireNonNull(unit, "unit");
             Objects.requireNonNull(position, "position");
+        }
+
+        /** Returns the text of the interval: the value and the unit, or the value alone. */
+        public String text() {
+            return unit == null ? value : value + " " + unit;
         }
     }
 

@@ -22,6 +22,7 @@ import net.fyrql.core.vector.DoubleVector;
 import net.fyrql.core.vector.FloatVector;
 import net.fyrql.core.vector.HugeIntVector;
 import net.fyrql.core.vector.IntVector;
+import net.fyrql.core.vector.IntervalVector;
 import net.fyrql.core.vector.ListVector;
 import net.fyrql.core.vector.MapVector;
 import net.fyrql.core.vector.SmallIntVector;
@@ -36,16 +37,28 @@ import org.apache.arrow.vector.BitVector;
 import org.apache.arrow.vector.DateDayVector;
 import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.Decimal256Vector;
+import org.apache.arrow.vector.DurationVector;
 import org.apache.arrow.vector.ExtensionTypeVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float2Vector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
+import org.apache.arrow.vector.IntervalDayVector;
+import org.apache.arrow.vector.IntervalMonthDayNanoVector;
+import org.apache.arrow.vector.IntervalYearVector;
 import org.apache.arrow.vector.NullVector;
+import org.apache.arrow.vector.TimeMicroVector;
+import org.apache.arrow.vector.TimeMilliVector;
+import org.apache.arrow.vector.TimeNanoVector;
+import org.apache.arrow.vector.TimeSecVector;
+import org.apache.arrow.vector.TimeStampMicroTZVector;
 import org.apache.arrow.vector.TimeStampMicroVector;
+import org.apache.arrow.vector.TimeStampMilliTZVector;
 import org.apache.arrow.vector.TimeStampMilliVector;
+import org.apache.arrow.vector.TimeStampNanoTZVector;
 import org.apache.arrow.vector.TimeStampNanoVector;
+import org.apache.arrow.vector.TimeStampSecTZVector;
 import org.apache.arrow.vector.TimeStampSecVector;
 import org.apache.arrow.vector.UInt1Vector;
 import org.apache.arrow.vector.UInt2Vector;
@@ -58,6 +71,7 @@ import org.apache.arrow.vector.complex.FixedSizeListVector;
 import org.apache.arrow.vector.dictionary.Dictionary;
 import org.apache.arrow.vector.dictionary.DictionaryEncoder;
 import org.apache.arrow.vector.dictionary.DictionaryProvider;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 
 import java.math.BigInteger;
@@ -267,6 +281,118 @@ public final class ArrowToBatch {
                         o.appendNull();
                     } else {
                         o.appendLong(v.get(r));
+                    }
+                }
+            }
+            case TimeStampMicroTZVector v -> timestamps(v, from, to, 1L, (BigIntVector.Builder) out, path);
+            case TimeStampSecTZVector v -> timestamps(v, from, to, 1_000_000L, (BigIntVector.Builder) out, path);
+            case TimeStampMilliTZVector v -> timestamps(v, from, to, 1_000L, (BigIntVector.Builder) out, path);
+            case TimeStampNanoTZVector v -> {
+                BigIntVector.Builder o = (BigIntVector.Builder) out;
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                    } else {
+                        o.appendLong(Math.floorDiv(v.get(r), 1_000L));
+                    }
+                }
+            }
+            case TimeMicroVector v -> {
+                BigIntVector.Builder o = (BigIntVector.Builder) out;
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                    } else {
+                        o.appendLong(v.get(r));
+                    }
+                }
+            }
+            case TimeNanoVector v -> {
+                BigIntVector.Builder o = (BigIntVector.Builder) out;
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                    } else {
+                        o.appendLong(Math.floorDiv(v.get(r), 1_000L));
+                    }
+                }
+            }
+            case TimeMilliVector v -> {
+                BigIntVector.Builder o = (BigIntVector.Builder) out;
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                    } else {
+                        o.appendLong(v.get(r) * 1_000L);
+                    }
+                }
+            }
+            case TimeSecVector v -> {
+                BigIntVector.Builder o = (BigIntVector.Builder) out;
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                    } else {
+                        o.appendLong(v.get(r) * 1_000_000L);
+                    }
+                }
+            }
+            case IntervalMonthDayNanoVector v -> {
+                IntervalVector.Builder o = (IntervalVector.Builder) out;
+                ArrowBuf data = v.getDataBuffer();
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                    } else {
+                        long at = (long) r * IntervalMonthDayNanoVector.TYPE_WIDTH;
+                        o.appendInterval(data.getInt(at), data.getInt(at + 4), Math.floorDiv(data.getLong(at + 8),
+                                1_000L));
+                    }
+                }
+            }
+            case IntervalDayVector v -> {
+                IntervalVector.Builder o = (IntervalVector.Builder) out;
+                ArrowBuf data = v.getDataBuffer();
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                    } else {
+                        long at = (long) r * IntervalDayVector.TYPE_WIDTH;
+                        o.appendInterval(0, data.getInt(at), data.getInt(at + 4) * 1_000L);
+                    }
+                }
+            }
+            case IntervalYearVector v -> {
+                IntervalVector.Builder o = (IntervalVector.Builder) out;
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                    } else {
+                        o.appendInterval(v.get(r), 0, 0L);
+                    }
+                }
+            }
+            case DurationVector v -> {
+                IntervalVector.Builder o = (IntervalVector.Builder) out;
+                long factor = switch (((ArrowType.Duration) v.getField().getType()).getUnit()) {
+                    case SECOND -> 1_000_000L;
+                    case MILLISECOND -> 1_000L;
+                    case MICROSECOND, NANOSECOND -> 1L;
+                };
+                boolean nanos = ((ArrowType.Duration) v.getField().getType()).getUnit()
+                        == org.apache.arrow.vector.types.TimeUnit.NANOSECOND;
+                for (int r = from; r < to; r++) {
+                    if (v.isNull(r)) {
+                        o.appendNull();
+                        continue;
+                    }
+                    long value = DurationVector.get(v.getDataBuffer(), r);
+                    try {
+                        o.appendInterval(0, 0, nanos ? Math.floorDiv(value, 1_000L) : Math.multiplyExact(value,
+                                factor));
+                    } catch (ArithmeticException e) {
+                        throw new ArrowTypeException(path, "the duration " + value + " is out of the range of"
+                                + " INTERVAL");
                     }
                 }
             }

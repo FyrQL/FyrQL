@@ -62,6 +62,9 @@ public final class H2Dialect extends StandardDialect {
             case DATE -> "DATE";
             case TIMESTAMP -> "TIMESTAMP(6)";
             case UUID -> "UUID";
+            case TIME -> "TIME(6)";
+            case TIMESTAMPTZ -> "TIMESTAMP(6) WITH TIME ZONE";
+            case INTERVAL -> "VARCHAR";
         };
     }
 
@@ -96,6 +99,7 @@ public final class H2Dialect extends StandardDialect {
 
     @Override
     boolean storesExactly(DataType type) {
-        return exactNumber(type) || type == Scalar.VARCHAR || type == Scalar.DATE || type == Scalar.TIMESTAMP;
+        return exactNumber(type) || type == Scalar.VARCHAR || type == Scalar.DATE || type == Scalar.TIMESTAMP
+                || type == Scalar.TIME || type == Scalar.TIMESTAMPTZ;
     }
 }

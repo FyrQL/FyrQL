@@ -14,6 +14,7 @@ package net.fyrql.connector.json;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.FileOutput;
 import net.fyrql.connector.FileStores;
+import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.Globs;
 import net.fyrql.connector.Sink;
 import net.fyrql.core.function.DateFormats;
@@ -32,6 +33,8 @@ import java.io.Writer;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -54,12 +57,13 @@ final class JsonFileWriter implements Sink {
     private final boolean array;
     private final LongFunction<String> dateFormat;
     private final LongFunction<String> timestampFormat;
+    private final ZoneId zone;
     private final StringBuilder line = new StringBuilder();
     private long rows;
     private boolean done;
 
     private JsonFileWriter(FileOutput file, Writer out, Schema schema, boolean array,
-            LongFunction<String> dateFormat, LongFunction<String> timestampFormat) {
+            LongFunction<String> dateFormat, LongFunction<String> timestampFormat, ZoneId zone) {
         this.file = file;
         this.out = out;
         this.names = schema.fields().stream().map(Schema.Field::name).toList();
@@ -67,6 +71,7 @@ final class JsonFileWriter implements Sink {
         this.array = array;
         this.dateFormat = dateFormat;
         this.timestampFormat = timestampFormat;
+        this.zone = zone;
     }
 
     /**
@@ -96,6 +101,7 @@ final class JsonFileWriter implements Sink {
         boolean array = o.bool("array").orElse(false);
         LongFunction<String> dateFormat = o.get("dateformat", null, DateFormats::writer).orElse(null);
         LongFunction<String> timestampFormat = o.get("timestampformat", null, DateFormats::writer).orElse(null);
+        ZoneId zone = o.get(FileWriterProvider.TIME_ZONE, null, FileWriterProvider::timeZone).orElse(ZoneOffset.UTC);
         boolean gzip = gzip(o, path.substring(Globs.lastSeparator(path) + 1).toLowerCase(Locale.ROOT), owner);
         o.rejectUnknown();
 
@@ -114,7 +120,7 @@ final class JsonFileWriter implements Sink {
             if (array) {
                 out.write("[\n");
             }
-            return new JsonFileWriter(file, out, schema, array, dateFormat, timestampFormat);
+            return new JsonFileWriter(file, out, schema, array, dateFormat, timestampFormat, zone);
         } catch (IOException e) {
             file.close();
             throw new UncheckedIOException("Cannot write " + file.location() + ": " + e.getMessage(), e);
@@ -203,7 +209,7 @@ final class JsonFileWriter implements Sink {
                         line.append(',');
                     }
                     first = false;
-                    JsonValues.string(Casts.format(e.getKey(), m.key()), line);
+                    JsonValues.string(Casts.format(e.getKey(), m.key(), zone), line);
                     line.append(':');
                     value(e.getValue(), m.value());
                 }
@@ -215,7 +221,7 @@ final class JsonFileWriter implements Sink {
                     case BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, HUGEINT -> line.append(v);
                     case FLOAT -> line.append(JsonValues.formatDouble(Double.parseDouble(Float.toString((Float) v))));
                     case DOUBLE -> line.append(JsonValues.formatDouble((Double) v));
-                    default -> JsonValues.string(Casts.format(v, type), line);
+                    default -> JsonValues.string(Casts.format(v, type, zone), line);
                 }
             }
         }

@@ -21,6 +21,7 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.vector.Batch;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -29,6 +30,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -174,7 +177,7 @@ class JsonFileTableTest {
         errors.add(Map.entry("The JSON source json reads no files of the format csv",
                 () -> json.fileTable("csv", file.toString(), schema, Map.of())));
         errors.add(Map.entry("The JSON file " + file + " has an unknown option rows; known are format, array,"
-                + " dateformat, timestampformat, ignore_errors, compression",
+                + " dateformat, timestampformat, ignore_errors, timezone, compression",
                 () -> json.fileTable("json", file.toString(), schema, Map.of("rows", "3"))));
         errors.add(Map.entry("The option format of the JSON file " + file + " is invalid: Unknown JSON format"
                 + " \"lines\"; supported are auto, array, newline_delimited",
@@ -196,6 +199,47 @@ class JsonFileTableTest {
                 () -> json.fileTable("json", file.toString(), schema, Map.of("timestampformat", "%Q")));
         assertTrue(format.getMessage().startsWith("The option timestampformat of the JSON file " + file
                 + " is invalid: "), format.getMessage());
+    }
+
+    @Test
+    void timesAndIntervalsGoThereAndBackInTheTimeZoneOfTheSession() throws IOException {
+        Schema schema = Schema.of(new Schema.Field("id", DataType.INTEGER), new Schema.Field("tm", DataType.TIME),
+                new Schema.Field("tz", DataType.TIMESTAMPTZ), new Schema.Field("iv", DataType.INTERVAL));
+        ZoneId utc = ZoneOffset.UTC;
+        List<Object[]> rows = List.of(
+                new Object[] {1, Conversions.parseTime("12:34:56.789"),
+                    Conversions.parseTimestampTz("2024-07-01 12:00:00+00", utc),
+                    Interval.parse("1 year 2 months -3 days 04:05:06.789")},
+                new Object[] {2, Conversions.parseTime("24:00:00"),
+                    Conversions.parseTimestampTz("2024-01-01 00:00:00.5+00", utc), Interval.parse("-00:00:00.5")},
+                new Object[] {3, 0L, 0L, Interval.parse("0 seconds")},
+                new Object[] {4, null, null, null});
+        Path file = dir.resolve("times.json");
+        Map<String, String> berlin = Map.of("timezone", "Europe/Berlin");
+        try (Sink sink = json.openFile("json", file.toString(), schema, berlin)) {
+            sink.write(Batch.ofRows(schema, rows));
+            sink.commit();
+        }
+        // What DuckDB 1.5 writes with SET TimeZone = 'Europe/Berlin'.
+        assertEquals("""
+                {"id":1,"tm":"12:34:56.789","tz":"2024-07-01 14:00:00+02","iv":"1 year 2 months -3 days 04:05:06.789"}
+                {"id":2,"tm":"24:00:00","tz":"2024-01-01 01:00:00.5+01","iv":"-00:00:00.5"}
+                {"id":3,"tm":"00:00:00","tz":"1970-01-01 01:00:00+01","iv":"00:00:00"}
+                {"id":4,"tm":null,"tz":null,"iv":null}
+                """, Files.readString(file));
+        assertEquals(Arrays.deepToString(rows.toArray()),
+                Arrays.deepToString(read(json.fileTable("json", file.toString(), schema, berlin)).toArray()));
+        // The sniffer reads the times of day, as DuckDB does, and the rest as text.
+        TableRef sniffed = json.bind("read_json", List.of(file.toString()), Map.of("timezone", "Europe/Berlin"));
+        assertEquals(List.of(DataType.BIGINT, DataType.TIME, DataType.VARCHAR, DataType.VARCHAR),
+                json.catalog().schema(sniffed).types());
+        // A string without an offset is in the time zone of the session.
+        Files.writeString(file, "{\"t\": \"2024-07-01 12:00:00\"}\n");
+        Schema instants = Schema.of(new Schema.Field("t", DataType.TIMESTAMPTZ));
+        assertEquals(Conversions.parseTimestampTz("2024-07-01 10:00:00Z", utc),
+                read(json.fileTable("json", file.toString(), instants, berlin)).get(0)[0]);
+        assertEquals(Conversions.parseTimestampTz("2024-07-01 12:00:00Z", utc),
+                read(json.fileTable("json", file.toString(), instants, Map.of())).get(0)[0]);
     }
 
     @Test

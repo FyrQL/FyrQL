@@ -18,6 +18,7 @@ import net.fyrql.core.value.Casts;
 import java.sql.Array;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -38,14 +39,17 @@ final class FyrQLArray implements Array {
 
     private final DataType.ListType type;
     private final List<?> values;
+    private final ZoneId zone;
     private boolean freed;
 
     /**
      * @param values the elements, as the engine holds them
+     * @param zone the time zone of the session, in which an instant is shown
      */
-    FyrQLArray(DataType.ListType type, List<?> values) {
+    FyrQLArray(DataType.ListType type, List<?> values, ZoneId zone) {
         this.type = type;
         this.values = values;
+        this.zone = zone;
     }
 
     /** Returns the type of the array. */
@@ -100,7 +104,7 @@ final class FyrQLArray implements Array {
         DataType element = type.element();
         Object[] result = (Object[]) java.lang.reflect.Array.newInstance(JdbcTypes.javaClass(element), count);
         for (int i = 0; i < count; i++) {
-            result[i] = JdbcValues.toObject(values.get(from + i), element);
+            result[i] = JdbcValues.toObject(values.get(from + i), element, zone);
         }
         return result;
     }
@@ -132,7 +136,8 @@ final class FyrQLArray implements Array {
         for (int i = 0; i < count; i++) {
             rows.add(new Object[] {(long) (from + i + 1), values.get(from + i)});
         }
-        return new FyrQLResultSet(null, BatchSource.of(schema, rows), 0, null, ResultSet.CLOSE_CURSORS_AT_COMMIT);
+        return new FyrQLResultSet(null, BatchSource.of(schema, rows), 0, null, ResultSet.CLOSE_CURSORS_AT_COMMIT,
+                zone);
     }
 
     @Override

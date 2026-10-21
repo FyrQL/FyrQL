@@ -14,6 +14,7 @@ package net.fyrql.connector.csv;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.FileOutput;
 import net.fyrql.connector.FileStores;
+import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.Globs;
 import net.fyrql.connector.Sink;
 import net.fyrql.core.function.DateFormats;
@@ -34,6 +35,8 @@ import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -61,12 +64,13 @@ final class CsvFileWriter implements Sink {
     private final String nullString;
     private final LongFunction<String> dateFormat;
     private final LongFunction<String> timestampFormat;
+    private final ZoneId zone;
     private final StringBuilder line = new StringBuilder();
     private long rows;
     private boolean done;
 
     private CsvFileWriter(FileOutput file, Writer out, Schema schema, char delimiter, char quote, char escape,
-            String nullString, LongFunction<String> dateFormat, LongFunction<String> timestampFormat) {
+            String nullString, LongFunction<String> dateFormat, LongFunction<String> timestampFormat, ZoneId zone) {
         this.file = file;
         this.out = out;
         this.types = schema.fields().stream().map(Schema.Field::type).toArray(DataType[]::new);
@@ -76,6 +80,7 @@ final class CsvFileWriter implements Sink {
         this.nullString = nullString;
         this.dateFormat = dateFormat;
         this.timestampFormat = timestampFormat;
+        this.zone = zone;
     }
 
     /**
@@ -94,6 +99,7 @@ final class CsvFileWriter implements Sink {
         String nullString = first(o.string("nullstr"), o.string("null")).orElse("");
         LongFunction<String> dateFormat = o.get("dateformat", null, DateFormats::writer).orElse(null);
         LongFunction<String> timestampFormat = o.get("timestampformat", null, DateFormats::writer).orElse(null);
+        ZoneId zone = o.get(FileWriterProvider.TIME_ZONE, null, FileWriterProvider::timeZone).orElse(ZoneOffset.UTC);
         boolean gzip = gzip(o, name, "the CSV file " + path);
         o.rejectUnknown();
         if (delimiter == quote || delimiter == '\n' || delimiter == '\r' || quote == '\n' || quote == '\r') {
@@ -109,7 +115,7 @@ final class CsvFileWriter implements Sink {
             }
             Writer out = new BufferedWriter(new OutputStreamWriter(stream, StandardCharsets.UTF_8), BUFFER);
             CsvFileWriter writer = new CsvFileWriter(file, out, schema, delimiter, quote, escape, nullString,
-                    dateFormat, timestampFormat);
+                    dateFormat, timestampFormat, zone);
             if (header) {
                 for (int c = 0; c < schema.size(); c++) {
                     if (c > 0) {
@@ -199,7 +205,7 @@ final class CsvFileWriter implements Sink {
         if (type == DataType.TIMESTAMP && timestampFormat != null) {
             return timestampFormat.apply(((BigIntVector) v).getLong(row));
         }
-        return Casts.format(v.get(row), type);
+        return Casts.format(v.get(row), type, zone);
     }
 
     /** Appends a value to the line, in quotes if it needs them. */

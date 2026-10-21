@@ -31,6 +31,7 @@ import java.util.UUID;
  * The total order of Java values of a type, the same order as the vectors
  * use: numbers by value with NaN above everything and {@code -0.0} equal to
  * {@code 0.0}, strings by their UTF-8 bytes, UUIDs as unsigned numbers,
+ * intervals by their normalized form,
  * nested values element by element with {@code NULL} last.
  */
 public final class Order {
@@ -83,7 +84,7 @@ public final class Order {
         }
         return switch ((Scalar) type) {
             case BOOLEAN -> Boolean.compare((Boolean) a, (Boolean) b);
-            case TINYINT, SMALLINT, INTEGER, BIGINT, DATE, TIMESTAMP ->
+            case TINYINT, SMALLINT, INTEGER, BIGINT, DATE, TIMESTAMP, TIME, TIMESTAMPTZ ->
                     Long.compare(((Number) a).longValue(), ((Number) b).longValue());
             case HUGEINT -> ((BigInteger) a).compareTo((BigInteger) b);
             case FLOAT -> compare(((Float) a).floatValue(), ((Float) b).floatValue());
@@ -97,6 +98,7 @@ public final class Order {
                 int c = Long.compareUnsigned(x.getMostSignificantBits(), y.getMostSignificantBits());
                 yield c != 0 ? c : Long.compareUnsigned(x.getLeastSignificantBits(), y.getLeastSignificantBits());
             }
+            case INTERVAL -> ((Interval) a).compareTo((Interval) b);
         };
     }
 

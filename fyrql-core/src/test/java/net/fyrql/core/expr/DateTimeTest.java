@@ -86,8 +86,7 @@ class DateTimeTest {
         assertThrows(IllegalArgumentException.class, () -> add(d, lit(1L)), "DuckDB adds no BIGINT to a date");
         assertThrows(IllegalArgumentException.class, () -> sub(lit(1), d));
         assertThrows(IllegalArgumentException.class, () -> add(d, d));
-        assertThrows(IllegalArgumentException.class, () -> sub(timestamp("2020-01-01"), timestamp("2020-01-01")),
-                "an INTERVAL in DuckDB");
+        assertEquals(DataType.INTERVAL, sub(timestamp("2020-01-01"), timestamp("2020-01-01")).type());
     }
 
     @Test
@@ -106,7 +105,7 @@ class DateTimeTest {
         assertEquals(1969L, eval(call("year", date("1969-12-28"))));
         assertEquals(0L, eval(call("year", date("0001-01-01 (BC)"))));
         assertEquals(-1L, eval(call("year", date("0002-01-01 (BC)"))));
-        for (String part : List.of("foo", " year", "epoch", "julian", "timezone")) {
+        for (String part : List.of("foo", " year", "epoch", "julian")) {
             assertThrows(ConversionException.class, () -> eval(call("date_part", lit(part), ts)), part);
         }
         assertEquals(-297_944.321088, eval(call("epoch", ts)));

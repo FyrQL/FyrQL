@@ -15,6 +15,7 @@ import net.fyrql.FyrQL;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ConnectorFactory;
+import net.fyrql.core.value.ZonedDates;
 import net.fyrql.exec.CodegenMode;
 
 import java.nio.file.Path;
@@ -41,8 +42,9 @@ import java.util.Optional;
  * {@code memoryBudget} (bytes, such as {@code 512MB} or {@code 2GiB}),
  * {@code codegen} ({@code off}, {@code auto} or {@code always}),
  * {@code codegenThreshold}, {@code pushdown} ({@code true} or
- * {@code false}), {@code threads}, {@code preserveOrder} and
- * {@code implicitSources}, as the methods of {@link FyrQL.Builder} of the
+ * {@code false}), {@code threads}, {@code preserveOrder},
+ * {@code implicitSources} and {@code timeZone} (a name such as
+ * {@code Europe/Berlin}), as the methods of {@link FyrQL.Builder} of the
  * same names take them.
  */
 public final class FyrQLConfig {
@@ -167,6 +169,7 @@ public final class FyrQLConfig {
         o.integer("threads").ifPresent(b::threads);
         o.bool("preserveOrder").ifPresent(b::preserveOrder);
         o.bool("implicitSources").ifPresent(b::implicitSources);
+        o.get("timeZone", "the name of a time zone", v -> ZonedDates.zone(v.strip())).ifPresent(b::timeZone);
         o.rejectUnknown();
         if (defaultSource.isPresent()) {
             String name = defaultSource.get();

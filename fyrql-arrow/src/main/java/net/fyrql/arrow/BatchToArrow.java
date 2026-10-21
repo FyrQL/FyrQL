@@ -22,6 +22,7 @@ import net.fyrql.core.vector.DoubleVector;
 import net.fyrql.core.vector.FloatVector;
 import net.fyrql.core.vector.HugeIntVector;
 import net.fyrql.core.vector.IntVector;
+import net.fyrql.core.vector.IntervalVector;
 import net.fyrql.core.vector.ListVector;
 import net.fyrql.core.vector.MapVector;
 import net.fyrql.core.vector.SmallIntVector;
@@ -81,7 +82,8 @@ public final class BatchToArrow {
      * so that a reader that still holds them, such as a stream being sent,
      * keeps them unchanged.
      *
-     * @throws ArrowTypeException       if a {@code HUGEINT} has more than 38 digits
+     * @throws ArrowTypeException       if a {@code HUGEINT} has more than 38 digits, or an interval more
+     *                                  nanoseconds than 64 bits hold
      * @throws IllegalArgumentException if the root has another number of columns
      */
     public static void fill(Batch batch, VectorSchemaRoot root) {
@@ -181,6 +183,24 @@ public final class BatchToArrow {
                         putLong(bytes, 0, u.getMost(r));
                         putLong(bytes, 8, u.getLeast(r));
                         o.setSafe(i, bytes);
+                    }
+                }
+            }
+            case IntervalVector n -> {
+                org.apache.arrow.vector.IntervalMonthDayNanoVector o =
+                        (org.apache.arrow.vector.IntervalMonthDayNanoVector) out;
+                for (int r = from, i = 0; r < to; r++, i++) {
+                    if (n.isNull(r)) {
+                        o.setNull(i);
+                    } else {
+                        long nanos;
+                        try {
+                            nanos = Math.multiplyExact(n.getMicros(r), 1000L);
+                        } catch (ArithmeticException e) {
+                            throw new ArrowTypeException(path, "the interval " + n.get(r) + " has more nanoseconds"
+                                    + " than Interval(MONTH_DAY_NANO) holds");
+                        }
+                        o.setSafe(i, n.getMonths(r), n.getDays(r), nanos);
                     }
                 }
             }

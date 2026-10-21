@@ -215,8 +215,7 @@ class JsonDifferentialTest {
             while (rs.next()) {
                 // Both quote a field name that is a keyword, such as "name", in a type; only DuckDB quotes one
                 // such as "day" in the name of an expression, as in count("day").
-                String type = rs.getString("column_type").replace("JSON", "VARCHAR").replaceAll("\\bTIME\\b",
-                        "VARCHAR");
+                String type = rs.getString("column_type").replace("JSON", "VARCHAR");
                 columns.add(rs.getString("column_name").replace("\"", "") + " " + type);
             }
         }

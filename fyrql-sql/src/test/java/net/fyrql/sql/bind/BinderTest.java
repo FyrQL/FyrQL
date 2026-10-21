@@ -23,8 +23,9 @@ import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.parse.SqlParser;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -250,31 +251,28 @@ class BinderTest {
     }
 
     @Test
-    void anIntervalAddedToAConstantDateIsFoldedWhenBinding() {
+    void anIntervalOfDaysAddedToAConstantDateIsFoldedWhenBinding() {
         PlanNode.Project top = assertInstanceOf(PlanNode.Project.class, bind("SELECT DATE '1998-12-01' - INTERVAL"
-                + " '90' DAY, DATE '2024-01-31' + INTERVAL 1 MONTH, DATE '2024-01-01' + INTERVAL '36' HOUR,"
-                + " TIMESTAMP '2024-01-31 10:00:00' + INTERVAL '1' MONTHS, CAST('2024-02-28' AS DATE) + INTERVAL '2' DAYS,"
-                + " CAST(NULL AS DATE) + INTERVAL '1' DAY"));
+                + " '90' DAY, DATE '2024-01-31' + INTERVAL 1 MONTH, CAST('2024-02-28' AS DATE) + INTERVAL '2' DAYS,"
+                + " CAST(NULL AS DATE) + INTERVAL '1' DAY, INTERVAL '1' WEEK + DATE '2024-01-01',"
+                + " DATE '2024-01-31' + INTERVAL '1 month 1 day'"));
         List<Object> values = new ArrayList<>();
         for (PlanNode.NamedExpression c : top.columns()) {
             Expression.Literal l = assertInstanceOf(Expression.Literal.class, c.expression());
-            values.add(l.value() == null ? null : l.type() == DataType.DATE
-                    ? LocalDate.ofEpochDay((Integer) l.value()).toString() : Conversions.toLocalDateTime((Long) l.value())
-                    .toString());
+            values.add(l.value() == null ? null : LocalDate.ofEpochDay((Integer) l.value()).toString());
         }
-        assertEquals(Arrays.asList("1998-09-02", "2024-02-29", "2024-01-02T12:00", "2024-02-29T10:00", "2024-03-01", null),
+        assertEquals(Arrays.asList("1998-09-02", "2024-02-29", "2024-03-01", null, "2024-01-08", "2024-03-01"),
                 values);
-        assertEquals("[DATE, DATE, TIMESTAMP, TIMESTAMP, DATE, DATE]", top.schema().types().toString());
-        String notSupported = "Not supported: INTERVAL except as a constant added to a date at line 1, column ";
-        assertEquals(notSupported + "12", error("SELECT a + INTERVAL '1' DAY FROM t").getMessage());
-        assertEquals(notSupported + "8", error("SELECT INTERVAL '1' DAY").getMessage());
-        assertEquals("[DATE]", bind("SELECT INTERVAL '1' DAY + DATE '2024-01-01'").schema().types().toString());
-        assertEquals(notSupported + "8", error("SELECT INTERVAL '1' DAY - DATE '2024-01-01'").getMessage());
-        assertEquals(notSupported + "12", error("SELECT 1 + INTERVAL '1' DAY").getMessage());
-        assertEquals("Not supported: the interval unit WEEK at line 1, column 28",
-                error("SELECT DATE '2024-01-01' + INTERVAL '1' WEEK").getMessage());
-        assertEquals("The interval '1.5' is not a whole number at line 1, column 28",
-                error("SELECT DATE '2024-01-01' + INTERVAL '1.5' DAY").getMessage());
+        assertEquals("[DATE, DATE, DATE, DATE, DATE, DATE]", top.schema().types().toString());
+        // With a time of day, a column or a timestamp, the operator of DuckDB, which gives a TIMESTAMP.
+        assertEquals("[TIMESTAMP, TIMESTAMP, TIMESTAMP, INTERVAL, INTERVAL]", bind("SELECT DATE '2024-01-01'"
+                + " + INTERVAL '36' HOUR, TIMESTAMP '2024-01-31 10:00:00' + INTERVAL '1' MONTHS,"
+                + " DATE '2024-01-01' + INTERVAL '1.5' DAY, INTERVAL '1' DAY, 2 * INTERVAL '1 day'")
+                .schema().types().toString());
+        assertEquals("No operator - for INTERVAL and DATE at line 1, column 8",
+                error("SELECT INTERVAL '1' DAY - DATE '2024-01-01'").getMessage());
+        assertEquals("Could not convert string '1 2:00' to INTERVAL at line 1, column 8",
+                error("SELECT INTERVAL '1 2:00'").getMessage());
     }
 
     @Test
@@ -316,13 +314,18 @@ class BinderTest {
     }
 
     @Test
-    void currentDateIsTheTimeOfTheBinding() {
-        LocalDateTime now = LocalDateTime.of(2024, 2, 29, 13, 14, 15);
-        PlanNode.Project p = assertInstanceOf(PlanNode.Project.class,
-                BINDER.bind(SqlParser.parse("SELECT current_date, now()"), now));
-        assertEquals(new Expression.Literal(DataType.DATE, (int) LocalDate.of(2024, 2, 29).toEpochDay()),
+    void currentDateIsTheTimeOfTheBindingInTheTimeZone() {
+        Instant now = Instant.parse("2024-02-29T23:30:00Z");
+        PlanNode.Project p = assertInstanceOf(PlanNode.Project.class, BINDER.bind(SqlParser.parse(
+                "SELECT current_date, now(), current_time, localtimestamp, current_setting('TimeZone')"), now,
+                ZoneId.of("Europe/Berlin")));
+        assertEquals(new Expression.Literal(DataType.DATE, (int) LocalDate.of(2024, 3, 1).toEpochDay()),
                 p.columns().get(0).expression());
-        assertEquals(DataType.TIMESTAMP, p.columns().get(1).expression().type());
+        assertEquals(new Expression.Literal(DataType.TIMESTAMPTZ, now.getEpochSecond() * 1_000_000L),
+                p.columns().get(1).expression());
+        assertEquals(new Expression.Literal(DataType.TIME, 1_800_000_000L), p.columns().get(2).expression());
+        assertEquals(DataType.TIMESTAMP, p.columns().get(3).expression().type());
+        assertEquals(new Expression.Literal(DataType.VARCHAR, "Europe/Berlin"), p.columns().get(4).expression());
     }
 
     @Test

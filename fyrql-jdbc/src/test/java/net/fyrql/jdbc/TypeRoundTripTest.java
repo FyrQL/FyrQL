@@ -193,9 +193,11 @@ class TypeRoundTripTest {
             assertEquals("abc", rs.getObject("v", CharSequence.class));
             assertEquals(rs.getObject("i"), rs.getObject("i", java.util.Map.of()));
             SQLException e = assertThrows(SQLFeatureNotSupportedException.class, () -> rs.getObject("i",
-                    Instant.class));
+                    java.time.Year.class));
             assertEquals("0A000", e.getSQLState());
-            assertEquals("FyrQL does not read a value of type INTEGER as java.time.Instant", e.getMessage());
+            assertEquals("FyrQL does not read a value of type INTEGER as java.time.Year", e.getMessage());
+            assertEquals("22018", assertThrows(SQLException.class, () -> rs.getObject("i", Instant.class))
+                    .getSQLState());
             e = assertThrows(SQLDataException.class, () -> rs.getObject("dt", Integer.class));
             assertEquals("22018", e.getSQLState());
             assertEquals("The value 2024-02-29 of type DATE cannot be read as an int", e.getMessage());
@@ -301,7 +303,9 @@ class TypeRoundTripTest {
                     DataType type = AllTypesTable.SCHEMA.type(i - 1);
                     String label = md.getColumnLabel(i) + " in row " + (r + 1);
                     assertEquals(type.sqlName(), md.getColumnTypeName(i), label);
-                    assertEquals(Casts.format(row[i - 1], type), rs.getString(i), label);
+                    // An instant is shown in the time zone of the session, the one of the JVM by default.
+                    assertEquals(Casts.format(row[i - 1], type, java.time.ZoneId.systemDefault()), rs.getString(i),
+                            label);
                     assertEquals(row[i - 1] == null, rs.wasNull(), label);
                     Object value = rs.getObject(i);
                     assertEquals(row[i - 1] == null, rs.wasNull(), label);

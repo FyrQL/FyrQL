@@ -269,8 +269,12 @@ class RoundTripTest {
                     : (short) random.nextInt();
             case INTEGER, DATE -> edge ? (random.nextBoolean() ? Integer.MIN_VALUE : Integer.MAX_VALUE)
                     : random.nextInt();
-            case BIGINT, TIMESTAMP -> edge ? (random.nextBoolean() ? Long.MIN_VALUE : Long.MAX_VALUE)
+            case BIGINT, TIMESTAMP, TIMESTAMPTZ -> edge ? (random.nextBoolean() ? Long.MIN_VALUE : Long.MAX_VALUE)
                     : random.nextLong();
+            case TIME -> edge ? (random.nextBoolean() ? 0L : 86_400_000_000L) : random.nextLong(86_400_000_000L);
+            case INTERVAL -> edge ? net.fyrql.core.value.Interval.of(Integer.MIN_VALUE, Integer.MAX_VALUE,
+                    -9_000_000_000_000_000L) : net.fyrql.core.value.Interval.of(random.nextInt(), random.nextInt(),
+                    random.nextLong(-9_000_000_000_000_000L, 9_000_000_000_000_000L));
             case HUGEINT -> edge ? (random.nextBoolean() ? TestRows.MAX_DECIMAL_38
                     : TestRows.MAX_DECIMAL_38.negate()) : BigInteger.valueOf(random.nextLong())
                     .shiftLeft(random.nextInt(60)).add(BigInteger.valueOf(random.nextLong()));

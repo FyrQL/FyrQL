@@ -119,7 +119,7 @@ class ODataCatalogTest {
                 + " Quantity SMALLINT NOT NULL, Discount FLOAT NOT NULL",
                 columns(catalog.schema(ref("northwind4", "Order_Details"))));
         Schema orders = catalog.schema(ref("northwind4", "Orders"));
-        assertEquals(DataType.TIMESTAMP, orders.type(orders.indexOf("OrderDate")));
+        assertEquals(DataType.TIMESTAMPTZ, orders.type(orders.indexOf("OrderDate")));
     }
 
     @Test

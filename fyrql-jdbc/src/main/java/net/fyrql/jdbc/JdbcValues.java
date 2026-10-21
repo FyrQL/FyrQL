@@ -15,6 +15,8 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.value.Casts;
 import net.fyrql.core.value.ConversionException;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
+import net.fyrql.core.value.ZonedDates;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -27,10 +29,15 @@ import java.sql.SQLException;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.Period;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
@@ -50,9 +57,11 @@ import java.util.UUID;
  * with the values inside converted the same way; {@code getObject} with
  * the class {@code List} or {@code Map} reads a list or a struct as a list
  * and a map or a struct as a map. A value that does not fit the getter is
- * {@code 22003}, one that cannot be converted {@code 22018}. Dates and
- * timestamps without a calendar are in the time zone of the JVM, as JDBC
- * wants it.
+ * {@code 22003}, one that cannot be converted {@code 22018}. Dates, times
+ * and timestamps without a calendar are in the time zone of the JVM, as
+ * JDBC wants it; a {@code TIMESTAMP WITH TIME ZONE} is an instant, which
+ * {@code getObject} returns as an {@code OffsetDateTime} in the time zone
+ * of the session, in which also its text and its local date and time are.
  * <p>
  * The other way, {@link #fromJava} and {@link #convert} turn the values of
  * the parameters of a prepared statement into values of the engine.
@@ -72,8 +81,13 @@ final class JdbcValues {
     private JdbcValues() {
     }
 
-    /** Returns the value {@code getObject} returns, of the class {@link JdbcTypes#javaClass}. */
-    static Object toObject(Object value, DataType type) {
+    /**
+     * Returns the value {@code getObject} returns, of the class
+     * {@link JdbcTypes#javaClass}.
+     *
+     * @param zone the time zone of the session
+     */
+    static Object toObject(Object value, DataType type, ZoneId zone) {
         if (value == null) {
             return null;
         }
@@ -83,6 +97,12 @@ final class JdbcValues {
         if (type == DataType.TIMESTAMP) {
             return Timestamp.valueOf(Conversions.toLocalDateTime((Long) value));
         }
+        if (type == DataType.TIME) {
+            return sqlTime(localTime((Long) value));
+        }
+        if (type == DataType.TIMESTAMPTZ) {
+            return instant((Long) value).atZone(zone).toOffsetDateTime();
+        }
         if (type == DataType.HUGEINT) {
             return new BigDecimal((BigInteger) value);
         }
@@ -90,31 +110,48 @@ final class JdbcValues {
             return ((byte[]) value).clone();
         }
         if (type instanceof DataType.ListType l) {
-            return new FyrQLArray(l, (List<?>) value);
+            return new FyrQLArray(l, (List<?>) value, zone);
         }
         if (type instanceof DataType.Struct s) {
-            return new FyrQLStruct(s, (List<?>) value);
+            return new FyrQLStruct(s, (List<?>) value, zone);
         }
         if (type instanceof DataType.MapType m) {
             Map<Object, Object> result = new LinkedHashMap<>();
             for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
-                result.put(toObject(e.getKey(), m.key()), toObject(e.getValue(), m.value()));
+                result.put(toObject(e.getKey(), m.key(), zone), toObject(e.getValue(), m.value(), zone));
             }
             return Collections.unmodifiableMap(result);
         }
         return value;
     }
 
+    /** The instant of the microseconds since 1970-01-01 in UTC. */
+    private static Instant instant(long micros) {
+        return Instant.ofEpochSecond(Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1000);
+    }
+
+    /** The local time of the microseconds of a day; 24:00:00 is the last nanosecond, as in PostgreSQL's driver. */
+    private static LocalTime localTime(long micros) {
+        return micros >= 86_400_000_000L ? LocalTime.MAX : LocalTime.ofNanoOfDay(micros * 1000);
+    }
+
+    /** A {@code java.sql.Time} of a local time on 1970-01-01 in the time zone of the JVM, with its milliseconds. */
+    private static Time sqlTime(LocalTime t) {
+        Time time = Time.valueOf(t);
+        time.setTime(time.getTime() + t.getNano() / 1_000_000);
+        return time;
+    }
+
     /**
      * Reads a value as a list: the elements of a {@code LIST} or the
      * attributes of a {@code STRUCT}, each as {@link #toObject} returns it.
      */
-    static List<Object> toList(Object value, DataType type) throws SQLException {
+    static List<Object> toList(Object value, DataType type, ZoneId zone) throws SQLException {
         Object[] elements;
         if (type instanceof DataType.ListType l) {
-            elements = (Object[]) new FyrQLArray(l, (List<?>) value).getArray();
+            elements = (Object[]) new FyrQLArray(l, (List<?>) value, zone).getArray();
         } else if (type instanceof DataType.Struct s) {
-            elements = new FyrQLStruct(s, (List<?>) value).getAttributes();
+            elements = new FyrQLStruct(s, (List<?>) value, zone).getAttributes();
         } else {
             throw cannotConvert(value, type, "a list", null);
         }
@@ -125,10 +162,10 @@ final class JdbcValues {
      * Reads a value as a map: the entries of a {@code MAP}, or the fields of a
      * {@code STRUCT} by name, each value as {@link #toObject} returns it.
      */
-    static Map<Object, Object> toMap(Object value, DataType type) throws SQLException {
+    static Map<Object, Object> toMap(Object value, DataType type, ZoneId zone) throws SQLException {
         if (type instanceof DataType.MapType) {
             @SuppressWarnings("unchecked")
-            Map<Object, Object> map = (Map<Object, Object>) toObject(value, type);
+            Map<Object, Object> map = (Map<Object, Object>) toObject(value, type, zone);
             return map;
         }
         if (type instanceof DataType.Struct s) {
@@ -136,7 +173,7 @@ final class JdbcValues {
             List<?> values = (List<?>) value;
             for (int i = 0; i < values.size(); i++) {
                 DataType.Struct.Field f = s.fields().get(i);
-                result.put(f.name(), toObject(values.get(i), f.type()));
+                result.put(f.name(), toObject(values.get(i), f.type(), zone));
             }
             return Collections.unmodifiableMap(result);
         }
@@ -144,16 +181,16 @@ final class JdbcValues {
     }
 
     /** Reads a value as a {@code java.sql.Array}: only a {@code LIST} is one. */
-    static Array toArray(Object value, DataType type) throws SQLException {
+    static Array toArray(Object value, DataType type, ZoneId zone) throws SQLException {
         if (type instanceof DataType.ListType l) {
-            return new FyrQLArray(l, (List<?>) value);
+            return new FyrQLArray(l, (List<?>) value, zone);
         }
         throw cannotConvert(value, type, "an array", null);
     }
 
-    /** Returns the text of a value, as {@link Casts#format} writes it. */
-    static String toText(Object value, DataType type) {
-        return Casts.format(value, type);
+    /** Returns the text of a value, as {@link Casts#format} writes it in the time zone of the session. */
+    static String toText(Object value, DataType type, ZoneId zone) {
+        return Casts.format(value, type, zone);
     }
 
     /** Reads a value as a boolean: a number is true unless it is zero. */
@@ -318,13 +355,17 @@ final class JdbcValues {
         throw cannotConvert(value, type, "bytes", null);
     }
 
-    /** Reads a value as a local date: a {@code DATE}, the day of a {@code TIMESTAMP}, or text. */
-    static LocalDate toLocalDate(Object value, DataType type) throws SQLException {
+    /**
+     * Reads a value as a local date: a {@code DATE}, the day of a
+     * {@code TIMESTAMP} or of an instant in the time zone of the session, or
+     * text.
+     */
+    static LocalDate toLocalDate(Object value, DataType type, ZoneId zone) throws SQLException {
         if (type == DataType.DATE) {
             return LocalDate.ofEpochDay((Integer) value);
         }
-        if (type == DataType.TIMESTAMP) {
-            return Conversions.toLocalDateTime((Long) value).toLocalDate();
+        if (type == DataType.TIMESTAMP || type == DataType.TIMESTAMPTZ) {
+            return toLocalDateTime(value, type, zone).toLocalDate();
         }
         if (value instanceof String s) {
             try {
@@ -336,10 +377,17 @@ final class JdbcValues {
         throw cannotConvert(value, type, "a date", null);
     }
 
-    /** Reads a value as a local date and time: a {@code TIMESTAMP}, the start of a {@code DATE}, or text. */
-    static LocalDateTime toLocalDateTime(Object value, DataType type) throws SQLException {
+    /**
+     * Reads a value as a local date and time: a {@code TIMESTAMP}, an
+     * instant in the time zone of the session, the start of a {@code DATE},
+     * or text.
+     */
+    static LocalDateTime toLocalDateTime(Object value, DataType type, ZoneId zone) throws SQLException {
         if (type == DataType.TIMESTAMP) {
             return Conversions.toLocalDateTime((Long) value);
+        }
+        if (type == DataType.TIMESTAMPTZ) {
+            return LocalDateTime.ofInstant(instant((Long) value), zone);
         }
         if (type == DataType.DATE) {
             return LocalDate.ofEpochDay((Integer) value).atStartOfDay();
@@ -354,14 +402,22 @@ final class JdbcValues {
         throw cannotConvert(value, type, "a timestamp", null);
     }
 
-    /** Reads a value as a local time: the time of a {@code TIMESTAMP}, or text such as {@code 12:30:00}. */
-    static LocalTime toLocalTime(Object value, DataType type) throws SQLException {
-        if (type == DataType.TIMESTAMP) {
-            return Conversions.toLocalDateTime((Long) value).toLocalTime();
+    /**
+     * Reads a value as a local time: a {@code TIME}, {@code 24:00:00} as the
+     * last nanosecond of the day, the time of a {@code TIMESTAMP} or of an
+     * instant in the time zone of the session, or text such as
+     * {@code 12:30:00}.
+     */
+    static LocalTime toLocalTime(Object value, DataType type, ZoneId zone) throws SQLException {
+        if (type == DataType.TIME) {
+            return localTime((Long) value);
+        }
+        if (type == DataType.TIMESTAMP || type == DataType.TIMESTAMPTZ) {
+            return toLocalDateTime(value, type, zone).toLocalTime();
         }
         if (value instanceof String s) {
             try {
-                return LocalTime.parse(s.strip());
+                return localTime(Conversions.parseTime(s));
             } catch (RuntimeException e) {
                 throw cannotConvert(value, type, "a time", e);
             }
@@ -370,26 +426,30 @@ final class JdbcValues {
     }
 
     /** Reads a value as a {@code java.sql.Date}, at the start of its day in the zone of the calendar, if any. */
-    static Date toDate(Object value, DataType type, Calendar calendar) throws SQLException {
-        LocalDate d = toLocalDate(value, type);
+    static Date toDate(Object value, DataType type, Calendar calendar, ZoneId zone) throws SQLException {
+        LocalDate d = toLocalDate(value, type, zone);
         return calendar == null ? Date.valueOf(d)
                 : new Date(d.atStartOfDay(zone(calendar)).toInstant().toEpochMilli());
     }
 
     /** Reads a value as a {@code java.sql.Time} on 1970-01-01, in the zone of the calendar, if any. */
-    static Time toTime(Object value, DataType type, Calendar calendar) throws SQLException {
-        LocalTime t = toLocalTime(value, type);
+    static Time toTime(Object value, DataType type, Calendar calendar, ZoneId zone) throws SQLException {
+        LocalTime t = toLocalTime(value, type, zone);
         if (calendar == null) {
-            Time time = Time.valueOf(t);
-            time.setTime(time.getTime() + t.getNano() / 1_000_000);
-            return time;
+            return sqlTime(t);
         }
         return new Time(LocalDate.EPOCH.atTime(t).atZone(zone(calendar)).toInstant().toEpochMilli());
     }
 
-    /** Reads a value as a {@code java.sql.Timestamp}, in the zone of the calendar, if any. */
-    static Timestamp toTimestamp(Object value, DataType type, Calendar calendar) throws SQLException {
-        LocalDateTime t = toLocalDateTime(value, type);
+    /**
+     * Reads a value as a {@code java.sql.Timestamp}, in the zone of the
+     * calendar, if any; an instant is itself.
+     */
+    static Timestamp toTimestamp(Object value, DataType type, Calendar calendar, ZoneId zone) throws SQLException {
+        if (type == DataType.TIMESTAMPTZ) {
+            return Timestamp.from(instant((Long) value));
+        }
+        LocalDateTime t = toLocalDateTime(value, type, zone);
         return calendar == null ? Timestamp.valueOf(t) : Timestamp.from(t.atZone(zone(calendar)).toInstant());
     }
 
@@ -404,7 +464,7 @@ final class JdbcValues {
      *         convert to, {@code 22018} or {@code 22003} for a value that
      *         does not convert
      */
-    static <T> T toClass(Object value, DataType type, Class<T> c) throws SQLException {
+    static <T> T toClass(Object value, DataType type, Class<T> c, ZoneId zone) throws SQLException {
         if (c == null) {
             throw SqlStates.invalidArgument("The type of getObject must not be null");
         }
@@ -413,7 +473,7 @@ final class JdbcValues {
         }
         Object result;
         if (c == String.class) {
-            result = toText(value, type);
+            result = toText(value, type, zone);
         } else if (c == Boolean.class) {
             result = toBoolean(value, type);
         } else if (c == Byte.class) {
@@ -435,33 +495,93 @@ final class JdbcValues {
         } else if (c == byte[].class) {
             result = toBytes(value, type);
         } else if (c == LocalDate.class) {
-            result = toLocalDate(value, type);
+            result = toLocalDate(value, type, zone);
         } else if (c == LocalDateTime.class) {
-            result = toLocalDateTime(value, type);
+            result = toLocalDateTime(value, type, zone);
         } else if (c == LocalTime.class) {
-            result = toLocalTime(value, type);
+            result = toLocalTime(value, type, zone);
         } else if (c == Date.class) {
-            result = toDate(value, type, null);
+            result = toDate(value, type, null, zone);
         } else if (c == Time.class) {
-            result = toTime(value, type, null);
+            result = toTime(value, type, null, zone);
         } else if (c == Timestamp.class || c == java.util.Date.class) {
-            result = toTimestamp(value, type, null);
+            result = toTimestamp(value, type, null, zone);
+        } else if (c == Instant.class) {
+            result = toInstant(value, type, zone);
+        } else if (c == OffsetDateTime.class) {
+            result = toInstant(value, type, zone).atZone(zone).toOffsetDateTime();
+        } else if (c == ZonedDateTime.class) {
+            result = toInstant(value, type, zone).atZone(zone);
+        } else if (c == Interval.class) {
+            result = toInterval(value, type);
+        } else if (c == Duration.class) {
+            Interval i = toInterval(value, type);
+            if (i.months() != 0) {
+                throw cannotConvert(value, type, "a Duration, which has no months", null);
+            }
+            result = i.toDuration();
+        } else if (c == Period.class) {
+            Interval i = toInterval(value, type);
+            if (i.micros() != 0) {
+                throw cannotConvert(value, type, "a Period, which has no time", null);
+            }
+            result = i.toPeriod();
         } else if (c == UUID.class) {
             result = toUuid(value, type);
         } else if (c == List.class) {
-            result = toList(value, type);
+            result = toList(value, type, zone);
         } else if (c == Map.class) {
-            result = toMap(value, type);
+            result = toMap(value, type, zone);
         } else if (c == Array.class) {
-            result = toArray(value, type);
+            result = toArray(value, type, zone);
         } else {
-            result = toObject(value, type);
+            result = toObject(value, type, zone);
             if (!c.isInstance(result)) {
                 throw SqlStates.create("FyrQL does not read a value of type " + type.sqlName() + " as "
                         + c.getName(), SqlStates.FEATURE_NOT_SUPPORTED, null);
             }
         }
         return c.cast(result);
+    }
+
+    /**
+     * Reads a value as an instant: a {@code TIMESTAMP WITH TIME ZONE}, a
+     * {@code TIMESTAMP} or the start of a {@code DATE} in the time zone of
+     * the session, or text.
+     */
+    private static Instant toInstant(Object value, DataType type, ZoneId zone) throws SQLException {
+        if (type == DataType.TIMESTAMPTZ) {
+            return instant((Long) value);
+        }
+        if (value instanceof String s) {
+            try {
+                return instant(Conversions.parseTimestampTz(s, zone));
+            } catch (RuntimeException e) {
+                throw cannotConvert(value, type, "an instant", e);
+            }
+        }
+        if (type == DataType.TIMESTAMP) {
+            return instant(ZonedDates.toInstant((Long) value, zone));
+        }
+        if (type == DataType.DATE) {
+            return instant(ZonedDates.startOfDay((Integer) value, zone));
+        }
+        throw cannotConvert(value, type, "an instant", null);
+    }
+
+    /** Reads a value as an interval: an {@code INTERVAL}, or text. */
+    private static Interval toInterval(Object value, DataType type) throws SQLException {
+        if (value instanceof Interval i) {
+            return i;
+        }
+        if (value instanceof String s) {
+            try {
+                return Interval.parse(s);
+            } catch (RuntimeException e) {
+                throw cannotConvert(value, type, "an interval", e);
+            }
+        }
+        throw cannotConvert(value, type, "an interval", null);
     }
 
     private static UUID toUuid(Object value, DataType type) throws SQLException {
@@ -486,14 +606,17 @@ final class JdbcValues {
      * Converts a value of a parameter to a value of the engine, of the type
      * that belongs to its class: the classes {@code getObject} returns, the
      * other boxed numbers and {@code BigInteger}, {@code Character},
-     * {@code LocalDate} and {@code LocalDateTime}, and a
-     * {@code java.util.Date} as a timestamp in the time zone of the JVM. A
+     * {@code LocalDate}, {@code LocalDateTime} and {@code LocalTime}, a
+     * {@code java.util.Date} as a timestamp and a {@code java.sql.Time} as a
+     * time of day in the time zone of the JVM, an {@code Instant},
+     * {@code OffsetDateTime} or {@code ZonedDateTime} as a
+     * {@code TIMESTAMP WITH TIME ZONE}, and a {@code Duration},
+     * {@code Period} or {@code Interval} as an {@code INTERVAL}. A
      * {@code BigDecimal} is a {@code DECIMAL} of its digits and scale, see
      * {@link #decimal}.
      *
      * @throws SQLException {@code 0A000} for a class the driver does not
-     *         take, such as {@code java.sql.Time}; {@code 22003} for a value
-     *         beyond the range of its type
+     *         take; {@code 22003} for a value beyond the range of its type
      */
     static Typed fromJava(Object x) throws SQLException {
         return switch (x) {
@@ -515,12 +638,19 @@ final class JdbcValues {
             case Character c -> new Typed(c.toString(), DataType.VARCHAR);
             case byte[] b -> new Typed(b.clone(), DataType.BLOB);
             case Date d -> fromLocalDate(d.toLocalDate());
-            case Time t -> throw noTime();
+            case Time t -> new Typed(LocalDateTime.ofInstant(Instant.ofEpochMilli(t.getTime()), ZoneId.systemDefault())
+                    .toLocalTime().toNanoOfDay() / 1000, DataType.TIME);
             case Timestamp t -> fromLocalDateTime(t.toLocalDateTime());
             case java.util.Date d -> fromLocalDateTime(LocalDateTime.ofInstant(d.toInstant(), ZoneId.systemDefault()));
             case LocalDate d -> fromLocalDate(d);
             case LocalDateTime t -> fromLocalDateTime(t);
-            case LocalTime t -> throw noTime();
+            case LocalTime t -> new Typed(t.toNanoOfDay() / 1000, DataType.TIME);
+            case Instant t -> fromInstant(t);
+            case OffsetDateTime t -> fromInstant(t.toInstant());
+            case ZonedDateTime t -> fromInstant(t.toInstant());
+            case Interval i -> new Typed(i, DataType.INTERVAL);
+            case Duration d -> fromInterval(() -> Interval.from(d), d.toString());
+            case Period p -> fromInterval(() -> Interval.from(p), p.toString());
             case UUID u -> new Typed(u, DataType.UUID);
             case FyrQLArray a -> new Typed(a.values(), a.type());
             case FyrQLStruct s -> new Typed(s.values(), s.type());
@@ -547,15 +677,28 @@ final class JdbcValues {
         }
     }
 
+    /** Returns a {@code TIMESTAMP WITH TIME ZONE} of an instant; a fraction below a microsecond is cut off. */
+    static Typed fromInstant(Instant t) throws SQLException {
+        try {
+            return new Typed(Math.addExact(Math.multiplyExact(t.getEpochSecond(), 1_000_000L), t.getNano() / 1000),
+                    DataType.TIMESTAMPTZ);
+        } catch (ArithmeticException e) {
+            throw tooLarge(t.toString(), "a TIMESTAMP WITH TIME ZONE");
+        }
+    }
+
+    private static Typed fromInterval(java.util.function.Supplier<Interval> interval, String text)
+            throws SQLException {
+        try {
+            return new Typed(interval.get(), DataType.INTERVAL);
+        } catch (ArithmeticException e) {
+            throw tooLarge(text, "an INTERVAL");
+        }
+    }
+
     /** A value of a parameter that does not fit its type: {@code 22003}. */
     private static SQLException tooLarge(String value, String target) {
         return SqlStates.create("The value " + value + " does not fit " + target, SqlStates.NUMERIC_OUT_OF_RANGE, null);
-    }
-
-    /** A time of day: {@code 0A000}, FyrQL has no {@code TIME}. */
-    static SQLException noTime() {
-        return SqlStates.create("FyrQL has no type TIME; set a timestamp or a string",
-                SqlStates.FEATURE_NOT_SUPPORTED, null);
     }
 
     /**
@@ -590,7 +733,8 @@ final class JdbcValues {
      * {@code null} for {@code NULL}, {@code OTHER}, {@code JAVA_OBJECT},
      * {@code ARRAY} and {@code STRUCT}: the type of the value then stays.
      *
-     * @throws SQLException {@code 0A000} for a code FyrQL has no type for, such as {@code TIME}
+     * @throws SQLException {@code 0A000} for a code FyrQL has no type for, such as
+     *         {@code TIME_WITH_TIMEZONE}
      */
     static DataType typeOf(int sqlType) throws SQLException {
         return switch (sqlType) {
@@ -607,6 +751,8 @@ final class JdbcValues {
             case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB -> DataType.BLOB;
             case Types.DATE -> DataType.DATE;
             case Types.TIMESTAMP -> DataType.TIMESTAMP;
+            case Types.TIME -> DataType.TIME;
+            case Types.TIMESTAMP_WITH_TIMEZONE -> DataType.TIMESTAMPTZ;
             case Types.NULL, Types.OTHER, Types.JAVA_OBJECT, Types.ARRAY, Types.STRUCT -> null;
             default -> throw SqlStates.create("FyrQL has no type for the JDBC type " + typeName(sqlType),
                     SqlStates.FEATURE_NOT_SUPPORTED, null);
@@ -628,10 +774,11 @@ final class JdbcValues {
      * value; a code without a type of its own keeps the value.
      *
      * @param scale the scale of a {@code DECIMAL}, or {@code -1}
+     * @param zone the time zone of the session
      * @throws SQLException {@code 22018} if the value does not convert,
      *         {@code 22003} if it is beyond the range of the type
      */
-    static Typed convert(Typed v, int sqlType, int scale) throws SQLException {
+    static Typed convert(Typed v, int sqlType, int scale, ZoneId zone) throws SQLException {
         DataType target = typeOf(sqlType);
         if (target == null || target.equals(v.type())) {
             return v;
@@ -641,7 +788,7 @@ final class JdbcValues {
             return decimal(scale >= 0 ? d.setScale(scale, RoundingMode.HALF_UP) : d);
         }
         try {
-            return new Typed(Casts.cast(v.value(), v.type(), target), target);
+            return new Typed(Casts.cast(v.value(), v.type(), target, zone), target);
         } catch (ArithmeticException e) {
             throw outOfRange(v.value(), v.type(), "the type " + target.sqlName());
         } catch (ConversionException e) {
@@ -663,7 +810,7 @@ final class JdbcValues {
 
     /** Returns the text of a value for a message, shortened to 40 characters. */
     private static String describe(Object value, DataType type) {
-        String s = toText(value, type);
+        String s = Casts.format(value, type);
         return s.length() > 40 ? s.substring(0, 40) + "..." : s;
     }
 }

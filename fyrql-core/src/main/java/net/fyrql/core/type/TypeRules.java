@@ -71,8 +71,12 @@ public final class TypeRules {
     /**
      * Returns the type of {@code a + b}: {@code DATE} for a {@code DATE} and
      * an integral type up to {@code INTEGER} in either order, a number of
-     * days, otherwise as {@link #numeric}. DuckDB adds no {@code BIGINT} to
-     * a date.
+     * days; {@code TIMESTAMP} for a {@code DATE} or {@code TIMESTAMP} and an
+     * {@code INTERVAL}, and for a {@code DATE} and a {@code TIME}, in either
+     * order; {@code TIME} for a {@code TIME} and an {@code INTERVAL};
+     * {@code INTERVAL} for two intervals; otherwise as {@link #numeric}.
+     * DuckDB adds no {@code BIGINT} to a date. A {@code TIMESTAMP WITH TIME
+     * ZONE} adds an interval only in a time zone, so not as an operator here.
      *
      * @throws IllegalArgumentException if the types do not add
      */
@@ -80,13 +84,43 @@ public final class TypeRules {
         if (a == Scalar.DATE && isInt32(b) || isInt32(a) && b == Scalar.DATE) {
             return Scalar.DATE;
         }
+        DataType temporal = addTemporal(a, b);
+        if (temporal == null && a == Scalar.INTERVAL) {
+            temporal = addTemporal(b, a);
+        }
+        if (temporal == null && a == Scalar.TIME && b == Scalar.DATE) {
+            temporal = Scalar.TIMESTAMP;
+        }
+        if (temporal != null) {
+            return temporal;
+        }
         return numeric(a, b);
+    }
+
+    /** The type of {@code interval + b} or {@code a + interval}, with the interval second; {@code null} if none. */
+    private static DataType addTemporal(DataType a, DataType b) {
+        if (b == Scalar.INTERVAL) {
+            if (a == Scalar.DATE || a == Scalar.TIMESTAMP) {
+                return Scalar.TIMESTAMP;
+            }
+            if (a == Scalar.TIME || a == Scalar.INTERVAL) {
+                return a;
+            }
+        }
+        if (a == Scalar.DATE && b == Scalar.TIME) {
+            return Scalar.TIMESTAMP;
+        }
+        return null;
     }
 
     /**
      * Returns the type of {@code a - b}: {@code DATE} for a {@code DATE}
      * minus an integral type up to {@code INTEGER}, {@code BIGINT} for the
-     * days between two dates, otherwise as {@link #numeric}.
+     * days between two dates; {@code TIMESTAMP}, {@code TIME} or
+     * {@code INTERVAL} for a {@code DATE} or {@code TIMESTAMP}, a
+     * {@code TIME} or an {@code INTERVAL} minus an {@code INTERVAL};
+     * {@code INTERVAL} between two timestamps or a date and a timestamp;
+     * otherwise as {@link #numeric}.
      *
      * @throws IllegalArgumentException if the types do not subtract
      */
@@ -97,7 +131,32 @@ public final class TypeRules {
         if (a == Scalar.DATE && b == Scalar.DATE) {
             return Scalar.BIGINT;
         }
+        if (b == Scalar.INTERVAL && a != Scalar.INTERVAL) {
+            DataType temporal = addTemporal(a, b);
+            if (temporal != null) {
+                return temporal;
+            }
+        }
+        if (a == Scalar.INTERVAL && b == Scalar.INTERVAL) {
+            return Scalar.INTERVAL;
+        }
+        if ((a == Scalar.TIMESTAMP || a == Scalar.DATE) && (b == Scalar.TIMESTAMP || b == Scalar.DATE)) {
+            return Scalar.INTERVAL;
+        }
         return numeric(a, b);
+    }
+
+    /**
+     * Tells whether an operator on these operand types works on the
+     * temporal values rather than on numbers or days: any operand of
+     * {@code TIME}, {@code TIMESTAMP} or {@code INTERVAL}.
+     */
+    public static boolean isTemporalArithmetic(DataType a, DataType b) {
+        return isTemporal(a) || isTemporal(b);
+    }
+
+    private static boolean isTemporal(DataType t) {
+        return t == Scalar.TIME || t == Scalar.TIMESTAMP || t == Scalar.INTERVAL || t == Scalar.TIMESTAMPTZ;
     }
 
     private static boolean isInt32(DataType t) {
@@ -105,7 +164,8 @@ public final class TypeRules {
     }
 
     /**
-     * Returns the type of {@code a * b}: as {@link #numeric}, except that two
+     * Returns the type of {@code a * b}: {@code INTERVAL} for an interval and
+     * a number in either order; as {@link #numeric}, except that two
      * decimals add their widths and scales, within 18 digits if both fit into
      * 18 digits and the scale is below 18, and within 38 otherwise.
      *
@@ -113,6 +173,9 @@ public final class TypeRules {
      *         scale of the product exceeds its width
      */
     public static DataType multiply(DataType a, DataType b) {
+        if (a == Scalar.INTERVAL && b.isNumeric() || a.isNumeric() && b == Scalar.INTERVAL) {
+            return Scalar.INTERVAL;
+        }
         DataType floating = floating(a, b);
         if (floating != null) {
             return floating;
@@ -131,12 +194,16 @@ public final class TypeRules {
     }
 
     /**
-     * Returns the type of {@code a / b}: {@code FLOAT} if an operand is a
-     * {@code FLOAT} and none a {@code DOUBLE}, otherwise {@code DOUBLE}.
+     * Returns the type of {@code a / b}: {@code INTERVAL} for an interval
+     * divided by a number; {@code FLOAT} if an operand is a {@code FLOAT}
+     * and none a {@code DOUBLE}, otherwise {@code DOUBLE}.
      *
      * @throws IllegalArgumentException if a type is not numeric
      */
     public static DataType divide(DataType a, DataType b) {
+        if (a == Scalar.INTERVAL && b.isNumeric()) {
+            return Scalar.INTERVAL;
+        }
         DataType floating = floating(a, b);
         return floating != null ? floating : Scalar.DOUBLE;
     }
@@ -223,7 +290,8 @@ public final class TypeRules {
      * holds the larger integer part and the larger scale of both (without
      * the carry digit of an addition, capped at 38 digits; two decimals that
      * need more give up digits of the scale), else the wider integral type. {@code BOOLEAN} unites with an integral type to that
-     * type, {@code DATE} with {@code TIMESTAMP} to {@code TIMESTAMP}. Two
+     * type, {@code DATE} with {@code TIMESTAMP} to {@code TIMESTAMP}, either
+     * with {@code TIMESTAMP WITH TIME ZONE} to that, in the time zone. Two
      * lists unite to the list of the common element type, two maps to the
      * map of the common key and value types, and two structs to the union of
      * their fields by name, whose missing fields a cast fills with
@@ -258,6 +326,10 @@ public final class TypeRules {
         }
         if (a == Scalar.DATE && b == Scalar.TIMESTAMP || a == Scalar.TIMESTAMP && b == Scalar.DATE) {
             return Scalar.TIMESTAMP;
+        }
+        if (a == Scalar.TIMESTAMPTZ && (b == Scalar.DATE || b == Scalar.TIMESTAMP)
+                || b == Scalar.TIMESTAMPTZ && (a == Scalar.DATE || a == Scalar.TIMESTAMP)) {
+            return Scalar.TIMESTAMPTZ;
         }
         if (a instanceof DataType.ListType x && b instanceof DataType.ListType y) {
             return DataType.listOf(common(x.element(), y.element()));

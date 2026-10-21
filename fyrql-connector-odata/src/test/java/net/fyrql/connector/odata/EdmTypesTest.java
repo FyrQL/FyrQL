@@ -101,7 +101,10 @@ class EdmTypesTest {
         assertEquals(DataType.UUID, types.get("Guid"));
         assertEquals(DataType.BLOB, types.get("Binary"));
         assertEquals(DataType.TIMESTAMP, types.get("DateTime"));
-        assertEquals(DataType.TIMESTAMP, types.get("DateTimeOffset"));
+        assertEquals(DataType.TIMESTAMPTZ, types.get("DateTimeOffset"));
+        assertEquals(DataType.TIME, types.get("Time"));
+        assertEquals(DataType.TIME, types.get("TimeOfDay"));
+        assertEquals(DataType.INTERVAL, types.get("Duration"));
         assertEquals(DataType.DATE, types.get("Date"));
     }
 
@@ -126,7 +129,7 @@ class EdmTypesTest {
     @Test
     void typesWithoutTypeInFyrQLAreText() {
         Map<String, DataType> types = types();
-        for (String name : List.of("Time", "TimeOfDay", "Duration", "Untyped", "Future", "Undeclared", "Enum")) {
+        for (String name : List.of("Untyped", "Future", "Undeclared", "Enum")) {
             assertEquals(DataType.VARCHAR, types.get(name), name);
         }
     }
@@ -161,10 +164,10 @@ class EdmTypesTest {
             types.put(p.name(), EdmTypes.of(p, trippin));
         }
         assertEquals(List.of(DataType.INTEGER, DataType.UUID, DataType.VARCHAR, DataType.FLOAT, DataType.VARCHAR,
-                DataType.listOf(DataType.VARCHAR), DataType.TIMESTAMP, DataType.TIMESTAMP),
+                DataType.listOf(DataType.VARCHAR), DataType.TIMESTAMPTZ, DataType.TIMESTAMPTZ),
                 List.copyOf(types.values()));
         Property duration = trippin.entityTypes().get("Trippin.PlanItem").properties().get(4);
         assertEquals("Duration", duration.name());
-        assertEquals(DataType.VARCHAR, EdmTypes.of(duration, trippin));
+        assertEquals(DataType.INTERVAL, EdmTypes.of(duration, trippin));
     }
 }

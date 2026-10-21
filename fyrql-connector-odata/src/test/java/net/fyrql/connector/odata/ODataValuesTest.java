@@ -13,6 +13,7 @@ package net.fyrql.connector.odata;
 
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -71,6 +72,26 @@ class ODataValuesTest {
         assertEquals("Invalid value for MonthOfYear (valid values 1 - 12): 13",
                 error("2024-13-02T03:04:05Z", DataType.TIMESTAMP));
         assertThrows(ArithmeticException.class, () -> VALUES.parse("/Date(9223372036854776)/", DataType.TIMESTAMP));
+    }
+
+    @Test
+    void timesOfDayAndDurations() {
+        assertEquals(Conversions.parseTime("13:20:00"), VALUES.parse("PT13H20M", DataType.TIME));
+        assertEquals(Conversions.parseTime("00:00:01.123456"), VALUES.parse("PT1.1234567S", DataType.TIME));
+        assertEquals(Conversions.parseTime("24:00:00"), VALUES.parse("P1D", DataType.TIME));
+        assertEquals(Conversions.parseTime("13:20:00.5"), VALUES.parse("13:20:00.5000000", DataType.TIME));
+        assertEquals(Conversions.parseTime("13:20:00"), VALUES.parse("13:20", DataType.TIME));
+        assertEquals("expected a time of day: PT25H", error("PT25H", DataType.TIME));
+        assertEquals("expected a time of day: -PT1H", error("-PT1H", DataType.TIME));
+        assertEquals(Interval.parse("1 day 02:30:00"), VALUES.parse("P1DT2H30M", DataType.INTERVAL));
+        assertEquals(Interval.parse("-1 year -2 months -3 days -00:00:00.5"),
+                VALUES.parse("-P1Y2M3DT0.5S", DataType.INTERVAL));
+        assertEquals(Interval.parse("00:00:00"), VALUES.parse("PT0S", DataType.INTERVAL));
+        assertEquals("expected a duration of ISO 8601 such as P1DT2H30M: P", error("P", DataType.INTERVAL));
+        assertEquals("expected a duration of ISO 8601 such as P1DT2H30M: P1DT", error("P1DT", DataType.INTERVAL));
+        // An instant as a timestamp, in UTC.
+        assertEquals(micros("2024-01-02 01:04:05"), VALUES.parse("2024-01-02T03:04:05+02:00",
+                DataType.TIMESTAMPTZ));
     }
 
     @Test

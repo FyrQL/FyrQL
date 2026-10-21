@@ -124,6 +124,19 @@ abstract class StandardDialect implements Dialect {
         return "CAST(" + string(value.toString()) + " AS " + typeName(Scalar.UUID) + ")";
     }
 
+    String timeLiteral(long micros) {
+        return "TIME " + string(Conversions.formatTime(micros));
+    }
+
+    /** An instant, written in UTC with its offset, so that the time zone of the database plays no part. */
+    String timestampTzLiteral(long micros) {
+        return "TIMESTAMP WITH TIME ZONE " + string(Conversions.formatTimestamp(micros) + "+00:00");
+    }
+
+    String intervalLiteral(net.fyrql.core.value.Interval value) {
+        throw new IllegalArgumentException(name() + " cannot write an INTERVAL");
+    }
+
     @Override
     public String literal(Object value, DataType type) {
         if (value == null) {
@@ -146,6 +159,9 @@ abstract class StandardDialect implements Dialect {
             case DATE -> dateLiteral((Integer) value);
             case TIMESTAMP -> timestampLiteral((Long) value);
             case UUID -> uuidLiteral((java.util.UUID) value);
+            case TIME -> timeLiteral((Long) value);
+            case TIMESTAMPTZ -> timestampTzLiteral((Long) value);
+            case INTERVAL -> intervalLiteral((net.fyrql.core.value.Interval) value);
         };
     }
 
@@ -330,8 +346,8 @@ abstract class StandardDialect implements Dialect {
             case COUNT_STAR, COUNT -> true;
             case MIN, MAX -> {
                 DataType t = schema.type(call.column());
-                yield (integer(t) || t instanceof Decimal || t == Scalar.DATE || t == Scalar.TIMESTAMP)
-                        && ordersExactly(t);
+                yield (integer(t) || t instanceof Decimal || t == Scalar.DATE || t == Scalar.TIMESTAMP
+                        || t == Scalar.TIME || t == Scalar.TIMESTAMPTZ) && ordersExactly(t);
             }
             case SUM -> sumsIntegers() && integer(schema.type(call.column()));
             default -> false;

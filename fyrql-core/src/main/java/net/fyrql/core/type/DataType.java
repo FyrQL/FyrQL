@@ -11,6 +11,8 @@
 
 package net.fyrql.core.type;
 
+import net.fyrql.core.value.Interval;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.List;
@@ -28,7 +30,11 @@ import java.util.Objects;
  * {@code BigDecimal} with exactly the scale of its type, {@code String},
  * {@code byte[]} for {@code BLOB}, {@code Integer} days since 1970-01-01 for
  * {@code DATE}, {@code Long} microseconds since 1970-01-01 00:00:00 for
- * {@code TIMESTAMP}, {@code java.util.UUID}; a {@code STRUCT} is a
+ * {@code TIMESTAMP}, {@code java.util.UUID}, {@code Long} microseconds since
+ * midnight for {@code TIME} (0 to 86,400,000,000, the last one being
+ * {@code 24:00:00}), {@code Long} microseconds since 1970-01-01 00:00:00 UTC
+ * for {@code TIMESTAMP WITH TIME ZONE}, shown in the time zone of the
+ * session, and {@link Interval} for {@code INTERVAL}; a {@code STRUCT} is a
  * {@code List} of its field values in order, a {@code LIST} a {@code List},
  * a {@code MAP} a {@code Map} that keeps its insertion order. {@code NULL} is
  * {@code null}.
@@ -49,6 +55,9 @@ public sealed interface DataType permits DataType.Scalar, DataType.Decimal, Data
     DataType DATE = Scalar.DATE;
     DataType TIMESTAMP = Scalar.TIMESTAMP;
     DataType UUID = Scalar.UUID;
+    DataType TIME = Scalar.TIME;
+    DataType TIMESTAMPTZ = Scalar.TIMESTAMPTZ;
+    DataType INTERVAL = Scalar.INTERVAL;
 
     /** The largest precision of a {@code DECIMAL}. */
     int MAX_DECIMAL_PRECISION = 38;
@@ -112,7 +121,10 @@ public sealed interface DataType permits DataType.Scalar, DataType.Decimal, Data
         BLOB(byte[].class),
         DATE(Integer.class),
         TIMESTAMP(Long.class),
-        UUID(java.util.UUID.class);
+        UUID(java.util.UUID.class),
+        TIME(Long.class),
+        TIMESTAMPTZ(Long.class),
+        INTERVAL(Interval.class);
 
         private final Class<?> javaClass;
 
@@ -120,9 +132,10 @@ public sealed interface DataType permits DataType.Scalar, DataType.Decimal, Data
             this.javaClass = javaClass;
         }
 
+        /** Returns the name, {@code TIMESTAMP WITH TIME ZONE} for {@code TIMESTAMPTZ} as DuckDB spells it. */
         @Override
         public String sqlName() {
-            return name();
+            return this == TIMESTAMPTZ ? "TIMESTAMP WITH TIME ZONE" : name();
         }
 
         @Override

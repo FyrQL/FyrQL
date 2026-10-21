@@ -299,7 +299,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * Returns a table that reads a Parquet file, for {@code COPY ... FROM}:
      * the table has the columns of the file, not the given ones, which the
      * engine casts the columns of the file to by position. There are no
-     * options. The same file in the same version gives the same table, also
+     * options but {@link FileWriterProvider#TIME_ZONE}, which a file that
+     * holds instants does not need. The same file in the same version gives the same table, also
      * the same as {@link #bind} gives.
      */
     @Override
@@ -308,9 +309,10 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
             throw new IllegalArgumentException("The Parquet source " + name + " reads no files of the format "
                     + format);
         }
-        if (!options.isEmpty()) {
+        List<String> given = options.keySet().stream().filter(k -> !k.equals(FileWriterProvider.TIME_ZONE)).toList();
+        if (!given.isEmpty()) {
             throw new IllegalArgumentException("The Parquet file " + location + " is read without options, not with "
-                    + String.join(", ", options.keySet()));
+                    + String.join(", ", given));
         }
         FileObject file = files.object(location);
         String table = calls.computeIfAbsent(List.of(ParquetFiles.Version.of(file)), v -> {
@@ -340,9 +342,11 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
             throw new IllegalArgumentException(function + " takes the path of a file, a directory or a pattern"
                     + " as its argument");
         }
-        if (!namedArguments.isEmpty()) {
-            throw new IllegalArgumentException("Invalid named parameter \"" + namedArguments.keySet().iterator().next()
-                    + "\" for function " + function + "; it has none");
+        for (String key : namedArguments.keySet()) {
+            if (!key.equals(FileWriterProvider.TIME_ZONE)) {
+                throw new IllegalArgumentException("Invalid named parameter \"" + key + "\" for function " + function
+                        + "; it has none");
+            }
         }
         String location = ParquetFiles.absolute(path, Path.of(""));
         List<FileObject> found = files.resolve(location);

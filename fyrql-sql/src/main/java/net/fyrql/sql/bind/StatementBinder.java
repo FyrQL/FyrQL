@@ -17,11 +17,15 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Casts;
+import net.fyrql.core.value.ZonedDates;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CopyFrom;
 import net.fyrql.sql.ast.CopyTo;
 import net.fyrql.sql.ast.CreateTable;
 import net.fyrql.sql.ast.DropTable;
+import net.fyrql.sql.ast.ResetVariable;
+import net.fyrql.sql.ast.SetVariable;
+import net.fyrql.sql.ast.ShowVariable;
 import net.fyrql.sql.ast.InsertInto;
 import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.ast.Query;
@@ -79,7 +83,32 @@ final class StatementBinder {
             case CreateTable c -> create(c);
             case InsertInto i -> insert(i);
             case DropTable d -> drop(d);
+            case SetVariable s -> new BoundStatement.Set(setting(s.name(), s.position()),
+                    ExpressionBinder.check(() -> zoneName(s.value(), s.position()), s.position(), null));
+            case ResetVariable r -> new BoundStatement.Set(setting(r.name(), r.position()), null);
+            case ShowVariable s -> {
+                String name = setting(s.name(), s.position());
+                yield new BoundStatement.Query(new PlanNode.Values(Schema.of(new Schema.Field(name, DataType.VARCHAR)),
+                        List.<Object[]>of(new Object[] {ZonedDates.name(context.zone())})));
+            }
         };
+    }
+
+    /** The name of a setting as FyrQL spells it; {@code TimeZone} is the only one. */
+    private static String setting(String name, Position position) {
+        if (!name.equalsIgnoreCase("TimeZone")) {
+            throw new SqlException("unrecognized configuration parameter \"" + name + "\"", position);
+        }
+        return "TimeZone";
+    }
+
+    /** The name of a time zone as the session shows it. */
+    private static String zoneName(String value, Position position) {
+        try {
+            return ZonedDates.name(ZonedDates.zone(value));
+        } catch (net.fyrql.core.value.ConversionException e) {
+            throw new SqlException(e.getMessage(), position);
+        }
     }
 
     private BoundStatement copy(CopyTo c) {

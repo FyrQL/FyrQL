@@ -15,6 +15,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.DataGenerator;
 import net.fyrql.core.value.DataGeneratorTest;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.value.Keys;
 import org.junit.jupiter.api.Test;
 
@@ -191,6 +192,24 @@ class VectorsTest {
             }
         }
     }
+    @Test
+    void intervalsAreEqualByTheirNormalizedForm() {
+        Vector v = Vectors.of(DataType.INTERVAL, Interval.ofMonths(1), Interval.ofDays(30),
+                Interval.ofMicros(Interval.MICROS_PER_MONTH), Interval.parse("1 day -1 hour"),
+                Interval.parse("23 hours"), null);
+        assertTrue(v instanceof IntervalVector);
+        assertTrue(Vectors.equal(v, 0, v, 1) && Vectors.equal(v, 0, v, 2));
+        assertEquals(Vectors.hash(v, 0), Vectors.hash(v, 2));
+        assertFalse(Vectors.equal(v, 3, v, 4));
+        assertTrue(Vectors.compare(v, 4, v, 3) < 0);
+        for (int i = 0; i < 5; i++) {
+            assertEquals(v.get(i).hashCode(), Vectors.hash(v, i), "hash of row " + i);
+            assertEquals(Keys.hash(v.get(i)), Vectors.hash(v, i), "key hash of row " + i);
+        }
+        assertNull(v.get(5));
+        assertEquals("1 day -01:00:00", v.get(3).toString());
+    }
+
     @Test
     void concatAndGatherKeepValuesAndNulls() {
         Schema schema = new Schema(DataGeneratorTest.ALL_TYPES.stream().map(t -> new Schema.Field(t.sqlName(), t))

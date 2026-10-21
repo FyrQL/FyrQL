@@ -176,10 +176,11 @@ class StatementBinderTest {
     void theColumnsOfAParquetFileAreCastByPosition() {
         BoundStatement.CopyFrom c = assertInstanceOf(BoundStatement.CopyFrom.class, bind("COPY t FROM 'p.parquet'"));
         assertEquals(Map.of(), c.options());
-        assertEquals(List.of("a=Cast[operand=Column[index=0, type=BIGINT], target=INTEGER, safe=false]",
+        assertEquals(List.of("a=Cast[operand=Column[index=0, type=BIGINT], target=INTEGER, safe=false, zone=null]",
                 "b=Column[index=1, type=VARCHAR]",
-                "e=Cast[operand=Column[index=2, type=SMALLINT], target=TINYINT, safe=false]",
-                "d=Cast[operand=Column[index=3, type=TIMESTAMP], target=DATE, safe=false]"), expressions(c.input()));
+                "e=Cast[operand=Column[index=2, type=SMALLINT], target=TINYINT, safe=false, zone=null]",
+                "d=Cast[operand=Column[index=3, type=TIMESTAMP], target=DATE, safe=false, zone=null]"),
+                expressions(c.input()));
     }
 
     @Test
@@ -238,10 +239,12 @@ class StatementBinderTest {
 
         i = assertInstanceOf(BoundStatement.Insert.class,
                 bind("INSERT INTO t (a, e, d) SELECT 1.5, 300, '2024-01-01'"));
-        assertEquals(List.of("a=Cast[operand=Column[index=0, type=DECIMAL(2,1)], target=INTEGER, safe=false]",
+        assertEquals(List.of("a=Cast[operand=Column[index=0, type=DECIMAL(2,1)], target=INTEGER, safe=false,"
+                + " zone=null]",
                 "b=Literal[type=VARCHAR, value=null]",
-                "e=Cast[operand=Column[index=1, type=INTEGER], target=TINYINT, safe=false]",
-                "d=Cast[operand=Column[index=2, type=VARCHAR], target=DATE, safe=false]"), expressions(i.input()));
+                "e=Cast[operand=Column[index=1, type=INTEGER], target=TINYINT, safe=false, zone=null]",
+                "d=Cast[operand=Column[index=2, type=VARCHAR], target=DATE, safe=false, zone=null]"),
+                expressions(i.input()));
     }
 
     @Test

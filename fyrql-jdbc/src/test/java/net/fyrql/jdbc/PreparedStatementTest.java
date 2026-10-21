@@ -229,13 +229,17 @@ class PreparedStatementTest {
             assertEquals("INTEGER", nullType(ps), "a name that is no type of FyrQL leaves the code");
             ps.setNull(1, Types.BIGINT, null);
             assertEquals("BIGINT", nullType(ps));
-            for (int code : new int[] {Types.TIME, Types.TIME_WITH_TIMEZONE, Types.TIMESTAMP_WITH_TIMEZONE,
-                    Types.REF, Types.ROWID, Types.SQLXML, Types.DATALINK, Types.DISTINCT, Types.REF_CURSOR, 12345}) {
+            ps.setNull(1, Types.TIME);
+            assertEquals("TIME", nullType(ps));
+            ps.setNull(1, Types.TIMESTAMP_WITH_TIMEZONE);
+            assertEquals("TIMESTAMP WITH TIME ZONE", nullType(ps));
+            for (int code : new int[] {Types.TIME_WITH_TIMEZONE, Types.REF, Types.ROWID, Types.SQLXML,
+                    Types.DATALINK, Types.DISTINCT, Types.REF_CURSOR, 12345}) {
                 SQLException e = assertThrows(SQLFeatureNotSupportedException.class, () -> ps.setNull(1, code));
                 assertEquals("0A000", e.getSQLState());
             }
-            assertEquals("FyrQL has no type for the JDBC type TIME",
-                    assertThrows(SQLException.class, () -> ps.setNull(1, Types.TIME)).getMessage());
+            assertEquals("FyrQL has no type for the JDBC type TIME_WITH_TIMEZONE",
+                    assertThrows(SQLException.class, () -> ps.setNull(1, Types.TIME_WITH_TIMEZONE)).getMessage());
         }
     }
 
@@ -273,8 +277,13 @@ class PreparedStatementTest {
                     () -> ps.setObject(1, LocalDate.of(2024, 2, 29), Types.INTEGER)).getSQLState());
             assertEquals("22018", assertThrows(SQLException.class,
                     () -> ps.setObject(1, LocalDate.of(2024, 2, 29), Types.DECIMAL)).getSQLState());
-            assertEquals("0A000", assertThrows(SQLException.class,
+            assertEquals("TIME 12:30:00", converted(ps, ps2 -> ps2.setObject(1, "12:30", Types.TIME)));
+            assertEquals("TIME 12:30:00", converted(ps, ps2 -> ps2.setObject(1,
+                    Timestamp.valueOf("2024-02-29 12:30:00"), Types.TIME)));
+            assertEquals("22018", assertThrows(SQLException.class,
                     () -> ps.setObject(1, 1, Types.TIME)).getSQLState());
+            assertEquals("0A000", assertThrows(SQLException.class,
+                    () -> ps.setObject(1, 1, Types.TIME_WITH_TIMEZONE)).getSQLState());
             SQLType vendor = new SQLType() {
                 @Override
                 public String getName() {
@@ -333,12 +342,9 @@ class PreparedStatementTest {
                 new Class<?>[] {Array.class}, (proxy, method, args) -> null);
         try (PreparedStatement ps = c.prepareStatement("SELECT ? AS v")) {
             List<StatementTest.ThrowingCall> calls = List.of(() -> ps.setObject(1, new Object()),
-                    () -> ps.setObject(1, LocalTime.NOON), () -> ps.setObject(1, Time.valueOf("12:00:00")),
-                    () -> ps.setObject(1, OffsetDateTime.now()), () -> ps.setObject(1, Map.of("k", 1)),
+                    () -> ps.setObject(1, java.time.OffsetTime.now()), () -> ps.setObject(1, Map.of("k", 1)),
                     () -> ps.setObject(1, List.of(1)), () -> ps.setObject(1, new int[] {1}),
-                    () -> ps.setTime(1, Time.valueOf("12:00:00")),
-                    () -> ps.setTime(1, Time.valueOf("12:00:00"), Calendar.getInstance()),
-                    () -> ps.setTime(1, null), () -> ps.setArray(1, foreign), () -> ps.setRef(1, null),
+                    () -> ps.setArray(1, foreign), () -> ps.setRef(1, null),
                     () -> ps.setRowId(1, null), () -> ps.setSQLXML(1, null),
                     () -> ps.setURL(1, url));
             for (StatementTest.ThrowingCall call : calls) {
@@ -347,8 +353,8 @@ class PreparedStatementTest {
             }
             assertEquals("FyrQL does not take a parameter of class java.lang.Object",
                     assertThrows(SQLException.class, () -> ps.setObject(1, new Object())).getMessage());
-            assertEquals("FyrQL has no type TIME; set a timestamp or a string",
-                    assertThrows(SQLException.class, () -> ps.setObject(1, LocalTime.NOON)).getMessage());
+            assertEquals("FyrQL does not take a parameter of class java.time.OffsetTime",
+                    assertThrows(SQLException.class, () -> ps.setObject(1, java.time.OffsetTime.MIN)).getMessage());
         }
     }
 
@@ -419,7 +425,9 @@ class PreparedStatementTest {
                 row++;
                 for (int i = 1; i <= md.getColumnCount(); i++) {
                     String type = md.getColumnTypeName(i);
-                    Object value = type.equals("HUGEINT") ? rs.getObject(i, BigInteger.class) : rs.getObject(i);
+                    // A java.sql.Time holds milliseconds, a LocalTime the microseconds of a TIME.
+                    Object value = type.equals("HUGEINT") ? rs.getObject(i, BigInteger.class)
+                            : type.equals("TIME") ? rs.getObject(i, java.time.LocalTime.class) : rs.getObject(i);
                     String where = "row " + row + ", column " + md.getColumnLabel(i);
                     if (value instanceof Map) {
                         assertThrows(SQLFeatureNotSupportedException.class, () -> ps.setObject(1, value), where);

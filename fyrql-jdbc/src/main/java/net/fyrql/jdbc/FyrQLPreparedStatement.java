@@ -63,8 +63,9 @@ import java.util.List;
  * {@code setObject} takes the classes {@link JdbcValues#fromJava} takes;
  * with a target type it converts the value as a cast of FyrQL does.
  * {@code setNull} with a type name of FyrQL, such as {@code INTEGER[]},
- * makes a {@code NULL} of that type. FyrQL has no {@code TIME}:
- * {@code setTime} is {@code 0A000}. A stream or reader is read whole when
+ * makes a {@code NULL} of that type. {@code setTime} sets a {@code TIME},
+ * an {@code Instant}, {@code OffsetDateTime} or {@code ZonedDateTime} a
+ * {@code TIMESTAMP WITH TIME ZONE}. A stream or reader is read whole when
  * it is set. {@link #getParameterMetaData()} tells the types the engine
  * gives the parameters, where it can; a value keeps the type of its setter.
  */
@@ -318,11 +319,18 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
         setTime(parameterIndex, x, null);
     }
 
-    /** Fails with {@code 0A000}: FyrQL has no {@code TIME}. */
+    /** Sets the local time of day of the time in the time zone of the calendar, or of the JVM. */
     @Override
     public void setTime(int parameterIndex, Time x, Calendar cal) throws SQLException {
         check(parameterIndex);
-        throw JdbcValues.noTime();
+        if (x == null) {
+            put(parameterIndex, null, DataType.TIME);
+        } else if (cal == null) {
+            put(parameterIndex, JdbcValues.fromJava(x));
+        } else {
+            put(parameterIndex, JdbcValues.fromJava(LocalDateTime.ofInstant(Instant.ofEpochMilli(x.getTime()),
+                    cal.getTimeZone().toZoneId()).toLocalTime()));
+        }
     }
 
     @Override
@@ -372,7 +380,8 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
             return;
         }
         boolean decimal = targetSqlType == Types.DECIMAL || targetSqlType == Types.NUMERIC;
-        put(parameterIndex, JdbcValues.convert(JdbcValues.fromJava(x), targetSqlType, decimal ? scaleOrLength : -1));
+        put(parameterIndex, JdbcValues.convert(JdbcValues.fromJava(x), targetSqlType, decimal ? scaleOrLength : -1,
+                zone()));
     }
 
     @Override

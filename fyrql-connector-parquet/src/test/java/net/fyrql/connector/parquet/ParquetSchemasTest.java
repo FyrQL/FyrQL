@@ -64,14 +64,15 @@ class ParquetSchemasTest {
             new Case("required int64 a (INTEGER(64,true));", "BIGINT"),
             new Case("required int64 a (INTEGER(64,false));", "HUGEINT"),
             new Case("required int32 a (DATE);", "DATE"),
-            new Case("required int32 a (TIME(MILLIS,false));", "VARCHAR"),
+            new Case("required int32 a (TIME(MILLIS,false));", "TIME"),
+            new Case("required int64 a (TIME(MICROS,false));", "TIME"),
             new Case("required int64 a (TIME(MICROS,true));", "VARCHAR"),
             new Case("required int64 a (TIME(NANOS,false));", "VARCHAR"),
-            new Case("required int64 a (TIMESTAMP(MILLIS,true));", "TIMESTAMP"),
+            new Case("required int64 a (TIMESTAMP(MILLIS,true));", "TIMESTAMP WITH TIME ZONE"),
             new Case("required int64 a (TIMESTAMP(MICROS,false));", "TIMESTAMP"),
-            new Case("required int64 a (TIMESTAMP(MICROS,true));", "TIMESTAMP"),
+            new Case("required int64 a (TIMESTAMP(MICROS,true));", "TIMESTAMP WITH TIME ZONE"),
             new Case("required int64 a (TIMESTAMP(NANOS,false));", "TIMESTAMP"),
-            new Case("required int64 a (TIMESTAMP(NANOS,true));", "TIMESTAMP"),
+            new Case("required int64 a (TIMESTAMP(NANOS,true));", "TIMESTAMP WITH TIME ZONE"),
             new Case("required int96 a;", "TIMESTAMP"),
             new Case("required float a;", "FLOAT"),
             new Case("required double a;", "DOUBLE"),
@@ -135,11 +136,9 @@ class ParquetSchemasTest {
 
     /** Returns the name of a type of DuckDB as the FyrQL type that stands for it. */
     private static String fyrqlName(String duckdb) {
-        return duckdb.replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
-                .replace("TIME WITH TIME ZONE", "VARCHAR")
+        return duckdb.replace("TIME WITH TIME ZONE", "VARCHAR")
                 .replaceAll("\\bTIMESTAMP_(NS|MS|S)\\b", "TIMESTAMP")
                 .replaceAll("\\bTIME_NS\\b", "VARCHAR")
-                .replaceAll("\\bTIME\\b", "VARCHAR")
                 .replaceAll("\\bJSON\\b", "VARCHAR")
                 .replaceAll("\\bUTINYINT\\b", "SMALLINT")
                 .replaceAll("\\bUSMALLINT\\b", "INTEGER")

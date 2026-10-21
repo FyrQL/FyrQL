@@ -17,6 +17,7 @@ import net.fyrql.core.type.DataType.ListType;
 import net.fyrql.core.type.DataType.MapType;
 import net.fyrql.core.type.DataType.Scalar;
 import net.fyrql.core.type.DataType.Struct;
+import net.fyrql.core.value.Interval;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -30,6 +31,7 @@ import java.util.function.IntUnaryOperator;
  * The order is a total order per type, the one DuckDB sorts by: numbers by
  * value, with {@code -0.0} equal to {@code 0.0} and NaN above everything;
  * strings and blobs by their bytes; UUIDs as unsigned 128-bit numbers;
+ * intervals by their normalized form ({@link Interval});
  * structs field by field, lists element by element and then by length, maps
  * entry by entry. {@code NULL} inside a nested value sorts last. The callers
  * handle {@code NULL} at the top level; {@link #compare} must not see one.
@@ -60,12 +62,13 @@ public final class Vectors {
             case TINYINT -> new TinyIntVector.Builder(capacity);
             case SMALLINT -> new SmallIntVector.Builder(capacity);
             case INTEGER, DATE -> new IntVector.Builder(type, capacity);
-            case BIGINT, TIMESTAMP -> new BigIntVector.Builder(type, capacity);
+            case BIGINT, TIMESTAMP, TIME, TIMESTAMPTZ -> new BigIntVector.Builder(type, capacity);
             case HUGEINT -> new HugeIntVector.Builder(capacity);
             case FLOAT -> new FloatVector.Builder(capacity);
             case DOUBLE -> new DoubleVector.Builder(capacity);
             case VARCHAR, BLOB -> new BytesVector.Builder(type, capacity);
             case UUID -> new UuidVector.Builder(capacity);
+            case INTERVAL -> new IntervalVector.Builder(capacity);
         };
     }
 
@@ -265,6 +268,19 @@ public final class Vectors {
                     k += y.most.length;
                 }
                 return new UuidVector(most, least, nulls);
+            }
+            case IntervalVector x -> {
+                int[] months = new int[n];
+                int[] days = new int[n];
+                long[] micros = new long[n];
+                for (Vector p : parts) {
+                    IntervalVector y = (IntervalVector) p;
+                    System.arraycopy(y.months, 0, months, k, y.months.length);
+                    System.arraycopy(y.days, 0, days, k, y.days.length);
+                    System.arraycopy(y.micros, 0, micros, k, y.micros.length);
+                    k += y.months.length;
+                }
+                return new IntervalVector(months, days, micros, nulls);
             }
             case StructVector x -> {
                 List<Vector> children = new ArrayList<>(x.children().size());
@@ -476,6 +492,19 @@ public final class Vectors {
                 }
                 return new UuidVector(most, least, nulls);
             }
+            case IntervalVector x -> {
+                int[] months = new int[n];
+                int[] days = new int[n];
+                long[] micros = new long[n];
+                for (int i = 0; i < n; i++) {
+                    if (rows[i] >= 0) {
+                        months[i] = x.getMonths(rows[i]);
+                        days[i] = x.getDays(rows[i]);
+                        micros[i] = x.getMicros(rows[i]);
+                    }
+                }
+                return new IntervalVector(months, days, micros, nulls);
+            }
             case StructVector x -> {
                 // A NULL struct has NULL in every field.
                 List<Vector> children = new ArrayList<>(x.children().size());
@@ -568,6 +597,11 @@ public final class Vectors {
             case UuidVector x -> {
                 UuidVector y = (UuidVector) b;
                 return UuidVector.compare(x.getMost(rowA), x.getLeast(rowA), y.getMost(rowB), y.getLeast(rowB));
+            }
+            case IntervalVector x -> {
+                IntervalVector y = (IntervalVector) b;
+                return Interval.compare(x.getMonths(rowA), x.getDays(rowA), x.getMicros(rowA), y.getMonths(rowB),
+                        y.getDays(rowB), y.getMicros(rowB));
             }
             case StructVector x -> {
                 StructVector y = (StructVector) b;
@@ -732,6 +766,9 @@ public final class Vectors {
             }
             case UuidVector x -> {
                 return Long.hashCode(x.getMost(row)) * 31 + Long.hashCode(x.getLeast(row));
+            }
+            case IntervalVector x -> {
+                return Interval.hash(x.getMonths(row), x.getDays(row), x.getMicros(row));
             }
             case StructVector x -> {
                 int h = 1;

@@ -229,8 +229,9 @@ public final class JdbcConnector implements Connector {
 
     /**
      * Takes over the filters the dialect evaluates as FyrQL does, except
-     * those on a column of instants, which the database would compare in
-     * the time zone of its session; the order if the dialect orders every
+     * those on a column of instants that the database would compare in
+     * the time zone of its session, see {@link JdbcTypes#comparesInstants};
+     * the order if the dialect orders every
      * key so, and a limit; or the aggregation if the dialect groups and
      * aggregates as FyrQL does, none of its columns holds instants, and
      * every filter is taken over. Of a filter not taken over, the statement
@@ -271,9 +272,15 @@ public final class JdbcConnector implements Connector {
         return new SqlRenderer(sql, catalog::qualifiedName);
     }
 
-    /** Which of the columns of a table, in the order given, hold instants. */
+    /**
+     * Which of the columns of a table, in the order given, hold instants that
+     * the database would compare in the time zone of its session.
+     */
     private BitSet zoned(TableRef table, List<Integer> columns) {
         BitSet all = catalog.withTimeZone(table);
+        if (JdbcTypes.comparesInstants(dialect)) {
+            all.clear();
+        }
         BitSet zoned = new BitSet();
         for (int i = 0; i < columns.size(); i++) {
             zoned.set(i, all.get(columns.get(i)));

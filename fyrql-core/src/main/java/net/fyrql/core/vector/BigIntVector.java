@@ -15,7 +15,11 @@ import net.fyrql.core.type.DataType;
 
 import java.util.Arrays;
 
-/** A {@code BIGINT} or {@code TIMESTAMP} (microseconds since 1970) vector over a {@code long[]}. */
+/**
+ * A {@code BIGINT}, {@code TIMESTAMP} (microseconds since 1970), {@code TIME}
+ * (microseconds since midnight) or {@code TIMESTAMP WITH TIME ZONE}
+ * (microseconds since 1970 in UTC) vector over a {@code long[]}.
+ */
 public final class BigIntVector implements Vector {
 
     private final DataType type;
@@ -23,12 +27,18 @@ public final class BigIntVector implements Vector {
     private final boolean[] nulls;
 
     BigIntVector(DataType type, long[] values, boolean[] nulls) {
-        if (type != DataType.BIGINT && type != DataType.TIMESTAMP) {
+        if (!isLongType(type)) {
             throw new IllegalArgumentException("Not a long type: " + type);
         }
         this.type = type;
         this.values = values;
         this.nulls = nulls;
+    }
+
+    /** Tells whether the values of a type are held in a {@code long}. */
+    public static boolean isLongType(DataType type) {
+        return type == DataType.BIGINT || type == DataType.TIMESTAMP || type == DataType.TIME
+                || type == DataType.TIMESTAMPTZ;
     }
 
     /** Creates a {@code BIGINT} vector without {@code NULL}s over the array, which is not copied. */
@@ -37,7 +47,7 @@ public final class BigIntVector implements Vector {
     }
 
     /**
-     * Creates a vector over arrays of {@code BIGINT} or {@code TIMESTAMP}, which are not copied: the values
+     * Creates a vector over arrays of a type of {@link #isLongType}, which are not copied: the values
      * and a mask with {@code true} where the value is {@code NULL}, or
      * {@code null} if none is. The caller must not change the arrays
      * afterwards.
@@ -85,7 +95,7 @@ public final class BigIntVector implements Vector {
         return new BigIntVector(type, selected, Nulls.select(nulls, rows));
     }
 
-    /** Builds a {@code BIGINT} or {@code TIMESTAMP} vector. */
+    /** Builds a vector of a type of {@link #isLongType}. */
     public static final class Builder implements Vector.Builder {
         private final DataType type;
         private long[] values;
@@ -93,7 +103,7 @@ public final class BigIntVector implements Vector {
         private int size;
 
         public Builder(DataType type, int capacity) {
-            if (type != DataType.BIGINT && type != DataType.TIMESTAMP) {
+            if (!isLongType(type)) {
                 throw new IllegalArgumentException("Not a long type: " + type);
             }
             this.type = type;

@@ -20,7 +20,9 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Casts;
+import net.fyrql.core.value.Conversions;
 import net.fyrql.core.value.DataGenerator;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.vector.Batch;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -29,6 +31,7 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneOffset;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -59,7 +62,9 @@ class ParquetWriteTest {
             new Schema.Field("d18", DataType.decimal(18, 4)), new Schema.Field("d38", DataType.decimal(38, 10)),
             new Schema.Field("s", DataType.VARCHAR), new Schema.Field("bl", DataType.BLOB),
             new Schema.Field("dt", DataType.DATE), new Schema.Field("ts", DataType.TIMESTAMP),
-            new Schema.Field("u", DataType.UUID), new Schema.Field("st", POINT),
+            new Schema.Field("u", DataType.UUID), new Schema.Field("tm", DataType.TIME),
+            new Schema.Field("tz", DataType.TIMESTAMPTZ), new Schema.Field("iv", DataType.INTERVAL),
+            new Schema.Field("st", POINT),
             new Schema.Field("l", DataType.listOf(DataType.INTEGER)),
             new Schema.Field("ll", DataType.listOf(DataType.listOf(DataType.VARCHAR))),
             new Schema.Field("m", DataType.mapOf(DataType.VARCHAR, DataType.DOUBLE)));
@@ -102,8 +107,10 @@ class ParquetWriteTest {
     /** Runs a query in DuckDB and returns each value as text. */
     private static List<List<String>> duckdb(String sql) throws SQLException {
         List<List<String>> rows = new ArrayList<>();
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement();
-                ResultSet rs = s.executeQuery(sql)) {
+        try (Connection c = DriverManager.getConnection("jdbc:duckdb:"); Statement s = c.createStatement()) {
+            // As FyrQL formats an instant without a time zone.
+            s.execute("SET TimeZone = 'UTC'");
+            ResultSet rs = s.executeQuery(sql);
             int n = rs.getMetaData().getColumnCount();
             while (rs.next()) {
                 List<String> row = new ArrayList<>();
@@ -138,8 +145,14 @@ class ParquetWriteTest {
     @Test
     void fyrqlAndDuckDbReadTheValuesOfEveryTypeBack() throws SQLException {
         List<Object[]> rows = DataGenerator.withSeed(20261020).generate(ALL_TYPES, 700);
+        int iv = ALL_TYPES.indexOf("iv");
         for (int r = 0; r < rows.size(); r++) {
             rows.get(r)[0] = (long) r;
+            // A file holds the milliseconds of an interval in 32 bits, and no negative parts, as in DuckDB.
+            if (rows.get(r)[iv] instanceof Interval i) {
+                rows.get(r)[iv] = Interval.of(Math.abs(i.months() % 1_000_000), Math.abs(i.days() % 1_000_000),
+                        Math.abs(i.micros() % (1L << 32)) / 1000 * 1000);
+            }
         }
         List<Batch> batches = new ArrayList<>();
         for (int from = 0; from < rows.size(); from += 128) {
@@ -214,6 +227,37 @@ class ParquetWriteTest {
     }
 
     @Test
+    void timesInstantsAndIntervalsAreWhatDuckDbReads() throws SQLException {
+        Schema schema = Schema.of(new Schema.Field("tm", DataType.TIME), new Schema.Field("tz", DataType.TIMESTAMPTZ),
+                new Schema.Field("iv", DataType.INTERVAL));
+        Path file = dir.resolve("t.parquet");
+        write(file, schema, Map.of(), List.of(Batch.ofRows(schema, List.<Object[]>of(
+                new Object[] {Conversions.parseTime("12:34:56.789012"),
+                    Conversions.parseTimestampTz("2024-07-01 12:00:00.123456Z", ZoneOffset.UTC),
+                    Interval.parse("1 year 2 months 3 days 04:05:06.789")},
+                new Object[] {null, null, null}))));
+        // parquet-java marks an interval UNKNOWN too, which DuckDB would read as NULL; the file has no such mark.
+        assertEquals(List.of(List.of("iv", "INTERVAL", "true")), duckdb("SELECT name, converted_type,"
+                + " CAST(logical_type IS NULL AS VARCHAR) FROM parquet_schema(" + ParquetTestFiles.sql(file)
+                + ") WHERE name = 'iv'"));
+        assertEquals(List.of(List.of("TIME", "TIMESTAMP WITH TIME ZONE", "INTERVAL")), List.of(duckdb("DESCRIBE"
+                + " SELECT * FROM read_parquet(" + ParquetTestFiles.sql(file) + ")").stream().map(r -> r.get(1))
+                .toList()));
+        assertEquals(List.of(List.of("12:34:56.789012", "2024-07-01 12:00:00.123456+00",
+                "1 year 2 months 3 days 04:05:06.789"), Arrays.asList(null, null, null)), duckdb("SELECT"
+                        + " CAST(tm AS VARCHAR), CAST(tz AS VARCHAR), CAST(iv AS VARCHAR) FROM read_parquet("
+                        + ParquetTestFiles.sql(file) + ")"));
+
+        // A file holds no negative part of an interval, as in DuckDB.
+        Path negative = dir.resolve("n.parquet");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> write(negative, schema,
+                Map.of(), List.of(Batch.ofRows(schema, List.<Object[]>of(new Object[] {null, null,
+                    Interval.parse("1 day -01:00:00")})))));
+        assertEquals("Parquet files do not support negative intervals, as 1 day -01:00:00 of the column iv is",
+                e.getMessage());
+    }
+
+    @Test
     void theCodecsTheRowGroupsAndVersion2AreOptions() throws SQLException {
         Schema schema = Schema.of(new Schema.Field("id", DataType.BIGINT), new Schema.Field("s", DataType.VARCHAR));
         List<Object[]> rows = new ArrayList<>();
@@ -259,7 +303,8 @@ class ParquetWriteTest {
         assertEquals("The column n is NOT NULL but holds a NULL", assertThrows(IllegalArgumentException.class,
                 () -> write(file, schema, Map.of(), List.of(nullInRequired))).getMessage());
         assertEquals("The Parquet file " + file + " has an unknown option array; known are compression, codec,"
-                + " row_group_size, row_group_size_bytes, parquet_version", assertThrows(IllegalArgumentException.class,
+                + " row_group_size, row_group_size_bytes, parquet_version, timezone",
+                assertThrows(IllegalArgumentException.class,
                         () -> write(file, schema, Map.of("array", "true"), List.of())).getMessage());
         assertEquals("The option compression of the Parquet file " + file + " must be zstd, snappy, gzip, lz4_raw or"
                 + " uncompressed, not brotli", assertThrows(IllegalArgumentException.class, () -> write(file, schema,

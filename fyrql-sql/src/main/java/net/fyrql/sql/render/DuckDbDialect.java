@@ -97,6 +97,10 @@ public final class DuckDbDialect implements Dialect {
             case DATE -> "DATE " + string(Conversions.formatDate((Integer) value));
             case TIMESTAMP -> "TIMESTAMP " + string(Conversions.formatTimestamp((Long) value));
             case UUID -> "CAST(" + string(value.toString()) + " AS UUID)";
+            case TIME -> "TIME " + string(Conversions.formatTime((Long) value));
+            case TIMESTAMPTZ -> "TIMESTAMPTZ " + string(Conversions.formatTimestampTz((Long) value,
+                    java.time.ZoneOffset.UTC));
+            case INTERVAL -> "INTERVAL " + string(value.toString());
         };
     }
 

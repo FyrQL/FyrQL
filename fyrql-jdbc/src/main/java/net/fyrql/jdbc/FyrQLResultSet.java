@@ -39,6 +39,8 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.RowId;
 import java.sql.SQLException;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.sql.SQLWarning;
 import java.sql.SQLXML;
 import java.sql.Statement;
@@ -66,6 +68,8 @@ final class FyrQLResultSet implements ResultSet {
     private final long maxRows;
     private final Lock lock;
     private final int holdability;
+    /** The time zone of the session when the result set was made, of the values with a time zone. */
+    private final ZoneId zone;
     private Batch batch;
     private Batch pending;
     private int row = -1;
@@ -83,6 +87,15 @@ final class FyrQLResultSet implements ResultSet {
      * @param lock the lock that the batches are read under, or {@code null}
      */
     FyrQLResultSet(FyrQLStatement statement, BatchSource source, long maxRows, Lock lock, int holdability) {
+        this(statement, source, maxRows, lock, holdability, statement == null ? ZoneOffset.UTC : statement.zone());
+    }
+
+    /**
+     * @param zone the time zone of the session, in which an instant is shown
+     */
+    FyrQLResultSet(FyrQLStatement statement, BatchSource source, long maxRows, Lock lock, int holdability,
+            ZoneId zone) {
+        this.zone = zone;
         this.statement = statement;
         this.source = source;
         this.schema = source.schema();
@@ -298,7 +311,7 @@ final class FyrQLResultSet implements ResultSet {
         if (v instanceof BytesVector b && b.type() == DataType.VARCHAR) {
             return b.getString(row);
         }
-        return JdbcValues.toText(v.get(row), type(columnIndex));
+        return JdbcValues.toText(v.get(row), type(columnIndex), zone);
     }
 
     @Override
@@ -425,7 +438,7 @@ final class FyrQLResultSet implements ResultSet {
         if (cal == null && v instanceof IntVector i && i.type() == DataType.DATE) {
             return dates().date(i.getInt(row));
         }
-        return JdbcValues.toDate(v.get(row), type(columnIndex), cal);
+        return JdbcValues.toDate(v.get(row), type(columnIndex), cal, zone);
     }
 
     /** Returns the cache of the dates of this result set, created when a date is read first. */
@@ -439,13 +452,13 @@ final class FyrQLResultSet implements ResultSet {
     @Override
     public Time getTime(int columnIndex, Calendar cal) throws SQLException {
         Object v = value(columnIndex);
-        return v == null ? null : JdbcValues.toTime(v, type(columnIndex), cal);
+        return v == null ? null : JdbcValues.toTime(v, type(columnIndex), cal, zone);
     }
 
     @Override
     public Timestamp getTimestamp(int columnIndex, Calendar cal) throws SQLException {
         Object v = value(columnIndex);
-        return v == null ? null : JdbcValues.toTimestamp(v, type(columnIndex), cal);
+        return v == null ? null : JdbcValues.toTimestamp(v, type(columnIndex), cal, zone);
     }
 
     /** Returns the text as ASCII; a character outside of it is a {@code ?}. */
@@ -493,7 +506,7 @@ final class FyrQLResultSet implements ResultSet {
         if (v instanceof IntVector i && i.type() == DataType.DATE) {
             return dates().date(i.getInt(row));
         }
-        return JdbcValues.toObject(v.get(row), type(columnIndex));
+        return JdbcValues.toObject(v.get(row), type(columnIndex), zone);
     }
 
     @Override
@@ -506,13 +519,13 @@ final class FyrQLResultSet implements ResultSet {
 
     @Override
     public <T> T getObject(int columnIndex, Class<T> type) throws SQLException {
-        return JdbcValues.toClass(value(columnIndex), type(columnIndex), type);
+        return JdbcValues.toClass(value(columnIndex), type(columnIndex), type, zone);
     }
 
     @Override
     public Array getArray(int columnIndex) throws SQLException {
         Object v = value(columnIndex);
-        return v == null ? null : JdbcValues.toArray(v, type(columnIndex));
+        return v == null ? null : JdbcValues.toArray(v, type(columnIndex), zone);
     }
 
     @Override

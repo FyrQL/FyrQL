@@ -13,6 +13,8 @@ package net.fyrql.connector.json;
 
 import net.fyrql.core.function.DateFormats;
 
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Objects;
 
 /**
@@ -34,15 +36,20 @@ import java.util.Objects;
  *        is taken for a {@code DATE}, or {@code null} for the formats DuckDB
  *        tries
  * @param timestampFormat the same for a {@code TIMESTAMP}
+ * @param zone the time zone in which a string without an offset is read as
+ *        a {@code TIMESTAMP WITH TIME ZONE}, UTC by default
  */
 public record JsonOptions(JsonFormat format, int sampleSize, int mapInferenceThreshold,
-        double fieldAppearanceThreshold, boolean ignoreErrors, String dateFormat, String timestampFormat) {
+        double fieldAppearanceThreshold, boolean ignoreErrors, String dateFormat, String timestampFormat,
+        ZoneId zone) {
 
     /** The options of DuckDB's {@code read_json} by default. */
-    public static final JsonOptions DEFAULT = new JsonOptions(JsonFormat.AUTO, 20480, 200, 0.1, false, null, null);
+    public static final JsonOptions DEFAULT = new JsonOptions(JsonFormat.AUTO, 20480, 200, 0.1, false, null, null,
+            ZoneOffset.UTC);
 
     public JsonOptions {
         Objects.requireNonNull(format, "format");
+        Objects.requireNonNull(zone, "zone");
         if (sampleSize != -1 && sampleSize < 1) {
             throw new IllegalArgumentException("The sample_size must be -1 or positive: " + sampleSize);
         }
@@ -64,36 +71,41 @@ public record JsonOptions(JsonFormat format, int sampleSize, int mapInferenceThr
 
     public JsonOptions withFormat(JsonFormat format) {
         return new JsonOptions(format, sampleSize, mapInferenceThreshold, fieldAppearanceThreshold, ignoreErrors,
-                dateFormat, timestampFormat);
+                dateFormat, timestampFormat, zone);
     }
 
     public JsonOptions withSampleSize(int sampleSize) {
         return new JsonOptions(format, sampleSize, mapInferenceThreshold, fieldAppearanceThreshold, ignoreErrors,
-                dateFormat, timestampFormat);
+                dateFormat, timestampFormat, zone);
     }
 
     public JsonOptions withMapInferenceThreshold(int mapInferenceThreshold) {
         return new JsonOptions(format, sampleSize, mapInferenceThreshold, fieldAppearanceThreshold, ignoreErrors,
-                dateFormat, timestampFormat);
+                dateFormat, timestampFormat, zone);
     }
 
     public JsonOptions withFieldAppearanceThreshold(double fieldAppearanceThreshold) {
         return new JsonOptions(format, sampleSize, mapInferenceThreshold, fieldAppearanceThreshold, ignoreErrors,
-                dateFormat, timestampFormat);
+                dateFormat, timestampFormat, zone);
     }
 
     public JsonOptions withIgnoreErrors(boolean ignoreErrors) {
         return new JsonOptions(format, sampleSize, mapInferenceThreshold, fieldAppearanceThreshold, ignoreErrors,
-                dateFormat, timestampFormat);
+                dateFormat, timestampFormat, zone);
     }
 
     public JsonOptions withDateFormat(String dateFormat) {
         return new JsonOptions(format, sampleSize, mapInferenceThreshold, fieldAppearanceThreshold, ignoreErrors,
-                dateFormat, timestampFormat);
+                dateFormat, timestampFormat, zone);
     }
 
     public JsonOptions withTimestampFormat(String timestampFormat) {
         return new JsonOptions(format, sampleSize, mapInferenceThreshold, fieldAppearanceThreshold, ignoreErrors,
-                dateFormat, timestampFormat);
+                dateFormat, timestampFormat, zone);
+    }
+
+    public JsonOptions withZone(ZoneId zone) {
+        return new JsonOptions(format, sampleSize, mapInferenceThreshold, fieldAppearanceThreshold, ignoreErrors,
+                dateFormat, timestampFormat, zone);
     }
 }

@@ -21,6 +21,7 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.test.db.TestDatabase;
 import net.fyrql.test.db.TestDatabases;
@@ -64,7 +65,9 @@ class PostgresConnectorTest {
                      '1 day 2 hours', '{"a": 1}', '{1,2,3}', 'ab', 'xyz', 'text', 0.5, 0.25, true, '\\x0102',
                      '123e4567-e89b-12d3-a456-426614174000', '2020-02-29', '2020-01-01 00:00:00.123'),
                     (NULL, NULL, NULL, '2020-01-01 09:59:59+00', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                     NULL, NULL, NULL, NULL, NULL, NULL)""",
+                     NULL, NULL, NULL, NULL, NULL, NULL),
+                    (NULL, NULL, NULL, NULL, '24:00:00', '-1 year -2 mons +3 days -04:05:06.789', NULL, NULL, NULL,
+                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)""",
                 "CREATE SCHEMA sales",
                 "CREATE TABLE sales.orders (id integer, amount numeric(10, 2))",
                 "INSERT INTO sales.orders VALUES (1, 10.50), (2, 20.00)",
@@ -77,14 +80,15 @@ class PostgresConnectorTest {
         JdbcConnector connector = db.connector("pg");
         Schema schema = connector.catalog().schema(TableRef.of("pg", "odd"));
         assertEquals(List.of(DataType.INTEGER, DataType.DOUBLE, DataType.decimal(5, 2), DataType.VARCHAR,
-                DataType.TIMESTAMP, DataType.VARCHAR, DataType.VARCHAR, DataType.VARCHAR, DataType.VARCHAR,
+                DataType.TIMESTAMPTZ, DataType.TIME, DataType.INTERVAL, DataType.VARCHAR, DataType.VARCHAR,
                 DataType.VARCHAR, DataType.VARCHAR, DataType.VARCHAR, DataType.BIGINT, DataType.FLOAT, DataType.DOUBLE,
                 DataType.BOOLEAN, DataType.BLOB, DataType.UUID, DataType.DATE, DataType.TIMESTAMP), schema.types());
         assertFalse(schema.fields().get(0).nullable());
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
             List<Object[]> rows = engine.rows("SELECT * FROM odd ORDER BY id");
             Object[] expected = {1, 1.5, new BigDecimal("3.14"), "1234567890123456789012345678901234567890",
-                    Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 10, 0)), "13:45:00", "1 day 02:00:00",
+                    Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 10, 0)), Conversions.parseTime("13:45:00"),
+                    Interval.parse("1 day 02:00:00"),
                     "{\"a\": 1}", "{1,2,3}", "ab ", "xyz", "text", 1L, 0.5f, 0.25, true, new byte[] {1, 2},
                     UUID.fromString("123e4567-e89b-12d3-a456-426614174000"),
                     Math.toIntExact(LocalDate.of(2020, 2, 29).toEpochDay()),
@@ -96,21 +100,29 @@ class PostgresConnectorTest {
                     assertEquals(null, nulls[c], schema.fields().get(c).name());
                 }
             }
+            // The text of an interval in the style of PostgreSQL, with a sign before each part.
+            assertEquals(Conversions.parseTime("24:00:00"), rows.get(2)[5]);
+            assertEquals(Interval.parse("-1 year -2 months 3 days -04:05:06.789"), rows.get(2)[6]);
         }
     }
 
     @Test
-    void aTimestampWithATimeZoneIsItsInstantInUtcAndFilteredByTheEngine() {
+    void aTimestampWithATimeZoneIsAnInstantThatPostgresCompares() {
         JdbcConnector connector = db.connector("pg");
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
-            // 12:00 at +02 is 10:00 in UTC, after 09:59:59 in UTC; the session of the database may be in any zone.
-            List<Object[]> rows = engine.rows("SELECT id FROM odd WHERE tz >= TIMESTAMP '2020-01-01 10:00:00'");
+            // 12:00 at +02 is 10:00 in UTC, after 09:59:59 in UTC; the literal has its offset, whatever the zone of
+            // the session of the database.
+            List<Object[]> rows = engine.rows("SELECT id FROM odd WHERE tz >= TIMESTAMPTZ '2020-01-01 12:00:00+02'");
             assertEquals(1, rows.size());
             assertEquals(1, rows.get(0)[0]);
             String sent = connector.statements().get(connector.statements().size() - 1);
-            assertFalse(sent.contains("WHERE"), sent);
-            rows = engine.rows("SELECT id FROM odd ORDER BY tz LIMIT 1");
+            assertEquals(engine.pushdown(), sent.contains("WHERE"), sent);
+            rows = engine.rows("SELECT id FROM odd WHERE tz IS NOT NULL ORDER BY tz LIMIT 1");
             assertEquals(2, rows.get(0)[0]);
+            // A time of day and an interval come back as written.
+            assertEquals(1, engine.rows("SELECT id FROM odd WHERE t = TIME '13:45:00'").size());
+            assertEquals(List.of(3), engine.rows("SELECT id FROM odd WHERE iv < INTERVAL '0 seconds'").stream()
+                    .map(r -> r[0]).toList());
         }
     }
 
@@ -170,7 +182,7 @@ class PostgresConnectorTest {
         try (Connection c = db.connect()) {
             JdbcConnector connector = JdbcConnector.builder("pg").connection(c).build();
             try (FyrQL engine = FyrQL.builder().register(connector).build()) {
-                assertEquals(2, engine.rows("SELECT id FROM odd").size());
+                assertEquals(3, engine.rows("SELECT id FROM odd").size());
             }
             assertTrue(c.getAutoCommit());
             assertFalse(c.isClosed());

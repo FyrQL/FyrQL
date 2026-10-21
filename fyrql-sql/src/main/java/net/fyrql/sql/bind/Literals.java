@@ -23,6 +23,8 @@ import net.fyrql.sql.ast.Position;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 
 /**
@@ -112,11 +114,16 @@ final class Literals {
      * @throws SqlException if the value does not convert
      */
     static Expression.Literal convert(Expression.Literal literal, DataType target, Position position) {
+        return convert(literal, target, position, ZoneOffset.UTC);
+    }
+
+    /** Converts a constant as {@link #convert(Expression.Literal, DataType, Position)} does, in a time zone. */
+    static Expression.Literal convert(Expression.Literal literal, DataType target, Position position, ZoneId zone) {
         if (!Casts.allowed(literal.type(), target)) {
             throw new SqlException("Cannot cast " + literal.type() + " to " + target, position);
         }
         try {
-            return new Expression.Literal(target, Casts.cast(literal.value(), literal.type(), target));
+            return new Expression.Literal(target, Casts.cast(literal.value(), literal.type(), target, zone));
         } catch (RuntimeException e) {
             String value = literal.type() == DataType.VARCHAR ? "string '" + literal.value() + "'"
                     : String.valueOf(literal.value());
@@ -125,19 +132,19 @@ final class Literals {
     }
 
     /**
-     * Converts a literal to another type as {@link #convert} does, except
+     * Converts a literal to another type in a time zone as {@link #convert} does, except
      * that a string that does not convert becomes a cast, which fails when
      * it is evaluated: DuckDB converts such a literal only when a row
      * reaches it.
      *
      * @throws SqlException if the types do not cast at all
      */
-    static Expression lazily(Expression.Literal literal, DataType target, Position position) {
+    static Expression lazily(Expression.Literal literal, DataType target, Position position, ZoneId zone) {
         try {
-            return convert(literal, target, position);
+            return convert(literal, target, position, zone);
         } catch (SqlException e) {
             if (literal.type() == DataType.VARCHAR && Casts.allowed(DataType.VARCHAR, target)) {
-                return new Expression.Cast(literal, target);
+                return new Expression.Cast(literal, target, false, zone);
             }
             throw e;
         }

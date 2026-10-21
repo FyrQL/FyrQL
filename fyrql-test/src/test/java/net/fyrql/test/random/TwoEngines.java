@@ -50,13 +50,16 @@ import java.util.function.Supplier;
  */
 final class TwoEngines implements AutoCloseable {
 
+    /** The start of the report where FyrQL fails, followed by the number of rows DuckDB gives. */
+    static final String DUCKDB_ROWS = "DuckDB gives rows: ";
+
     /** The start of the report of rows that differ where a second run of DuckDB agrees with FyrQL. */
     static final String UNSTABLE = "DuckDB agrees on a second run; the first run differs:\n";
 
     private final FyrQL engine;
     private final FyrQL compiled;
     private final FyrQL sequential;
-    private final DuckDbReference duck = new DuckDbReference();
+    private final DuckDbReference duck = RandomTables.duck();
     private final SqlRenderer renderer = new SqlRenderer(DuckDbDialect.INSTANCE,
             t -> DuckDbDialect.INSTANCE.quoteIdentifier(t.table()));
 
@@ -225,7 +228,8 @@ final class TwoEngines implements AutoCloseable {
                     message, "");
         }
         if (fyrqlError != null) {
-            return new Outcome(Outcome.Kind.FYRQL_FAILS, sql, fyrqlError, null, "");
+            return new Outcome(Outcome.Kind.FYRQL_FAILS, sql, fyrqlError, null,
+                    DUCKDB_ROWS + expected.rows().size() + "\n");
         }
         List<String> types = schema.types().stream().map(DataType::sqlName).toList();
         if (!types.equals(expected.types())) {

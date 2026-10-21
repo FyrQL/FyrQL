@@ -17,6 +17,8 @@ import net.fyrql.core.type.TypeRules;
 import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Casts;
 
+import java.time.ZoneId;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -145,10 +147,12 @@ public sealed interface Expression {
         }
     }
 
-    /** Unary minus. */
+    /** Unary minus, of a number or an interval. */
     record Negate(Expression operand) implements Expression {
         public Negate {
-            TypeRules.requireNumeric(operand.type());
+            if (operand.type() != DataType.INTERVAL) {
+                TypeRules.requireNumeric(operand.type());
+            }
         }
 
         @Override
@@ -385,9 +389,11 @@ public sealed interface Expression {
      * {@code CAST(operand AS target)}, for the pairs of types that
      * {@link Casts#allowed} permits; a {@code safe} cast ({@code TRY_CAST})
      * gives {@code NULL} where the value does not convert instead of an
-     * error.
+     * error. A cast that depends on the time zone ({@link Casts#needsZone})
+     * converts in the given zone, or in UTC if it is {@code null}; the
+     * binder fixes the zone of the session.
      */
-    record Cast(Expression operand, DataType target, boolean safe) implements Expression {
+    record Cast(Expression operand, DataType target, boolean safe, ZoneId zone) implements Expression {
         public Cast {
             Objects.requireNonNull(operand, "operand");
             Objects.requireNonNull(target, "target");
@@ -396,8 +402,17 @@ public sealed interface Expression {
             }
         }
 
+        public Cast(Expression operand, DataType target, boolean safe) {
+            this(operand, target, safe, null);
+        }
+
         public Cast(Expression operand, DataType target) {
-            this(operand, target, false);
+            this(operand, target, false, null);
+        }
+
+        /** Returns the time zone of the conversion, UTC if none is set. */
+        public ZoneId zoneOrUtc() {
+            return zone == null ? java.time.ZoneOffset.UTC : zone;
         }
 
         @Override

@@ -50,13 +50,20 @@ class JdbcTypesTest {
         assertEquals(DataType.BLOB, JdbcTypes.type(POSTGRESQL, Types.BINARY, "bytea", 0, 0));
         assertEquals(DataType.DATE, JdbcTypes.type(H2, Types.DATE, "DATE", 10, 0));
         assertEquals(DataType.TIMESTAMP, JdbcTypes.type(H2, Types.TIMESTAMP, "TIMESTAMP", 26, 6));
-        assertEquals(DataType.TIMESTAMP, JdbcTypes.type(POSTGRESQL, Types.TIMESTAMP, "timestamptz", 35, 6));
-        assertEquals(DataType.TIMESTAMP,
+        assertEquals(DataType.TIMESTAMPTZ, JdbcTypes.type(POSTGRESQL, Types.TIMESTAMP, "timestamptz", 35, 6));
+        assertEquals(DataType.TIMESTAMPTZ,
                 JdbcTypes.type(H2, Types.TIMESTAMP_WITH_TIMEZONE, "TIMESTAMP WITH TIME ZONE", 35, 6));
+        assertEquals(DataType.TIMESTAMPTZ, JdbcTypes.type(MYSQL, Types.TIMESTAMP, "TIMESTAMP", 26, 6));
+        assertEquals(DataType.TIMESTAMP, JdbcTypes.type(MYSQL, Types.TIMESTAMP, "DATETIME", 26, 6));
+        assertEquals(DataType.TIME, JdbcTypes.type(H2, Types.TIME, "TIME", 8, 0));
+        assertEquals(DataType.TIME, JdbcTypes.type(POSTGRESQL, Types.TIME, "time", 15, 6));
+        assertEquals(DataType.INTERVAL, JdbcTypes.type(POSTGRESQL, Types.OTHER, "interval", 49, 6));
         assertEquals(DataType.UUID, JdbcTypes.type(H2, Types.BINARY, "UUID", 16, 0));
         assertEquals(DataType.UUID, JdbcTypes.type(POSTGRESQL, Types.OTHER, "uuid", 2147483647, 0));
         // What FyrQL has no type for is read as a string.
-        assertEquals(DataType.VARCHAR, JdbcTypes.type(H2, Types.TIME, "TIME", 8, 0));
+        assertEquals(DataType.VARCHAR, JdbcTypes.type(POSTGRESQL, Types.TIME, "timetz", 21, 6));
+        assertEquals(DataType.VARCHAR, JdbcTypes.type(H2, Types.TIME_WITH_TIMEZONE, "TIME WITH TIME ZONE", 8, 0));
+        assertEquals(DataType.VARCHAR, JdbcTypes.type(H2, Types.OTHER, "INTERVAL DAY TO SECOND", 0, 0));
         assertEquals(DataType.VARCHAR, JdbcTypes.type(POSTGRESQL, Types.OTHER, "jsonb", 0, 0));
         assertEquals(DataType.VARCHAR, JdbcTypes.type(POSTGRESQL, Types.ARRAY, "_int4", 10, 0));
     }

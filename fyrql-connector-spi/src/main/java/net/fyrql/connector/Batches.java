@@ -116,6 +116,7 @@ public final class Batches {
             case net.fyrql.core.vector.DoubleVector x -> 8 * n + 16;
             case net.fyrql.core.vector.HugeIntVector x -> 16 * n + 32;
             case net.fyrql.core.vector.UuidVector x -> 16 * n + 32;
+            case net.fyrql.core.vector.IntervalVector x -> 16 * n + 48;
             case DecimalVector x -> (x.isSmall() ? 8 : 40) * n + 16;
             case BytesVector x -> x.data().length + 4 * n + 32;
             case StructVector x -> {

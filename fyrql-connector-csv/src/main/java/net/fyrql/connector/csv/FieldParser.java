@@ -27,6 +27,8 @@ import net.fyrql.core.vector.TinyIntVector;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
 
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.function.ToLongFunction;
 
 /**
@@ -58,6 +60,7 @@ abstract class FieldParser {
     private final char[] nullString;
     private final int capacity;
     private Vector.Builder current;
+    private ZoneId zone = ZoneOffset.UTC;
 
     private FieldParser(DataType type, String nullString, int capacity) {
         this.type = type;
@@ -79,15 +82,16 @@ abstract class FieldParser {
      *
      * @param dateFormat reads a date as the microseconds of its start, or {@code null}
      * @param timestampFormat reads a timestamp as microseconds, or {@code null}
+     * @param zone the time zone in which a text without an offset is read
+     *        as a {@code TIMESTAMP WITH TIME ZONE}
      */
     static FieldParser of(DataType type, String nullString, int capacity, ToLongFunction<String> dateFormat,
-            ToLongFunction<String> timestampFormat) {
+            ToLongFunction<String> timestampFormat, ZoneId zone) {
         ToLongFunction<String> format = type == DataType.DATE ? dateFormat
                 : type == DataType.TIMESTAMP ? timestampFormat : null;
-        if (format == null) {
-            return of(type, nullString, capacity);
-        }
-        FieldParser parser = new FormatParser(type, nullString, capacity, format);
+        FieldParser parser = format == null ? create(type, nullString, capacity)
+                : new FormatParser(type, nullString, capacity, format);
+        parser.zone = zone;
         parser.start();
         return parser;
     }
@@ -114,7 +118,7 @@ abstract class FieldParser {
         if (isNull(buf, offset, length)) {
             current.appendNull();
         } else if (!fast(buf, offset, length)) {
-            current.append(Casts.parse(new String(buf, offset, length), type));
+            current.append(Casts.parse(new String(buf, offset, length), type, zone));
         }
     }
 

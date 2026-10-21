@@ -67,13 +67,14 @@ class ArrowRoundTripTest {
                     }
                     checked++;
                 } catch (ArrowTypeException e) {
-                    assertTrue(e.getMessage().contains("has more than 38 digits"), "query " + i + ": " + e);
+                    assertTrue(e.getMessage().contains("has more than 38 digits")
+                            || e.getMessage().contains("than Interval(MONTH_DAY_NANO) holds"), "query " + i + ": " + e);
                     tooLarge++;
                 }
             }
         }
         System.out.println("Random results through Arrow: " + checked + " plans with " + rows + " rows back, "
-                + failed + " failed in FyrQL, " + tooLarge + " with a HUGEINT of 39 digits");
+                + failed + " failed in FyrQL, " + tooLarge + " with a HUGEINT of 39 digits or a long interval");
         assertTrue(checked > RandomRun.QUERIES / 2, checked + " of " + RandomRun.QUERIES + " plans checked");
     }
 

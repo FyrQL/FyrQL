@@ -38,11 +38,13 @@ class DuckDbFunctionTypesTest {
 
     private static final List<DataType> TYPES = List.of(DataType.TINYINT, DataType.SMALLINT, DataType.INTEGER,
             DataType.BIGINT, DataType.HUGEINT, DataType.FLOAT, DataType.DOUBLE, DataType.decimal(5, 2),
-            DataType.decimal(20, 2), DataType.VARCHAR, DataType.BOOLEAN, DataType.DATE, DataType.TIMESTAMP);
+            DataType.decimal(20, 2), DataType.VARCHAR, DataType.BOOLEAN, DataType.DATE, DataType.TIMESTAMP,
+            DataType.TIME, DataType.TIMESTAMPTZ, DataType.INTERVAL);
 
     /** A smaller sample for three arguments. */
     private static final List<DataType> TYPES3 = List.of(DataType.INTEGER, DataType.BIGINT, DataType.DOUBLE,
-            DataType.decimal(5, 2), DataType.VARCHAR, DataType.DATE, DataType.TIMESTAMP);
+            DataType.decimal(5, 2), DataType.VARCHAR, DataType.DATE, DataType.TIMESTAMP, DataType.TIMESTAMPTZ,
+            DataType.TIME);
 
     /**
      * Calls that differ on purpose: {@code trunc(x, n)} to a number of
@@ -53,12 +55,14 @@ class DuckDbFunctionTypesTest {
      * columns {@code c7} and {@code c8}) to a number of places, which both
      * engines take for a constant count only, FyrQL in
      * {@code ScalarFunction.specialize}, which a probe of types does not
-     * reach.
+     * reach; and {@code age(x)} of one argument, which the binder turns
+     * into {@code age} of the midnight of the current date and the argument.
      */
     private static boolean known(String call) {
         return call.startsWith("trunc(") && call.contains(",")
                 || call.startsWith("strftime(") || call.startsWith("strptime(") || call.startsWith("try_strptime(")
-                || call.startsWith("round(c7, ") || call.startsWith("round(c8, ");
+                || call.startsWith("round(c7, ") || call.startsWith("round(c8, ")
+                || call.startsWith("age(") && !call.contains(",");
     }
 
     @Test

@@ -40,7 +40,9 @@ class TypeNamesTest {
                 Map.entry("TIMESTAMP_US", "TIMESTAMP"), Map.entry("FLOAT(10)", "FLOAT"), Map.entry("FLOAT(30)", "DOUBLE"),
                 Map.entry("UUID", "UUID"), Map.entry("GUID", "UUID"), Map.entry("integer", "INTEGER"),
                 Map.entry("\"INTEGER\"", "INTEGER"), Map.entry("decimal (10, 2)", "DECIMAL(10,2)"),
-                Map.entry("Date", "DATE"), Map.entry("HUGEINT", "HUGEINT"), Map.entry("BLOB", "BLOB"));
+                Map.entry("Date", "DATE"), Map.entry("HUGEINT", "HUGEINT"), Map.entry("BLOB", "BLOB"),
+                Map.entry("TIME", "TIME"), Map.entry("TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE"),
+                Map.entry("timestamp with time zone", "TIMESTAMP WITH TIME ZONE"), Map.entry("INTERVAL", "INTERVAL"));
         for (Map.Entry<String, String> e : measured.entrySet()) {
             assertEquals(e.getValue(), TypeNames.parse(e.getKey()).sqlName(), e.getKey());
         }
@@ -55,11 +57,10 @@ class TypeNamesTest {
                 Map.entry("DECIMAL(5,6)", "DECIMAL type scale cannot be greater than width"),
                 Map.entry("DOUBLE(5)", "Type DOUBLE does not take any type parameters"),
                 Map.entry("DATE(3)", "Type DATE does not take any type parameters"),
-                Map.entry("TIME", "Type TIME is not supported"),
-                Map.entry("INTERVAL", "Type INTERVAL is not supported"),
+                Map.entry("TIMETZ", "Type TIMETZ is not supported"),
+                Map.entry("TIME WITH TIME ZONE", "Type TIME WITH TIME ZONE is not supported"),
                 Map.entry("UINTEGER", "Type UINTEGER is not supported"),
-                Map.entry("TIMESTAMPTZ", "Type TIMESTAMPTZ is not supported"),
-                Map.entry("TIMESTAMP WITH TIME ZONE", "Type TIMESTAMP WITH TIME ZONE is not supported"),
+                Map.entry("INTERVAL(3)", "Type INTERVAL does not take any type parameters"),
                 Map.entry("TIMESTAMP(3)", "Type TIMESTAMP does not take any type parameters"),
                 Map.entry("VARCHAR(10, 2)", "Type VARCHAR takes at most one parameter"),
                 Map.entry("DECIMAL(a)", "Invalid type name: DECIMAL(a)"),
@@ -73,7 +74,7 @@ class TypeNamesTest {
                 Map.entry("STRUCT(\"\" INTEGER)", "Invalid type name: STRUCT(\"\" INTEGER)"),
                 Map.entry("INTEGER[", "Arrays of a fixed size are not supported: INTEGER["),
                 Map.entry("LIST(INTEGER)", "Invalid type name: LIST(INTEGER)"),
-                Map.entry("STRUCT(a TIME)", "Type TIME is not supported"));
+                Map.entry("STRUCT(a TIMETZ)", "Type TIMETZ is not supported"));
         for (Map.Entry<String, String> e : errors.entrySet()) {
             IllegalArgumentException x = assertThrows(IllegalArgumentException.class, () -> TypeNames.parse(e.getKey()),
                     e.getKey());

@@ -37,9 +37,13 @@ import java.util.TreeMap;
  * sign are {@code TINYINT} and {@code SMALLINT}; an unsigned integer is the
  * next wider type with a sign, up to {@code HUGEINT} for
  * {@code INT(64,false)};</li>
- * <li>{@code DATE} is {@code DATE}; {@code TIMESTAMP} in any unit, adjusted
- * to UTC or not, and {@code INT96} are {@code TIMESTAMP}; {@code TIME} is
- * {@code VARCHAR};</li>
+ * <li>{@code DATE} is {@code DATE}; {@code TIMESTAMP} in any unit is
+ * {@code TIMESTAMP WITH TIME ZONE} if adjusted to UTC and {@code TIMESTAMP}
+ * if not, and {@code INT96} is {@code TIMESTAMP}; {@code TIME} in
+ * milliseconds or microseconds and not adjusted to UTC is {@code TIME}, any
+ * other {@code TIME} is {@code VARCHAR} with the text DuckDB shows;
+ * {@code INTERVAL} on a {@code FIXED_LEN_BYTE_ARRAY(12)} is
+ * {@code INTERVAL};</li>
  * <li>{@code STRING}, {@code ENUM} and {@code JSON} are {@code VARCHAR};
  * other byte arrays, {@code BSON} among them, are {@code BLOB};
  * {@code UUID} is {@code UUID}; {@code FLOAT16} is {@code FLOAT};
@@ -50,8 +54,8 @@ import java.util.TreeMap;
  * {@code MAP} a {@code MAP}, and a repeated field outside a {@code LIST} a
  * {@code LIST} of its type.</li>
  * </ul>
- * Any other annotation, such as {@code INTERVAL} or {@code VARIANT}, falls
- * back to the physical type. A {@code required} column is not nullable.
+ * Any other annotation, such as {@code VARIANT}, falls back to the
+ * physical type. A {@code required} column is not nullable.
  * <p>
  * {@link #message} maps the other way, for the files that FyrQL writes.
  */
@@ -158,6 +162,14 @@ final class ParquetSchemas {
                         .named(name);
                 case UUID -> Types.primitive(PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY, repetition).length(16)
                         .as(LogicalTypeAnnotation.uuidType()).named(name);
+                case TIME -> Types.primitive(PrimitiveTypeName.INT64, repetition)
+                        .as(LogicalTypeAnnotation.timeType(false, LogicalTypeAnnotation.TimeUnit.MICROS))
+                        .named(name);
+                case TIMESTAMPTZ -> Types.primitive(PrimitiveTypeName.INT64, repetition)
+                        .as(LogicalTypeAnnotation.timestampType(true, LogicalTypeAnnotation.TimeUnit.MICROS))
+                        .named(name);
+                case INTERVAL -> Types.primitive(PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY, repetition).length(12)
+                        .as(LogicalTypeAnnotation.IntervalLogicalTypeAnnotation.getInstance()).named(name);
             };
         };
     }
@@ -256,13 +268,14 @@ final class ParquetSchemas {
             case INT32 -> switch (annotation) {
                 case LogicalTypeAnnotation.IntLogicalTypeAnnotation i -> integer(i, DataType.INTEGER);
                 case LogicalTypeAnnotation.DateLogicalTypeAnnotation d -> DataType.DATE;
-                case LogicalTypeAnnotation.TimeLogicalTypeAnnotation t -> DataType.VARCHAR;
+                case LogicalTypeAnnotation.TimeLogicalTypeAnnotation t -> time(t);
                 case null, default -> DataType.INTEGER;
             };
             case INT64 -> switch (annotation) {
                 case LogicalTypeAnnotation.IntLogicalTypeAnnotation i -> integer(i, DataType.BIGINT);
-                case LogicalTypeAnnotation.TimestampLogicalTypeAnnotation t -> DataType.TIMESTAMP;
-                case LogicalTypeAnnotation.TimeLogicalTypeAnnotation t -> DataType.VARCHAR;
+                case LogicalTypeAnnotation.TimestampLogicalTypeAnnotation t -> t.isAdjustedToUTC()
+                        ? DataType.TIMESTAMPTZ : DataType.TIMESTAMP;
+                case LogicalTypeAnnotation.TimeLogicalTypeAnnotation t -> time(t);
                 case null, default -> DataType.BIGINT;
             };
             case INT96 -> DataType.TIMESTAMP;
@@ -278,9 +291,22 @@ final class ParquetSchemas {
                 case LogicalTypeAnnotation.UUIDLogicalTypeAnnotation u when p.getTypeLength() == 16 -> DataType.UUID;
                 case LogicalTypeAnnotation.Float16LogicalTypeAnnotation f when p.getTypeLength() == 2 ->
                         DataType.FLOAT;
+                case LogicalTypeAnnotation.IntervalLogicalTypeAnnotation i when p.getTypeLength() == 12 ->
+                        DataType.INTERVAL;
                 case null, default -> DataType.BLOB;
             };
         };
+    }
+
+    /**
+     * Returns the type of a time of day: {@code TIME} in milliseconds or
+     * microseconds; otherwise its text, with {@code +00} if adjusted to UTC,
+     * as DuckDB shows a {@code TIME WITH TIME ZONE}, and with nanoseconds,
+     * as DuckDB shows a {@code TIME_NS}, types FyrQL does not have.
+     */
+    private static DataType time(LogicalTypeAnnotation.TimeLogicalTypeAnnotation t) {
+        return t.isAdjustedToUTC() || t.getUnit() == LogicalTypeAnnotation.TimeUnit.NANOS ? DataType.VARCHAR
+                : DataType.TIME;
     }
 
     /**
