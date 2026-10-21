@@ -15,6 +15,7 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.Operator;
 import net.fyrql.exec.QueryContext;
+import net.fyrql.exec.SpillStatistics;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -51,6 +52,14 @@ public final class QueryResult implements AutoCloseable {
             rows.addAll(b.rows());
         }
         return rows;
+    }
+
+    /**
+     * Returns what the operators of the query have spilled to disk so far,
+     * because the memory budget was exhausted, and read back.
+     */
+    public SpillStatistics spill() {
+        return context.spill();
     }
 
     /**

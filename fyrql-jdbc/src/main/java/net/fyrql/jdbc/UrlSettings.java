@@ -63,6 +63,10 @@ record UrlSettings(Map<String, String> values, List<String> unknownProperties) {
             new Key("batchSize", "The number of rows per batch", List.of()),
             new Key("memoryBudget", "The bytes a query may hold in joins, aggregations and sorts, such as 512MB",
                     List.of()),
+            new Key("spill", "Whether aggregations, sorts and windows spill to disk above the memory budget",
+                    List.of("true", "false")),
+            new Key("spillDirectory", "The directory under which the engine spills; the temporary directory of"
+                    + " the JVM by default", List.of()),
             new Key("codegen", "When expressions are compiled: off, auto or always", List.of("off", "auto",
                     "always")),
             new Key("codegenThreshold", "The rows after which an operator compiles in the mode auto", List.of()),

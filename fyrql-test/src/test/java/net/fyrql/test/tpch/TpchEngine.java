@@ -31,6 +31,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -159,6 +160,13 @@ final class TpchEngine {
 
     /** Opens an engine over the five sources and further ones, as {@link #open(Boolean, CodegenMode, int)} does. */
     FyrQL open(Boolean pushdown, CodegenMode codegen, int threads, List<Connector> more) {
+        return open(pushdown, codegen, threads, more, b -> {
+        });
+    }
+
+    /** Opens an engine as {@link #open(Boolean, CodegenMode, int, List)} does, with further settings. */
+    FyrQL open(Boolean pushdown, CodegenMode codegen, int threads, List<Connector> more,
+            Consumer<FyrQL.Builder> settings) {
         long splitSize = scaleFactor <= SMALL ? SMALL_SPLIT_SIZE : CsvConnector.SPLIT_SIZE;
         CsvConnector.Builder csv = CsvConnector.builder("files").delimiter(TpchData.DELIMITER).header(true)
                 .splitSize(splitSize);
@@ -198,6 +206,7 @@ final class TpchEngine {
         if (threads > 0) {
             b.threads(threads);
         }
+        settings.accept(b);
         return b.build();
     }
 

@@ -240,6 +240,40 @@ final class ValueAccumulator {
         count += other.count;
     }
 
+    /**
+     * Takes what another accumulator of the same aggregate holds, as if its
+     * rows were the rows of this one, which has none yet; unlike
+     * {@link #merge}, for every aggregate. The other stays as it is; the
+     * values this one keeps are reserved again.
+     */
+    void copyOf(ValueAccumulator other) {
+        if (count != 0 || values != null || seen != null && !seen.isEmpty()
+                || ordered != null && !ordered.isEmpty()) {
+            throw new IllegalStateException("The accumulator of " + call.name() + " has rows already");
+        }
+        long kept = (other.seen == null ? 0 : other.seen.size()) + (other.ordered == null ? 0 : other.ordered.size())
+                + (other.values == null ? 0 : other.values.size());
+        if (kept > 0) {
+            reserve.accept(BYTES_PER_VALUE * kept);
+        }
+        count = other.count;
+        longSum = other.longSum;
+        monthSum = other.monthSum;
+        daySum = other.daySum;
+        bigSum = other.bigSum;
+        doubleSum = other.doubleSum;
+        decimalSum = other.decimalSum;
+        extreme = other.extreme;
+        bool = other.bool;
+        values = other.values == null ? null : new ArrayList<>(other.values);
+        if (seen != null) {
+            seen.addAll(other.seen);
+        }
+        if (ordered != null) {
+            ordered.addAll(other.ordered);
+        }
+    }
+
     /** Returns the value of the aggregate; once for an ordered aggregate. */
     Object result() {
         if (ordered != null) {

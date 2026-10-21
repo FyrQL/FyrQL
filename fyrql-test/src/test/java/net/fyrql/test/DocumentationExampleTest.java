@@ -12,6 +12,7 @@
 package net.fyrql.test;
 
 import net.fyrql.FyrQL;
+import net.fyrql.PreparedQuery;
 import net.fyrql.exec.CodegenMode;
 import net.fyrql.QueryResult;
 import net.fyrql.codegen.JaninoCompiler;
@@ -59,13 +60,15 @@ import static net.fyrql.core.expr.Expressions.lt;
 import static net.fyrql.core.expr.Expressions.mul;
 
 /**
- * The examples of the README: the query, with the data it describes, whose
- * printed rows and plan are those of the README, the window functions and
- * the statements that write over the same data, the values of the time zone
- * of the session, the same query through the JDBC driver, and the generated
- * code of a filter and of the pipeline of TPC-H Q6, which the README shows.
+ * The examples of the README, of {@code docs/getting-started.md} and of
+ * {@code docs/manual.md}: the query, with the data it describes, whose
+ * printed rows and plan are those of the documents, the same query with a
+ * parameter, the window functions and the statements that write over the
+ * same data, the Iceberg queries, the values of the time zone of the
+ * session, the same query through the JDBC driver, and the generated code of
+ * a filter and of the pipeline of TPC-H Q6, which the manual shows.
  */
-class ReadmeExampleTest {
+class DocumentationExampleTest {
 
     record Order(long id, Integer customerId, BigDecimal amount) {
     }
@@ -84,7 +87,7 @@ class ReadmeExampleTest {
         String pipeline;
         String parallel;
 
-        // From here on as in the README, with the directory of the test for "data".
+        // From here on as in the documents, with the directory of the test for "data".
         try (FyrQL engine = FyrQL.builder()
                 .register(CsvConnector.builder("csv").directory(data).build())
                 .register(MemoryConnector.builder("mem")
@@ -101,8 +104,17 @@ class ReadmeExampleTest {
                     printed.add(Arrays.toString(row));
                 }
             }
+            // The query with a parameter.
+            PreparedQuery larger = engine.prepare("""
+                    SELECT o.id, c.region, o.amount
+                    FROM orders AS o JOIN customers AS c ON o.customerId = c.id
+                    WHERE o.amount > ?
+                    ORDER BY o.id""");
+            for (Object[] row : engine.rows(larger, List.of(new BigDecimal("6.00")))) {
+                printed.add(Arrays.toString(row));
+            }
             plan = engine.explain(sql);
-            // The README shows the plan of AUTO: the tables are too small for a pipeline unless code is always
+            // The documents show the plan of AUTO: the tables are too small for a pipeline unless code is always
             // generated.
             pipeline = engine.codegen() == CodegenMode.ALWAYS ? " [codegen pipeline]" : "";
             // With more than one thread, the chains over the scans run as segments: the one of the orders up to the
@@ -115,7 +127,8 @@ class ReadmeExampleTest {
             assertEquals("Referenced column \"x\" not found in FROM clause! at line 1, column 33", e.getMessage());
         }
 
-        assertEquals(List.of("[south, 1, 20.00]", "[north, 3, 15.75]"), printed);
+        assertEquals(List.of("[south, 1, 20.00]", "[north, 3, 15.75]", "[1, north, 10.50]", "[2, south, 20.00]"),
+                printed);
         assertEquals("""
                 Sort #2 DESC
                   Project #0 AS region, #1 AS orders, #2 AS revenue
@@ -143,7 +156,7 @@ class ReadmeExampleTest {
                         .table("orders", Order.class, orders, Map.of("amount", DataType.decimal(10, 2)))
                         .build())
                 .build()) {
-            // From here on as in the README, with the directory of the test for "data".
+            // From here on as in the documents, with the directory of the test for "data".
             long written = engine.update("""
                     COPY (SELECT o.id, c.region, o.amount
                           FROM orders AS o JOIN customers AS c ON o.customerId = c.id)
@@ -189,7 +202,7 @@ class ReadmeExampleTest {
                         .table("orders", Order.class, orders, Map.of("amount", DataType.decimal(10, 2)))
                         .build())
                 .build()) {
-            // From here on as in the README.
+            // From here on as in the documents.
             String sql = """
                     SELECT c.region, o.id, o.amount,
                            rank() OVER (PARTITION BY c.region ORDER BY o.amount DESC) AS place,
@@ -234,7 +247,7 @@ class ReadmeExampleTest {
         String location = orders.toString().replace('\\', '/');
         long first = tables.table("branch").snapshots().iterator().next().snapshotId();
         try (FyrQL engine = FyrQL.builder().build()) {
-            // As in the README, with the directory of the test for "warehouse" and its local copy for S3.
+            // As in the documents, with the directory of the test for "warehouse" and its local copy for S3.
             assertEquals(6L, engine.rows("SELECT count(*) FROM iceberg_scan('" + location + "')").get(0)[0]);
             assertEquals(3, engine.rows("SELECT snapshot_id, \"timestamp_ms\" FROM iceberg_snapshots('" + location
                     + "')").size());
@@ -250,7 +263,7 @@ class ReadmeExampleTest {
         String reset;
         try (FyrQL engine = FyrQL.builder().build()) {
             before = engine.timeZone().getId();
-            // As in the README, with each value as its text.
+            // As in the manual, with each value as its text.
             engine.update("SET TimeZone = 'Europe/Berlin'");
             values = Arrays.asList(engine.rows("""
                     SELECT CAST(TIMESTAMPTZ '2024-03-30 12:00:00+01' + INTERVAL 1 DAY AS VARCHAR),
@@ -285,7 +298,7 @@ class ReadmeExampleTest {
                 """, StandardCharsets.UTF_8);
         List<String> printed = new ArrayList<>();
 
-        // From here on as in the README, with the path of the file of the test in the URL.
+        // From here on as in the documents, with the path of the file of the test in the URL.
         try (Connection connection = DriverManager.getConnection("jdbc:fyrql:?config="
                 + config.toAbsolutePath().toString().replace('\\', '/'))) {
             try (ResultSet tables = connection.getMetaData().getTables(null, null, "%", null)) {
@@ -315,19 +328,19 @@ class ReadmeExampleTest {
     }
 
     @Test
-    void theGeneratedFilterIsTheOneOfTheReadme() throws IOException {
+    void theGeneratedFilterIsTheOneOfTheManual() throws IOException {
         Schema schema = Schema.of(new Schema.Field("quantity", DataType.INTEGER),
                 new Schema.Field("discount", DataType.decimal(4, 2)));
         String source = new JaninoCompiler().filter(and(lt(col(schema, 0), lit(24)),
                 gt(col(schema, 1), lit(new BigDecimal("0.05")))), schema).source();
         String method = source.substring(source.indexOf("public int[] select(Batch in)"));
         // The tests run in the directory of the module.
-        String readme = Files.readString(Path.of("..", "README.md"), StandardCharsets.UTF_8);
-        assertTrue(readme.contains("```java\n" + method + "```\n"), method);
+        String manual = Files.readString(Path.of("..", "docs", "manual.md"), StandardCharsets.UTF_8);
+        assertTrue(manual.contains("```java\n" + method + "```\n"), method);
     }
 
     @Test
-    void theGeneratedPipelineIsTheOneOfTheReadme() throws IOException {
+    void theGeneratedPipelineIsTheOneOfTheManual() throws IOException {
         // The filter and the projection of TPC-H Q6 over the four columns of lineitem it reads.
         DataType money = DataType.decimal(15, 2);
         Schema lineitem = Schema.of(new Schema.Field("l_quantity", money),
@@ -343,10 +356,10 @@ class ReadmeExampleTest {
         PlanNode.Project project = new PlanNode.Project(filter, List.of(
                 new NamedExpression("#argument0", mul(col(lineitem, 1), col(lineitem, 2)))));
         String source = new JaninoCompiler().pipeline(new PipelineSpec(lineitem, List.of(filter, project))).source();
-        // The README shows the loop, not the method the filter is split into.
+        // The manual shows the loop, not the method the filter is split into.
         int start = source.indexOf("public Batch consume(Batch in, JoinTable[] tables)");
         String method = source.substring(start, source.indexOf("\n}\n", start) + 3);
-        String readme = Files.readString(Path.of("..", "README.md"), StandardCharsets.UTF_8);
-        assertTrue(readme.contains("```java\n" + method + "```\n"), method);
+        String manual = Files.readString(Path.of("..", "docs", "manual.md"), StandardCharsets.UTF_8);
+        assertTrue(manual.contains("```java\n" + method + "```\n"), method);
     }
 }

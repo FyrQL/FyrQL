@@ -40,7 +40,8 @@ import java.util.Optional;
  * The settings of the engine, under {@code engine}, are:
  * {@code defaultSource}, {@code defaultSchema}, {@code batchSize},
  * {@code memoryBudget} (bytes, such as {@code 512MB} or {@code 2GiB}),
- * {@code codegen} ({@code off}, {@code auto} or {@code always}),
+ * {@code spill} ({@code true} or {@code false}), {@code spillDirectory} (a
+ * path, relative to the file), {@code codegen} ({@code off}, {@code auto} or {@code always}),
  * {@code codegenThreshold}, {@code pushdown} ({@code true} or
  * {@code false}), {@code threads}, {@code preserveOrder},
  * {@code implicitSources} and {@code timeZone} (a name such as
@@ -162,6 +163,8 @@ public final class FyrQLConfig {
         o.string("defaultSchema").ifPresent(b::defaultSchema);
         o.integer("batchSize").ifPresent(b::batchSize);
         o.bytes("memoryBudget").ifPresent(b::memoryBudget);
+        o.bool("spill").ifPresent(b::spill);
+        o.path("spillDirectory").ifPresent(b::spillDirectory);
         o.get("codegen", "off, auto or always", v -> CodegenMode.valueOf(v.strip().toUpperCase(Locale.ROOT)))
                 .ifPresent(b::codegen);
         o.get("codegenThreshold", "an integer", v -> Long.parseLong(v.strip())).ifPresent(b::codegenThreshold);

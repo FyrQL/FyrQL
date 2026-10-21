@@ -11,6 +11,7 @@
 
 package net.fyrql.exec;
 
+import net.fyrql.connector.Batches;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
@@ -27,11 +28,16 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.SplittableRandom;
+import java.util.stream.Stream;
 
 import static net.fyrql.core.expr.Expressions.col;
 import static net.fyrql.core.expr.Expressions.gt;
@@ -64,6 +70,9 @@ class ParallelSortWindowTest {
     private static final int B = 6;
 
     private final SplitTables source = new SplitTables();
+
+    @TempDir
+    Path temp;
 
     /** Rows with keys of few and of many values, {@code NULL}s, zeros of both signs and NaNs. */
     private static List<Object[]> rows(SplittableRandom random, int n, boolean zeroBuckets) {
@@ -101,8 +110,16 @@ class ParallelSortWindowTest {
 
     /** Runs a plan and returns its rows, or the error it fails with; the budget gets everything back. */
     private Object run(PlanNode plan, int threads, boolean preserveOrder) {
-        MemoryBudget budget = new MemoryBudget(1L << 40);
-        Executor executor = new Executor(source, budget, 1000, Codegen.off(), threads, preserveOrder);
+        return run(plan, threads, preserveOrder, 1L << 40, null);
+    }
+
+    /**
+     * Runs a plan as {@link #run(PlanNode, int, boolean)} does, with a
+     * budget and a directory to spill to; no file is left.
+     */
+    private Object run(PlanNode plan, int threads, boolean preserveOrder, long limit, SpillDirectory spill) {
+        MemoryBudget budget = new MemoryBudget(limit);
+        Executor executor = new Executor(source, budget, 1000, Codegen.off(), threads, preserveOrder, spill);
         List<List<Object>> rows = new ArrayList<>();
         try {
             for (Object[] row : executor.rows(plan)) {
@@ -112,8 +129,60 @@ class ParallelSortWindowTest {
             return e;
         } finally {
             assertEquals(0, budget.used(), "the budget is given back");
+            Path dir = spill == null ? null : spill.path();
+            if (dir != null) {
+                try (Stream<Path> files = Files.list(dir)) {
+                    assertEquals(List.of(), files.toList(), "the files are deleted");
+                } catch (IOException e) {
+                    throw new AssertionError(e);
+                }
+            }
         }
         return rows;
+    }
+
+    @Test
+    void windowsOverTheBudgetGiveWhatTheyGiveInMemory() {
+        SplittableRandom random = new SplittableRandom(20261021);
+        try (SpillDirectory spill = new SpillDirectory(temp)) {
+            for (int round = 0; round < 6; round++) {
+                int n = 6000 + random.nextInt(6000);
+                List<Object[]> rows = rows(random, n, round % 3 == 0);
+                for (Object[] row : rows) {
+                    // Partitions of about five rows.
+                    row[MANY] = (long) random.nextInt(n / 5);
+                }
+                PlanNode.Scan scan = source.table("spill" + round, SCHEMA, rows, splits(random, n));
+                long total = Batches.estimateBytes(Batch.ofRows(SCHEMA, rows));
+                // Many small partitions, by a key of many values or the unique id.
+                List<Integer> partition = round % 2 == 0 ? List.of(MANY) : List.of(ID, FEW);
+                List<SortKey> order = new ArrayList<>();
+                if (random.nextInt(4) > 0) {
+                    order.add(new SortKey(random.nextBoolean() ? D : FEW, random.nextBoolean(),
+                            random.nextBoolean()));
+                }
+                PlanNode.Window window = new PlanNode.Window(scan, partition, order,
+                        calls(random, order, round % 3 == 0));
+                String what = "round " + round + ", partition " + partition + ", order " + order;
+                Object expected = run(window, 1, true);
+                for (int threads : new int[] {1, 12}) {
+                    long parts = spill.statistics().parts();
+                    assertSame(expected, run(window, threads, true, total / 8, spill), what + ", " + threads
+                            + " threads");
+                    assertTrue(spill.statistics().parts() > parts, what + ": the input went to disk");
+                }
+            }
+            // Without a partition, all rows are one, which does not fit.
+            List<Object[]> rows = rows(random, 5000, false);
+            PlanNode.Scan scan = source.table("one", SCHEMA, rows, splits(random, rows.size()));
+            PlanNode.Window all = new PlanNode.Window(scan, List.of(), List.of(SortKey.asc(ID)),
+                    List.of(WindowCall.of(WindowFunction.ROW_NUMBER, List.of(), "rn")));
+            long total = Batches.estimateBytes(Batch.ofRows(SCHEMA, rows));
+            Object failed = run(all, 4, true, total / 8, spill);
+            assertTrue(failed instanceof QueryException e && e.getMessage().matches("Memory budget of \\d+ bytes"
+                    + " exceeded: \\d+ bytes needed after spilling \\d+ bytes in Window#0"), String.valueOf(failed));
+        }
+        assertEquals(0, source.open.get(), "every reader is closed");
     }
 
     private static void assertSame(Object expected, Object actual, String what) {

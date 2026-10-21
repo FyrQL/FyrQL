@@ -17,7 +17,9 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.ConversionException;
 import net.fyrql.exec.CodegenMode;
+import net.fyrql.exec.Executor;
 import net.fyrql.exec.QueryException;
+import net.fyrql.exec.SpillStatistics;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.render.DuckDbDialect;
 import net.fyrql.sql.render.SqlRenderer;
@@ -28,6 +30,10 @@ import net.fyrql.test.ResultComparison;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -46,7 +52,12 @@ import java.util.function.Supplier;
  * the interpreted one, floating-point values within the tolerance of the
  * comparison with DuckDB, since an aggregation on several threads adds up
  * sums of them in another order, or the outcome is
- * {@link Outcome.Kind#THREADS_DIFFER}.
+ * {@link Outcome.Kind#THREADS_DIFFER}. A fourth run with a budget of
+ * {@value #SPILL_BUDGET} bytes, on the threads of the default, spills
+ * aggregations, sorts and windows to disk and must agree with the
+ * interpreted one in the same way, or the outcome is
+ * {@link Outcome.Kind#SPILL_DIFFERS}; that it runs out of the budget, as a
+ * join does, which does not spill, is no difference.
  */
 final class TwoEngines implements AutoCloseable {
 
@@ -56,9 +67,15 @@ final class TwoEngines implements AutoCloseable {
     /** The start of the report of rows that differ where a second run of DuckDB agrees with FyrQL. */
     static final String UNSTABLE = "DuckDB agrees on a second run; the first run differs:\n";
 
+    /** The budget of the engine that spills, which holds a few batches of 16 rows. */
+    static final long SPILL_BUDGET = 8 * 1024;
+
     private final FyrQL engine;
     private final FyrQL compiled;
     private final FyrQL sequential;
+    private final Path spillDirectory;
+    private final FyrQL spilling;
+    private int outOfBudget;
     private final DuckDbReference duck = RandomTables.duck();
     private final SqlRenderer renderer = new SqlRenderer(DuckDbDialect.INSTANCE,
             t -> DuckDbDialect.INSTANCE.quoteIdentifier(t.table()));
@@ -67,7 +84,26 @@ final class TwoEngines implements AutoCloseable {
         engine = RandomTables.engine(RandomTables.rows(seed));
         compiled = RandomTables.engine(RandomTables.rows(seed), CodegenMode.ALWAYS);
         sequential = RandomTables.engine(RandomTables.rows(seed), CodegenMode.OFF, 1);
+        try {
+            spillDirectory = Files.createTempDirectory("fyrql-random-");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        spilling = RandomTables.engine(RandomTables.rows(seed), CodegenMode.OFF, Executor.threadsFromSystemProperty(),
+                List.of(), b -> b.memoryBudget(SPILL_BUDGET).spillDirectory(spillDirectory));
         RandomTables.load(engine, duck);
+    }
+
+    /** Describes what the engine with the small budget spilled, and how often it ran out of it, for the report. */
+    String spill() {
+        SpillStatistics s = spilling.spillStatistics();
+        return "spilled: " + s.parts() + " parts, " + s.bytesWritten() + " bytes, " + outOfBudget
+                + " queries out of the budget";
+    }
+
+    /** Returns what the engine with the small budget spilled so far. */
+    SpillStatistics spillStatistics() {
+        return spilling.spillStatistics();
     }
 
     FyrQL engine() {
@@ -132,6 +168,10 @@ final class TwoEngines implements AutoCloseable {
             if (threads != null) {
                 return threads;
             }
+            Outcome spilled = spilled(sql, plan, actual, fyrqlError, ulps);
+            if (spilled != null) {
+                return spilled;
+            }
         }
         PlanNode optimized = null;
         if (plan != null) {
@@ -183,6 +223,16 @@ final class TwoEngines implements AutoCloseable {
     }
 
     /**
+     * Runs a plan with a small budget and compares it with the interpreted
+     * run in memory as {@link #threads} does, unless it runs out of the
+     * budget. Returns {@code null} if they agree.
+     */
+    private Outcome spilled(String sql, PlanNode plan, List<Object[]> inMemory, String inMemoryError, int ulps) {
+        return agree(Outcome.Kind.SPILL_DIFFERS, "in memory", "spilling", spilling, sql, plan, inMemory,
+                inMemoryError, ulps);
+    }
+
+    /**
      * Runs a plan in another engine and compares it with a run: both fail,
      * or both give the same rows in the same order, bit for bit up to the
      * sign of zero and the kind of NaN, with a tolerance of 0 units in the
@@ -195,6 +245,12 @@ final class TwoEngines implements AutoCloseable {
         boolean crash = false;
         try {
             rows = other.rows(plan);
+        } catch (QueryException e) {
+            if (other == spilling && e.getMessage() != null && e.getMessage().startsWith("Memory budget")) {
+                outOfBudget++;
+                return null;
+            }
+            error = e.getClass().getSimpleName() + ": " + e.getMessage();
         } catch (RuntimeException | StackOverflowError e) {
             error = e.getClass().getSimpleName() + ": " + e.getMessage();
             crash = !(e instanceof QueryException || e instanceof ConversionException || e instanceof SqlException);
@@ -290,5 +346,11 @@ final class TwoEngines implements AutoCloseable {
         engine.close();
         compiled.close();
         sequential.close();
+        spilling.close();
+        try {
+            Files.deleteIfExists(spillDirectory);
+        } catch (IOException e) {
+            // The engine deleted what it spilled; an empty directory may stay.
+        }
     }
 }

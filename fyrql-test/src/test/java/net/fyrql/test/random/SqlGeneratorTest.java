@@ -33,8 +33,9 @@ class SqlGeneratorTest {
                 Outcome outcome = engines.sql(query.sql(), query.ordered(), SqlRoundTripTest.ULPS);
                 run.record(i, "sql", outcome, () -> shrink(engines, run, query, outcome));
             }
-            System.out.println(run.report() + "  " + engines.codegen());
+            System.out.println(run.report() + "  " + engines.codegen() + "  " + engines.spill());
             assertTrue(run.unexplained().isEmpty(), run.report());
+            assertTrue(engines.spillStatistics().parts() > 0, "no query spilled: " + engines.spill());
         }
     }
 

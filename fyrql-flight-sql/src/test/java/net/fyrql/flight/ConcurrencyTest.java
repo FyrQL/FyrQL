@@ -90,7 +90,7 @@ class ConcurrencyTest {
     @Test
     void theMemoryBudgetOfTheEngineIsExhausted() throws Exception {
         try (TestServer server = new TestServer(ServerConfig.defaults().withPort(0),
-                FyrQL.builder().memoryBudget(1_000_000))) {
+                FyrQL.builder().memoryBudget(1_000_000).spill(false))) {
             FlightSqlClient client = server.client();
             FlightInfo info = client.execute("SELECT a.n, b.s FROM numbers a, numbers b ORDER BY b.s, a.n");
             TestServer.fails(FlightStatusCode.RESOURCE_EXHAUSTED, "", () -> TestServer.rows(client, info));

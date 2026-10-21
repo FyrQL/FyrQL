@@ -40,6 +40,8 @@ import net.fyrql.exec.Executor;
 import net.fyrql.exec.MemoryBudget;
 import net.fyrql.exec.Operator;
 import net.fyrql.exec.QueryContext;
+import net.fyrql.exec.SpillDirectory;
+import net.fyrql.exec.SpillStatistics;
 import net.fyrql.exec.Splits;
 import net.fyrql.exec.TableSource;
 import net.fyrql.optimizer.Optimizer;
@@ -52,6 +54,7 @@ import net.fyrql.sql.bind.BoundStatement;
 import net.fyrql.sql.parse.Parameters;
 import net.fyrql.sql.parse.SqlParser;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -117,14 +120,17 @@ public final class FyrQL implements AutoCloseable {
     private final Executor executor;
     private final Codegen codegen;
     private final Writes writes;
+    /** The directory to which operators spill, {@code null} if they do not. */
+    private final SpillDirectory spill;
     /** The time zone the session starts with, to which {@code RESET TimeZone} returns. */
     private final ZoneId initialZone;
     private volatile ZoneId zone;
 
     private FyrQL(Map<String, Connector> connectors, SearchPath searchPath, FunctionRegistry functions,
             MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options, int threads,
-            boolean preserveOrder, ZoneId zone) {
+            boolean preserveOrder, SpillDirectory spill, ZoneId zone) {
         this.connectors = Collections.unmodifiableMap(new LinkedHashMap<>(connectors));
+        this.spill = spill;
         this.catalog = new EngineCatalog(this.connectors, searchPath, this::timeZone);
         this.catalogTables = new CatalogTables(this.connectors);
         this.functions = functions;
@@ -159,7 +165,7 @@ public final class FyrQL implements AutoCloseable {
             public BatchReader open(PlanNode.Remote remote) {
                 return FyrQL.this.open(remote);
             }
-        }, budget, batchSize, codegen, threads, preserveOrder);
+        }, budget, batchSize, codegen, threads, preserveOrder, spill);
     }
 
     /** Returns the catalog: names along the search path, columns, and table functions. */
@@ -185,6 +191,22 @@ public final class FyrQL implements AutoCloseable {
     /** Returns what the compiler has done so far; the compiler and its statistics are shared by all engines. */
     public CodegenStatistics codegenStatistics() {
         return codegen.statistics();
+    }
+
+    /**
+     * Returns what the queries of the engine have spilled to disk since it
+     * was built, and read back; per query, see {@link QueryResult#spill()}.
+     */
+    public SpillStatistics spillStatistics() {
+        return spill != null ? spill.statistics() : SpillStatistics.NONE;
+    }
+
+    /**
+     * Returns the directory under which operators spill to disk when the
+     * memory budget is exhausted, or nothing if they fail instead.
+     */
+    public Optional<Path> spillDirectory() {
+        return spill != null ? Optional.of(spill.parent()) : Optional.empty();
     }
 
     /** Tells whether scans are negotiated with their connectors, so that a source takes over what it can. */
@@ -751,10 +773,17 @@ public final class FyrQL implements AutoCloseable {
         return connector.openRemote(plan);
     }
 
+    /** Closes the sources and deletes the directory to which operators spilled. */
     @Override
     public void close() {
-        for (Connector c : connectors.values()) {
-            c.close();
+        try {
+            for (Connector c : connectors.values()) {
+                c.close();
+            }
+        } finally {
+            if (spill != null) {
+                spill.close();
+            }
         }
     }
 
@@ -771,6 +800,8 @@ public final class FyrQL implements AutoCloseable {
         private Boolean pushdown;
         private int threads;
         private boolean preserveOrder = true;
+        private boolean spill = true;
+        private Path spillDirectory;
         private boolean implicitSources = true;
         private ClassLoader classLoader;
         private ZoneId timeZone = ZoneId.systemDefault();
@@ -787,9 +818,44 @@ public final class FyrQL implements AutoCloseable {
             return this;
         }
 
-        /** Sets the bytes a query may hold in joins, aggregations and sorts; unlimited by default. */
+        /**
+         * Sets the bytes the queries of the engine may hold in joins,
+         * aggregations and sorts; unlimited by default. Above it,
+         * aggregations, sorts and windows spill to disk, see
+         * {@link #spill(boolean)}, and the other operators fail.
+         */
         public Builder memoryBudget(long bytes) {
             this.memoryBudget = bytes;
+            return this;
+        }
+
+        /**
+         * Sets whether aggregations, sorts and windows spill to disk when
+         * the memory budget is exhausted, instead of failing; on by default.
+         * Without a budget, nothing spills.
+         */
+        public Builder spill(boolean enabled) {
+            this.spill = enabled;
+            return this;
+        }
+
+        /**
+         * Sets the directory under which the engine creates its directory
+         * for spilling, named {@code fyrql-spill-} and a random suffix,
+         * when an operator spills first; it is deleted when the engine
+         * closes. By default the temporary directory of the JVM, the system
+         * property {@code java.io.tmpdir}; a directory that does not exist
+         * is created.
+         *
+         * @throws IllegalArgumentException if the path exists and is no directory that can be written
+         */
+        public Builder spillDirectory(Path directory) {
+            Objects.requireNonNull(directory, "directory");
+            if (Files.exists(directory) && !(Files.isDirectory(directory) && Files.isWritable(directory))) {
+                throw new IllegalArgumentException("The spill directory " + directory
+                        + " is no directory that can be written");
+            }
+            this.spillDirectory = directory;
             return this;
         }
 
@@ -969,6 +1035,8 @@ public final class FyrQL implements AutoCloseable {
                 return new FyrQL(sources, new SearchPath(source, defaultSchema),
                         functions != null ? functions : FunctionRegistry.standard(),
                         new MemoryBudget(memoryBudget), batchSize, codegen, options, engineThreads, preserveOrder,
+                        !spill ? null : spillDirectory != null ? new SpillDirectory(spillDirectory)
+                                : SpillDirectory.temporary(),
                         timeZone);
             } catch (RuntimeException | Error e) {
                 close(implicit, e);

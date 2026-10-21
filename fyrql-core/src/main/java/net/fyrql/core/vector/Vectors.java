@@ -527,6 +527,184 @@ public final class Vectors {
     }
 
     /**
+     * Gathers rows of several vectors of one type into one vector: row
+     * {@code i} of the result is row {@code rowOf[from + i]} of the vector
+     * {@code partOf[from + i]}, up to {@code to}. Flat values are copied
+     * without boxing; nested ones are selected in runs of rows of one vector.
+     */
+    public static Vector gather(DataType type, List<Vector> parts, int[] partOf, int[] rowOf, int from, int to) {
+        int n = to - from;
+        if (n == 0) {
+            return builder(type, 0).build();
+        }
+        Vector[] ps = parts.toArray(new Vector[0]);
+        for (Vector p : ps) {
+            if (!p.type().equals(type)) {
+                throw new IllegalArgumentException("A " + p.type() + " vector among " + type + " vectors");
+            }
+        }
+        if (ps[0] instanceof StructVector || ps[0] instanceof ListVector || ps[0] instanceof MapVector) {
+            List<Vector> runs = new ArrayList<>();
+            for (int i = from; i < to;) {
+                int p = partOf[i];
+                int j = i + 1;
+                while (j < to && partOf[j] == p) {
+                    j++;
+                }
+                runs.add(ps[p].select(java.util.Arrays.copyOfRange(rowOf, i, j)));
+                i = j;
+            }
+            return concat(type, runs);
+        }
+        boolean[] nulls = null;
+        for (int i = 0; i < n; i++) {
+            if (ps[partOf[from + i]].isNull(rowOf[from + i])) {
+                if (nulls == null) {
+                    nulls = new boolean[n];
+                }
+                nulls[i] = true;
+            }
+        }
+        switch (ps[0]) {
+            case BooleanVector x -> {
+                boolean[] values = new boolean[n];
+                for (int i = 0; i < n; i++) {
+                    values[i] = ((BooleanVector) ps[partOf[from + i]]).values[rowOf[from + i]];
+                }
+                return new BooleanVector(values, nulls);
+            }
+            case TinyIntVector x -> {
+                byte[] values = new byte[n];
+                for (int i = 0; i < n; i++) {
+                    values[i] = ((TinyIntVector) ps[partOf[from + i]]).values[rowOf[from + i]];
+                }
+                return new TinyIntVector(values, nulls);
+            }
+            case SmallIntVector x -> {
+                short[] values = new short[n];
+                for (int i = 0; i < n; i++) {
+                    values[i] = ((SmallIntVector) ps[partOf[from + i]]).values[rowOf[from + i]];
+                }
+                return new SmallIntVector(values, nulls);
+            }
+            case IntVector x -> {
+                int[][] arrays = new int[ps.length][];
+                for (int p = 0; p < ps.length; p++) {
+                    arrays[p] = ((IntVector) ps[p]).values;
+                }
+                int[] values = new int[n];
+                for (int i = 0; i < n; i++) {
+                    values[i] = arrays[partOf[from + i]][rowOf[from + i]];
+                }
+                return new IntVector(type, values, nulls);
+            }
+            case BigIntVector x -> {
+                long[][] arrays = new long[ps.length][];
+                for (int p = 0; p < ps.length; p++) {
+                    arrays[p] = ((BigIntVector) ps[p]).values;
+                }
+                long[] values = new long[n];
+                for (int i = 0; i < n; i++) {
+                    values[i] = arrays[partOf[from + i]][rowOf[from + i]];
+                }
+                return new BigIntVector(type, values, nulls);
+            }
+            case HugeIntVector x -> {
+                long[] high = new long[n];
+                long[] low = new long[n];
+                for (int i = 0; i < n; i++) {
+                    HugeIntVector y = (HugeIntVector) ps[partOf[from + i]];
+                    high[i] = y.high[rowOf[from + i]];
+                    low[i] = y.low[rowOf[from + i]];
+                }
+                return new HugeIntVector(high, low, nulls);
+            }
+            case FloatVector x -> {
+                float[] values = new float[n];
+                for (int i = 0; i < n; i++) {
+                    values[i] = ((FloatVector) ps[partOf[from + i]]).values[rowOf[from + i]];
+                }
+                return new FloatVector(values, nulls);
+            }
+            case DoubleVector x -> {
+                double[][] arrays = new double[ps.length][];
+                for (int p = 0; p < ps.length; p++) {
+                    arrays[p] = ((DoubleVector) ps[p]).values;
+                }
+                double[] values = new double[n];
+                for (int i = 0; i < n; i++) {
+                    values[i] = arrays[partOf[from + i]][rowOf[from + i]];
+                }
+                return new DoubleVector(values, nulls);
+            }
+            case DecimalVector x -> {
+                boolean small = true;
+                for (Vector p : ps) {
+                    small &= ((DecimalVector) p).small != null;
+                }
+                if (small) {
+                    long[][] arrays = new long[ps.length][];
+                    for (int p = 0; p < ps.length; p++) {
+                        arrays[p] = ((DecimalVector) ps[p]).small;
+                    }
+                    long[] values = new long[n];
+                    for (int i = 0; i < n; i++) {
+                        values[i] = arrays[partOf[from + i]][rowOf[from + i]];
+                    }
+                    return new DecimalVector(x.type(), values, null, nulls);
+                }
+                BigInteger[] values = new BigInteger[n];
+                for (int i = 0; i < n; i++) {
+                    values[i] = ((DecimalVector) ps[partOf[from + i]]).getUnscaled(rowOf[from + i]);
+                }
+                return new DecimalVector(x.type(), null, values, nulls);
+            }
+            case BytesVector x -> {
+                int[] offsets = new int[n + 1];
+                int bytes = 0;
+                for (int i = 0; i < n; i++) {
+                    offsets[i] = bytes;
+                    bytes += ((BytesVector) ps[partOf[from + i]]).length(rowOf[from + i]);
+                }
+                offsets[n] = bytes;
+                byte[] data = new byte[bytes];
+                for (int i = 0; i < n; i++) {
+                    BytesVector y = (BytesVector) ps[partOf[from + i]];
+                    int r = rowOf[from + i];
+                    System.arraycopy(y.data(), y.offsets[r], data, offsets[i], offsets[i + 1] - offsets[i]);
+                }
+                return new BytesVector(type, data, offsets, nulls);
+            }
+            case UuidVector x -> {
+                long[] most = new long[n];
+                long[] least = new long[n];
+                for (int i = 0; i < n; i++) {
+                    UuidVector y = (UuidVector) ps[partOf[from + i]];
+                    most[i] = y.most[rowOf[from + i]];
+                    least[i] = y.least[rowOf[from + i]];
+                }
+                return new UuidVector(most, least, nulls);
+            }
+            case IntervalVector x -> {
+                int[] months = new int[n];
+                int[] days = new int[n];
+                long[] micros = new long[n];
+                for (int i = 0; i < n; i++) {
+                    IntervalVector y = (IntervalVector) ps[partOf[from + i]];
+                    int r = rowOf[from + i];
+                    months[i] = y.months[r];
+                    days[i] = y.days[r];
+                    micros[i] = y.micros[r];
+                }
+                return new IntervalVector(months, days, micros, nulls);
+            }
+            case StructVector x -> throw new AssertionError();
+            case ListVector x -> throw new AssertionError();
+            case MapVector x -> throw new AssertionError();
+        }
+    }
+
+    /**
      * Fills the offsets of the gathered rows of a list or map vector, an
      * empty range for -1, and returns the indexes of their elements.
      */

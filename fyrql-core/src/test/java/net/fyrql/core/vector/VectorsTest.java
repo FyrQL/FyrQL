@@ -291,6 +291,59 @@ class VectorsTest {
         assertFalse(strings.hasNulls());
     }
 
+    @Test
+    void gatherOfSeveralVectorsTakesRowsInTheGivenOrder() {
+        Schema schema = new Schema(DataGeneratorTest.ALL_TYPES.stream().map(t -> new Schema.Field(t.sqlName(), t))
+                .toList());
+        java.util.SplittableRandom random = new java.util.SplittableRandom(20261021);
+        for (int round = 0; round < 10; round++) {
+            List<Batch> parts = new ArrayList<>();
+            List<List<Object[]>> rows = new ArrayList<>();
+            for (int p = 0, n = 1 + random.nextInt(4); p < n; p++) {
+                List<Object[]> r = DataGenerator.withSeed(10 * round + p).generate(schema, random.nextInt(50));
+                rows.add(r);
+                parts.add(Batch.ofRows(schema, r));
+            }
+            int total = 5 + random.nextInt(100);
+            int[] partOf = new int[total];
+            int[] rowOf = new int[total];
+            for (int i = 0; i < total; i++) {
+                do {
+                    partOf[i] = random.nextInt(parts.size());
+                } while (rows.get(partOf[i]).isEmpty() && rows.stream().anyMatch(r -> !r.isEmpty()));
+                rowOf[i] = rows.get(partOf[i]).isEmpty() ? -1 : random.nextInt(rows.get(partOf[i]).size());
+            }
+            if (Arrays.stream(rowOf).anyMatch(r -> r < 0)) {
+                continue;
+            }
+            int from = random.nextInt(total);
+            int to = from + random.nextInt(total - from + 1);
+            for (int c = 0; c < schema.size(); c++) {
+                DataType type = schema.type(c);
+                List<Vector> columns = new ArrayList<>();
+                for (Batch p : parts) {
+                    columns.add(p.column(c));
+                }
+                Vector g = Vectors.gather(type, columns, partOf, rowOf, from, to);
+                assertEquals(type, g.type());
+                assertEquals(to - from, g.size(), type + " gather");
+                for (int i = from; i < to; i++) {
+                    assertSame(rows.get(partOf[i]).get(rowOf[i])[c], g, i - from, type + " gathered row " + i);
+                }
+            }
+        }
+        // Decimals of several forms gather to the large one.
+        DataType.Decimal d = DataType.decimal(38, 0);
+        Vector small = new DecimalVector(d, new long[] {1, 2}, null, null);
+        Vector big = new DecimalVector(d, null, new java.math.BigInteger[] {java.math.BigInteger.TEN}, null);
+        Vector mixed = Vectors.gather(d, List.of(small, big), new int[] {1, 0, 0}, new int[] {0, 1, 0}, 0, 3);
+        assertEquals(Arrays.asList(new BigDecimal("10"), new BigDecimal("2"), new BigDecimal("1")),
+                Arrays.asList(mixed.get(0), mixed.get(1), mixed.get(2)));
+        assertEquals(0, Vectors.gather(DataType.VARCHAR, List.of(), new int[0], new int[0], 0, 0).size());
+        assertThrows(IllegalArgumentException.class, () -> Vectors.gather(DataType.INTEGER,
+                List.of(IntVector.of(1), BigIntVector.of(2L)), new int[] {0}, new int[] {0}, 0, 1));
+    }
+
     private static void assertSame(Object expected, Vector v, int row, String what) {
         assertEquals(expected == null, v.isNull(row), what);
         assertTrue(Keys.equalObjects(Keys.canonical(expected), Keys.canonical(v.get(row))), what + ": " + expected

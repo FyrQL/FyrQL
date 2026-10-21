@@ -12,7 +12,9 @@
 package net.fyrql.test.tpch;
 
 import net.fyrql.FyrQL;
+import net.fyrql.QueryResult;
 import net.fyrql.core.plan.PlanNode;
+import net.fyrql.exec.SpillStatistics;
 import net.fyrql.exec.CodegenMode;
 import net.fyrql.test.DuckDbReference;
 import org.junit.jupiter.api.Test;
@@ -48,6 +50,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * mvnw -o -B -pl fyrql-test -P tpch verify -Dtest=TpchScale1Test -Dsurefire.failIfNoSpecifiedTests=false
  * </pre>
  * The files take about 1 GB in {@code target/tpch} and are written once.
+ * <p>
+ * With the system property {@code fyrql.tpch.budget}, such as
+ * {@code 256MB}, a second test runs the queries with code generation on
+ * all threads without a limit and with that budget, spilling to the
+ * temporary directory of the JVM, and writes the times and what each query
+ * spilled to {@code target/tpch-spill-report.md}:
+ * <pre>
+ * mvnw -o -B -pl fyrql-test -P tpch verify -Dtest=TpchScale1Test#theQueriesRunWithinABudget
+ *     -Dsurefire.failIfNoSpecifiedTests=false -Dfyrql.tpch.budget=256MB
+ * </pre>
  */
 @EnabledIfSystemProperty(named = "fyrql.tpch.sf", matches = "1")
 class TpchScale1Test {
@@ -174,6 +186,71 @@ class TpchScale1Test {
         Path report = Path.of("target", "tpch-report.md");
         Files.writeString(report, report(runs, threads, loadMillis, plans.toString()));
         runs.stream().filter(r -> r.error() != null).forEach(r -> failures.add(r.query() + ": " + r.error()));
+        assertTrue(failures.isEmpty(), String.join("\n", failures) + "\nsee " + report.toAbsolutePath());
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "fyrql.tpch.budget", matches = "\\d+(KB|MB|GB)?")
+    void theQueriesRunWithinABudget() throws IOException {
+        String setting = System.getProperty("fyrql.tpch.budget");
+        long budget = Long.parseLong(setting.replaceAll("\\D", ""))
+                << (setting.endsWith("GB") ? 30 : setting.endsWith("MB") ? 20 : setting.endsWith("KB") ? 10 : 0);
+        TpchEngine tpch = TpchEngine.load(SCALE_FACTOR, TpchTest.directory(SCALE_FACTOR));
+        Path directory = Files.createTempDirectory("fyrql-tpch-");
+        StringBuilder b = new StringBuilder("# TPC-H at scale factor 1 within a budget\n\n");
+        List<String> failures = new ArrayList<>();
+        long[] sums = new long[2];
+        try (FyrQL free = tpch.open(true, CodegenMode.AUTO);
+                FyrQL bounded = tpch.open(true, CodegenMode.AUTO, 0, List.of(),
+                        e -> e.memoryBudget(budget).spillDirectory(directory))) {
+            b.append(String.format(Locale.ROOT, "Java %s, max. heap %d MB, code generation on %d threads, each query"
+                    + " %d times, the fastest run; with a budget of %d MB for the engine, spilling to the temporary"
+                    + " directory, against no limit.%n%n", System.getProperty("java.version"),
+                    Runtime.getRuntime().maxMemory() >> 20, free.threads(), RUNS, budget >> 20));
+            b.append("| Query | Rows | No limit (s) | Budget (s) | Parts spilled | MB written | MB read | Result |\n");
+            b.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n");
+            for (TpchQueries.Query query : TpchQueries.ALL) {
+                PlanNode plan = free.plan(query.sql());
+                long[] best = {Long.MAX_VALUE, Long.MAX_VALUE};
+                List<Object[]> expected = null;
+                List<Object[]> actual = null;
+                SpillStatistics spilled = SpillStatistics.NONE;
+                String error = null;
+                for (int r = 0; r < RUNS && error == null; r++) {
+                    long start = System.nanoTime();
+                    expected = free.rows(plan);
+                    best[0] = Math.min(best[0], (System.nanoTime() - start) / 1_000_000);
+                    start = System.nanoTime();
+                    try (QueryResult result = bounded.sql(query.sql())) {
+                        actual = result.rows();
+                        best[1] = Math.min(best[1], (System.nanoTime() - start) / 1_000_000);
+                        spilled = result.spill();
+                    } catch (RuntimeException e) {
+                        error = e.getMessage();
+                    }
+                }
+                if (error == null) {
+                    error = TpchQueries.compare(plan, expected, actual).map(d -> "differs: " + d).orElse(null);
+                }
+                if (error != null) {
+                    failures.add(query.name() + ": " + error);
+                } else {
+                    sums[0] += best[0];
+                    sums[1] += best[1];
+                }
+                b.append(String.format(Locale.ROOT, "| %s | %d | %.2f | %s | %d | %.1f | %.1f | %s |%n", query.name(),
+                        expected.size(), best[0] / 1000.0, error == null ? String.format(Locale.ROOT, "%.2f",
+                                best[1] / 1000.0) : "-", spilled.parts(), spilled.bytesWritten() / 1e6,
+                        spilled.bytesRead() / 1e6, error == null ? "same rows" : error.lines().findFirst()
+                                .orElse("")));
+            }
+        } finally {
+            Files.deleteIfExists(directory);
+        }
+        b.append(String.format(Locale.ROOT, "%nThe queries that ran within the budget: %.1f s without a limit, %.1f s"
+                + " within it.%n", sums[0] / 1000.0, sums[1] / 1000.0));
+        Path report = Path.of("target", "tpch-spill-report.md");
+        Files.writeString(report, b.toString());
         assertTrue(failures.isEmpty(), String.join("\n", failures) + "\nsee " + report.toAbsolutePath());
     }
 

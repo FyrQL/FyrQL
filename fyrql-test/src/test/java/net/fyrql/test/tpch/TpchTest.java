@@ -12,6 +12,7 @@
 package net.fyrql.test.tpch;
 
 import net.fyrql.FyrQL;
+import net.fyrql.QueryResult;
 import net.fyrql.connector.jdbc.JdbcConnector;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
@@ -23,6 +24,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,16 +47,28 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * and keeps the customers without orders of Q22. The semi join of Q18
  * filters the orders before they are joined with the customers. The scans
  * of {@code orders} and {@code customer} are read in ranges of their keys.
+ * With a budget of {@value #SPILL_BUDGET} bytes, the hash tables of the
+ * joins fit and every query gives the same rows, the aggregation of Q18
+ * spilling to disk; with {@value #SMALLER_BUDGET} bytes, those of Q1, Q13,
+ * Q17, Q18 and Q20 spill too.
  * The files are
  * written into {@code target/tpch} once, or into the directory of the
  * system property {@code fyrql.tpch.dir}.
  */
 class TpchTest {
 
+    /** The budget of the engine that spills: the least in which the hash tables of the joins of Q21 fit. */
+    static final long SPILL_BUDGET = 4L << 20;
+
+    /** A budget in which Q1, Q13, Q17, Q18 and Q20 spill, but the hash tables of Q21 do not fit. */
+    static final long SMALLER_BUDGET = 2L << 20;
+
     private static TpchEngine tpch;
     private static FyrQL engine;
     private static FyrQL off;
     private static FyrQL single;
+    private static Path spillDirectory;
+    private static FyrQL spilling;
     private static DuckDbReference duck;
 
     /** Returns the directory of the files of a scale factor. */
@@ -62,17 +77,24 @@ class TpchTest {
     }
 
     @BeforeAll
-    static void setUp() {
+    static void setUp() throws IOException {
         tpch = TpchEngine.load(TpchEngine.SMALL, directory(TpchEngine.SMALL));
         engine = tpch.open(null, null);
         off = tpch.open(false, null);
         single = tpch.open(null, null, 1);
+        spillDirectory = Files.createTempDirectory("fyrql-tpch-");
+        spilling = tpch.open(null, null, 0, List.of(), b -> b.memoryBudget(SPILL_BUDGET)
+                .spillDirectory(spillDirectory));
         duck = new DuckDbReference();
         tpch.views(duck);
     }
 
     @AfterAll
-    static void tearDown() {
+    static void tearDown() throws IOException {
+        if (spilling != null) {
+            spilling.close();
+            Files.deleteIfExists(spillDirectory);
+        }
         if (duck != null) {
             duck.close();
         }
@@ -111,9 +133,39 @@ class TpchTest {
             fail(query.name() + " on one thread and on " + engine.threads() + " differs:\n" + threads.get() + "\n"
                     + explain);
         }
+        Optional<String> spilled = TpchQueries.compare(plan, spilling.rows(plan), actual);
+        if (spilled.isPresent()) {
+            fail(query.name() + " with a budget of " + SPILL_BUDGET + " bytes differs:\n" + spilled.get() + "\n"
+                    + explain);
+        }
         Optional<String> oracle = TpchQueries.compare(plan, duck.query(query.sql(), plan.schema()), actual);
         if (oracle.isPresent()) {
             fail(query.name() + " differs from DuckDB:\n" + oracle.get() + "\n" + explain);
+        }
+    }
+
+    @Test
+    void aggregationsSortsAndWindowsSpillWithASmallerBudget() throws IOException {
+        Path dir = Files.createTempDirectory("fyrql-tpch-");
+        try (FyrQL small = tpch.open(null, null, 0, List.of(), b -> b.memoryBudget(SMALLER_BUDGET)
+                .spillDirectory(dir))) {
+            for (String name : List.of("q01", "q13", "q17", "q18", "q20")) {
+                TpchQueries.Query q = queries().stream().filter(x -> x.name().equals(name)).findFirst().orElseThrow();
+                PlanNode plan = engine.plan(q.sql());
+                try (QueryResult result = small.sql(q.sql())) {
+                    Optional<String> differs = TpchQueries.compare(plan, engine.rows(plan), result.rows());
+                    if (differs.isPresent()) {
+                        fail(name + " with a budget of " + SMALLER_BUDGET + " bytes differs:\n" + differs.get());
+                    }
+                    // Q1 has four groups: whether it spills depends on how many workers reserve for a batch
+                    // at the same time, so that only its rows are compared.
+                    if (!name.equals("q01")) {
+                        assertTrue(result.spill().parts() > 0, name + " spilled nothing: " + result.spill());
+                    }
+                }
+            }
+        } finally {
+            Files.deleteIfExists(dir);
         }
     }
 

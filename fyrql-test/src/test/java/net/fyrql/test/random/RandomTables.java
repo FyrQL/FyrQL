@@ -32,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.SplittableRandom;
+import java.util.function.Consumer;
 
 /**
  * The tables of the random queries, in a memory source {@code memory} of
@@ -170,12 +171,20 @@ public final class RandomTables {
 
     /** Builds an engine over the tables and further sources as {@link #engine(Map, CodegenMode, int)} does. */
     static FyrQL engine(Map<String, List<Object[]>> rows, CodegenMode codegen, int threads, List<Connector> more) {
+        return engine(rows, codegen, threads, more, b -> {
+        });
+    }
+
+    /** Builds an engine as {@link #engine(Map, CodegenMode, int, List)} does, with further settings. */
+    static FyrQL engine(Map<String, List<Object[]>> rows, CodegenMode codegen, int threads, List<Connector> more,
+            Consumer<FyrQL.Builder> settings) {
         MemoryConnector.Builder memory = MemoryConnector.builder(SOURCE).batchSize(16).splitRows(16);
         for (Map.Entry<String, List<Object[]>> table : rows.entrySet()) {
             memory.table(table.getKey(), SCHEMAS.get(table.getKey()), table.getValue());
         }
         FyrQL.Builder b = FyrQL.builder().register(memory.build());
         more.forEach(b::register);
+        settings.accept(b);
         return b.batchSize(16).codegen(codegen).threads(threads).timeZone(ZONE).build();
     }
 

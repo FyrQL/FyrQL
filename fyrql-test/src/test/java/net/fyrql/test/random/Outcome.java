@@ -78,7 +78,12 @@ record Outcome(Kind kind, String sql, String fyrqlError, String duckError, Strin
          * FyrQL on one thread and on several threads disagree, whatever
          * DuckDB does; never a known difference.
          */
-        THREADS_DIFFER;
+        THREADS_DIFFER,
+        /**
+         * FyrQL in memory and FyrQL with a small budget, spilling to disk,
+         * disagree, whatever DuckDB does; never a known difference.
+         */
+        SPILL_DIFFERS;
 
         /** Tells whether the engines disagree. */
         boolean differs() {

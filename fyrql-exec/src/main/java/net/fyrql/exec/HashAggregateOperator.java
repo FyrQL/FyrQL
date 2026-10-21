@@ -14,20 +14,29 @@ package net.fyrql.exec;
 import net.fyrql.connector.Batches;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
+import net.fyrql.core.plan.PlanNode.SortKey;
+import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.core.vector.BigIntVector;
+import net.fyrql.core.vector.IntVector;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
 import net.fyrql.exec.spi.InterpretedKeys;
 import net.fyrql.exec.spi.KeyFunctions;
 
 import java.math.BigInteger;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.List;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.IntToLongFunction;
+import java.util.function.LongConsumer;
 
 /**
  * Groups the input by its key columns and accumulates the aggregates per
@@ -70,6 +79,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * groups come partition by partition. What differs from one thread: sums of
  * {@code FLOAT}s and {@code DOUBLE}s add up in another order. Otherwise the
  * operator reads the segment as any other input.
+ * <p>
+ * With a directory to spill to and a limited budget, a part whose groups
+ * do not fit, or would take more than half of the budget, so that the
+ * merge has room, keeps its groups and scatters its further rows as they
+ * are, as above, also the part that takes all rows and for every
+ * aggregate; the partitions go to disk once they do not fit either. The
+ * merge then takes the partitions one after the other, see
+ * {@link #mergeSpilled}. An aggregation without keys does not spill.
  */
 final class HashAggregateOperator extends AbstractOperator {
 
@@ -100,6 +117,12 @@ final class HashAggregateOperator extends AbstractOperator {
     /** {@link #MIN_ROWS_PER_GROUP}, which tests raise. */
     static volatile int minRowsPerGroup = MIN_ROWS_PER_GROUP;
 
+    /** The most partitions into which the merge cuts the rows that went to disk, see {@link #mergeSpilled}. */
+    static final int MAX_PARTITIONS = 65_536;
+
+    /** The partitions cut into smaller ones so far because they did not fit, which tests read. */
+    static final AtomicLong REFINED = new AtomicLong();
+
     /** The bits of a place for the row in its morsel, the highest morsel and the highest row it tells apart. */
     private static final int ROW_BITS = 40;
     private static final long MAX_MORSEL = (1L << 23) - 1;
@@ -121,18 +144,24 @@ final class HashAggregateOperator extends AbstractOperator {
     private final Schema scatteredSchema;
     private final List<Integer> scatteredKeys;
     private final List<AggregateCall> scatteredCalls;
+    /** The directory to spill to, or {@code null}; the schema of the rows on disk: scattered, hashes, places. */
+    private final SpillDirectory spill;
+    private final Schema rawSchema;
+    private final List<Integer> rawColumns;
+    private final List<SpillFile> files = Collections.synchronizedList(new ArrayList<>());
     private List<Batch> output;
+    private ExternalSort results;
     private final AtomicLong reserved = new AtomicLong();
 
     HashAggregateOperator(String label, PlanNode.Aggregate aggregate, Operator input, MemoryBudget budget,
             int batchSize, Codegen codegen) {
-        this(label, aggregate, input, budget, batchSize, codegen, true, 1, true);
+        this(label, aggregate, input, budget, batchSize, codegen, true, 1, true, null);
     }
 
     /** With {@code unboxed} false, every aggregate keeps accumulator objects, which the tests compare against. */
     HashAggregateOperator(String label, PlanNode.Aggregate aggregate, Operator input, MemoryBudget budget,
             int batchSize, Codegen codegen, boolean unboxed) {
-        this(label, aggregate, input, budget, batchSize, codegen, unboxed, 1, true);
+        this(label, aggregate, input, budget, batchSize, codegen, unboxed, 1, true, null);
     }
 
     /**
@@ -141,11 +170,21 @@ final class HashAggregateOperator extends AbstractOperator {
      */
     HashAggregateOperator(String label, PlanNode.Aggregate aggregate, Operator input, MemoryBudget budget,
             int batchSize, Codegen codegen, int threads, boolean ordered) {
-        this(label, aggregate, input, budget, batchSize, codegen, true, threads, ordered);
+        this(label, aggregate, input, budget, batchSize, codegen, true, threads, ordered, null);
+    }
+
+    /**
+     * @param threads the most threads that merge the groups of the workers
+     * @param ordered whether the groups come in the order of their first rows, as on one thread
+     * @param spill   the directory to spill to when the budget is exhausted, or {@code null} to fail then
+     */
+    HashAggregateOperator(String label, PlanNode.Aggregate aggregate, Operator input, MemoryBudget budget,
+            int batchSize, Codegen codegen, int threads, boolean ordered, SpillDirectory spill) {
+        this(label, aggregate, input, budget, batchSize, codegen, true, threads, ordered, spill);
     }
 
     private HashAggregateOperator(String label, PlanNode.Aggregate aggregate, Operator input, MemoryBudget budget,
-            int batchSize, Codegen codegen, boolean unboxed, int threads, boolean ordered) {
+            int batchSize, Codegen codegen, boolean unboxed, int threads, boolean ordered, SpillDirectory spill) {
         super(label, aggregate.schema());
         this.aggregate = aggregate;
         this.input = input;
@@ -156,6 +195,7 @@ final class HashAggregateOperator extends AbstractOperator {
         this.unboxed = unboxed;
         this.threads = threads;
         this.ordered = ordered;
+        this.spill = spill;
         this.keyColumnList = List.copyOf(aggregate.groupColumns());
         this.keyColumns = keyColumnList.stream().mapToInt(Integer::intValue).toArray();
         TreeSet<Integer> used = new TreeSet<>(keyColumnList);
@@ -163,15 +203,28 @@ final class HashAggregateOperator extends AbstractOperator {
             if (call.column() >= 0) {
                 used.add(call.column());
             }
+            for (SortKey k : call.orderBy()) {
+                used.add(k.column());
+            }
         }
         this.scatteredColumns = List.copyOf(used);
         this.scatteredSchema = inputSchema.select(scatteredColumns);
         this.scatteredKeys = keyColumnList.stream().map(scatteredColumns::indexOf).toList();
-        // Only the aggregates of a merge, without DISTINCT and ORDER BY, read scattered rows.
-        this.scatteredCalls = !mergeable(aggregate) ? List.of() : aggregate.aggregates().stream()
+        // On workers, only mergeable aggregates scatter rows; the part that takes all rows does so for any.
+        this.scatteredCalls = aggregate.aggregates().stream()
                 .map(c -> c.column() < 0 ? c
-                        : new AggregateCall(c.function(), scatteredColumns.indexOf(c.column()), false, c.name()))
+                        : new AggregateCall(c.function(), scatteredColumns.indexOf(c.column()), c.distinct(),
+                                c.name(), c.separator(), c.orderBy().stream().map(k -> new SortKey(
+                                        scatteredColumns.indexOf(k.column()), k.ascending(), k.nullsFirst()))
+                                        .toList()))
                 .toList();
+        this.rawSchema = scatteredSchema.concat(Schema.of(new Schema.Field("$hash", DataType.INTEGER, false),
+                new Schema.Field("$place", DataType.BIGINT, false)));
+        List<Integer> columns = new ArrayList<>();
+        for (int c = 0; c < scatteredSchema.size(); c++) {
+            columns.add(c);
+        }
+        this.rawColumns = List.copyOf(columns);
     }
 
     /**
@@ -202,6 +255,9 @@ final class HashAggregateOperator extends AbstractOperator {
             output = input instanceof ParallelSegment segment && mergeable(aggregate) ? aggregateParallel(segment)
                     : aggregateAll();
         }
+        if (results != null) {
+            return results.next();
+        }
         return output.isEmpty() ? null : output.remove(0);
     }
 
@@ -210,11 +266,16 @@ final class HashAggregateOperator extends AbstractOperator {
         for (Batch b = input.next(); b != null; b = input.next()) {
             all.accept(0, b);
         }
-        return output(all);
+        return all.pressured ? mergeSpilled(List.of(all)) : output(all);
     }
 
     private List<Batch> aggregateParallel(ParallelSegment segment) {
         List<Partial> parts = segment.drain(workers -> new Partial(workers == 1));
+        for (Partial p : parts) {
+            if (p.pressured) {
+                return mergeSpilled(parts);
+            }
+        }
         Partial first = parts.get(0);
         if (parts.size() == 1 && first.scattered == null) {
             return output(first);
@@ -274,7 +335,7 @@ final class HashAggregateOperator extends AbstractOperator {
         Piece[][] pieces = new Piece[parts.size()][];
         Workers.run(parts.size(), threads, w -> pieces[w] = parts.get(w).pieces(partitions));
         Merged[] merged = new Merged[partitions];
-        Workers.run(partitions, threads, p -> merged[p] = mergePartition(parts, pieces, p));
+        Workers.run(partitions, threads, p -> merged[p] = mergePartition(parts, pieces, p, this::reserve));
         Merged failed = null;
         List<Batch> results = new ArrayList<>();
         List<long[]> places = new ArrayList<>();
@@ -305,8 +366,10 @@ final class HashAggregateOperator extends AbstractOperator {
      * their places, so that the groups are numbered in the order of their
      * first rows, then the states of the groups of the parts and the rows,
      * and computes the results of the groups in their order.
+     *
+     * @param reserve takes the bytes of the groups of the partition from the budget
      */
-    private Merged mergePartition(List<Partial> parts, Piece[][] pieces, int partition) {
+    private Merged mergePartition(List<Partial> parts, Piece[][] pieces, int partition, LongConsumer reserve) {
         List<Segment> segments = new ArrayList<>();
         int m = 0;
         for (int w = 0; w < pieces.length; w++) {
@@ -356,10 +419,10 @@ final class HashAggregateOperator extends AbstractOperator {
                 at[segment.entry() + i] = g;
             }
         }
-        reserve(storedBytes[0] + BYTES_PER_GROUP * groups);
+        reserve.accept(storedBytes[0] + BYTES_PER_GROUP * groups);
         firstPlaces = Arrays.copyOf(firstPlaces, groups);
         // Given the places of the rows, min and max keep the first of equal values in whatever order the parts come.
-        AggregateState[] states = newStates(scatteredCalls, scatteredSchema);
+        AggregateState[] states = newStates(scatteredCalls, scatteredSchema, reserve);
         for (int w = 0; w < pieces.length; w++) {
             Piece piece = pieces[w][partition];
             AggregateState[] own = parts.get(w).states;
@@ -509,17 +572,17 @@ final class HashAggregateOperator extends AbstractOperator {
     private record Piece(Batch keys, int[] groups, List<Batch> raw, int[] hashes, long[] places) {
     }
 
-    /** Returns the states of the aggregates for new groups. */
-    private AggregateState[] newStates() {
-        return newStates(aggregate.aggregates(), inputSchema);
-    }
-
-    /** Returns the states of aggregates over the columns of a schema for new groups. */
-    private AggregateState[] newStates(List<AggregateCall> calls, Schema schema) {
+    /**
+     * Returns the states of aggregates over the columns of a schema for new
+     * groups.
+     *
+     * @param reserve takes the bytes of the values that accumulators keep
+     */
+    private AggregateState[] newStates(List<AggregateCall> calls, Schema schema, LongConsumer reserve) {
         AggregateState[] states = new AggregateState[calls.size()];
         for (int i = 0; i < states.length; i++) {
             AggregateState state = unboxed ? AggregateState.of(calls.get(i), schema) : null;
-            states[i] = state != null ? state : new Accumulators(calls.get(i), schema);
+            states[i] = state != null ? state : new Accumulators(calls.get(i), schema, reserve);
         }
         return states;
     }
@@ -531,7 +594,7 @@ final class HashAggregateOperator extends AbstractOperator {
     }
 
     /** Returns the place of a row: its morsel and its place in the morsel, which order the rows as one thread. */
-    private static long place(int morsel, long row) {
+    static long place(int morsel, long row) {
         return Math.min(morsel, MAX_MORSEL) << ROW_BITS | Math.min(row, MAX_ROW);
     }
 
@@ -616,6 +679,547 @@ final class HashAggregateOperator extends AbstractOperator {
     }
 
     /**
+     * Takes bytes from the budget for the groups or the rows of a part if
+     * they are left and the operator then holds at most half of the budget,
+     * so that the merge has room.
+     */
+    private boolean tryTake(long bytes) {
+        if (reserved.get() + bytes > budget.limit() / 2 || !budget.tryReserve(bytes)) {
+            return false;
+        }
+        reserved.addAndGet(bytes);
+        return true;
+    }
+
+    private void release(long bytes) {
+        budget.release(bytes);
+        reserved.addAndGet(-bytes);
+    }
+
+    /** Creates a file of this operator, which closing it deletes. */
+    private SpillFile newFile(String what, Schema schema) {
+        SpillFile file = spill.create(label(), what, schema, context());
+        files.add(file);
+        return file;
+    }
+
+    /** Returns rows of {@link #scatteredSchema} with the hashes and places of their keys, see {@link #rawSchema}. */
+    private Batch withHashesAndPlaces(Batch rows, int[] hashes, long[] places) {
+        List<Vector> columns = new ArrayList<>(rows.columns());
+        columns.add(IntVector.of(hashes));
+        columns.add(BigIntVector.of(places));
+        return new Batch(rawSchema, rows.rowCount(), columns);
+    }
+
+    /**
+     * Thrown when a merge of a partition that went to disk does not fit in
+     * the budget, so that the partition is cut into smaller ones.
+     */
+    private static final class OverBudget extends RuntimeException {
+        final long bytes;
+
+        OverBudget(long bytes) {
+            super(null, null, false, false);
+            this.bytes = bytes;
+        }
+    }
+
+    /** Takes bytes from the budget for the merge of a partition, until it gives them all back. */
+    private final class Attempt implements LongConsumer {
+        private long bytes;
+
+        @Override
+        public void accept(long more) {
+            if (!budget.tryReserve(more)) {
+                throw new OverBudget(more);
+            }
+            bytes += more;
+        }
+
+        /** Gives back bytes taken before. */
+        void giveBack(long fewer) {
+            budget.release(fewer);
+            bytes -= fewer;
+        }
+
+        void release() {
+            budget.release(bytes);
+            bytes = 0;
+        }
+    }
+
+    /**
+     * Reads a file of rows that went to disk a batch at a time, with the
+     * hashes and the places of their keys; the rows are in the order of
+     * their places.
+     */
+    private final class Cursor {
+        private final SpillFile.SpillReader reader;
+        Batch batch;
+        int[] hashes;
+        long[] places;
+        int at;
+
+        Cursor(SpillFile file) {
+            this.reader = file.reader();
+        }
+
+        /** Reads the next batch; {@code false} at the end, which closes the reader. */
+        boolean next() {
+            Batch b = reader.next();
+            if (b == null) {
+                reader.close();
+                batch = null;
+                return false;
+            }
+            int n = b.rowCount();
+            IntVector h = (IntVector) b.column(scatteredSchema.size());
+            BigIntVector p = (BigIntVector) b.column(scatteredSchema.size() + 1);
+            hashes = new int[n];
+            places = new long[n];
+            for (int r = 0; r < n; r++) {
+                hashes[r] = h.getInt(r);
+                places[r] = p.getLong(r);
+            }
+            batch = b;
+            at = 0;
+            return true;
+        }
+    }
+
+    /**
+     * Returns the one of some runs of places, each at a place of its own,
+     * whose place comes first, and the place of the next of the others, or
+     * {@link Long#MAX_VALUE} if there is no other: the first takes its
+     * places before that one.
+     */
+    private static long[] least(int count, IntToLongFunction placeOf) {
+        int best = 0;
+        long limit = Long.MAX_VALUE;
+        for (int i = 1; i < count; i++) {
+            long p = placeOf.applyAsLong(i);
+            long b = placeOf.applyAsLong(best);
+            if (p < b) {
+                limit = b;
+                best = i;
+            } else {
+                limit = Math.min(limit, p);
+            }
+        }
+        return new long[] {best, limit};
+    }
+
+    /**
+     * What the merge of a partition of the rows that went to disk reads, in
+     * the order of the places: the groups of a part there, or the rows of a
+     * file, a batch at a time, each reserved while it is read.
+     */
+    private final class Source {
+        /** The part of the groups, or {@code null} for the rows of a file. */
+        final Partial part;
+        private final int[] localGroups;
+        private final Cursor cursor;
+        private final Attempt attempt;
+        /** The keys of the rows at hand, their hashes and places; the rows themselves, {@code null} for groups. */
+        Batch keys;
+        int[] hashes;
+        long[] places;
+        Batch raw;
+        int at;
+        private long bytes;
+
+        /** The groups of a part, with their keys, hashes and places, in the order of their numbers. */
+        Source(Partial part, Batch keys, int[] localGroups, int[] hashes, long[] places) {
+            this.part = part;
+            this.localGroups = localGroups;
+            this.cursor = null;
+            this.attempt = null;
+            this.keys = keys;
+            this.hashes = hashes;
+            this.places = places;
+        }
+
+        /** The rows of a file. */
+        Source(SpillFile file, Attempt attempt) {
+            this.part = null;
+            this.localGroups = null;
+            this.cursor = new Cursor(file);
+            this.attempt = attempt;
+            next();
+        }
+
+        /** Tells whether rows are at hand. */
+        boolean hasRows() {
+            return keys != null && at < keys.rowCount();
+        }
+
+        /** Returns the group of the part of a row at hand, which is a group of the part. */
+        int localGroup(int row) {
+            return localGroups[row];
+        }
+
+        /** Goes on with the next batch of the file, giving back the one at hand; none after the groups. */
+        void next() {
+            keys = null;
+            raw = null;
+            if (cursor == null) {
+                return;
+            }
+            attempt.giveBack(bytes);
+            bytes = 0;
+            if (!cursor.next()) {
+                return;
+            }
+            bytes = Batches.estimateBytes(cursor.batch);
+            attempt.accept(bytes);
+            hashes = cursor.hashes;
+            places = cursor.places;
+            raw = cursor.batch.project(rawColumns);
+            keys = raw.project(scatteredKeys);
+            at = 0;
+        }
+    }
+
+    /**
+     * Merges a partition of the rows that went to disk: the groups of the
+     * parts there and the rows of its files in the order of their places, a
+     * run of rows of one of them at a time, so that the groups are numbered
+     * in the order of their first rows, the states of the groups of the
+     * parts combined and the rows added as they come; then computes the
+     * results of the groups in their order. Only the groups of the partition
+     * and a batch of each file are in memory, reserved by the attempt.
+     */
+    private Merged mergeStreamed(List<Partial> parts, Work w, Attempt attempt) {
+        List<Integer> stored = new ArrayList<>();
+        for (int k = 0; k < keyColumns.length; k++) {
+            stored.add(k);
+        }
+        GroupTable table = new GroupTable(stored);
+        // The key functions of the workers, compiled once they were due, hash as the interpreted ones.
+        KeyFunctions keys = parts.get(0).keys;
+        AggregateState[] states = newStates(scatteredCalls, scatteredSchema, attempt);
+        List<Source> sources = new ArrayList<>();
+        for (Partial p : parts) {
+            Source s = p.source(w, attempt);
+            if (s.hasRows()) {
+                sources.add(s);
+            }
+        }
+        for (SpillFile f : w.files()) {
+            Source s = new Source(f, attempt);
+            if (s.hasRows()) {
+                sources.add(s);
+            }
+        }
+        long[] firstPlaces = new long[16];
+        int groups = 0;
+        long[] storedBytes = new long[1];
+        int done = 0;
+        while (!sources.isEmpty()) {
+            if ((done++ & (CHECK_INTERVAL - 1)) == 0) {
+                checkCancelled();
+            }
+            long[] least = least(sources.size(), i -> sources.get(i).places[sources.get(i).at]);
+            int best = (int) least[0];
+            Source s = sources.get(best);
+            int from = s.at;
+            int to = from + 1;
+            int n = s.keys.rowCount();
+            while (to < n && s.places[to] < least[1]) {
+                to++;
+            }
+            storedBytes[0] = 0;
+            int before = groups;
+            int[] groupOf = table.groups(s.keys, from, to, s.hashes, from, keys,
+                    b -> storedBytes[0] += Batches.estimateBytes(b));
+            for (int i = 0; i < groupOf.length; i++) {
+                if (groupOf[i] == groups) {
+                    firstPlaces = AggregateState.grow(firstPlaces, groups + 1);
+                    firstPlaces[groups++] = s.places[from + i];
+                }
+            }
+            attempt.accept(storedBytes[0] + BYTES_PER_GROUP * (groups - before));
+            if (s.raw == null) {
+                AggregateState[] own = s.part.states;
+                for (int i = 0; i < groupOf.length; i++) {
+                    for (int c = 0; c < states.length; c++) {
+                        states[c].combine(groupOf[i], own[c], s.localGroup(from + i));
+                    }
+                }
+            } else {
+                Batch rows = s.raw;
+                if (from > 0 || to < n) {
+                    int[] range = new int[to - from];
+                    for (int i = 0; i < range.length; i++) {
+                        range[i] = from + i;
+                    }
+                    rows = rows.select(range);
+                }
+                for (AggregateState state : states) {
+                    state.add(rows, groupOf, to - from, groups, s.places, from);
+                }
+            }
+            s.at = to;
+            if (to == n) {
+                s.next();
+                if (!s.hasRows()) {
+                    sources.remove(best);
+                }
+            }
+        }
+        if (groups == 0) {
+            return new Merged(null, null, null, 0);
+        }
+        for (AggregateState state : states) {
+            state.startResult(groups);
+        }
+        for (int g = 0; g < groups; g++) {
+            if ((g & (CHECK_INTERVAL - 1)) == 0) {
+                checkCancelled();
+            }
+            try {
+                for (AggregateState state : states) {
+                    state.result(g);
+                }
+            } catch (QueryCancelledException | OverBudget e) {
+                throw e;
+            } catch (RuntimeException e) {
+                return new Merged(null, null, e, firstPlaces[g]);
+            }
+        }
+        List<Vector> columns = new ArrayList<>(keyColumns.length + states.length);
+        for (int k = 0; k < keyColumns.length; k++) {
+            columns.add(table.keys(k));
+        }
+        for (AggregateState state : states) {
+            columns.add(state.finishResult());
+        }
+        return new Merged(new Batch(schema(), groups, columns), Arrays.copyOf(firstPlaces, groups), null, 0);
+    }
+
+    /**
+     * A partition of the rows that went to disk: those whose hash is in
+     * {@code index} of {@code count} partitions, see {@link #partition}, in
+     * files whose rows are each in the order of their places.
+     */
+    private record Work(int index, int count, List<SpillFile> files) {
+    }
+
+    /**
+     * Merges the groups and the rows of parts of which one or more went
+     * over the budget, on the thread of the query: the rows kept as they
+     * are all go to disk first, then the partitions are merged one after the
+     * other, each with what it needs reserved in the budget, which it gives
+     * back once its results are on disk with the places of the first rows of
+     * their groups. A partition that does not fit is cut into
+     * {@value #PARTITIONS} smaller ones by more of the bits of the hashes of
+     * the keys, its rows going to disk again, a file for each, down to
+     * {@value #MAX_PARTITIONS} partitions. The results are then read merged
+     * by their places, see {@link ExternalSort}, so that the groups come in
+     * the order of their first rows and the group that fails is the first
+     * one, as in memory.
+     */
+    private List<Batch> mergeSpilled(List<Partial> parts) {
+        for (Partial p : parts) {
+            p.flush();
+        }
+        Deque<Work> work = new ArrayDeque<>();
+        for (int i = 0; i < PARTITIONS; i++) {
+            List<SpillFile> of = new ArrayList<>();
+            for (Partial p : parts) {
+                if (p.files != null && p.files[i] != null) {
+                    of.add(p.files[i]);
+                }
+            }
+            work.add(new Work(i, PARTITIONS, of));
+        }
+        Schema runSchema = ExternalSort.runSchema(schema());
+        List<ExternalSort.Run> runs = new ArrayList<>();
+        // The results of the partitions stay in memory while they take at most a quarter of the budget.
+        List<Merged> held = new ArrayList<>();
+        long heldBytes = 0;
+        RuntimeException failure = null;
+        long failedAt = Long.MAX_VALUE;
+        while (!work.isEmpty()) {
+            Work w = work.poll();
+            Attempt attempt = new Attempt();
+            List<Work> finer = null;
+            boolean again = false;
+            try {
+                Merged m = mergeStreamed(parts, w, attempt);
+                if (m.failure() != null && m.failedAt() < failedAt) {
+                    failure = m.failure();
+                    failedAt = m.failedAt();
+                }
+                if (m.batch() != null) {
+                    long bytes = Batches.estimateBytes(m.batch()) + 8L * m.batch().rowCount();
+                    if (heldBytes + bytes > budget.limit() / 4 || !budget.tryReserve(bytes)) {
+                        if (!held.isEmpty()) {
+                            runs.add(writeRun(inPlaceOrder(held), runSchema));
+                            held.clear();
+                            release(heldBytes);
+                            heldBytes = 0;
+                        }
+                        runs.add(writeRun(m, runSchema));
+                    } else {
+                        reserved.addAndGet(bytes);
+                        held.add(m);
+                        heldBytes += bytes;
+                    }
+                }
+            } catch (OverBudget e) {
+                attempt.release();
+                if (!held.isEmpty()) {
+                    // The results in memory go to disk first, and the partition is merged again.
+                    runs.add(writeRun(inPlaceOrder(held), runSchema));
+                    held.clear();
+                    release(heldBytes);
+                    heldBytes = 0;
+                    again = true;
+                } else if ((long) w.count() * PARTITIONS > MAX_PARTITIONS) {
+                    throw new QueryException(label(), "Memory budget of " + budget.limit() + " bytes exceeded: "
+                            + (budget.used() + e.bytes) + " bytes needed after spilling "
+                            + context().spill().bytesWritten() + " bytes");
+                } else {
+                    REFINED.incrementAndGet();
+                    finer = refine(w);
+                }
+            } finally {
+                attempt.release();
+            }
+            if (again) {
+                work.addFirst(w);
+                continue;
+            }
+            for (SpillFile f : w.files()) {
+                f.close();
+            }
+            if (finer != null) {
+                for (int i = finer.size() - 1; i >= 0; i--) {
+                    work.addFirst(finer.get(i));
+                }
+            }
+        }
+        // The groups of the parts are merged; what they took goes to the merge of the results.
+        budget.release(reserved.getAndSet(heldBytes) - heldBytes);
+        if (failure != null) {
+            throw failure;
+        }
+        if (runs.isEmpty()) {
+            return held.isEmpty() ? new ArrayList<>()
+                    : new ArrayList<>(Batches.split(inPlaceOrder(held).batch(), batchSize));
+        }
+        if (!held.isEmpty()) {
+            runs.add(writeRun(inPlaceOrder(held), runSchema));
+            release(heldBytes);
+        }
+        results = new ExternalSort(label(), schema(), List.of(), budget, spill, context(), batchSize);
+        results.start(runs);
+        return new ArrayList<>();
+    }
+
+    /** Returns the results of partitions as one, in the order of the places of the first rows of their groups. */
+    private Merged inPlaceOrder(List<Merged> merged) {
+        if (merged.size() == 1) {
+            return merged.get(0);
+        }
+        List<Batch> batches = new ArrayList<>();
+        List<long[]> places = new ArrayList<>();
+        for (Merged m : merged) {
+            batches.add(m.batch());
+            places.add(m.places());
+        }
+        int[] order = mergeOrder(places);
+        long[] all = new long[order.length];
+        int at = 0;
+        for (long[] p : places) {
+            System.arraycopy(p, 0, all, at, p.length);
+            at += p.length;
+        }
+        long[] sorted = new long[order.length];
+        for (int i = 0; i < order.length; i++) {
+            sorted[i] = all[order[i]];
+        }
+        return new Merged(Batches.concat(schema(), batches).select(order), sorted, null, 0);
+    }
+
+    /** Writes the results of a partition with the places of the first rows of their groups. */
+    private ExternalSort.Run writeRun(Merged m, Schema runSchema) {
+        SpillFile file = newFile("groups", runSchema);
+        long batchBytes = 0;
+        int from = 0;
+        Batch all = m.batch();
+        int step = ExternalSort.runRows(Batches.estimateBytes(all), all.rowCount(), budget, batchSize);
+        for (Batch b : Batches.split(all, step)) {
+            int to = from + b.rowCount();
+            Batch withPlaces = ExternalSort.withPlaces(runSchema, b, Arrays.copyOfRange(m.places(), from, to));
+            batchBytes = Math.max(batchBytes, Batches.estimateBytes(withPlaces));
+            file.append(withPlaces);
+            from = to;
+        }
+        file.finish();
+        return new ExternalSort.Run(file, batchBytes);
+    }
+
+    /**
+     * Cuts a partition into {@value #PARTITIONS} smaller ones: the rows of
+     * its files, read in the order of their places, go to a new file for
+     * each smaller partition, in this order.
+     */
+    private List<Work> refine(Work w) {
+        int count = w.count() * PARTITIONS;
+        SpillFile[] finer = new SpillFile[PARTITIONS];
+        List<Cursor> cursors = new ArrayList<>();
+        for (SpillFile f : w.files()) {
+            Cursor c = new Cursor(f);
+            if (c.next()) {
+                cursors.add(c);
+            }
+        }
+        while (!cursors.isEmpty()) {
+            long[] least = least(cursors.size(), i -> cursors.get(i).places[cursors.get(i).at]);
+            int best = (int) least[0];
+            Cursor c = cursors.get(best);
+            int n = c.batch.rowCount();
+            int from = c.at;
+            int to = from + 1;
+            while (to < n && c.places[to] < least[1]) {
+                to++;
+            }
+            int[] sub = new int[to - from];
+            int[] counts = new int[PARTITIONS];
+            for (int r = from; r < to; r++) {
+                sub[r - from] = partition(c.hashes[r], count) - w.index() * PARTITIONS;
+                counts[sub[r - from]]++;
+            }
+            for (int s = 0; s < PARTITIONS; s++) {
+                if (counts[s] == 0) {
+                    continue;
+                }
+                int[] rows = new int[counts[s]];
+                for (int r = from, k = 0; r < to; r++) {
+                    if (sub[r - from] == s) {
+                        rows[k++] = r;
+                    }
+                }
+                if (finer[s] == null) {
+                    finer[s] = newFile("partition", rawSchema);
+                }
+                finer[s].append(counts[s] == n ? c.batch : c.batch.select(rows));
+            }
+            c.at = to;
+            if (to == n && !c.next()) {
+                cursors.remove(best);
+            }
+        }
+        List<Work> works = new ArrayList<>(PARTITIONS);
+        for (int s = 0; s < PARTITIONS; s++) {
+            works.add(new Work(w.index() * PARTITIONS + s, count, finer[s] == null ? List.of() : List.of(finer[s])));
+        }
+        return works;
+    }
+
+    /**
      * The groups of the rows of one worker, or of all rows, with the places
      * of their first rows; once grouping does not pay, its further rows as
      * they are, scattered into the partitions.
@@ -653,11 +1257,25 @@ final class HashAggregateOperator extends AbstractOperator {
         private int[] hashes = new int[0];
         private int[] partitionOf = new int[0];
         private int[] byPartition = new int[0];
+        /** Whether the part spills, see {@link #tryTake}, and whether it went over the budget. */
+        private final boolean spills;
+        private boolean pressured;
+        /**
+         * In a part that spills: the bytes taken for a batch before grouping
+         * it, those its groups use, and those of the rows kept.
+         */
+        private long taken;
+        private long used;
+        private long scatteredBytes;
+        private boolean overBudget;
+        /** The files of the rows kept as they are, per partition, once they go to disk. */
+        private SpillFile[] files;
 
         Partial(boolean alone) {
             this.alone = alone;
             this.table = keyColumns.length == 0 ? null : new GroupTable(keyColumnList);
-            this.states = newStates();
+            this.spills = table != null && spill != null && budget.limit() < Long.MAX_VALUE;
+            this.states = newStates(aggregate.aggregates(), inputSchema, this::reserveValue);
             boolean keepsPlaces = false;
             for (AggregateState state : states) {
                 keepsPlaces |= state.keepsPlaces();
@@ -688,10 +1306,20 @@ final class HashAggregateOperator extends AbstractOperator {
                 groupOf = noKeys;
             } else {
                 askKeys();
+                if (spills) {
+                    // At most every row is a new group; the half of the budget for the merge stays free.
+                    long worst = Batches.estimateBytes(b.project(keyColumnList)) + BYTES_PER_GROUP * n;
+                    if (!tryTake(worst)) {
+                        pressure();
+                        scatter(b, first);
+                        return;
+                    }
+                    taken = worst;
+                }
                 rowsSeen += n;
-                groupOf = table.groups(b, keys, stored -> reserve(Batches.estimateBytes(stored)));
+                groupOf = table.groups(b, keys, stored -> keep(Batches.estimateBytes(stored)));
                 if (table.size() > groups) {
-                    reserve(BYTES_PER_GROUP * (table.size() - groups));
+                    keep(BYTES_PER_GROUP * (table.size() - groups));
                     places = AggregateState.grow(places, table.size());
                     // New groups are numbered in the order of their first rows.
                     for (int r = 0, next = groups; next < table.size(); r++) {
@@ -700,6 +1328,9 @@ final class HashAggregateOperator extends AbstractOperator {
                         }
                     }
                     groups = table.size();
+                }
+                if (spills) {
+                    settle();
                 }
             }
             if (placed) {
@@ -717,19 +1348,77 @@ final class HashAggregateOperator extends AbstractOperator {
                     state.add(b, groupOf, n, groups);
                 }
             }
-            if (!alone && table != null && groups > nextCheck) {
+            if (overBudget) {
+                pressure();
+            }
+            if (!alone && table != null && groups > nextCheck && scattered == null) {
                 if (rowsSeen - checkedRows < (long) minRowsPerGroup * (groups - checkedGroups)) {
-                    scattered = new ArrayList<>();
-                    for (int p = 0; p < PARTITIONS; p++) {
-                        scattered.add(new ArrayList<>());
-                    }
-                    scatteredHashes = new int[PARTITIONS][16];
-                    scatteredPlaces = new long[PARTITIONS][16];
-                    scatteredRows = new int[PARTITIONS];
+                    startScattering();
                 }
                 checkedRows = rowsSeen;
                 checkedGroups = groups;
                 nextCheck = (int) Math.min(Integer.MAX_VALUE, 2L * groups);
+            }
+        }
+
+        private void startScattering() {
+            scattered = new ArrayList<>();
+            for (int p = 0; p < PARTITIONS; p++) {
+                scattered.add(new ArrayList<>());
+            }
+            scatteredHashes = new int[PARTITIONS][16];
+            scatteredPlaces = new long[PARTITIONS][16];
+            scatteredRows = new int[PARTITIONS];
+        }
+
+        /** The part went over the budget: it keeps its groups and scatters its further rows. */
+        private void pressure() {
+            pressured = true;
+            if (scattered == null) {
+                startScattering();
+            }
+        }
+
+        /** Takes bytes for the groups of a batch, at once or, in a part that spills, once they are grouped. */
+        private void keep(long bytes) {
+            if (spills) {
+                used += bytes;
+            } else {
+                reserve(bytes);
+            }
+        }
+
+        /** Gives back what the part took for a batch beyond what its groups use, or takes what they use beyond. */
+        private void settle() {
+            if (used < taken) {
+                release(taken - used);
+            } else {
+                take(used - taken);
+            }
+            taken = 0;
+            used = 0;
+        }
+
+        /** Takes the bytes of the values that the accumulators of the part keep. */
+        private void reserveValue(long bytes) {
+            if (!spills) {
+                reserve(bytes);
+            } else {
+                take(bytes);
+            }
+        }
+
+        /**
+         * Takes bytes of memory the part holds already, such as the values of
+         * accumulators; if they do not fit, they are taken anyway and the part
+         * scatters the rows of the next batches, so that it goes beyond the
+         * budget by the values of a batch at most.
+         */
+        private void take(long bytes) {
+            if (bytes > 0 && !tryTake(bytes)) {
+                budget.reserveAnyway(bytes);
+                reserved.addAndGet(bytes);
+                overBudget = true;
             }
         }
 
@@ -773,15 +1462,49 @@ final class HashAggregateOperator extends AbstractOperator {
             }
             Batch columns = b.project(scatteredColumns);
             long bytes = 0;
+            int[][] owns = new int[PARTITIONS][];
+            Batch[] rowsOf = new Batch[PARTITIONS];
             for (int p = 0; p < PARTITIONS; p++) {
                 int count = start[p + 1] - start[p];
                 if (count == 0) {
                     continue;
                 }
-                int[] own = Arrays.copyOfRange(byPartition, start[p], start[p + 1]);
-                Batch rows = count == n ? columns : columns.select(own);
-                bytes += Batches.estimateBytes(rows) + 12L * count;
-                scattered.get(p).add(rows);
+                owns[p] = Arrays.copyOfRange(byPartition, start[p], start[p + 1]);
+                rowsOf[p] = count == n ? columns : columns.select(owns[p]);
+                bytes += Batches.estimateBytes(rowsOf[p]) + 12L * count;
+            }
+            rawRows += n;
+            if (spills && !tryTake(bytes)) {
+                // The rows kept go to disk first, so that the rows of each file stay in the order of their places.
+                pressured = true;
+                flush();
+                for (int p = 0; p < PARTITIONS; p++) {
+                    if (rowsOf[p] == null) {
+                        continue;
+                    }
+                    int[] own = owns[p];
+                    int[] h = new int[own.length];
+                    long[] at = new long[own.length];
+                    for (int i = 0; i < own.length; i++) {
+                        h[i] = hashes[own[i]];
+                        at[i] = first + own[i];
+                    }
+                    file(p).append(withHashesAndPlaces(rowsOf[p], h, at));
+                }
+                return;
+            }
+            if (spills) {
+                scatteredBytes += bytes;
+            } else {
+                reserve(bytes);
+            }
+            for (int p = 0; p < PARTITIONS; p++) {
+                if (rowsOf[p] == null) {
+                    continue;
+                }
+                int[] own = owns[p];
+                int count = own.length;
+                scattered.get(p).add(rowsOf[p]);
                 int at = scatteredRows[p];
                 if (scatteredHashes[p].length < at + count) {
                     int size = Math.max(at + count, scatteredHashes[p].length * 2);
@@ -796,8 +1519,63 @@ final class HashAggregateOperator extends AbstractOperator {
                 }
                 scatteredRows[p] = at + count;
             }
-            reserve(bytes);
-            rawRows += n;
+        }
+
+        /** Returns the file of the rows of a partition, created when the first of them goes to disk. */
+        private SpillFile file(int partition) {
+            if (files == null) {
+                files = new SpillFile[PARTITIONS];
+            }
+            if (files[partition] == null) {
+                files[partition] = newFile("partition-" + partition, rawSchema);
+            }
+            return files[partition];
+        }
+
+        /** Writes the rows kept as they are in memory to the files of their partitions and gives their bytes back. */
+        void flush() {
+            if (scattered == null) {
+                return;
+            }
+            for (int p = 0; p < PARTITIONS; p++) {
+                int at = 0;
+                for (Batch rows : scattered.get(p)) {
+                    int count = rows.rowCount();
+                    file(p).append(withHashesAndPlaces(rows, Arrays.copyOfRange(scatteredHashes[p], at, at + count),
+                            Arrays.copyOfRange(scatteredPlaces[p], at, at + count)));
+                    at += count;
+                }
+                scattered.get(p).clear();
+                scatteredRows[p] = 0;
+            }
+            release(scatteredBytes);
+            scatteredBytes = 0;
+        }
+
+        /**
+         * Returns what the part holds of a partition of the rows that went
+         * to disk: the groups whose hashes fall into it, their keys reserved
+         * for the merge.
+         */
+        Source source(Work w, Attempt attempt) {
+            int[] own = new int[16];
+            int count = 0;
+            for (int g = 0; g < groups; g++) {
+                if (partition(table.hash(g), w.count()) == w.index()) {
+                    own = count == own.length ? Arrays.copyOf(own, count * 2) : own;
+                    own[count++] = g;
+                }
+            }
+            own = Arrays.copyOf(own, count);
+            Batch keysOf = count == 0 ? Batch.empty(inputSchema.select(keyColumnList)) : table.keys(own);
+            attempt.accept(Batches.estimateBytes(keysOf));
+            int[] hashesOf = new int[count];
+            long[] at = new long[count];
+            for (int i = 0; i < count; i++) {
+                hashesOf[i] = table.hash(own[i]);
+                at[i] = places[own[i]];
+            }
+            return new Source(this, keysOf, own, hashesOf, at);
         }
 
         /** Divides the groups and the rows of the part into partitions by the hashes of their keys. */
@@ -849,20 +1627,22 @@ final class HashAggregateOperator extends AbstractOperator {
     }
 
     /** The state of an aggregate as one accumulator object per group. */
-    private final class Accumulators extends AggregateState {
+    private static final class Accumulators extends AggregateState {
         private final AggregateCall call;
         private final Schema schema;
+        private final LongConsumer reserve;
         private final List<ValueAccumulator> groups = new ArrayList<>();
         private Vector.Builder out;
 
-        Accumulators(AggregateCall call, Schema schema) {
+        Accumulators(AggregateCall call, Schema schema, LongConsumer reserve) {
             this.call = call;
             this.schema = schema;
+            this.reserve = reserve;
         }
 
         private void grow(int n) {
             while (groups.size() < n) {
-                groups.add(new ValueAccumulator(call, schema, HashAggregateOperator.this::reserve));
+                groups.add(new ValueAccumulator(call, schema, reserve));
             }
         }
 
@@ -880,7 +1660,12 @@ final class HashAggregateOperator extends AbstractOperator {
             grow(group + 1);
             // The one group of an aggregation without keys has no accumulator until a row comes.
             if (otherGroup < o.groups.size()) {
-                groups.get(group).merge(o.groups.get(otherGroup));
+                // Only the part that takes all rows combines aggregates that do not merge, into new groups.
+                if (ValueAccumulator.mergeable(call)) {
+                    groups.get(group).merge(o.groups.get(otherGroup));
+                } else {
+                    groups.get(group).copyOf(o.groups.get(otherGroup));
+                }
             }
         }
 
@@ -928,7 +1713,22 @@ final class HashAggregateOperator extends AbstractOperator {
 
     @Override
     public void close() {
-        input.close();
-        budget.release(reserved.getAndSet(0));
+        try {
+            input.close();
+        } finally {
+            try {
+                if (results != null) {
+                    results.close();
+                }
+                synchronized (files) {
+                    for (SpillFile f : files) {
+                        f.close();
+                    }
+                    files.clear();
+                }
+            } finally {
+                budget.release(reserved.getAndSet(0));
+            }
+        }
     }
 }

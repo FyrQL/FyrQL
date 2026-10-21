@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.IntFunction;
 import java.util.stream.IntStream;
 
 /**
@@ -60,7 +61,7 @@ import java.util.stream.IntStream;
  * <p>
  * On more than one thread, the input is sorted on several threads, see
  * {@link RowOrder#sort(Runnable, int)}, over a segment the workers keep its
- * batches in the order of the morsels, see {@link Materialize}, and the
+ * batches, see {@link SortSink}, and the
  * partitions are computed in ranges of about equal numbers of rows, one
  * task each, see {@link Workers#run}; each call writes the results of a
  * partition to the places of its rows, so that they do not depend on the
@@ -68,6 +69,12 @@ import java.util.stream.IntStream;
  * each in theirs, so that the failure is the one of one thread.
  * <p>
  * The budget takes the input, the results and the nodes of the trees.
+ * <p>
+ * With a directory to spill to, the input that does not fit in the budget
+ * is sorted as a sort over the budget sorts it, see {@link ExternalSort},
+ * and the rows are then computed as they come, a few whole partitions at a
+ * time, each with the rows of its partitions reserved; a partition that
+ * does not fit fails the query. The results are the same.
  */
 final class WindowOperator extends AbstractOperator {
 
@@ -90,8 +97,14 @@ final class WindowOperator extends AbstractOperator {
     private final Schema inputSchema;
     private final boolean trees;
     private final int threads;
+    private final SpillDirectory spill;
     private List<Batch> output;
     private final AtomicLong reserved = new AtomicLong();
+    /** Once the input went to disk: its rows in order, and those of the partition read last, not yet computed. */
+    private ExternalSort external;
+    private final List<SortSink> sinks = new ArrayList<>();
+    private final List<Batch> pending = new ArrayList<>();
+    private long pendingBytes;
 
     // The sorted input and the peers of each of its rows, while the calls are computed.
     private Batch rows;
@@ -113,7 +126,16 @@ final class WindowOperator extends AbstractOperator {
      */
     WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget, int batchSize,
             int threads) {
-        this(label, window, input, budget, batchSize, true, threads);
+        this(label, window, input, budget, batchSize, true, threads, null);
+    }
+
+    /**
+     * @param threads the most threads that sort the input and compute the partitions
+     * @param spill   the directory to spill to when the budget is exhausted, or {@code null} to fail then
+     */
+    WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget, int batchSize,
+            int threads, SpillDirectory spill) {
+        this(label, window, input, budget, batchSize, true, threads, spill);
     }
 
     /**
@@ -122,11 +144,11 @@ final class WindowOperator extends AbstractOperator {
      */
     WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget, int batchSize,
             boolean trees) {
-        this(label, window, input, budget, batchSize, trees, 1);
+        this(label, window, input, budget, batchSize, trees, 1, null);
     }
 
     private WindowOperator(String label, PlanNode.Window window, Operator input, MemoryBudget budget,
-            int batchSize, boolean trees, int threads) {
+            int batchSize, boolean trees, int threads, SpillDirectory spill) {
         super(label, window.schema());
         this.window = window;
         this.input = input;
@@ -135,6 +157,7 @@ final class WindowOperator extends AbstractOperator {
         this.inputSchema = window.input().schema();
         this.trees = trees;
         this.threads = threads;
+        this.spill = spill;
     }
 
     @Override
@@ -142,22 +165,151 @@ final class WindowOperator extends AbstractOperator {
         if (output == null) {
             output = computeAll();
         }
+        while (output.isEmpty() && external != null) {
+            computeSpilled();
+        }
         return output.isEmpty() ? null : output.remove(0);
     }
 
-    private List<Batch> computeAll() {
-        List<Batch> batches = Materialize.read(input, label(), budget, reserved);
-        if (batches.isEmpty()) {
-            return new ArrayList<>();
-        }
-        Batch all = Batches.concat(inputSchema, batches);
-        batches.clear();
+    /** Returns the sort keys of the input: the partition, then the order. */
+    private List<SortKey> keys() {
         List<SortKey> keys = new ArrayList<>();
         for (int c : window.partition()) {
             keys.add(SortKey.asc(c));
         }
         keys.addAll(window.order());
-        rows = all.select(new RowOrder(all, keys).sort(this::checkCancelled, threads));
+        return keys;
+    }
+
+    private List<Batch> computeAll() {
+        List<SortKey> keys = keys();
+        IntFunction<SortSink> sink = workers -> {
+            SortSink s = new SortSink(label(), inputSchema, keys, budget, reserved, spill, context(), batchSize,
+                    workers == 1 ? threads : 1);
+            sinks.add(s);
+            return s;
+        };
+        List<SortSink> read;
+        if (input instanceof ParallelSegment segment) {
+            read = segment.drain(sink);
+        } else {
+            SortSink s = sink.apply(1);
+            for (Batch b = input.next(); b != null; b = input.next()) {
+                s.accept(0, b);
+            }
+            read = List.of(s);
+        }
+        boolean spilled = false;
+        for (SortSink s : read) {
+            spilled |= s.spilled();
+        }
+        if (spilled) {
+            List<ExternalSort.Run> runs = new ArrayList<>();
+            for (SortSink s : read) {
+                s.spillKept(threads);
+                runs.addAll(s.runs());
+            }
+            // Rows come in batches whose peers and results take at most a quarter of the budget.
+            long perRow = BYTES_PER_ROW + BYTES_PER_RESULT * window.calls().size() + BYTES_PER_NODE;
+            int rows = (int) Math.max(1, Math.min(batchSize, budget.limit() / 4 / perRow));
+            external = new ExternalSort(label(), inputSchema, keys, budget, spill, context(), rows);
+            external.start(runs);
+            return new ArrayList<>();
+        }
+        List<Batch> batches = SortSink.inOrder(read);
+        if (batches.isEmpty()) {
+            return new ArrayList<>();
+        }
+        Batch all = Batches.concat(inputSchema, batches);
+        batches.clear();
+        return computeSorted(all.select(new RowOrder(all, keys).sort(this::checkCancelled, threads)), keys);
+    }
+
+    /**
+     * Reads the sorted rows of the input that went to disk up to the end of
+     * a partition and computes the partitions read; the rows of the
+     * partition read last wait for the next call, unless the input ended.
+     */
+    private void computeSpilled() {
+        List<SortKey> keys = keys();
+        List<SortKey> partition = keys.subList(0, window.partition().size());
+        while (true) {
+            Batch b = external.next();
+            if (b == null) {
+                if (!pending.isEmpty()) {
+                    computePending(new ArrayList<>(pending), keys);
+                    pending.clear();
+                }
+                external.close();
+                external = null;
+                return;
+            }
+            // The first row of the last partition of the batch, 0 if the whole batch is of one partition.
+            Vector[] of = RowOrder.columns(b, partition);
+            int last = b.rowCount() - 1;
+            int from = last;
+            while (from > 0 && RowOrder.compare(partition, of, from - 1, of, last) == 0) {
+                from--;
+            }
+            boolean continues = true;
+            if (from == 0 && !pending.isEmpty()) {
+                Batch p = pending.get(pending.size() - 1);
+                continues = RowOrder.compare(partition, RowOrder.columns(p, partition), p.rowCount() - 1, of, 0)
+                        == 0;
+            }
+            if (from == 0 && continues) {
+                hold(b);
+                continue;
+            }
+            List<Batch> done = new ArrayList<>(pending);
+            if (from > 0) {
+                done.add(b.select(range(0, from)));
+            }
+            long bytes = pendingBytes;
+            pending.clear();
+            pendingBytes = 0;
+            hold(from == 0 ? b : b.select(range(from, b.rowCount())));
+            computePending(done, keys);
+            budget.release(bytes);
+            reserved.addAndGet(-bytes);
+            return;
+        }
+    }
+
+    private static int[] range(int from, int to) {
+        int[] rows = new int[to - from];
+        for (int i = 0; i < rows.length; i++) {
+            rows[i] = from + i;
+        }
+        return rows;
+    }
+
+    /** Keeps rows of a partition not yet complete, reserved in the budget. */
+    private void hold(Batch b) {
+        long bytes = Batches.estimateBytes(b);
+        if (!budget.tryReserve(bytes)) {
+            throw overBudget(bytes);
+        }
+        reserved.addAndGet(bytes);
+        pendingBytes += bytes;
+        pending.add(b);
+    }
+
+    /** Computes whole partitions of sorted rows and gives back what they took in the budget. */
+    private void computePending(List<Batch> done, List<SortKey> keys) {
+        long before = reserved.get();
+        try {
+            output.addAll(computeSorted(Batches.concat(inputSchema, done), keys));
+        } finally {
+            long taken = reserved.get() - before;
+            budget.release(taken);
+            reserved.addAndGet(-taken);
+        }
+    }
+
+    /** Computes the calls over rows sorted by the keys, whole partitions of them. */
+    private List<Batch> computeSorted(Batch sorted, List<SortKey> keys) {
+        rows = sorted;
         int n = rows.rowCount();
         reserve((BYTES_PER_ROW + BYTES_PER_RESULT * window.calls().size()) * n);
         peerStart = new int[n];
@@ -260,8 +412,18 @@ final class WindowOperator extends AbstractOperator {
     }
 
     private void reserve(long bytes) {
-        budget.reserve(bytes, label());
+        if (external == null) {
+            budget.reserve(bytes, label());
+        } else if (!budget.tryReserve(bytes)) {
+            throw overBudget(bytes);
+        }
         reserved.addAndGet(bytes);
+    }
+
+    private QueryException overBudget(long bytes) {
+        return new QueryException(label(), "Memory budget of " + budget.limit() + " bytes exceeded: "
+                + (budget.used() + bytes) + " bytes needed after spilling " + context().spill().bytesWritten()
+                + " bytes");
     }
 
     /**
@@ -791,7 +953,21 @@ final class WindowOperator extends AbstractOperator {
 
     @Override
     public void close() {
-        input.close();
-        budget.release(reserved.getAndSet(0));
+        try {
+            input.close();
+        } finally {
+            try {
+                if (external != null) {
+                    external.close();
+                }
+                for (SortSink s : sinks) {
+                    s.close();
+                }
+                sinks.clear();
+                pending.clear();
+            } finally {
+                budget.release(reserved.getAndSet(0));
+            }
+        }
     }
 }

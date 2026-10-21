@@ -28,6 +28,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -118,9 +119,11 @@ class FyrQLConfigTest {
     @Test
     void aFileAloneBuildsAnEngineThatJoinsCsvJsonAndADatabase() throws IOException {
         Path file = config("defaultSource: shop\nbatchSize: 2\nmemoryBudget: 64MiB\ncodegen: off\npushdown: true\n"
-                + "threads: 3\npreserveOrder: false\n");
+                + "threads: 3\npreserveOrder: false\nspill: on\nspillDirectory: spill\n");
         try (FyrQL engine = FyrQLConfig.open(file)) {
             assertEquals(List.of("shop", "files", "docs", "iceberg", "parquet"), engine.sources());
+            assertEquals(Optional.of(file.getParent().resolve("spill")), engine.spillDirectory(),
+                    "a relative directory lies next to the file");
             assertTrue(engine.pushdown());
             assertEquals(3, engine.threads());
             assertFalse(engine.preserveOrder());
@@ -148,8 +151,9 @@ class FyrQLConfigTest {
 
     @Test
     void withoutPushdownTheDatabaseOnlyReadsColumns() throws IOException {
-        try (FyrQL engine = FyrQLConfig.open(config("defaultSource: shop\npushdown: off\n"))) {
+        try (FyrQL engine = FyrQLConfig.open(config("defaultSource: shop\npushdown: off\nspill: false\n"))) {
             assertFalse(engine.pushdown());
+            assertEquals(Optional.empty(), engine.spillDirectory());
             assertTrue(engine.preserveOrder());
             assertEquals(3, engine.rows(QUERY).size());
             List<String> statements = ((JdbcConnector) engine.connector("shop")).statements();
@@ -178,7 +182,8 @@ class FyrQLConfigTest {
         Path typo = config("batchsize: 2\n");
         assertTrue(assertThrows(ConfigException.class, () -> FyrQLConfig.open(typo)).getMessage().startsWith(
                 typo + ": The engine has an unknown option batchsize; known are defaultSource, defaultSchema,"
-                        + " batchSize, memoryBudget, codegen, codegenThreshold, pushdown, threads,"
+                        + " batchSize, memoryBudget, spill, spillDirectory, codegen, codegenThreshold, pushdown,"
+                        + " threads,"
                         + " preserveOrder, implicitSources"));
         Files.delete(dir.resolve("products.json"));
         Path missing = config("{}");

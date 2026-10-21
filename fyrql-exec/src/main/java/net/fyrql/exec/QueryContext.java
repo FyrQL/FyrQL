@@ -15,6 +15,7 @@ import net.fyrql.connector.BatchReader;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * The state of one running query that another thread may cancel. Once
@@ -24,6 +25,9 @@ import java.util.List;
  * the readers of the sources that the query registered are asked to stop
  * at once, see {@link BatchReader#cancel()}, so that a query that waits on
  * a remote source ends too. Canceling is final: the first reason stays.
+ * <p>
+ * The context also counts what the operators of the query spill to disk,
+ * see {@link #spill()}.
  */
 public final class QueryContext {
 
@@ -52,6 +56,9 @@ public final class QueryContext {
     private final boolean cancellable;
     private final List<BatchReader> readers = new ArrayList<>();
     private volatile Reason reason;
+    private final LongAdder spilledParts = new LongAdder();
+    private final LongAdder spilledBytes = new LongAdder();
+    private final LongAdder readBytes = new LongAdder();
 
     /** A context that is not canceled yet. */
     public QueryContext() {
@@ -126,6 +133,25 @@ public final class QueryContext {
             }
         }
         stop(reader);
+    }
+
+    /** Counts a part that an operator of the query spilled to disk, with its bytes. */
+    void spilled(long bytes) {
+        spilledParts.increment();
+        spilledBytes.add(bytes);
+    }
+
+    /** Counts bytes that an operator of the query read back from disk. */
+    void readBack(long bytes) {
+        readBytes.add(bytes);
+    }
+
+    /**
+     * Returns what the operators of the query have spilled to disk so far
+     * and read back; all zero if they spilled nothing.
+     */
+    public SpillStatistics spill() {
+        return new SpillStatistics(spilledParts.sum(), spilledBytes.sum(), readBytes.sum());
     }
 
     private static void stop(BatchReader reader) {

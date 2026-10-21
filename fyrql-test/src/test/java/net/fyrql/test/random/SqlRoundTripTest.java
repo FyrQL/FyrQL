@@ -42,8 +42,9 @@ class SqlRoundTripTest {
                 Outcome bound = engines.sql(engines.render(plan), ordered, ULPS);
                 run.record(i, "bound from SQL", bound, () -> shrink(engines, run, plan, bound, true));
             }
-            System.out.println(run.report() + "  " + engines.codegen());
+            System.out.println(run.report() + "  " + engines.codegen() + "  " + engines.spill());
             assertTrue(run.unexplained().isEmpty(), run.report());
+            assertTrue(engines.spillStatistics().parts() > 0, "no query spilled: " + engines.spill());
         }
     }
 

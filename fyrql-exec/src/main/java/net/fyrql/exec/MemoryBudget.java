@@ -12,9 +12,11 @@
 package net.fyrql.exec;
 
 /**
- * The memory a query may hold in its pipeline breakers (join build sides,
- * aggregation state, sorted input). Until there is spilling, a query that
- * exceeds the budget fails instead of filling the heap.
+ * The memory the queries of an engine may hold in their pipeline breakers
+ * (join build sides, aggregation state, sorted input). An operator that can
+ * spill to disk asks with {@link #tryReserve} and spills when the budget is
+ * exhausted; the others take with {@link #reserve}, and their query fails
+ * instead of filling the heap.
  */
 public final class MemoryBudget {
 
@@ -46,6 +48,34 @@ public final class MemoryBudget {
         if (limit - used < bytes) {
             throw new QueryException(operator, "Memory budget of " + limit + " bytes exceeded: " + (used + bytes)
                     + " bytes needed");
+        }
+        used += bytes;
+    }
+
+    /**
+     * Takes bytes from the budget if they are left, for an operator that
+     * spills to disk when they are not.
+     *
+     * @return whether the bytes were taken
+     */
+    public synchronized boolean tryReserve(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException("bytes: " + bytes);
+        }
+        if (limit - used < bytes) {
+            return false;
+        }
+        used += bytes;
+        return true;
+    }
+
+    /**
+     * Takes bytes from the budget even beyond its limit, for memory an
+     * operator holds already; until enough is given back, reservations fail.
+     */
+    public synchronized void reserveAnyway(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException("bytes: " + bytes);
         }
         used += bytes;
     }

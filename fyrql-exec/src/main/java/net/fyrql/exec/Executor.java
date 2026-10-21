@@ -62,14 +62,17 @@ public final class Executor {
     private final Codegen codegen;
     private final int threads;
     private final boolean preserveOrder;
+    private final SpillDirectory spill;
 
     /**
      * @param threads       the most threads on which one query runs at a time
      * @param preserveOrder whether rows that no sort orders come in the order of the parts of their scans, as
      *                      on one thread
+     * @param spill         the directory to which operators spill when the budget is exhausted, or
+     *                      {@code null} if they fail instead
      */
     public Executor(TableSource source, MemoryBudget budget, int batchSize, Codegen codegen, int threads,
-            boolean preserveOrder) {
+            boolean preserveOrder, SpillDirectory spill) {
         if (threads < 1) {
             throw new IllegalArgumentException("threads: " + threads);
         }
@@ -79,6 +82,19 @@ public final class Executor {
         this.codegen = codegen;
         this.threads = threads;
         this.preserveOrder = preserveOrder;
+        this.spill = spill;
+    }
+
+    /**
+     * An executor whose operators do not spill.
+     *
+     * @param threads       the most threads on which one query runs at a time
+     * @param preserveOrder whether rows that no sort orders come in the order of the parts of their scans, as
+     *                      on one thread
+     */
+    public Executor(TableSource source, MemoryBudget budget, int batchSize, Codegen codegen, int threads,
+            boolean preserveOrder) {
+        this(source, budget, batchSize, codegen, threads, preserveOrder, null);
     }
 
     /** An executor that runs a query on one thread. */
@@ -118,6 +134,11 @@ public final class Executor {
     /** Tells whether rows that no sort orders come in the order of the parts of their scans. */
     public boolean preserveOrder() {
         return preserveOrder;
+    }
+
+    /** Returns the directory to which operators spill, or {@code null} if they do not spill. */
+    public SpillDirectory spillDirectory() {
+        return spill;
     }
 
     /**
@@ -303,9 +324,9 @@ public final class Executor {
                         ? new HashJoinOperator(label, j, open(j.left()), tables.get(j), codegen)
                         : new HashJoinOperator(label, j, open(j.left()), open(j.right()), budget, codegen);
                 case PlanNode.Aggregate a -> new HashAggregateOperator(label, a, open(a.input()), budget, batchSize,
-                        codegen, threads, !unordered.contains(a));
+                        codegen, threads, !unordered.contains(a), spill);
                 case PlanNode.Sort s -> new SortOperator(label, s, open(s.input()), budget, batchSize,
-                        threads);
+                        threads, spill);
                 case PlanNode.Limit l -> new LimitOperator(label, l, open(l.input()));
                 case PlanNode.Union u -> {
                     List<Operator> inputs = new ArrayList<>();
@@ -316,7 +337,7 @@ public final class Executor {
                 }
                 case PlanNode.Unnest u -> new UnnestOperator(label, u, open(u.input()), batchSize);
                 case PlanNode.Window w -> new WindowOperator(label, w, open(w.input()), budget,
-                        batchSize, threads);
+                        batchSize, threads, spill);
                 case PlanNode.Values v -> new ValuesOperator(label, v, batchSize);
                 case PlanNode.SetOperation s -> new SetOperationOperator(label, s, open(s.left()),
                         open(s.right()), budget, batchSize);

@@ -11,6 +11,7 @@
 
 package net.fyrql.exec;
 
+import net.fyrql.connector.Batches;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
@@ -145,6 +146,21 @@ final class GroupTable {
             columns.add(keys(k));
         }
         return new Batch(keyBatches.get(0).schema(), size, columns);
+    }
+
+    /**
+     * Returns the keys of some groups, the key columns only, in the order
+     * given; there must be at least one group.
+     */
+    Batch keys(int[] groups) {
+        int n = groups.length;
+        int[] partOf = new int[n];
+        int[] rowOf = new int[n];
+        for (int i = 0; i < n; i++) {
+            partOf[i] = groupBatch[groups[i]];
+            rowOf[i] = groupRow[groups[i]];
+        }
+        return Batches.gather(keyBatches.get(0).schema(), keyBatches, partOf, rowOf, 0, n);
     }
 
     /** Returns the hash of the key of a group. */

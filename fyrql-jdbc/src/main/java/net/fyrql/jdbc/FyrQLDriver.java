@@ -42,8 +42,9 @@ import java.util.logging.Logger;
  * {@code CREATE TABLE memory.t AS ...} keeps a table for as long as the
  * connection.</li>
  * <li>{@code defaultSource}, {@code defaultSchema}, {@code batchSize},
- * {@code memoryBudget}, {@code codegen}, {@code codegenThreshold},
- * {@code pushdown}, {@code threads} and {@code preserveOrder} are the
+ * {@code memoryBudget}, {@code spill}, {@code spillDirectory},
+ * {@code codegen}, {@code codegenThreshold}, {@code pushdown},
+ * {@code threads}, {@code preserveOrder} and {@code timeZone} are the
  * settings of the engine, as the configuration
  * file takes them, over whose settings they win.</li>
  * </ul>

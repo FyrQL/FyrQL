@@ -68,6 +68,23 @@ public final class Batches {
         return new Batch(schema, rows, columns);
     }
 
+    /**
+     * Gathers rows of several batches of one schema into one batch: row
+     * {@code i} of the result is row {@code rowOf[from + i]} of the batch
+     * {@code partOf[from + i]}, up to {@code to}; nothing is boxed.
+     */
+    public static Batch gather(Schema schema, List<Batch> parts, int[] partOf, int[] rowOf, int from, int to) {
+        List<Vector> columns = new ArrayList<>(schema.size());
+        for (int c = 0; c < schema.size(); c++) {
+            List<Vector> vectors = new ArrayList<>(parts.size());
+            for (Batch b : parts) {
+                vectors.add(b.column(c));
+            }
+            columns.add(Vectors.gather(schema.type(c), vectors, partOf, rowOf, from, to));
+        }
+        return new Batch(schema, to - from, columns);
+    }
+
     /** Splits a batch into batches of at most the given size. */
     public static List<Batch> split(Batch batch, int size) {
         if (batch.rowCount() <= size) {
