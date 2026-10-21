@@ -60,6 +60,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -271,6 +274,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     private final BufferAllocator allocator;
     private final int maxQueries;
     private final Semaphore queries;
+    /** Held for reading while a call holds buffers of the allocator, for writing once the server stopped. */
+    private final ReadWriteLock buffers = new ReentrantReadWriteLock();
     private final Handles<Statement> statements;
     private final Handles<Prepared> prepared;
     private final ScheduledExecutorService expiry;
@@ -310,6 +315,22 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     /** Returns the number of queries that run. */
     int runningQueries() {
         return maxQueries - queries.availablePermits();
+    }
+
+    /**
+     * Waits until no call holds buffers of the allocator, at most a time in
+     * milliseconds: a call may still free its buffers when its client has
+     * read the last of them and the server has stopped.
+     *
+     * @return whether no call holds buffers any more
+     */
+    boolean awaitBuffers(long millis) throws InterruptedException {
+        Lock all = buffers.writeLock();
+        if (!all.tryLock(millis, TimeUnit.MILLISECONDS)) {
+            return false;
+        }
+        all.unlock();
+        return true;
     }
 
     /** Returns the number of statements and prepared statements the server holds handles for. */
@@ -388,9 +409,12 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     /** Answers a put with one message and completes it. */
     private void complete(StreamListener<PutResult> ackStream, Message message) {
         byte[] result = message.toByteArray();
+        buffers.readLock().lock();
         try (ArrowBuf buffer = allocator.buffer(result.length)) {
             buffer.writeBytes(result);
             ackStream.onNext(PutResult.metadata(buffer));
+        } finally {
+            buffers.readLock().unlock();
         }
         ackStream.onCompleted();
     }
@@ -434,6 +458,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
         QueryContext context = new QueryContext();
         s.runs.add(context);
+        buffers.readLock().lock();
         try {
             Backpressure ready = new Backpressure(listener, context);
             if (s.cancelled) {
@@ -462,6 +487,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                 listener.error(FlightErrors.of(e));
             }
         } finally {
+            buffers.readLock().unlock();
             s.runs.remove(context);
             queries.release();
         }
@@ -720,10 +746,13 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
 
     private void send(org.apache.arrow.vector.types.pojo.Schema schema, ServerStreamListener listener,
             Supplier<List<Object[]>> rows) {
+        buffers.readLock().lock();
         try {
             Metadata.send(schema, rows.get(), allocator, listener);
         } catch (RuntimeException e) {
             listener.error(FlightErrors.of(e));
+        } finally {
+            buffers.readLock().unlock();
         }
     }
 

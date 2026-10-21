@@ -45,6 +45,9 @@ public final class FlightSqlServer implements AutoCloseable {
     /** The version of Arrow the server was built with. */
     public static final String ARROW_VERSION;
 
+    /** How long closing waits for the calls that ended to give back their buffers. */
+    private static final long CLOSE_MILLIS = 3000;
+
     static {
         Properties p = new Properties();
         try (InputStream in = FlightSqlServer.class.getResourceAsStream("server.properties")) {
@@ -170,14 +173,17 @@ public final class FlightSqlServer implements AutoCloseable {
     }
 
     /**
-     * Stops the server: it takes no new calls and ends those that run; the
-     * engine stays open. A thread interrupted while it waits for the calls
-     * keeps its interrupt status.
+     * Stops the server: it takes no new calls, ends those that run and waits
+     * at most {@value #CLOSE_MILLIS} ms for them to give back their buffers,
+     * which a call may still hold when its client has read its last batch;
+     * the engine stays open. A thread interrupted while it waits for the
+     * calls keeps its interrupt status.
      */
     @Override
     public void close() {
         try {
             server.close();
+            producer.awaitBuffers(CLOSE_MILLIS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
