@@ -11,6 +11,7 @@
 
 package net.fyrql.test;
 
+import net.fyrql.connector.iceberg.IcebergTestTables;
 import net.fyrql.connector.odata.FakeODataServer;
 import net.fyrql.connector.odata.ODataVersion;
 import net.fyrql.connector.s3.FakeS3Server;
@@ -41,6 +42,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -110,6 +112,17 @@ class ShadedJdbcDriverTest {
                     + path(data.resolve("items.parquet")) + "' (FORMAT parquet)");
         }
         s3.put("lake", "items/items.parquet", Files.readAllBytes(data.resolve("items.parquet")));
+        // An Iceberg table with a deletion vector, local and in S3, read without a source in the configuration.
+        Path ice = IcebergTestTables.shared().copy("dv_v3", dir.resolve("ice"));
+        try (Stream<Path> files = Files.walk(ice)) {
+            for (Path f : files.filter(Files::isRegularFile).toList()) {
+                StringBuilder key = new StringBuilder("ice");
+                for (Path part : ice.relativize(f)) {
+                    key.append('/').append(part);
+                }
+                s3.put("lake", key.toString(), Files.readAllBytes(f));
+            }
+        }
         String h2 = "jdbc:h2:file:" + path(dir.resolve("countries"));
         try (Connection c = DriverManager.getConnection(h2); Statement s = c.createStatement()) {
             s.execute("CREATE TABLE \"countries\" (\"code\" VARCHAR(2), \"name\" VARCHAR(20))");
@@ -171,7 +184,7 @@ class ShadedJdbcDriverTest {
                         catalogs.add(rs.getString(1));
                     }
                 }
-                assertEquals(List.of("files", "docs", "pq", "db", "erp", "s3"), catalogs);
+                assertEquals(List.of("files", "docs", "pq", "db", "erp", "s3", "iceberg"), catalogs);
                 try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery(sql)) {
                     assertTrue(rs.next());
                     assertEquals("Ann", rs.getString(1));
@@ -219,6 +232,14 @@ class ShadedJdbcDriverTest {
                             + " 's3://lake/out/orders.parquet'"));
                 }
                 assertTrue(s3.keys("lake").contains("out/orders.parquet"), s3.keys("lake").toString());
+                for (String table : List.of(path(ice), "s3://lake/ice")) {
+                    try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery("SELECT count(*), sum(id)"
+                            + " FROM iceberg_scan('" + table + "')")) {
+                        assertTrue(rs.next());
+                        assertEquals(8, rs.getLong(1), table);
+                        assertEquals(36, rs.getLong(2), table);
+                    }
+                }
                 SQLException e = assertThrows(SQLException.class,
                         () -> c.createStatement().executeQuery("SELECT * FROM nowhere"));
                 assertEquals("42P01", e.getSQLState(), e.getMessage());
@@ -253,7 +274,8 @@ class ShadedJdbcDriverTest {
                     "net.fyrql.connector.odata.ODataConnectorFactory",
                     "net.fyrql.connector.jdbc.JdbcConnectorFactory",
                     "net.fyrql.connector.memory.MemoryConnectorFactory",
-                    "net.fyrql.connector.s3.S3ConnectorFactory"),
+                    "net.fyrql.connector.s3.S3ConnectorFactory",
+                    "net.fyrql.connector.iceberg.IcebergConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),
                     services(jar, "net.fyrql.exec.spi.ExpressionCompiler"));

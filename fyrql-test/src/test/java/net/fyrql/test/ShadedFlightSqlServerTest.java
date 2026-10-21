@@ -228,7 +228,7 @@ class ShadedFlightSqlServerTest {
                 config.toString(), "--port", "0"));
                 BufferAllocator allocator = new RootAllocator();
                 FlightSqlClient client = client(allocator, server)) {
-            assertEquals(List.of("files", "docs", "pq"), column(rows(client, client.getCatalogs())));
+            assertEquals(List.of("files", "docs", "pq", "iceberg"), column(rows(client, client.getCatalogs())));
 
             List<Object[]> totals = rows(client, client.execute(FEDERATED));
             assertEquals(2, totals.size());
@@ -335,7 +335,8 @@ class ShadedFlightSqlServerTest {
                     "net.fyrql.connector.odata.ODataConnectorFactory",
                     "net.fyrql.connector.jdbc.JdbcConnectorFactory",
                     "net.fyrql.connector.memory.MemoryConnectorFactory",
-                    "net.fyrql.connector.s3.S3ConnectorFactory"),
+                    "net.fyrql.connector.s3.S3ConnectorFactory",
+                    "net.fyrql.connector.iceberg.IcebergConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),
                     services(jar, "net.fyrql.exec.spi.ExpressionCompiler"));

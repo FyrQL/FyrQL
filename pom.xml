@@ -16,7 +16,7 @@
 
 	<groupId>io.github.stefan-zobel</groupId>
 	<artifactId>fyrql</artifactId>
-	<version>0.8.0</version>
+	<version>0.8.5</version>
 	<packaging>pom</packaging>
 
 	<name>FyrQL</name>
@@ -44,6 +44,7 @@
 		<module>fyrql-connector-odata</module>
 		<module>fyrql-connector-jdbc</module>
 		<module>fyrql-connector-s3</module>
+		<module>fyrql-connector-iceberg</module>
 		<module>fyrql-optimizer</module>
 		<module>fyrql-engine</module>
 		<module>fyrql-config</module>
@@ -75,6 +76,11 @@
 		<parquet.version>1.18.1</parquet.version>
 		<parquet-floor.version>2.4</parquet-floor.version>
 		<hadoop.version>3.5.0</hadoop.version>
+		<!--
+		  Iceberg Java writes the tables of the tests of the Iceberg connector and reads them as a reference; only ever a
+		  test dependency. The connector itself reads Iceberg without it.
+		-->
+		<iceberg.version>1.12.0</iceberg.version>
 		<!-- janino-lts: the latest release on Maven Central; every release of FyrQL names a fixed version. -->
 		<janino.version>3.1.20</janino.version>
 		<!-- The test oracle; only ever a test dependency. -->
@@ -201,6 +207,17 @@
 			</dependency>
 			<dependency>
 				<groupId>io.github.stefan-zobel</groupId>
+				<artifactId>fyrql-connector-iceberg</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>io.github.stefan-zobel</groupId>
+				<artifactId>fyrql-connector-iceberg</artifactId>
+				<version>${project.version}</version>
+				<type>test-jar</type>
+			</dependency>
+			<dependency>
+				<groupId>io.github.stefan-zobel</groupId>
 				<artifactId>fyrql-optimizer</artifactId>
 				<version>${project.version}</version>
 			</dependency>
@@ -319,6 +336,11 @@
 				<version>${parquet.version}</version>
 			</dependency>
 			<dependency>
+				<groupId>org.apache.parquet</groupId>
+				<artifactId>parquet-avro</artifactId>
+				<version>${parquet.version}</version>
+			</dependency>
+			<dependency>
 				<groupId>blue.strategic.parquet</groupId>
 				<artifactId>parquet-floor</artifactId>
 				<version>${parquet-floor.version}</version>
@@ -327,6 +349,26 @@
 				<groupId>org.apache.hadoop</groupId>
 				<artifactId>hadoop-common</artifactId>
 				<version>${hadoop.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.hadoop</groupId>
+				<artifactId>hadoop-mapreduce-client-core</artifactId>
+				<version>${hadoop.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.iceberg</groupId>
+				<artifactId>iceberg-core</artifactId>
+				<version>${iceberg.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.iceberg</groupId>
+				<artifactId>iceberg-data</artifactId>
+				<version>${iceberg.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.iceberg</groupId>
+				<artifactId>iceberg-parquet</artifactId>
+				<version>${iceberg.version}</version>
 			</dependency>
 			<dependency>
 				<groupId>com.github.jsqlparser</groupId>

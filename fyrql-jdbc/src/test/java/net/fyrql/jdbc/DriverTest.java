@@ -81,7 +81,7 @@ class DriverTest {
         Path json = Files.writeString(dir.resolve("t.json"), "[{\"a\": 1}, {\"a\": 5}]", StandardCharsets.UTF_8);
         try (Connection c = driver.connect("jdbc:fyrql:", null)) {
             FyrQL engine = c.unwrap(FyrQL.class);
-            assertEquals(List.of("csv", "json", "parquet", "memory"), engine.sources());
+            assertEquals(List.of("csv", "json", "parquet", "iceberg", "memory"), engine.sources());
             assertNull(c.getCatalog());
             assertEquals("main", c.getSchema());
             assertEquals(List.of(2L), first(c, "SELECT count(*) FROM read_csv('" + path(csv) + "')"));
@@ -171,7 +171,7 @@ class DriverTest {
         String url = "jdbc:fyrql:?config=" + path(config).replace(" ", "%20") + "&pushdown=false";
         try (Connection c = driver.connect(url, null)) {
             FyrQL engine = c.unwrap(FyrQL.class);
-            assertEquals(List.of("files", "json", "parquet"), engine.sources(), "with the implicit sources");
+            assertEquals(List.of("files", "iceberg", "json", "parquet"), engine.sources(), "with the implicit sources");
             assertEquals("files", c.getCatalog(), "the only registered source is the default");
             assertFalse(engine.pushdown(), "the URL wins over the file");
             assertEquals(CodegenMode.OFF, engine.codegen());

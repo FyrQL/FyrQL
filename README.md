@@ -8,8 +8,8 @@ warehouse first.
 
 - **Heterogeneous sources, one query.** PostgreSQL, MySQL, SQLite and H2 over JDBC, and
   any other database with a JDBC driver through a generic dialect; CSV, JSON and Parquet
-  files, local or in S3 and MinIO; JSON from HTTP endpoints; OData services of versions 2
-  and 4;
+  files and Apache Iceberg tables, local or in S3 and MinIO; JSON from HTTP endpoints;
+  OData services of versions 2 and 4;
   and Java collections of records or beans. The columns of files and endpoints are
   inferred from the data as DuckDB infers them, nested `STRUCT`, `LIST` and `MAP` values
   included, so that no schema has to be declared.
@@ -36,8 +36,8 @@ warehouse first.
 - **Arrow.** Results come as vectors of Apache Arrow, in the process or from a Flight SQL
   server in one executable JAR, which Python reads through ADBC into pyarrow and pandas,
   and other clients of Flight SQL alike.
-- **Pure Java.** No JNI, no native libraries, no Hadoop: Parquet is read with codecs in
-  pure Java, code generation uses Janino, and Arrow allocates its memory without Netty
+- **Pure Java.** No JNI, no native libraries, no Hadoop: Parquet and Iceberg are read
+  with codecs in pure Java, code generation uses Janino, and Arrow allocates its memory without Netty
   or native code. The same JARs run wherever Java 21 runs,
   also in containers and application servers that do not allow native code.
 - **Simple to use.** A source is a few lines of a builder or of a YAML file; queries are
@@ -187,6 +187,48 @@ and JDBC write tables; see [Writing](#writing).
   memory, compressed, outside the memory budget of the engine. A file in S3 is read in
   ranges, see `fyrql-connector-s3`; the option `readAhead` (`1MB`) is the size of the
   reads of the headers of pages, of dictionaries and of indexes there.
+- `fyrql-connector-iceberg`: Apache Iceberg tables, read in pure Java without Hadoop
+  and without a catalog: a table is its directory, the one with `metadata/`, or one of its
+  metadata files, local or in S3. In a directory, `metadata/version-hint.text` names the
+  version, or else the metadata file with the highest version is the current one. Format
+  versions 1 to 3 are read: the manifest list and the manifests of a snapshot, which a
+  reader of its own reads as Avro with the codecs `null`, `deflate`, `snappy` and
+  `zstandard`, name the data files, which must be Parquet files and are read by the
+  Parquet connector. The columns of a data file are found by their field ids, so that
+  renamed, added, dropped and reordered columns read right; a column a file lacks is its
+  identity partition value, its `initial-default` or `NULL`, and a promoted column (`int`
+  to `long`, `float` to `double`, a `decimal` with more digits) is read in its new type.
+  Deletion vectors, position deletes and equality deletes remove their rows. The types
+  are those of the schema: `int` is `INTEGER`, `long` `BIGINT`, `string` `VARCHAR`,
+  `fixed` and `binary` are `BLOB`, `timestamp` and `timestamptz` are `TIMESTAMP` and
+  `TIMESTAMPTZ`, also in nanoseconds, which are read in microseconds, and `struct`,
+  `list` and `map` are `STRUCT`, `LIST` and `MAP`; `variant`, `geometry`, `geography` and
+  `unknown` are an error that names the column. A scan leaves out the manifests and data
+  files in which no row can pass its filters, by the partition values (`identity`,
+  `year`, `month`, `day`, `hour` and `truncate`, `bucket` for `=` and `IN`), the bounds,
+  null and `NaN` counts of the columns and the partition summaries of the manifest list,
+  and then the row groups and pages of the files as the Parquet connector does; it takes
+  over a limit and `count(*)` only when the snapshot has no deletes, and `recordReads(true)`
+  keeps the row groups each scan read. The table functions `iceberg_scan` and
+  `read_iceberg` take the location and, to read another snapshot, `snapshot_from_id`,
+  `snapshot_from_timestamp`, a `TIMESTAMP` in UTC, a `TIMESTAMPTZ` or text, or `ref`, the
+  name of a branch or tag; `iceberg_snapshots` lists the snapshots of a table, as in
+  DuckDB. A table that was moved or copied, also into S3, is read where it is now: a path
+  of its metadata that starts with the location the metadata gives is taken relative to
+  the directory of the table. The source of the type `iceberg` takes `tables.<name>` or
+  `tables.<name>.path` with at most one of `.snapshot_from_id`,
+  `.snapshot_from_timestamp` and `.ref`, `directory`, whose subdirectories with a
+  directory `metadata` become tables, `batchSize` and `readAhead`; an engine with the
+  module on its class path has a source `iceberg` without tables for the table functions,
+  unless a registered source offers them. Catalogs such as REST, AWS Glue or Unity,
+  writing, the `name-mapping` of files without field ids, field ids inside nested types,
+  whose fields are found by their names, and ORC and Avro data files are not supported.
+
+  ```sql
+  SELECT count(*) FROM iceberg_scan('warehouse/db/orders');
+  SELECT snapshot_id, "timestamp_ms" FROM iceberg_snapshots('warehouse/db/orders');
+  SELECT * FROM iceberg_scan('s3://lake/warehouse/db/orders', snapshot_from_id = 3051729675574597004);
+  ```
 - `fyrql-connector-http`: the JSON an endpoint answers to a `GET`, read as a JSON file,
   or the array that a JSON pointer such as `/data` points to inside the answer. The
   connector sends its headers, such as `Authorization`, accepts gzip and infers the
@@ -752,7 +794,7 @@ engine:
 ```
 
 The `type` of a source picks its connector, which must be on the class path: `csv`,
-`json`, `parquet`, `http`, `odata`, `jdbc`, `memory` or `s3`; a connector of an application joins them through a
+`json`, `parquet`, `iceberg`, `http`, `odata`, `jdbc`, `memory` or `s3`; a connector of an application joins them through a
 `ConnectorFactory` listed in `META-INF/services`. The other keys of a source are the
 options of its type, read as text with nested keys joined by dots (`tables.products.url`);
 an unknown or misspelled option is an error that lists the known ones. Relative paths
@@ -882,9 +924,10 @@ set. The properties `user` and `password`, which tools always send, are ignored;
 unknown property gives a warning on the connection, and an unknown key in the URL fails
 the connection with `08001`, as does a file with an error. A relative path of the file is
 resolved against the working directory, and the paths in the file against its directory.
-Without `config`, the engine has the sources `csv`, `json` and `parquet` without tables,
-so that file names and table functions can be queried, as in
-`SELECT * FROM 'data/orders.csv'` or `SELECT * FROM read_parquet('lake/events.parquet')`,
+Without `config`, the engine has the sources `csv`, `json`, `parquet` and `iceberg`
+without tables, so that file names and table functions can be queried, as in
+`SELECT * FROM 'data/orders.csv'`, `SELECT * FROM read_parquet('lake/events.parquet')` or
+`SELECT * FROM iceberg_scan('warehouse/db/orders')`,
 and files written, and the source `memory`, in which `CREATE TABLE memory.t AS ...`
 creates tables that live as long as the connection.
 
@@ -1525,7 +1568,8 @@ forms follow DuckDB 1.5.6.
   `ORDER BY`.
 - `FROM` with tables, subqueries, `VALUES`, the table functions `read_csv`,
   `read_csv_auto`, `read_json`, `read_json_auto`, `read_ndjson`, `read_ndjson_auto`,
-  `read_parquet` and `parquet_scan`, and file names such as `FROM 'data/orders.csv'`,
+  `read_parquet`, `parquet_scan`, `iceberg_scan`, `read_iceberg` and
+  `iceberg_snapshots`, and file names such as `FROM 'data/orders.csv'`,
   `FROM 'events.jsonl'` or `FROM 'lake/*.parquet'`; `INNER`, `LEFT`,
   `RIGHT`, `FULL` and `CROSS JOIN` with `ON` and any condition without a subquery,
   `USING` or `NATURAL`; `SELECT` without `FROM`.
@@ -1661,6 +1705,13 @@ functions in a correlated subquery, and subqueries or `unnest` inside window fun
 
 Known differences from DuckDB:
 
+- An Iceberg table is read without the extension `iceberg`. Its directory needs no
+  `version-hint.text`: without it, the metadata file with the highest version counts,
+  as with `unsafe_enable_version_guessing`; a moved table needs no `allow_moved_paths`,
+  and its deletion vectors are found as well; `ref` reads a branch or tag. DuckDB 1.5.6
+  crashes on manifests compressed with `zstandard`, which FyrQL reads. The column
+  `timestamp_ms` of `iceberg_snapshots` must be quoted, `"timestamp_ms"`, since the parser
+  takes `TIMESTAMP_MS`, `TIMESTAMP_NS` and `TIMESTAMP_S` for types.
 - Files in S3 need a registered source of the type `s3`, rather than the extension
   `httpfs` and `CREATE SECRET`. Locations of `gs://`, `az://`, `http://` and `https://`,
   `**` in a pattern and a pattern before the last part of a location are not supported.
@@ -1783,7 +1834,7 @@ read text without an offset in it. In Berlin, where the clocks went forward on
 SET TimeZone = 'Europe/Berlin';
 SELECT TIMESTAMPTZ '2024-03-30 12:00:00+01' + INTERVAL 1 DAY,                -- 2024-03-31 12:00:00+02
        TIMESTAMPTZ '2024-03-30 12:00:00+01' + INTERVAL 24 HOURS,             -- 2024-03-31 13:00:00+02
-       date_trunc('day', TIMESTAMPTZ '2024-10-27 12:00:00+01'),             -- 2024-10-27 00:00:00+02
+       date_trunc('day', TIMESTAMPTZ '2024-10-27 12:00:00+01'),              -- 2024-10-27 00:00:00+02
        TIMESTAMPTZ '2024-10-27 12:00:00+01' AT TIME ZONE 'America/New_York', -- 2024-10-27 07:00:00
        TIME '23:30:00' + INTERVAL '45 minutes',                              -- 00:15:00
        TIMESTAMP '2024-03-31 12:00:00' - TIMESTAMP '2024-01-01 00:00:00'     -- 90 days 12:00:00
@@ -1819,6 +1870,7 @@ computes in UTC.
 | `fyrql-connector-odata` | the entity sets of OData services of versions 2 and 4 as tables, with filters, orders, limits and `count(*)` pushed to the service |
 | `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC, and of any other database through a generic dialect, read and written |
 | `fyrql-connector-s3` | the objects of S3 and MinIO as the files of the connectors of CSV, JSON and Parquet, over a client of its own with the signatures of AWS |
+| `fyrql-connector-iceberg` | Apache Iceberg tables, local or in S3, with snapshots, deletes, schema evolution and the pruning of files by the manifests, read through the Parquet connector |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources and those of the file formats on the class path |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type |
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application |
@@ -1839,6 +1891,17 @@ Java 21 or later is required; the Maven wrapper fetches Maven itself.
 
 The tests of `fyrql-test` run DuckDB through its JDBC driver, which is a test dependency only;
 `fyrql-bench` uses it to write its Parquet file.
+
+The Iceberg tables of the tests are written by Iceberg Java, a test dependency only, with
+partitions of every transform, every kind of delete, schema evolution, format version 1,
+manifests of every codec and branches and tags; the connector must read the rows Iceberg
+Java reads, in every snapshot. DuckDB with its extension `iceberg` is a second reference:
+these tests load it from the cache of DuckDB, never from the network, and are skipped
+without it; it is there after `INSTALL iceberg` in any DuckDB 1.5.6. Tables of other
+writers, such as PyIceberg or Spark, are compared with DuckDB with
+`-Dfyrql.test.iceberg.dir=<directory>`, in which every directory with a directory
+`metadata` is a table, and the tables in S3 against a running MinIO with
+`-Dfyrql.test.s3.endpoint=http://127.0.0.1:9000`.
 
 Besides a corpus of SQL texts, two generators of random queries compare FyrQL with DuckDB:
 random plans, which FyrQL runs as they are and as it binds them from their SQL, and random

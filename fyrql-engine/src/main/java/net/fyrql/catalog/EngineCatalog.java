@@ -52,6 +52,10 @@ public final class EngineCatalog implements CatalogView {
     /** The formats of files that a module of their own brings. */
     private static final List<String> MODULE_FORMATS = List.of("csv", "json", "parquet");
 
+    /** The table functions of the Iceberg connector, which its module brings. */
+    private static final List<String> ICEBERG_FUNCTIONS = List.of("iceberg_scan", "read_iceberg",
+            "iceberg_snapshots");
+
     /**
      * A catalog over sources by name, in the order of their registration, in
      * the time zone of the JVM.
@@ -246,7 +250,9 @@ public final class EngineCatalog implements CatalogView {
         TableFunctionProvider provider = functions.get(function);
         if (provider == null) {
             throw new SqlException("Table function with name " + name + " does not exist"
-                    + (function.startsWith("read_") ? moduleHint(function.substring(5)) : "")
+                    + (ICEBERG_FUNCTIONS.contains(function) ? "; put fyrql-connector-iceberg on the class path"
+                            + " or register a source of the type iceberg"
+                            : function.startsWith("read_") ? moduleHint(function.substring(5)) : "")
                     + (functions.isEmpty() ? "" : "; there are " + String.join(", ", functions.keySet())),
                     Position.UNKNOWN);
         }

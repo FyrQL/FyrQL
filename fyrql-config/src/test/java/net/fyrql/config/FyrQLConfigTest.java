@@ -84,11 +84,43 @@ class FyrQLConfigTest {
     }
 
     @Test
+    void anIcebergSourceReadsATableWithoutSnapshots() throws IOException {
+        Path metadata = Files.createDirectories(dir.resolve("lake/orders/metadata"));
+        Files.writeString(metadata.resolve("v1.metadata.json"), """
+                {"format-version": 2, "table-uuid": "4b5c4f1e-0d6f-4f3a-9d8e-2a1b3c4d5e6f",
+                 "location": "s3://elsewhere/orders", "last-sequence-number": 0, "last-updated-ms": 1,
+                 "last-column-id": 2, "current-schema-id": 0,
+                 "schemas": [{"type": "struct", "schema-id": 0, "fields": [
+                   {"id": 1, "name": "id", "required": true, "type": "long"},
+                   {"id": 2, "name": "note", "required": false, "type": "string"}]}],
+                 "default-spec-id": 0, "partition-specs": [{"spec-id": 0, "fields": []}],
+                 "last-partition-id": 999, "default-sort-order-id": 0,
+                 "sort-orders": [{"order-id": 0, "fields": []}], "properties": {},
+                 "current-snapshot-id": -1, "snapshots": []}""", StandardCharsets.UTF_8);
+        Path file = Files.writeString(dir.resolve("iceberg.yaml"), """
+                sources:
+                  - name: lake
+                    type: iceberg
+                    tables:
+                      orders: lake/orders
+                """, StandardCharsets.UTF_8);
+        try (FyrQL engine = FyrQLConfig.open(file)) {
+            assertEquals(List.of("lake", "csv", "json", "parquet"), engine.sources());
+            assertEquals(List.of(List.of(0L)), engine.rows("SELECT count(*) FROM lake.orders").stream()
+                    .map(Arrays::asList).toList());
+            assertEquals(List.of(List.of(0L)), engine.rows("SELECT count(*) FROM iceberg_scan('"
+                    + metadata.getParent() + "')").stream().map(Arrays::asList).toList());
+            assertEquals(List.of("id", "note"), engine.plan("SELECT * FROM lake.orders").schema().fields().stream()
+                    .map(f -> f.name()).toList());
+        }
+    }
+
+    @Test
     void aFileAloneBuildsAnEngineThatJoinsCsvJsonAndADatabase() throws IOException {
         Path file = config("defaultSource: shop\nbatchSize: 2\nmemoryBudget: 64MiB\ncodegen: off\npushdown: true\n"
                 + "threads: 3\npreserveOrder: false\n");
         try (FyrQL engine = FyrQLConfig.open(file)) {
-            assertEquals(List.of("shop", "files", "docs", "parquet"), engine.sources());
+            assertEquals(List.of("shop", "files", "docs", "iceberg", "parquet"), engine.sources());
             assertTrue(engine.pushdown());
             assertEquals(3, engine.threads());
             assertFalse(engine.preserveOrder());
@@ -172,7 +204,7 @@ class FyrQLConfigTest {
                           events: s3://lake/events/*.parquet
                     """.formatted(s3.endpoint()), StandardCharsets.UTF_8);
             try (FyrQL engine = FyrQLConfig.open(file)) {
-                assertEquals(List.of("s3", "lake", "csv", "json"), engine.sources());
+                assertEquals(List.of("s3", "lake", "csv", "iceberg", "json"), engine.sources());
                 assertEquals(2, engine.update("COPY (SELECT * FROM (VALUES (1), (2)) v(n)) TO"
                         + " 's3://lake/events/a.parquet'"));
                 assertEquals(1, engine.update("COPY (SELECT 3 AS n) TO 's3://lake/events/b.parquet'"));

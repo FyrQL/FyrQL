@@ -17,6 +17,7 @@ import net.fyrql.connector.Globs;
 import net.fyrql.core.type.Schema;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.filter2.compat.FilterCompat;
+import org.apache.parquet.filter2.predicate.FilterPredicate;
 import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
@@ -150,6 +151,22 @@ final class ParquetFiles {
                 .useColumnIndexFilter(!rowGroups)
                 .useRecordFilter(false)
                 .build();
+    }
+
+    /**
+     * Returns the row groups of a file in which a row can satisfy a
+     * predicate, by their statistics, dictionaries and Bloom filters.
+     */
+    List<BlockMetaData> passing(Footer footer, FilterPredicate predicate) {
+        String file = footer.version().location();
+        InputFile input = input(footer.version().file());
+        try (ParquetFileReader reader = new ParquetFileReader(input, footer.metadata(),
+                options(FilterCompat.get(predicate), true), input.newStream())) {
+            return reader.getRowGroups();
+        } catch (IOException | RuntimeException e) {
+            throw new IllegalArgumentException("Cannot read the Parquet file " + file + ": "
+                    + (e.getMessage() == null ? e.toString() : e.getMessage()), e);
+        }
     }
 
     /**

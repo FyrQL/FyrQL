@@ -32,11 +32,8 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
-import org.apache.parquet.filter2.compat.FilterCompat;
 import org.apache.parquet.filter2.predicate.FilterPredicate;
-import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
-import org.apache.parquet.io.InputFile;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -410,7 +407,7 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
             FilterPredicate predicate = state.filters().isEmpty() ? null
                     : FilterTranslation.translate(state.filters(), footer.schema(), plan.columns());
             List<BlockMetaData> blocks = footer.metadata().getBlocks();
-            List<BlockMetaData> passing = predicate == null ? blocks : passing(footer, predicate);
+            List<BlockMetaData> passing = predicate == null ? blocks : files.passing(footer, predicate);
             for (int b = 0; b < blocks.size() && left > 0; b++) {
                 long rows = blocks.get(b).getRowCount();
                 if (rows > 0 && contains(passing, blocks.get(b))) {
@@ -423,24 +420,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         return splits;
     }
 
-    /**
-     * Returns the row groups of a file in which a row can satisfy a
-     * predicate, by their statistics, dictionaries and Bloom filters.
-     */
-    private List<BlockMetaData> passing(ParquetFiles.Footer footer, FilterPredicate predicate) {
-        String file = footer.version().location();
-        InputFile input = files.input(footer.version().file());
-        try (ParquetFileReader reader = new ParquetFileReader(input, footer.metadata(),
-                ParquetFiles.options(FilterCompat.get(predicate), true), input.newStream())) {
-            return reader.getRowGroups();
-        } catch (IOException | RuntimeException e) {
-            throw new IllegalArgumentException("Cannot read the Parquet file " + file + ": "
-                    + (e.getMessage() == null ? e.toString() : e.getMessage()), e);
-        }
-    }
-
     /** Tells whether a list holds a row group itself, not one that equals it. */
-    private static boolean contains(List<BlockMetaData> blocks, BlockMetaData block) {
+    static boolean contains(List<BlockMetaData> blocks, BlockMetaData block) {
         for (BlockMetaData b : blocks) {
             if (b == block) {
                 return true;

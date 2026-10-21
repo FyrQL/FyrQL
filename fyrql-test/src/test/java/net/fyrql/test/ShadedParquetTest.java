@@ -75,13 +75,19 @@ class ShadedParquetTest {
                     .get(0);
             assertEquals("[250000, n999, 500]", java.util.Arrays.toString(row));
         }
-        // The unrenamed parquet-java of the class path is another one, and there is no Hadoop at all.
+        // The unrenamed parquet-java of the class path is another one. Hadoop is on the class path only for Iceberg
+        // Java, which writes the tables of the Iceberg tests; the connector uses its own renamed stubs, and its
+        // tests run without Hadoop.
         Class<?> parser = Class.forName(PARQUET + ".schema.MessageTypeParser");
         assertNotNull(parser.getMethod("parseMessageType", String.class).invoke(null, "message m { required int32 a; }"));
         Class<?> renamed = Class.forName("net.fyrql.internal.parquet.schema.MessageTypeParser");
         assertNotEquals(parser.getProtectionDomain().getCodeSource().getLocation(),
                 renamed.getProtectionDomain().getCodeSource().getLocation());
-        assertThrows(ClassNotFoundException.class, () -> Class.forName(HADOOP + ".conf.Configuration"));
+        Class<?> stubs = Class.forName("net.fyrql.internal.hadoop.conf.Configuration");
+        assertEquals(renamed.getProtectionDomain().getCodeSource().getLocation(),
+                stubs.getProtectionDomain().getCodeSource().getLocation());
+        assertNotEquals(stubs.getProtectionDomain().getCodeSource().getLocation(),
+                Class.forName(HADOOP + ".conf.Configuration").getProtectionDomain().getCodeSource().getLocation());
     }
 
     @Test

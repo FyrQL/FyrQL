@@ -25,6 +25,7 @@ import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.RemotePlan;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.plan.PlanNode;
@@ -903,7 +904,10 @@ public final class FyrQL implements AutoCloseable {
          * {@link ConnectorFactory#fileFormats() formats of files}, such as
          * that of {@code fyrql-connector-parquet}, then becomes a source
          * without options, named after its type, unless registered sources
-         * read and write all its formats or one has that name. The engine
+         * read and write all its formats or one has that name. A factory
+         * without formats that is {@link ConnectorFactory#implicit() implicit},
+         * such as that of {@code fyrql-connector-iceberg}, becomes a source
+         * unless registered sources offer all its table functions. The engine
          * closes these sources; they follow the registered ones in
          * {@link #sources()} and are never the default source by themselves.
          */
@@ -999,7 +1003,11 @@ public final class FyrQL implements AutoCloseable {
         private List<Connector> addImplicitSources(Map<String, Connector> sources) {
             Set<String> written = new HashSet<>();
             Set<String> read = new HashSet<>();
+            Set<String> functions = new HashSet<>();
             for (Connector c : sources.values()) {
+                if (c instanceof TableFunctionProvider p) {
+                    functions.addAll(p.tableFunctions());
+                }
                 if (c instanceof FileWriterProvider p) {
                     for (String f : p.fileFormats()) {
                         written.add(f.toLowerCase(Locale.ROOT));
@@ -1014,7 +1022,7 @@ public final class FyrQL implements AutoCloseable {
             List<ConnectorFactory> factories = new ArrayList<>();
             for (ConnectorFactory f : ServiceLoader.load(ConnectorFactory.class,
                     classLoader != null ? classLoader : FyrQL.class.getClassLoader())) {
-                if (!f.fileFormats().isEmpty()) {
+                if (f.implicit()) {
                     factories.add(f);
                 }
             }
@@ -1022,7 +1030,8 @@ public final class FyrQL implements AutoCloseable {
             List<Connector> added = new ArrayList<>();
             for (ConnectorFactory f : factories) {
                 List<String> formats = f.fileFormats().stream().map(s -> s.toLowerCase(Locale.ROOT)).toList();
-                if (sources.containsKey(f.type()) || written.containsAll(formats) && read.containsAll(formats)) {
+                if (sources.containsKey(f.type())
+                        || !formats.isEmpty() && written.containsAll(formats) && read.containsAll(formats)) {
                     continue;
                 }
                 Connector c;
@@ -1034,8 +1043,16 @@ public final class FyrQL implements AutoCloseable {
                     close(added, failure);
                     throw failure;
                 }
+                if (formats.isEmpty() && c instanceof TableFunctionProvider p
+                        && functions.containsAll(p.tableFunctions())) {
+                    c.close();
+                    continue;
+                }
                 sources.put(f.type(), c);
                 added.add(c);
+                if (c instanceof TableFunctionProvider p) {
+                    functions.addAll(p.tableFunctions());
+                }
                 written.addAll(formats);
                 read.addAll(formats);
             }

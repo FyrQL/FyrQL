@@ -44,7 +44,7 @@ import java.util.Optional;
 final class EngineFactory {
 
     /** The types of the sources of an engine without a configuration file, each a source of the same name. */
-    static final List<String> IMPLICIT_SOURCES = List.of("csv", "json", "parquet", "memory");
+    static final List<String> IMPLICIT_SOURCES = List.of("csv", "json", "parquet", "iceberg", "memory");
 
     private EngineFactory() {
     }

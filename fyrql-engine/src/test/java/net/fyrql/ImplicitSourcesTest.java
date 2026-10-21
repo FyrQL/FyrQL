@@ -21,6 +21,7 @@ import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
+import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
@@ -249,6 +250,78 @@ class ImplicitSourcesTest {
         }
     }
 
+    /** A source without tables or formats that offers the table function fake_scan. */
+    static final class FunctionsConnector implements Connector, TableFunctionProvider {
+        private final MemoryConnector inner;
+        private volatile boolean closed;
+
+        FunctionsConnector(String name) {
+            this.inner = MemoryConnector.builder(name).build();
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public Catalog catalog() {
+            return inner.catalog();
+        }
+
+        @Override
+        public ScanPlan plan(TableRef table, ScanRequest request) {
+            return inner.plan(table, request);
+        }
+
+        @Override
+        public List<Split> splits(ScanPlan plan) {
+            return inner.splits(plan);
+        }
+
+        @Override
+        public BatchReader open(Split split) {
+            return inner.open(split);
+        }
+
+        @Override
+        public List<String> tableFunctions() {
+            return List.of("fake_scan");
+        }
+
+        @Override
+        public TableRef bind(String name, List<Object> arguments, Map<String, Object> namedArguments) {
+            throw new IllegalArgumentException("fake_scan reads nothing");
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
+    }
+
+    /** Creates sources of the type functions, without formats but implicit, for their table function. */
+    public static final class FunctionsFactory implements ConnectorFactory {
+        static final List<FunctionsConnector> MADE = Collections.synchronizedList(new ArrayList<>());
+
+        @Override
+        public String type() {
+            return "functions";
+        }
+
+        @Override
+        public boolean implicit() {
+            return true;
+        }
+
+        @Override
+        public Connector create(String name, Map<String, String> options, Path directory) {
+            FunctionsConnector c = new FunctionsConnector(name);
+            MADE.add(c);
+            return c;
+        }
+    }
+
     /** A factory without formats of files, which never becomes an implicit source. */
     public static final class PlainFactory implements ConnectorFactory {
         @Override
@@ -284,6 +357,31 @@ class ImplicitSourcesTest {
 
     private static String fails(FyrQL engine, String sql) {
         return assertThrows(SqlException.class, () -> engine.update(sql), sql).reason();
+    }
+
+    @Test
+    void anImplicitFactoryWithoutFormatsBecomesASourceForItsTableFunctions() throws IOException {
+        FunctionsFactory.MADE.clear();
+        ClassLoader loader = loader(FunctionsFactory.class, PlainFactory.class);
+        try (FyrQL engine = FyrQL.builder().register(memory("mem")).classLoader(loader).build()) {
+            assertEquals(List.of("mem", "functions"), engine.sources());
+            assertEquals("fake_scan reads nothing", fails(engine, "SELECT * FROM fake_scan('x')"));
+        }
+        assertTrue(FunctionsFactory.MADE.get(0).closed);
+        FunctionsFactory.MADE.clear();
+        try (FyrQL engine = FyrQL.builder().register(new FunctionsConnector("own")).classLoader(loader).build()) {
+            assertEquals(List.of("own"), engine.sources());
+            assertTrue(FunctionsFactory.MADE.get(0).closed, "made and closed again");
+        }
+    }
+
+    @Test
+    void theTableFunctionsOfIcebergNameTheirModule() throws IOException {
+        try (FyrQL engine = FyrQL.builder().register(memory("mem")).implicitSources(false).build()) {
+            assertEquals("Table function with name iceberg_scan does not exist; put fyrql-connector-iceberg on the"
+                    + " class path or register a source of the type iceberg",
+                    fails(engine, "SELECT * FROM iceberg_scan('x')"));
+        }
     }
 
     @Test

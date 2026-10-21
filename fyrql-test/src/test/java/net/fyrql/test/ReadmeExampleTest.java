@@ -16,6 +16,7 @@ import net.fyrql.exec.CodegenMode;
 import net.fyrql.QueryResult;
 import net.fyrql.codegen.JaninoCompiler;
 import net.fyrql.connector.csv.CsvConnector;
+import net.fyrql.connector.iceberg.IcebergTestTables;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
@@ -224,6 +225,22 @@ class ReadmeExampleTest {
                             Scan mem.main.orders (id BIGINT, customerId INTEGER, amount DECIMAL(10,2))
                           Scan csv.main.customers (id BIGINT, region VARCHAR)%s
                 """.formatted(pipeline, parallel, parallel), plan);
+    }
+
+    @Test
+    void theIcebergExampleRuns() throws IOException {
+        IcebergTestTables tables = IcebergTestTables.shared();
+        Path orders = tables.copy("branch", data.resolve("warehouse/db/orders"));
+        String location = orders.toString().replace('\\', '/');
+        long first = tables.table("branch").snapshots().iterator().next().snapshotId();
+        try (FyrQL engine = FyrQL.builder().build()) {
+            // As in the README, with the directory of the test for "warehouse" and its local copy for S3.
+            assertEquals(6L, engine.rows("SELECT count(*) FROM iceberg_scan('" + location + "')").get(0)[0]);
+            assertEquals(3, engine.rows("SELECT snapshot_id, \"timestamp_ms\" FROM iceberg_snapshots('" + location
+                    + "')").size());
+            assertEquals(3, engine.rows("SELECT * FROM iceberg_scan('" + location + "', snapshot_from_id = "
+                    + first + ")").size());
+        }
     }
 
     @Test

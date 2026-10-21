@@ -14,6 +14,7 @@ package net.fyrql.connector.s3;
 import java.io.IOException;
 
 /** An error that S3 answered a request with: the status and the code of the error, such as {@code AccessDenied}. */
+@SuppressWarnings("serial")
 public final class S3Exception extends IOException {
 
     private final int status;

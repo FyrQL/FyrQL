@@ -32,7 +32,7 @@ class ConnectorsTest {
     @Test
     void findsTheFactoriesOfTheConnectorsOnTheClassPath() {
         Map<String, ConnectorFactory> factories = Connectors.factories();
-        assertEquals(List.of("csv", "http", "jdbc", "json", "memory", "odata", "parquet", "s3"),
+        assertEquals(List.of("csv", "http", "iceberg", "jdbc", "json", "memory", "odata", "parquet", "s3"),
                 List.copyOf(factories.keySet()));
         try (Connector c = Connectors.create(new SourceConfig("files", "CSV", Map.of()), factories, DIR)) {
             assertInstanceOf(CsvConnector.class, c);
@@ -49,7 +49,7 @@ class ConnectorsTest {
     void anUnknownTypeOrAMissingOptionNamesTheSource() {
         Map<String, ConnectorFactory> factories = Connectors.factories();
         assertEquals("The source mongo has the type mongodb, which no connector on the class path has; known are csv,"
-                + " http, jdbc, json, memory, odata, parquet, s3",
+                + " http, iceberg, jdbc, json, memory, odata, parquet, s3",
                 assertThrows(ConfigException.class, () -> Connectors.create(
                         new SourceConfig("mongo", "mongodb", Map.of()), factories, DIR)).getMessage());
         assertEquals("Cannot create the source shop: The JDBC source shop needs the option url",

@@ -38,6 +38,19 @@ public interface ConnectorFactory {
     }
 
     /**
+     * Tells whether an engine with the factory on its class path creates a
+     * connector of this type without options as the source of the name
+     * {@link #type()}, see {@code FyrQL.Builder.implicitSources}: by default
+     * if it has {@link #fileFormats() formats of files}. A type without
+     * formats, such as {@code iceberg}, says so to serve its table
+     * functions; the engine leaves it out when registered sources already
+     * offer all of them.
+     */
+    default boolean implicit() {
+        return !fileFormats().isEmpty();
+    }
+
+    /**
      * Creates a connector.
      *
      * @param name the name under which the source will be registered

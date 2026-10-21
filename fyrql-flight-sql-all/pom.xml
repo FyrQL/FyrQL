@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.8.0</version>
+		<version>0.8.5</version>
 	</parent>
 
 	<artifactId>fyrql-flight-sql-all</artifactId>
@@ -88,6 +88,17 @@
 		<dependency>
 			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-connector-s3</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-connector-iceberg</artifactId>
+			<!-- The Parquet connector it reads its data files with is above, with what it renamed into its JAR. -->
+			<exclusions>
+				<exclusion>
+					<groupId>io.github.stefan-zobel</groupId>
+					<artifactId>fyrql-connector-parquet</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 		<!-- The server logs warnings of Arrow and gRPC to the standard error stream. -->
 		<dependency>

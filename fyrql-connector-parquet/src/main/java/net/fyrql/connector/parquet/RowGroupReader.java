@@ -338,6 +338,18 @@ final class RowGroupReader implements BatchReader {
                 }
             }
             case FLOAT -> {
+                if (leaf.target() == ParquetLeaf.Target.DOUBLE) {
+                    DoubleVector.Builder v = (DoubleVector.Builder) b;
+                    for (int i = 0; i < n; i++) {
+                        if (r.getCurrentDefinitionLevel() < max) {
+                            v.appendNull();
+                        } else {
+                            v.appendDouble(r.getFloat());
+                        }
+                        r.consume();
+                    }
+                    return;
+                }
                 FloatVector.Builder v = (FloatVector.Builder) b;
                 for (int i = 0; i < n; i++) {
                     if (r.getCurrentDefinitionLevel() < max) {
