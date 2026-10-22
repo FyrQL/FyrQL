@@ -69,6 +69,7 @@ final class Writes {
     long run(BoundStatement statement, QueryContext context) {
         return switch (statement) {
             case BoundStatement.Query q -> throw new IllegalArgumentException("A query writes nothing");
+            case BoundStatement.Explain e -> throw new IllegalArgumentException("EXPLAIN writes nothing");
             case BoundStatement.Copy c -> copy(c, context);
             case BoundStatement.CopyFrom c -> insert(new BoundStatement.Insert(c.table(), c.input()), context);
             case BoundStatement.Create c -> create(c, context);

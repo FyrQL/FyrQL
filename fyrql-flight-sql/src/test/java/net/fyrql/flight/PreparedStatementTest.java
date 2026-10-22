@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Prepared statements through the server: the schemas of the result and of
@@ -188,6 +189,11 @@ class PreparedStatementTest {
             assertEquals(List.of("plan"), p.getResultSetSchema().getFields().stream().map(f -> f.getName()).toList());
             assertEquals(server.engine.explain("SELECT v FROM tiny").split("\n").length,
                     TestServer.rows(client, p.execute()).size());
+        }
+        try (FlightSqlClient.PreparedStatement p = client.prepare("EXPLAIN ANALYZE SELECT v FROM tiny")) {
+            assertEquals(List.of("plan"), p.getResultSetSchema().getFields().stream().map(f -> f.getName()).toList());
+            List<List<Object>> plan = TestServer.comparable(TestServer.rows(client, p.execute()));
+            assertTrue(String.valueOf(plan.get(0).get(0)).startsWith("Analyzed in "), plan.toString());
         }
     }
 

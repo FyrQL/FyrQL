@@ -16,6 +16,8 @@ import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.SourceStatistics;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -261,6 +263,23 @@ class ODataConnectorTest {
             assertEquals("4.0", r.header("OData-MaxVersion"));
             assertEquals("odata.maxpagesize=2", r.header("Prefer"));
         }
+    }
+
+    @Test
+    void thePagesOfAScanCountAsItsRequests() {
+        v4Service("trips");
+        SourceCounters counters = new SourceCounters();
+        try (ODataConnector c = builder("trips").pageSize(2).build()) {
+            c.catalog().schema(ref("trips", "Things"));
+            server.clearRequests();
+            try (SourceCounters.Scope s = SourceCounters.enter(counters)) {
+                assertEquals(comparable(v4Rows()), readAll(c, ref("trips", "Things")));
+            }
+        }
+        SourceStatistics read = counters.snapshot();
+        assertEquals(3, read.requests());
+        assertEquals(server.requests().size(), read.requests());
+        assertTrue(read.bytes() > 0);
     }
 
     @Test

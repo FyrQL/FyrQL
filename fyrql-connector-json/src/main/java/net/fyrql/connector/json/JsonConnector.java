@@ -23,6 +23,7 @@ import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.Globs;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
@@ -711,6 +712,9 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
     @Override
     public BatchReader open(Split split) {
         Table table = table(split.plan().table());
+        if (table.remote() == null) {
+            counted(table.file(), split.state() instanceof Range range ? range : new Range(0, Long.MAX_VALUE));
+        }
         if (split.state() instanceof Range range) {
             InputStream in;
             try {
@@ -724,6 +728,22 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         }
         return JsonRecordReader.open(open(table), table.layout(), split.plan().columns(), table.options(),
                 batchSize, table.location());
+    }
+
+    /**
+     * Counts the bytes of a local file from one offset to before another one,
+     * or to its end, for the scan the thread works for, see {@link SourceCounters}.
+     */
+    private static void counted(Path file, Range range) {
+        SourceCounters counters = SourceCounters.current();
+        if (counters == SourceCounters.NONE) {
+            return;
+        }
+        try {
+            counters.bytes(Math.max(0, Math.min(range.to(), Files.size(file)) - range.from()));
+        } catch (IOException e) {
+            // Reading the file reports it.
+        }
     }
 
     /** The bytes of a file from one offset to before another one, or to its end. */

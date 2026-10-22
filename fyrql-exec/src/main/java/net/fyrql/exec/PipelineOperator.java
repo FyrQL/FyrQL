@@ -187,7 +187,7 @@ final class PipelineOperator extends AbstractOperator {
         PlanNode.Join j = joins.get(p);
         Operator right = builds.get(p);
         if (right instanceof ParallelSegment) {
-            return JoinBuild.read(right, j, joinLabels.get(p), budget, codegen, reserved);
+            return JoinBuild.read(right, j, joinLabels.get(p), budget, codegen, reserved, context());
         }
         List<Batch> batches = new ArrayList<>();
         for (Batch b = right.next(); b != null; b = right.next()) {
@@ -203,7 +203,7 @@ final class PipelineOperator extends AbstractOperator {
             for (int k : j.leftKeys()) {
                 types.add(j.left().schema().type(k));
             }
-            KeyFunctions compiled = codegen.keys(types);
+            KeyFunctions compiled = codegen.keys(types, context());
             if (compiled != null) {
                 functions = compiled;
             }

@@ -25,18 +25,38 @@ import java.util.Objects;
 /**
  * A statement, bound: a query as its plan, or a statement that writes with
  * the plan of the rows it writes, which the engine optimizes and runs as
- * the plan of any query, or a setting of the session. Whether a table to
- * create exists, or one to write or drop, is checked when the statement
- * runs.
+ * the plan of any query, or a setting of the session, or {@code EXPLAIN} of
+ * one of these. Whether a table to create exists, or one to write or drop,
+ * is checked when the statement runs.
  */
 public sealed interface BoundStatement {
 
     /** The columns of the result of a statement that writes, as in DuckDB: the number of rows written. */
     Schema COUNT = Schema.of(new Schema.Field("Count", DataType.BIGINT, false));
 
-    /** Returns the columns of the result: those of a query, or {@link #COUNT}. */
+    /** The columns of the result of {@code EXPLAIN}: the plan, one line per row. */
+    Schema PLAN = Schema.of(new Schema.Field("plan", DataType.VARCHAR, false));
+
+    /** Returns the columns of the result: those of a query, {@link #PLAN} or {@link #COUNT}. */
     default Schema schema() {
-        return this instanceof Query q ? q.plan().schema() : COUNT;
+        return switch (this) {
+            case Query q -> q.plan().schema();
+            case Explain e -> PLAN;
+            default -> COUNT;
+        };
+    }
+
+    /**
+     * Tells whether running the statement changes something: a table, a
+     * file or a setting of the session. A query does not, nor does
+     * {@code EXPLAIN} without {@code ANALYZE}.
+     */
+    default boolean writes() {
+        return switch (this) {
+            case Query q -> false;
+            case Explain e -> e.analyze() && e.statement().writes();
+            default -> true;
+        };
     }
 
     /** A query. */
@@ -156,6 +176,23 @@ public sealed interface BoundStatement {
     record Set(String name, String value) implements BoundStatement {
         public Set {
             Objects.requireNonNull(name, "name");
+        }
+    }
+
+    /**
+     * {@code EXPLAIN}: the plan of a statement, or with {@code ANALYZE} the
+     * plan after the statement ran, with what each operator did; a
+     * statement that writes then writes.
+     *
+     * @param analyze whether the statement runs
+     * @param statement the statement, which is no {@code EXPLAIN}
+     */
+    record Explain(boolean analyze, BoundStatement statement) implements BoundStatement {
+        public Explain {
+            Objects.requireNonNull(statement, "statement");
+            if (statement instanceof Explain) {
+                throw new IllegalArgumentException("EXPLAIN of EXPLAIN");
+            }
         }
     }
 }

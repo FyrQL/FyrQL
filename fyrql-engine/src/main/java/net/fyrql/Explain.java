@@ -11,13 +11,18 @@
 
 package net.fyrql;
 
+import net.fyrql.connector.SourceStatistics;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.plan.Plans;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Casts;
 import net.fyrql.exec.Codegen;
+import net.fyrql.exec.Executor;
+import net.fyrql.exec.OperatorStatistics;
 import net.fyrql.exec.PipelinePlanner;
+import net.fyrql.exec.QueryStatistics;
 import net.fyrql.exec.SegmentPlanner;
 import net.fyrql.sql.bind.BoundStatement;
 import net.fyrql.sql.render.DuckDbDialect;
@@ -26,6 +31,7 @@ import net.fyrql.sql.render.SqlRenderer;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.IntFunction;
@@ -47,6 +53,10 @@ import java.util.regex.Pattern;
  * plan that a source runs is a line {@code Remote source [what it runs]},
  * with the part below it, each line after a {@code |}. A statement that
  * writes is a line of its own, see {@link #header}.
+ * <p>
+ * The plan a query ran can be printed with what each operator and scan
+ * did, after {@code --} on the line of its node, see {@link #print(QueryStatistics,
+ * Codegen, ToDoubleFunction, int)}.
  */
 final class Explain {
 
@@ -94,6 +104,7 @@ final class Explain {
             case BoundStatement.Set s -> s.value() == null ? "Reset " + s.name()
                     : "Set " + s.name() + " = '" + s.value().replace("'", "''") + "'";
             case BoundStatement.Query q -> throw new IllegalArgumentException("A query has a plan, not a header");
+            case BoundStatement.Explain e -> throw new IllegalArgumentException("EXPLAIN has no header");
         };
     }
 
@@ -101,16 +112,152 @@ final class Explain {
     static String print(PlanNode plan, Codegen codegen, ToDoubleFunction<PlanNode> estimate, int threads) {
         StringBuilder sb = new StringBuilder();
         Set<PlanNode> segments = threads > 1 ? SegmentPlanner.tops(plan) : Set.of();
-        print(plan, codegen, estimate, segments, new IdentityHashMap<>(), 0, sb);
+        print(plan, codegen, estimate, segments, new IdentityHashMap<>(), 0, sb, null);
         return sb.toString();
+    }
+
+    /**
+     * Prints the plan a query ran, as {@link #print(PlanNode, Codegen,
+     * ToDoubleFunction, int)} does, with what each operator and scan did
+     * after {@code --} on the line of its node: the rows and batches it
+     * returned, the time it worked without the time of its inputs, summed
+     * over its threads, and the threads; for a scan the splits, the row
+     * groups and files read of all, the requests and the bytes it read;
+     * the parts spilled to disk; and below a scan, each statement sent to
+     * a database on a line after {@code >}. A node of a compiled pipeline
+     * below its top has no numbers. Empty if no plan ran.
+     */
+    static String print(QueryStatistics statistics, Codegen codegen, ToDoubleFunction<PlanNode> estimate,
+            int threads) {
+        PlanNode plan = statistics.plan();
+        if (plan == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        Set<PlanNode> segments = threads > 1 ? SegmentPlanner.tops(plan) : Set.of();
+        print(plan, codegen, estimate, segments, new IdentityHashMap<>(), 0, sb,
+                new Run(statistics, Plans.ids(plan)));
+        return sb.toString();
+    }
+
+    /** What a query did, and the ids of the nodes of its plan, for the labels of its operators. */
+    private record Run(QueryStatistics statistics, Map<PlanNode, Integer> ids) {
+    }
+
+    /**
+     * Returns the first line of {@code EXPLAIN ANALYZE}: the time of the
+     * query, its rows or those it wrote, the threads its operators worked on,
+     * the compiled code it used and what it spilled to disk, such as
+     * {@code Analyzed in 1.23 s: 4 rows, 12 threads, 5 compiled parts in 45.6 ms}.
+     */
+    static String analyzed(QueryStatistics statistics, long rows, boolean written) {
+        StringBuilder sb = new StringBuilder("Analyzed in ").append(time(statistics.elapsed().toNanos()))
+                .append(": ").append(count(rows, "row")).append(written ? " written" : "").append(", ")
+                .append(count(statistics.threads(), "thread"));
+        if (statistics.compiled() > 0) {
+            sb.append(", ").append(count(statistics.compiled(), "compiled part")).append(" in ")
+                    .append(time(statistics.compileNanos()));
+        }
+        if (statistics.spill().parts() > 0) {
+            sb.append(", spilled ").append(bytes(statistics.spill().bytesWritten())).append(" in ")
+                    .append(count(statistics.spill().parts(), "part"));
+        }
+        return sb.toString();
+    }
+
+    /** The numbers of a node after {@code --}, or "" if its operator did nothing it could count. */
+    private static String numbers(PlanNode node, Run run) {
+        String label = Executor.label(node, run.ids());
+        OperatorStatistics op = run.statistics().operators().get(label);
+        SourceStatistics source = run.statistics().sources().get(label);
+        List<String> parts = new ArrayList<>();
+        if (source != null) {
+            if (source.splits() > 0) {
+                parts.add(count(source.splits(), "split"));
+            }
+            if (source.rowGroupsRead() + source.rowGroupsSkipped() > 0) {
+                parts.add(source.rowGroupsRead() + " of " + count(source.rowGroupsRead() + source.rowGroupsSkipped(),
+                        "row group"));
+            }
+            if (source.filesRead() + source.filesSkipped() > 0) {
+                parts.add(source.filesRead() + " of " + count(source.filesRead() + source.filesSkipped(), "file"));
+            }
+            if (source.requests() > 0) {
+                parts.add(count(source.requests(), "request") + " in " + time(source.requestNanos()));
+            }
+            if (source.bytes() > 0) {
+                parts.add(bytes(source.bytes()));
+            }
+        }
+        if (op != null && op.spilledParts() > 0) {
+            parts.add("spilled " + bytes(op.spilledBytes()) + " in " + count(op.spilledParts(), "part")
+                    + ", read back " + bytes(op.readBack()));
+        }
+        if (op == null && parts.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(" --");
+        if (op != null) {
+            sb.append(' ').append(count(op.rows(), "row")).append(", ").append(count(op.batches(), "batch"))
+                    .append(", ").append(time(op.nanos())).append(", ").append(count(op.threads(), "thread"));
+        }
+        if (!parts.isEmpty()) {
+            sb.append(op != null ? "; " : " ").append(String.join(", ", parts));
+        }
+        return sb.toString();
+    }
+
+    /** A number with a noun, such as {@code 1 row} or {@code 2 batches}. */
+    private static String count(long n, String noun) {
+        return n + " " + (n == 1 ? noun : noun.endsWith("ch") ? noun + "es" : noun + "s");
+    }
+
+    /** A time with three significant digits, such as {@code 450 us}, {@code 12.3 ms} or {@code 1.23 s}. */
+    static String time(long nanos) {
+        if (nanos < 1_000) {
+            return nanos + " ns";
+        }
+        double value;
+        String unit;
+        if (nanos < 1_000_000) {
+            value = nanos / 1e3;
+            unit = "us";
+        } else if (nanos < 1_000_000_000) {
+            value = nanos / 1e6;
+            unit = "ms";
+        } else {
+            value = nanos / 1e9;
+            unit = "s";
+        }
+        return String.format(Locale.ROOT, value >= 100 ? "%.0f" : value >= 10 ? "%.1f" : "%.2f", value) + " "
+                + unit;
+    }
+
+    /** Bytes in units of 1024, such as {@code 512 bytes}, {@code 12.5 KB} or {@code 203.5 MB}. */
+    static String bytes(long bytes) {
+        if (bytes < 1024) {
+            return count(bytes, "byte");
+        }
+        double value = bytes / 1024.0;
+        String unit = "KB";
+        for (String next : new String[] {"MB", "GB", "TB"}) {
+            if (value < 1024) {
+                break;
+            }
+            value /= 1024;
+            unit = next;
+        }
+        return String.format(Locale.ROOT, "%.1f %s", value, unit);
     }
 
     /**
      * Prints a node and its inputs; the marks of the nodes of the pipelines
      * found so far, by node, tell the nodes inside a pipeline.
+     *
+     * @param run what the query did, or {@code null} for the plan alone
      */
     private static void print(PlanNode node, Codegen codegen, ToDoubleFunction<PlanNode> estimate,
-            Set<PlanNode> segments, Map<PlanNode, String> marks, int depth, StringBuilder sb) {
+            Set<PlanNode> segments, Map<PlanNode, String> marks, int depth, StringBuilder sb, Run run) {
         if (!marks.containsKey(node)) {
             PipelinePlanner.Pipeline pipeline = PipelinePlanner.plan(node, codegen, estimate);
             if (pipeline != null) {
@@ -129,9 +276,21 @@ final class Explain {
         if (segments.contains(node)) {
             sb.append(" [parallel]");
         }
+        if (run != null) {
+            sb.append(numbers(node, run));
+        }
         sb.append('\n');
+        if (run != null) {
+            SourceStatistics source = run.statistics().sources().get(Executor.label(node, run.ids()));
+            if (source != null) {
+                for (String statement : source.statements()) {
+                    sb.append("  ".repeat(depth + 1)).append("> ").append(statement.replaceAll("\\s+", " "))
+                            .append('\n');
+                }
+            }
+        }
         for (PlanNode child : node.children()) {
-            print(child, codegen, estimate, segments, marks, depth + 1, sb);
+            print(child, codegen, estimate, segments, marks, depth + 1, sb, run);
         }
         if (node instanceof PlanNode.Remote r) {
             remote(r.logical(), "  ".repeat(depth + 1) + "| ", 0, sb);
@@ -160,7 +319,7 @@ final class Explain {
         };
     }
 
-    private static String line(PlanNode node) {
+    static String line(PlanNode node) {
         return switch (node) {
             case PlanNode.Scan s -> {
                 List<String> columns = new ArrayList<>();

@@ -11,6 +11,8 @@
 
 package net.fyrql.connector.iceberg;
 
+import net.fyrql.connector.SourceCounters;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -74,7 +76,8 @@ final class SnapshotScan {
      * @param snapshot the snapshot
      * @param read reads an Avro file at a location
      * @param manifests which manifests to read, by the entries of the manifest list
-     * @param files which data files to keep
+     * @param files which data files to keep; those kept and those not count for the scan, see
+     *        {@link SourceCounters}
      * @throws IllegalArgumentException if a manifest cannot be read or names
      *         a partition spec the metadata lacks
      */
@@ -83,6 +86,7 @@ final class SnapshotScan {
             Predicate<Manifests.ContentFile> files) {
         List<Manifests.ContentFile> data = new ArrayList<>();
         List<Manifests.ContentFile> deletes = new ArrayList<>();
+        long skipped = 0;
         for (Manifests.ManifestFile m : manifests(metadata, location, snapshot, read)) {
             if (!manifests.test(m)) {
                 continue;
@@ -98,12 +102,15 @@ final class SnapshotScan {
                 if (f.content() == Manifests.DATA) {
                     if (files.test(f)) {
                         data.add(f);
+                    } else {
+                        skipped++;
                     }
                 } else {
                     deletes.add(f);
                 }
             }
         }
+        SourceCounters.current().files(data.size(), skipped);
         return match(data, deletes, metadata.specs());
     }
 

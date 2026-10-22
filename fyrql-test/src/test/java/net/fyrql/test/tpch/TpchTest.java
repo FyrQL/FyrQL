@@ -14,6 +14,7 @@ package net.fyrql.test.tpch;
 import net.fyrql.FyrQL;
 import net.fyrql.QueryResult;
 import net.fyrql.connector.jdbc.JdbcConnector;
+import net.fyrql.connector.parquet.ParquetConnector;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
 import net.fyrql.exec.CodegenMode;
@@ -28,8 +29,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -260,6 +264,59 @@ class TpchTest {
         assertEquals(1, db.statements().size() - scans.size(), db.statements().toString());
         assertEquals(q22, !scans.isEmpty(), db.statements().toString());
         assertTrue(scans.stream().allMatch(s -> s.contains(".\"customer\" t")), db.statements().toString());
+    }
+
+    static List<TpchQueries.Query> analyzed() {
+        return queries().stream().filter(q -> List.of("q01", "q06", "q13", "q18").contains(q.name())).toList();
+    }
+
+    /**
+     * The numbers of {@code EXPLAIN ANALYZE} are those the sources record:
+     * the rows and row groups the scans of {@code lineitem} read from
+     * Parquet, and the statements sent to the database, also those that
+     * find the ranges of the keys.
+     */
+    @ParameterizedTest
+    @MethodSource("analyzed")
+    void explainAnalyzeShowsWhatTheSourcesRead(TpchQueries.Query query) {
+        ParquetConnector parquet = (ParquetConnector) engine.connector("parquet");
+        JdbcConnector db = (JdbcConnector) engine.connector("db");
+        parquet.clearReads();
+        db.clearStatements();
+        String text = engine.explainAnalyze(query.sql());
+        List<String> lines = Arrays.asList(text.split("\n"));
+        assertTrue(lines.get(0).matches("Analyzed in .*: \\d+ rows?, \\d+ threads?.*"), lines.get(0));
+        long rows = 0;
+        long groups = 0;
+        Pattern numbers = Pattern.compile(" -- (\\d+) rows?, .*; \\d+ splits?, (\\d+) of \\d+ row groups?");
+        for (String line : lines) {
+            if (line.strip().startsWith("Scan parquet.")) {
+                Matcher m = numbers.matcher(line);
+                assertTrue(m.find(), line);
+                rows += Long.parseLong(m.group(1));
+                groups += Long.parseLong(m.group(2));
+            }
+        }
+        assertEquals(parquet.reads().stream().mapToLong(ParquetConnector.Read::rows).sum(), rows, text);
+        assertEquals(parquet.reads().size(), groups, text);
+        List<String> shown = lines.stream().map(String::strip).filter(l -> l.startsWith("> "))
+                .map(l -> l.substring(2)).sorted().toList();
+        assertEquals(db.statements().stream().map(s -> s.replaceAll("\\s+", " ")).sorted().toList(), shown,
+                text);
+    }
+
+    @Test
+    void explainAnalyzeShowsWhatQ18Spilled() throws IOException {
+        Path dir = Files.createTempDirectory("fyrql-tpch-");
+        try (FyrQL small = tpch.open(null, null, SMALLER_BUDGET_THREADS, List.of(),
+                b -> b.memoryBudget(SMALLER_BUDGET).spillDirectory(dir))) {
+            String q18 = queries().stream().filter(q -> q.name().equals("q18")).findFirst().orElseThrow().sql();
+            String text = small.explainAnalyze(q18);
+            assertTrue(text.split("\n")[0].matches(".*, spilled [0-9.]+ (KB|MB) in \\d+ parts?"), text);
+            assertTrue(text.contains("; spilled "), text);
+        } finally {
+            Files.deleteIfExists(dir);
+        }
     }
 
     @Test

@@ -51,9 +51,10 @@ final class JoinBuild {
      * @param right    the operator of the right input
      * @param label    the label of the join
      * @param reserved counts the bytes reserved in the budget, which the caller releases
+     * @param context  the context of the query, which counts the compiled key functions
      */
     static JoinTable read(Operator right, PlanNode.Join join, String label, MemoryBudget budget, Codegen codegen,
-            AtomicLong reserved) {
+            AtomicLong reserved, QueryContext context) {
         int[] keys = join.rightKeys().stream().mapToInt(Integer::intValue).toArray();
         List<DataType> types = new ArrayList<>();
         for (int k : join.leftKeys()) {
@@ -61,9 +62,9 @@ final class JoinBuild {
         }
         List<Part> parts;
         if (right instanceof ParallelSegment segment) {
-            parts = segment.collect(() -> new Hasher(keys, types, label, budget, codegen, reserved));
+            parts = segment.collect(() -> new Hasher(keys, types, label, budget, codegen, reserved, context));
         } else {
-            Hasher hasher = new Hasher(keys, types, label, budget, codegen, reserved);
+            Hasher hasher = new Hasher(keys, types, label, budget, codegen, reserved, context);
             parts = new ArrayList<>();
             for (Batch b = right.next(); b != null; b = right.next()) {
                 parts.add(hasher.apply(b));
@@ -112,18 +113,20 @@ final class JoinBuild {
         private final MemoryBudget budget;
         private final Codegen codegen;
         private final AtomicLong reserved;
+        private final QueryContext context;
         private KeyFunctions functions = InterpretedKeys.INSTANCE;
         private boolean asked;
         private long rows;
 
         Hasher(int[] keys, List<DataType> types, String label, MemoryBudget budget, Codegen codegen,
-                AtomicLong reserved) {
+                AtomicLong reserved, QueryContext context) {
             this.keys = keys;
             this.types = types;
             this.label = label;
             this.budget = budget;
             this.codegen = codegen;
             this.reserved = reserved;
+            this.context = context;
         }
 
         @Override
@@ -136,7 +139,7 @@ final class JoinBuild {
             }
             if (!asked && codegen.due(rows)) {
                 asked = true;
-                KeyFunctions compiled = codegen.keys(types);
+                KeyFunctions compiled = codegen.keys(types, context);
                 if (compiled != null) {
                     functions = compiled;
                 }

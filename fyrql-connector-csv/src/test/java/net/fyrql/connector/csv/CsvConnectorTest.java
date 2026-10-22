@@ -15,6 +15,7 @@ import net.fyrql.connector.Batches;
 import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Split;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
@@ -363,6 +364,24 @@ class CsvConnectorTest {
         List<List<Object>> changed = rowsOfSplits(parts, "big", 0, 1, 2);
         assertEquals(501, changed.size());
         assertEquals(List.of(2L, "b", 1.5), changed.get(500));
+    }
+
+    @Test
+    void aScanCountsTheBytesOfTheFileOrOfItsParts() throws IOException {
+        StringBuilder csv = new StringBuilder("id,text\n");
+        for (int r = 0; r < 2000; r++) {
+            csv.append(r).append(",row ").append(r).append('\n');
+        }
+        Path file = dir.resolve("counted.csv");
+        Files.writeString(file, csv, StandardCharsets.UTF_8);
+        for (long splitSize : new long[] {0, 1000}) {
+            CsvConnector c = CsvConnector.builder("csv").file("t", file).splitSize(splitSize).build();
+            SourceCounters counters = new SourceCounters();
+            try (SourceCounters.Scope s = SourceCounters.enter(counters)) {
+                assertEquals(2000, rowsOfSplits(c, "t", 0, 1).size());
+            }
+            assertEquals(Files.size(file), counters.snapshot().bytes(), "split size " + splitSize);
+        }
     }
 
     /** A field of a random kind: plain, quoted with a delimiter, quotes or line breaks, or not ASCII. */

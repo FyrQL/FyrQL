@@ -84,6 +84,7 @@ class DocumentationExampleTest {
                 new Order(3, 3, new BigDecimal("5.25")), new Order(4, 1, null), new Order(5, null, new BigDecimal("7.00")));
         List<String> printed = new ArrayList<>();
         String plan;
+        String analyzed;
         String pipeline;
         String parallel;
 
@@ -114,6 +115,7 @@ class DocumentationExampleTest {
                 printed.add(Arrays.toString(row));
             }
             plan = engine.explain(sql);
+            analyzed = engine.explainAnalyze(sql);
             // The documents show the plan of AUTO: the tables are too small for a pipeline unless code is always
             // generated.
             pipeline = engine.codegen() == CodegenMode.ALWAYS ? " [codegen pipeline]" : "";
@@ -139,6 +141,14 @@ class DocumentationExampleTest {
                             Scan mem.main.orders (customerId INTEGER, amount DECIMAL(10,2))
                           Scan csv.main.customers (id BIGINT, region VARCHAR)%s
                 """.formatted(pipeline, parallel, parallel), plan);
+        // EXPLAIN ANALYZE: the plan with the numbers of the run, the rows and batches as in the documents.
+        List<String> lines = List.of(analyzed.split("\n"));
+        assertTrue(lines.get(0).matches("Analyzed in [0-9.]+ (ns|us|ms|s): 2 rows, \\d+ threads?.*"), analyzed);
+        assertEquals(List.of(plan.split("\n")), lines.subList(1, lines.size()).stream()
+                .map(l -> l.replaceAll(" -- .*", "")).toList());
+        assertTrue(lines.get(1).contains(" -- 2 rows, 1 batch, "), analyzed);
+        assertTrue(lines.get(lines.size() - 2).contains(" -- 5 rows, 1 batch, "), analyzed);
+        assertTrue(lines.get(lines.size() - 1).matches(".* -- 3 rows, 1 batch, .*; 1 split, 34 bytes"), analyzed);
     }
 
     @Test

@@ -39,22 +39,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.10.0</version>
+    <version>0.11.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.10.0</version>
+    <version>0.11.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.10.0</version>
+    <version>0.11.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.10.0</version>
+    <version>0.11.0</version>
 </dependency>
 ```
 
@@ -131,7 +131,15 @@ that runs: the scan of the orders reads only the two columns the query uses,
 at once. A query that does not parse or bind throws an `SqlException` with the position
 in the text, such as `Referenced column "x" not found in FROM clause! at line 1, column 33`.
 
-More: [Using the engine](manual.md#using-the-engine), [Connectors](manual.md#connectors).
+`engine.explainAnalyze(sql)`, or `EXPLAIN ANALYZE` in SQL, runs the query and adds to
+each line of the plan, after `--`, what its node did: the rows and batches it returned,
+the time it worked and its threads, and for a scan what it read from its source. In one
+run, the customers gave
+`Scan csv.main.customers (id BIGINT, region VARCHAR) [parallel] -- 3 rows, 1 batch, 976 us, 1 thread; 1 split, 34 bytes`.
+While Java Flight Recorder records, each query is an event `net.fyrql.Query` as well.
+
+More: [Using the engine](manual.md#using-the-engine), [Connectors](manual.md#connectors),
+[Observing queries](manual.md#observing-queries).
 
 ## Parameters
 

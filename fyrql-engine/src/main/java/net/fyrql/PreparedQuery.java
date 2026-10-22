@@ -28,7 +28,8 @@ import java.util.Objects;
  * @param searchPath the search path the names of the query are looked up along
  * @param schema the columns of the result, {@code Count} for a statement that writes
  * @param parameterTypes the type of each parameter, from the first
- * @param writes whether the statement writes
+ * @param writes whether the statement writes and its result is {@code Count}; {@code false} for a query and
+ *        for {@code EXPLAIN}, also of a statement that writes
  */
 public record PreparedQuery(String sql, SearchPath searchPath, Schema schema, List<DataType> parameterTypes,
         boolean writes) {

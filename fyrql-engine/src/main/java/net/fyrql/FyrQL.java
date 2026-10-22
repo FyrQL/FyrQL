@@ -27,6 +27,8 @@ import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.RemotePlan;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.function.FunctionRegistry;
@@ -42,6 +44,7 @@ import net.fyrql.exec.Executor;
 import net.fyrql.exec.MemoryBudget;
 import net.fyrql.exec.Operator;
 import net.fyrql.exec.QueryContext;
+import net.fyrql.exec.QueryStatistics;
 import net.fyrql.exec.SpillDirectory;
 import net.fyrql.exec.SpillStatistics;
 import net.fyrql.exec.Splits;
@@ -116,6 +119,9 @@ import java.util.concurrent.ScheduledFuture;
  * }</pre>
  */
 public final class FyrQL implements AutoCloseable {
+
+    /** Whether the module {@code jdk.jfr} is there, as it may not be in a runtime made with jlink. */
+    private static final boolean RECORDABLE = ModuleLayer.boot().findModule("jdk.jfr").isPresent();
 
     private final Map<String, Connector> connectors;
     private final EngineCatalog catalog;
@@ -431,8 +437,9 @@ public final class FyrQL implements AutoCloseable {
                         p.position());
             }
         }
-        return new PreparedQuery(sql, searchPath, bound.statement().schema(), types,
-                !(bound.statement() instanceof BoundStatement.Query));
+        BoundStatement statement = bound.statement();
+        return new PreparedQuery(sql, searchPath, statement.schema(), types,
+                !(statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain));
     }
 
     /**
@@ -568,7 +575,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException if the statement cannot be parsed or bound, or a write fails
      */
     public QueryResult sql(String sql) {
-        return execute(statement(sql), new QueryContext());
+        return execute(statement(sql), new QueryContext(), sql);
     }
 
     /**
@@ -579,7 +586,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public QueryResult sql(String sql, SearchPath searchPath) {
-        return execute(statement(sql, searchPath), new QueryContext());
+        return execute(statement(sql, searchPath), new QueryContext(), sql);
     }
 
     /**
@@ -601,7 +608,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException if the statement cannot be parsed or bound, is a query, or fails
      */
     public long update(String sql) {
-        return update(statement(sql), new QueryContext());
+        return update(statement(sql), new QueryContext(), sql);
     }
 
     /**
@@ -613,7 +620,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public long update(String sql, SearchPath searchPath) {
-        return update(statement(sql, searchPath), new QueryContext());
+        return update(statement(sql, searchPath), new QueryContext(), sql);
     }
 
     /**
@@ -621,35 +628,80 @@ public final class FyrQL implements AutoCloseable {
      * number of rows written; a context of the caller cancels it, which
      * abandons what was written, and so does the timeout of the query.
      *
-     * @throws SqlException if the statement is a query, or the write fails
+     * @throws SqlException if the statement is a query or {@code EXPLAIN}, or the write fails
      */
     public long update(BoundStatement statement, QueryContext context) {
-        if (statement instanceof BoundStatement.Query) {
-            throw new SqlException("A query returns rows, not a number of rows written; run it with sql",
-                    Position.UNKNOWN);
+        return update(statement, context, null);
+    }
+
+    /**
+     * Runs a statement that writes, see {@link #update(BoundStatement, QueryContext)},
+     * as an event of Java Flight Recorder, if one is recorded.
+     *
+     * @param sql the text of the statement, or {@code null} for its line in {@link #explain(String)}
+     */
+    private long update(BoundStatement statement, QueryContext context, String sql) {
+        if (statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain) {
+            throw new SqlException((statement instanceof BoundStatement.Query ? "A query" : "EXPLAIN")
+                    + " returns rows, not a number of rows written; run it with sql", Position.UNKNOWN);
         }
+        QueryEvent event = RECORDABLE ? QueryEvent.start() : null;
         ScheduledFuture<?> timeout = timeouts.start(context);
+        long count = 0;
+        Throwable failure = null;
         try {
-            return writes.run(statement, context);
+            count = writes.run(statement, context);
+            return count;
+        } catch (RuntimeException | Error e) {
+            failure = e;
+            throw e;
         } finally {
             Timeouts.stop(timeout);
+            if (event != null) {
+                event.done(sql != null ? sql : Explain.header(statement), context, count, failure);
+            }
         }
     }
 
     /**
      * Runs a bound statement: a query as {@link #execute(PlanNode, QueryContext)}
      * does, a statement that writes to its end, with a result of one row
-     * of the column {@code Count}. The caller closes the result.
+     * of the column {@code Count}, and {@code EXPLAIN} with a result of
+     * one row per line of the plan in the column {@code plan}, see
+     * {@link #explain(BoundStatement)} and
+     * {@link #explainAnalyze(BoundStatement, QueryContext)}. The caller
+     * closes the result.
      *
      * @throws SqlException if the write fails
      */
     public QueryResult execute(BoundStatement statement, QueryContext context) {
+        return execute(statement, context, null);
+    }
+
+    /**
+     * Runs a bound statement, see {@link #execute(BoundStatement, QueryContext)}.
+     *
+     * @param sql the text of the statement for its event of Java Flight Recorder, or {@code null}
+     */
+    private QueryResult execute(BoundStatement statement, QueryContext context, String sql) {
         if (statement instanceof BoundStatement.Query q) {
-            return execute(q.plan(), context);
+            return execute(q.plan(), context, sql);
         }
-        long count = update(statement, context);
-        return new QueryResult(open(new PlanNode.Values(BoundStatement.COUNT,
-                List.<Object[]>of(new Object[] {count})), context), context, null);
+        if (statement instanceof BoundStatement.Explain e) {
+            String plan = e.analyze() ? explainAnalyze(e.statement(), context) : explain(e.statement());
+            List<Object[]> lines = new ArrayList<>();
+            for (String line : plan.split("\n")) {
+                lines.add(new Object[] {line});
+            }
+            return result(new PlanNode.Values(BoundStatement.PLAN, lines), context);
+        }
+        long count = update(statement, context, sql);
+        return result(new PlanNode.Values(BoundStatement.COUNT, List.<Object[]>of(new Object[] {count})), context);
+    }
+
+    /** The result of a statement that has run, whose operators count nothing for the context of the statement. */
+    private QueryResult result(PlanNode.Values rows, QueryContext context) {
+        return new QueryResult(open(rows, QueryContext.NONE), context, null);
     }
 
     /**
@@ -696,8 +748,14 @@ public final class FyrQL implements AutoCloseable {
         return Explain.print(optimize(plan), codegen, optimizer.estimator(), executor.threads());
     }
 
-    /** Returns a statement as the engine runs it, as text in the form of {@link #explain(String)}. */
+    /**
+     * Returns a statement as the engine runs it, as text in the form of
+     * {@link #explain(String)}; for {@code EXPLAIN}, that of its statement.
+     */
     public String explain(BoundStatement statement) {
+        if (statement instanceof BoundStatement.Explain e) {
+            return explain(e.statement());
+        }
         if (statement instanceof BoundStatement.Query q) {
             return explain(q.plan());
         }
@@ -715,6 +773,88 @@ public final class FyrQL implements AutoCloseable {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * Runs a statement and returns its plan with what each operator and scan
+     * did, as text: a first line such as
+     * {@code Analyzed in 1.23 s: 4 rows, 12 threads}, then the plan the
+     * query ran, see {@link #explain(QueryStatistics)}. The rows of a
+     * query are read and dropped; a statement that writes writes, and its
+     * line comes before the plan of its rows, as in {@link #explain(String)}.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound, or fails
+     */
+    public String explainAnalyze(String sql) {
+        return explainAnalyze(statement(sql), new QueryContext());
+    }
+
+    /**
+     * Runs a statement with names looked up along a search path, see
+     * {@link #statement(String, SearchPath)}, and returns its plan with what
+     * each operator did, see {@link #explainAnalyze(String)}.
+     *
+     * @throws SqlException             if the statement cannot be parsed or bound, or fails
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public String explainAnalyze(String sql, SearchPath searchPath) {
+        return explainAnalyze(statement(sql, searchPath), new QueryContext());
+    }
+
+    /** Runs a plan and returns it with what each operator did, see {@link #explainAnalyze(String)}. */
+    public String explainAnalyze(PlanNode plan) {
+        return explainAnalyze(new BoundStatement.Query(plan), new QueryContext());
+    }
+
+    /**
+     * Runs a statement in a context of the caller, which cancels it and
+     * gives it its timeout, see {@link #execute(PlanNode, QueryContext)},
+     * and returns its plan with what each operator did, see
+     * {@link #explainAnalyze(String)}; for {@code EXPLAIN}, its statement.
+     *
+     * @throws SqlException if the statement fails
+     */
+    public String explainAnalyze(BoundStatement statement, QueryContext context) {
+        BoundStatement run = statement instanceof BoundStatement.Explain e ? e.statement() : statement;
+        if (run instanceof BoundStatement.Query q) {
+            long rows = 0;
+            try (QueryResult result = execute(q.plan(), context)) {
+                for (Batch b = result.nextBatch(); b != null; b = result.nextBatch()) {
+                    rows += b.rowCount();
+                }
+            }
+            QueryStatistics statistics = context.statistics();
+            return Explain.analyzed(statistics, rows, false) + "\n" + explain(statistics);
+        }
+        long written = update(run, context);
+        context.finished();
+        QueryStatistics statistics = context.statistics();
+        StringBuilder sb = new StringBuilder(Explain.analyzed(statistics, written, true)).append('\n')
+                .append(Explain.header(run)).append('\n');
+        if (statistics.plan() != null) {
+            for (String line : explain(statistics).split("\n")) {
+                sb.append("  ").append(line).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Returns the plan a query ran with what each of its operators and scans
+     * did, as text: each line of the plan as in {@link #explain(String)}
+     * followed by {@code --} and the rows and batches the operator
+     * returned, the time it worked without the time of its inputs, summed
+     * over the threads it worked on, and those threads; for a scan the
+     * splits, the row groups and files it read of all, the requests to its
+     * source and the bytes it read, and below it, after {@code >}, each
+     * statement sent to a database; and what an operator spilled to disk.
+     * A node of a compiled pipeline below its top has no numbers. Empty if
+     * the query opened no plan.
+     *
+     * @param statistics what a query did, see {@link QueryResult#statistics()}
+     */
+    public String explain(QueryStatistics statistics) {
+        return Explain.print(statistics, codegen, optimizer.estimator(), executor.threads());
     }
 
     /**
@@ -736,18 +876,39 @@ public final class FyrQL implements AutoCloseable {
      * context is canceled with {@link QueryContext.Reason#TIMEOUT}.
      */
     public QueryResult execute(PlanNode plan, QueryContext context) {
+        return execute(plan, context, null);
+    }
+
+    /**
+     * Runs a plan, see {@link #execute(PlanNode, QueryContext)}; while Java
+     * Flight Recorder records, the run is an event {@code net.fyrql.Query}
+     * until the result is closed.
+     *
+     * @param sql the text of the statement for the event, or {@code null} for the first line of the plan
+     */
+    private QueryResult execute(PlanNode plan, QueryContext context, String sql) {
+        QueryEvent event = RECORDABLE ? QueryEvent.start() : null;
         ScheduledFuture<?> timeout = timeouts.start(context);
         try {
-            return new QueryResult(open(plan, context), context, timeout);
+            return new QueryResult(open(plan, context), context, timeout, event, sql);
         } catch (RuntimeException | Error e) {
             Timeouts.stop(timeout);
+            if (event != null) {
+                event.done(sql, context, 0, e);
+            }
             throw e;
         }
     }
 
-    /** Opens the operator of a plan, after {@link #optimize}. */
+    /**
+     * Opens the operator of a plan, after {@link #optimize}; the optimized
+     * plan is noted in the context, if it is the first one of the query, see
+     * {@link QueryContext#plan(PlanNode)}.
+     */
     Operator open(PlanNode plan, QueryContext context) {
-        return executor.open(optimize(plan), optimizer.estimator(), context);
+        PlanNode optimized = optimize(plan);
+        context.plan(optimized);
+        return executor.open(optimized, optimizer.estimator(), context);
     }
 
     /** Runs a plan and collects all rows as Java values. */
@@ -806,7 +967,9 @@ public final class FyrQL implements AutoCloseable {
             throw new IllegalStateException("The connector " + connector.name() + " plans " + plan.output()
                     + " for a scan of " + scan.schema());
         }
-        return Splits.of(connector.splits(plan, threads), connector::open);
+        List<Split> splits = connector.splits(plan, threads);
+        SourceCounters.current().splits(splits.size());
+        return Splits.of(splits, connector::open);
     }
 
     /**

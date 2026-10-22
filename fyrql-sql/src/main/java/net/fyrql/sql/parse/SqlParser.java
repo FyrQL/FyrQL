@@ -102,7 +102,8 @@ public final class SqlParser {
 
     /**
      * Parses a statement: a query, {@code COPY ... TO}, {@code COPY ... FROM},
-     * {@code CREATE TABLE}, {@code INSERT INTO} or {@code DROP TABLE}; a
+     * {@code CREATE TABLE}, {@code INSERT INTO} or {@code DROP TABLE}, or
+     * one of these after {@code EXPLAIN} or {@code EXPLAIN ANALYZE}; a
      * trailing semicolon is allowed.
      *
      * @throws SqlException if the text is not one statement of the supported
@@ -135,6 +136,10 @@ public final class SqlParser {
      */
     private static ParameterizedStatement statement(String sql, boolean parameters, boolean writes) {
         Objects.requireNonNull(sql, "sql");
+        int explain = CopyParser.word(sql, 0, "explain");
+        if (explain >= 0) {
+            return explain(sql, explain, parameters, writes);
+        }
         if (CopyParser.isCopy(sql)) {
             if (!writes) {
                 throw new SqlException("Only queries are supported, not COPY", CopyParser.start(sql));
@@ -163,6 +168,28 @@ public final class SqlParser {
             }
         }
         return new ParameterizedStatement(statement, numbered);
+    }
+
+    /**
+     * Parses {@code EXPLAIN [ANALYZE] statement}: the statement in the text
+     * with spaces in place of the words before it, so that its positions
+     * are those of the whole text.
+     *
+     * @param end where the word {@code EXPLAIN} ends
+     */
+    private static ParameterizedStatement explain(String sql, int end, boolean parameters, boolean writes) {
+        Position position = CopyParser.token(sql, 0);
+        if (!writes) {
+            throw new SqlException("Only queries are supported, not EXPLAIN", position);
+        }
+        int analyze = CopyParser.word(sql, end, "analyze");
+        int start = analyze >= 0 ? analyze : end;
+        if (CopyParser.word(sql, start, "explain") >= 0) {
+            throw new SqlException("EXPLAIN cannot explain EXPLAIN", CopyParser.token(sql, start));
+        }
+        ParameterizedStatement explained = statement(CopyParser.from(sql, start), parameters, true);
+        return new ParameterizedStatement(new net.fyrql.sql.ast.Explain(analyze >= 0, explained.statement(),
+                position), explained.parameters());
     }
 
     /**

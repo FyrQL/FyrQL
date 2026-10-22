@@ -12,6 +12,7 @@
 package net.fyrql.exec;
 
 import net.fyrql.connector.BatchReader;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.JoinType;
 import net.fyrql.core.type.Schema;
@@ -174,6 +175,12 @@ final class ParallelSegment extends AbstractOperator {
         this.codegen = codegen;
     }
 
+    /** The copies of the chains count, under the same labels as the segment and its scans. */
+    @Override
+    boolean counts() {
+        return false;
+    }
+
     @Override
     Batch compute() {
         if (!started) {
@@ -267,13 +274,19 @@ final class ParallelSegment extends AbstractOperator {
             throw new IllegalStateException("The segment " + label() + " is read already");
         }
         List<S> made = new ArrayList<>();
-        start((ex, workerCount) -> {
-            S sink = sinks.apply(workerCount);
-            made.add(sink);
-            return (morsel, b) -> {
-                sink.accept(morsel.index(), renamed(b));
-                return ex.wanted(morsel);
-            };
+        // The sinks on the workers work for the operator that drains the segment.
+        OperatorCounters.Part consumer = context().counting() ? Timing.current().owner() : null;
+        Timing.run(context(), null, () -> {
+            start((ex, workerCount) -> {
+                S sink = sinks.apply(workerCount);
+                made.add(sink);
+                OperatorCounters.Part worker = consumer == null ? null : consumer.counters().part();
+                return (morsel, b) -> {
+                    accept(sink, morsel.index(), renamed(b), worker);
+                    return ex.wanted(morsel);
+                };
+            });
+            return null;
         });
         if (exchange == null) {
             S sink = sinks.apply(1);
@@ -282,7 +295,7 @@ final class ParallelSegment extends AbstractOperator {
             }
             return List.of(sink);
         }
-        if (!exchange.await()) {
+        if (!Timing.run(context(), null, exchange::await)) {
             checkCancelled();
         }
         S rest = null;
@@ -294,6 +307,21 @@ final class ParallelSegment extends AbstractOperator {
             rest.accept(morselCount, renamed(b));
         }
         return made;
+    }
+
+    /** Gives a batch to a sink on a worker, timed for the operator that drains the segment, if any. */
+    private static void accept(Sink sink, int morsel, Batch b, OperatorCounters.Part consumer) {
+        if (consumer == null) {
+            sink.accept(morsel, b);
+            return;
+        }
+        Timing timing = Timing.current();
+        long start = timing.begin(consumer);
+        try {
+            sink.accept(morsel, b);
+        } finally {
+            timing.end(start);
+        }
     }
 
     /**
@@ -393,7 +421,8 @@ final class ParallelSegment extends AbstractOperator {
         for (Build b : ch.builds()) {
             JoinTable table;
             try {
-                table = JoinBuild.read(b.right(), b.join(), b.label(), budget, codegen, reserved);
+                table = Timing.run(context(), b.label(), () -> JoinBuild.read(b.right(), b.join(), b.label(),
+                        budget, codegen, reserved, context()));
             } catch (QueryException e) {
                 throw e;
             } catch (RuntimeException e) {
@@ -409,10 +438,17 @@ final class ParallelSegment extends AbstractOperator {
         return true;
     }
 
-    /** Returns the splits of the scan of a chain, a failure under the label of the scan. */
+    /**
+     * Returns the splits of the scan of a chain, a failure under the label of
+     * the scan, which counts the time and what the source reads for it.
+     */
     private Splits splits(Chain c) {
         try {
-            return source.splits(c.scan(), threads, context());
+            return Timing.run(context(), c.scanLabel(), () -> {
+                try (SourceCounters.Scope scope = SourceCounters.enter(context().source(c.scanLabel()))) {
+                    return source.splits(c.scan(), threads, context());
+                }
+            });
         } catch (QueryException e) {
             throw e;
         } catch (RuntimeException e) {

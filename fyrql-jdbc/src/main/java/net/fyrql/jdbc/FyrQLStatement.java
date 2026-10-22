@@ -29,11 +29,12 @@ import java.util.List;
 /**
  * A statement that runs one statement of SQL at a time; each run closes
  * the result set of the one before. A query is one {@code SELECT},
- * {@code WITH}, {@code VALUES} or set operation, or {@code EXPLAIN} and a
- * statement, whose result is the plan in a column {@code plan}, one line
- * per row. A statement that writes, {@code COPY ... TO},
- * {@code COPY ... FROM}, {@code CREATE TABLE}, {@code INSERT INTO} or
- * {@code DROP TABLE}, runs to its end before the method returns, and the
+ * {@code WITH}, {@code VALUES} or set operation, or {@code EXPLAIN} or
+ * {@code EXPLAIN ANALYZE} and a statement, whose result is the plan in a
+ * column {@code plan}, one line per row; {@code EXPLAIN ANALYZE} runs the
+ * statement first, and one that writes writes. A statement that writes,
+ * {@code COPY ... TO}, {@code COPY ... FROM}, {@code CREATE TABLE},
+ * {@code INSERT INTO} or {@code DROP TABLE}, runs to its end before the method returns, and the
  * rows it wrote are the update count: {@link #execute(String)} runs either
  * kind and returns {@code false} for a statement that writes,
  * {@link #executeUpdate(String)} runs only those, and

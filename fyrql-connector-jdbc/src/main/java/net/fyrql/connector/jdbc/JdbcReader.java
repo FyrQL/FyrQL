@@ -12,6 +12,7 @@
 package net.fyrql.connector.jdbc;
 
 import net.fyrql.connector.BatchReader;
+import net.fyrql.connector.SourceRequest;
 import net.fyrql.connector.jdbc.ColumnReaders.ColumnReader;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
@@ -128,8 +129,13 @@ final class JdbcReader implements BatchReader {
                             + shown);
                 }
             }
-            result = statement instanceof PreparedStatement prepared ? prepared.executeQuery()
-                    : statement.executeQuery(sql);
+            SourceRequest call = SourceRequest.start();
+            try {
+                result = statement instanceof PreparedStatement prepared ? prepared.executeQuery()
+                        : statement.executeQuery(sql);
+            } finally {
+                call.done(source, "query", shown, 0, 0);
+            }
             ResultSetMetaData md = result.getMetaData();
             if (md.getColumnCount() != Math.max(1, output.size())) {
                 throw new JdbcSourceException("The JDBC source " + source + " returns " + md.getColumnCount()

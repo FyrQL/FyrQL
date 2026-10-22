@@ -166,6 +166,17 @@ public final class Executor {
     }
 
     /**
+     * Returns the label of a node of a plan under which its operator reports
+     * failures and counts what it does, such as {@code Filter#2}: the name
+     * of its type and its id, see {@link Plans#ids}.
+     *
+     * @param ids the ids of the nodes of the plan
+     */
+    public static String label(PlanNode node, Map<PlanNode, Integer> ids) {
+        return node.getClass().getSimpleName() + "#" + ids.get(node);
+    }
+
+    /**
      * Builds the operator tree of a plan without estimates of its rows, so
      * that only {@link CodegenMode#ALWAYS} fuses pipelines; the caller
      * closes it.
@@ -235,7 +246,7 @@ public final class Executor {
         }
 
         private String label(PlanNode node) {
-            return node.getClass().getSimpleName() + "#" + ids.get(node);
+            return Executor.label(node, ids);
         }
 
         Operator open(PlanNode node) {
@@ -288,7 +299,7 @@ public final class Executor {
             if (p == null) {
                 return null;
             }
-            CompiledPipeline compiled = codegen.pipeline(p.spec());
+            CompiledPipeline compiled = codegen.pipeline(p.spec(), context);
             if (compiled == null) {
                 return null;
             }

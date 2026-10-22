@@ -99,6 +99,23 @@ class UpdateTest {
     }
 
     @Test
+    void explainAnalyzeOfAStatementThatWritesIsAQueryThatWrites() throws Exception {
+        assertEquals(List.of("plan"), client.getExecuteSchema("EXPLAIN ANALYZE INSERT INTO mem.w VALUES (1, 'a')")
+                .getSchema().getFields().stream().map(Field::getName).toList());
+        assertEquals(List.of(List.of(0L)), rows("SELECT count(*) FROM w"), "the schema does not run it");
+        List<List<Object>> plan = rows("EXPLAIN ANALYZE INSERT INTO mem.w VALUES (1, 'a'), (2, 'b')");
+        assertTrue(String.valueOf(plan.get(0).get(0)).matches("Analyzed in .*: 2 rows written, .*"), plan.toString());
+        assertEquals("Insert into mem.main.w", plan.get(1).get(0));
+        assertEquals(List.of(List.of(2L)), rows("SELECT count(*) FROM w"));
+        TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "A query returns rows",
+                () -> client.executeUpdate("EXPLAIN ANALYZE INSERT INTO mem.w VALUES (3, 'c')"));
+        assertEquals(List.of(List.of(2L)), rows("SELECT count(*) FROM w"));
+        plan = rows("EXPLAIN ANALYZE SELECT v FROM tiny");
+        assertTrue(String.valueOf(plan.get(0).get(0)).matches("Analyzed in .*: 2 rows, .*"), plan.toString());
+        assertEquals(0, server.server.runningQueries());
+    }
+
+    @Test
     void aPreparedStatementWritesOnceForEachRowOfValues() throws Exception {
         try (FlightSqlClient.PreparedStatement p = client.prepare("INSERT INTO mem.w VALUES (?, ?)")) {
             assertTrue(p.getResultSetSchema().getFields().isEmpty(), "a statement that writes has no columns");

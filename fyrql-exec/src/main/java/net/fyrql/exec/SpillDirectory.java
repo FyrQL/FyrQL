@@ -92,7 +92,7 @@ public final class SpillDirectory implements AutoCloseable {
         }
         String name = files.incrementAndGet() + "-" + operator.replaceAll("[^A-Za-z0-9_-]", "") + "-" + what
                 + ".spill";
-        return new SpillFile(this, dir.resolve(name), operator, schema, context);
+        return new SpillFile(this, dir.resolve(name), operator, what, schema, context);
     }
 
     private synchronized Path directory() throws IOException {

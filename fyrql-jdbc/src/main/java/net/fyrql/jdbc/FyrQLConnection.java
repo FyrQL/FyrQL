@@ -35,7 +35,6 @@ import java.sql.SQLXML;
 import java.sql.Savepoint;
 import java.sql.Statement;
 import java.sql.Struct;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,8 +46,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * A connection to an engine, which it owns and closes, unless it was
@@ -68,11 +65,6 @@ import java.util.regex.Pattern;
  * reading a batch of its result take a lock of the connection.
  */
 final class FyrQLConnection implements Connection {
-
-    /** The result of {@code EXPLAIN}: the plan, one line per row. */
-    private static final Schema PLAN = Schema.of(new Schema.Field("plan", DataType.VARCHAR, false));
-    private static final Pattern EXPLAIN = Pattern.compile("\\s*EXPLAIN\\s+(.*)",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private final FyrQL engine;
     private final boolean closeEngine;
@@ -144,36 +136,28 @@ final class FyrQLConnection implements Connection {
     }
 
     /**
-     * Runs a statement that a context cancels: {@code EXPLAIN} and a
-     * statement gives its plan, a query starts and gives its rows, and a
-     * statement that writes runs to its end and gives the rows it wrote.
-     * A statement of another kind than the one expected fails with
-     * {@code 42809} before it runs, and one that writes fails with
-     * {@code 25006} if the connection is read-only. A query canceled while
-     * it is planned fails with its first batch.
+     * Runs a statement that a context cancels: a query starts and gives its
+     * rows, {@code EXPLAIN} gives the plan of its statement, after running
+     * it for {@code EXPLAIN ANALYZE}, and a statement that writes runs to
+     * its end and gives the rows it wrote. A statement of another kind than
+     * the one expected fails with {@code 42809} before it runs, and one that
+     * writes, also under {@code EXPLAIN ANALYZE}, fails with {@code 25006}
+     * if the connection is read-only. A query canceled while it is planned
+     * fails with its first batch.
      */
     Outcome run(String sql, QueryContext context, Kind expected) throws SQLException {
         lock.lock();
         try {
             checkOpen();
-            Matcher m = EXPLAIN.matcher(sql);
-            if (m.matches()) {
-                expect(expected, Kind.QUERY);
-                List<Object[]> rows = new ArrayList<>();
-                for (String line : engine.explain(m.group(1), searchPath).split("\n")) {
-                    rows.add(new Object[] {line});
-                }
-                return new Outcome(BatchSource.of(PLAN, rows), -1);
-            }
             BoundStatement statement = engine.statement(sql, searchPath);
-            if (statement instanceof BoundStatement.Query q) {
-                expect(expected, Kind.QUERY);
-                return new Outcome(BatchSource.of(engine.execute(q.plan(), context), context), -1);
-            }
-            expect(expected, Kind.UPDATE);
-            if (readOnly) {
+            boolean query = statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain;
+            expect(expected, query ? Kind.QUERY : Kind.UPDATE);
+            if (readOnly && statement.writes()) {
                 throw SqlStates.create("The connection is read-only and runs no statement that writes",
                         SqlStates.READ_ONLY, null);
+            }
+            if (query) {
+                return new Outcome(BatchSource.of(engine.execute(statement, context), context), -1);
             }
             return new Outcome(null, engine.update(statement, context));
         } catch (RuntimeException e) {
@@ -198,16 +182,15 @@ final class FyrQLConnection implements Connection {
     /**
      * Binds a statement without running it and returns the columns of its
      * result, or {@code null} for a statement that writes; {@code EXPLAIN}
-     * and a statement has the column {@code plan}.
+     * has the column {@code plan}.
      */
     Schema describe(String sql) throws SQLException {
         lock.lock();
         try {
             checkOpen();
-            if (EXPLAIN.matcher(sql).matches()) {
-                return PLAN;
-            }
-            return engine.statement(sql, searchPath) instanceof BoundStatement.Query q ? q.plan().schema() : null;
+            BoundStatement statement = engine.statement(sql, searchPath);
+            return statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain
+                    ? statement.schema() : null;
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
         } finally {
@@ -223,15 +206,14 @@ final class FyrQLConnection implements Connection {
     /**
      * Prepares a query with parameters without running it and returns the
      * types of its parameters, or {@code null} if the engine cannot prepare
-     * it, e.g. for {@code SELECT ?}; for {@code EXPLAIN} and a query, those
+     * it, e.g. for {@code SELECT ?}; for {@code EXPLAIN}, those of its statement
      * of the query.
      */
     List<DataType> parameterTypes(String sql) throws SQLException {
         lock.lock();
         try {
             checkOpen();
-            Matcher m = EXPLAIN.matcher(sql);
-            return engine.prepare(m.matches() ? m.group(1) : sql, searchPath).parameterTypes();
+            return engine.prepare(sql, searchPath).parameterTypes();
         } catch (SqlException e) {
             return null;
         } catch (RuntimeException e) {
@@ -450,7 +432,7 @@ final class FyrQLConnection implements Connection {
     /**
      * Sets whether the connection refuses statements that write, with
      * {@code 25006}; it does not at first. Queries and {@code EXPLAIN} run
-     * either way.
+     * either way, but not {@code EXPLAIN ANALYZE} of a statement that writes.
      */
     @Override
     public void setReadOnly(boolean readOnly) throws SQLException {

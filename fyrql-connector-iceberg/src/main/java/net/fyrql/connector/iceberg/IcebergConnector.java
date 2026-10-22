@@ -21,6 +21,7 @@ import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.connector.parquet.ParquetConnector;
@@ -469,6 +470,7 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
             ParquetFile file = files.parquet(task.data().location());
             IcebergReader.Layout layout = IcebergReader.layout(table.schema(), plan.columns(), plan.output(),
                     state.filters(), file, task, table.metadata().specs());
+            int groups = 0;
             for (int g : file.rowGroups(layout.filters(), layout.read())) {
                 if (left <= 0) {
                     break;
@@ -476,7 +478,9 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
                 long take = Math.min(file.rows(g), left);
                 left -= take;
                 splits.add(new Split(plan, splits.size(), new RowGroup(task, file, g, take, layout)));
+                groups++;
             }
+            SourceCounters.current().rowGroups(groups, file.rowGroups() - groups);
         }
         return splits;
     }

@@ -141,7 +141,8 @@ final class TpchEngine {
 
     /**
      * Opens an engine over the five sources. The columns of a Parquet file
-     * come from its footer; they must be those of the table.
+     * come from its footer; they must be those of the table. The Parquet
+     * source records the row groups it reads, see {@link ParquetConnector#reads()}.
      *
      * @param pushdown whether scans are negotiated, or {@code null} for the system property
      * @param codegen when to compile, or {@code null} for the system property
@@ -173,7 +174,7 @@ final class TpchEngine {
         JsonConnector.Builder json = JsonConnector.builder("json").format(JsonFormat.NEWLINE_DELIMITED)
                 .splitSize(splitSize);
         MemoryConnector.Builder memory = MemoryConnector.builder("mem");
-        ParquetConnector.Builder parquet = ParquetConnector.builder("parquet");
+        ParquetConnector.Builder parquet = ParquetConnector.builder("parquet").recordReads(true);
         for (TpchTable table : TpchTable.values()) {
             String name = table.tableName();
             switch (table.store()) {

@@ -11,6 +11,8 @@
 
 package net.fyrql.connector.s3;
 
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.SourceStatistics;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,8 +53,8 @@ class S3ClientTest {
     }
 
     private S3Client client(S3Credentials credentials, int retries) {
-        return new S3Client(URI.create(server.endpoint()), "eu-central-1", true, credentials, Duration.ofSeconds(10),
-                retries);
+        return new S3Client("s3", URI.create(server.endpoint()), "eu-central-1", true, credentials,
+                Duration.ofSeconds(10), retries);
     }
 
     private static byte[] bytes(String s) {
@@ -143,6 +145,27 @@ class S3ClientTest {
                 client.uploadPart(a, small, 2, bytes("e"), 1));
         assertEquals("EntityTooSmall", assertThrows(S3Exception.class, () -> client.completeMultipart(a, small,
                 parts)).code());
+    }
+
+    @Test
+    void eachAttemptCountsAsARequestAndTheBodiesAsBytes() throws IOException {
+        server.put("lake", "k", bytes("0123456789"));
+        S3Location k = S3Location.parse("s3://lake/k");
+        server.fail(2, 503);
+        SourceCounters counters = new SourceCounters();
+        try (SourceCounters.Scope s = SourceCounters.enter(counters)) {
+            S3Client.Head head = client.head(k);
+            client.read(k, head.etag(), 3, ByteBuffer.allocate(4));
+            try (InputStream in = client.get(k, head.etag())) {
+                assertEquals(10, in.readAllBytes().length);
+            }
+        }
+        client.head(k);
+        SourceStatistics read = counters.snapshot();
+        assertEquals(3 + 1 + 1, read.requests());
+        assertEquals(server.requests().size() - 1, read.requests());
+        assertEquals(4 + 10, read.bytes());
+        assertTrue(read.requestNanos() > 0);
     }
 
     @Test

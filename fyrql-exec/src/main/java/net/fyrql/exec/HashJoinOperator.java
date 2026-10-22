@@ -101,7 +101,7 @@ final class HashJoinOperator extends AbstractOperator {
             for (int k : leftKeys) {
                 types.add(join.left().schema().type(k));
             }
-            KeyFunctions compiled = codegen.keys(types);
+            KeyFunctions compiled = codegen.keys(types, context());
             if (compiled != null) {
                 keys = compiled;
             }
@@ -161,7 +161,7 @@ final class HashJoinOperator extends AbstractOperator {
 
     private void buildTable() {
         if (right instanceof ParallelSegment) {
-            table = JoinBuild.read(right, join, label(), budget, codegen, reserved);
+            table = JoinBuild.read(right, join, label(), budget, codegen, reserved, context());
             rowsSeen += table.rowCount();
             compileKeys();
         } else {
@@ -291,7 +291,7 @@ final class HashJoinOperator extends AbstractOperator {
     private int[] matching(Batch probe, Pairs pairs) {
         if (!conditionAsked && codegen.due(rowsSeen)) {
             conditionAsked = true;
-            condition = codegen.filter(join.condition(), join.pairSchema());
+            condition = codegen.filter(join.condition(), join.pairSchema(), context());
         }
         Batch leftPart = probe.select(Arrays.copyOf(pairs.probeRows, pairs.size));
         Batch rightPart = build.select(Arrays.copyOf(pairs.buildRows, pairs.size));

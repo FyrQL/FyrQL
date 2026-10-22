@@ -53,7 +53,7 @@ final class FilterOperator extends AbstractOperator {
     private int[] select(Batch b) {
         if (!asked && codegen.due(rowsSeen)) {
             asked = true;
-            compiled = codegen.filter(filter.condition(), filter.input().schema());
+            compiled = codegen.filter(filter.condition(), filter.input().schema(), context());
         }
         rowsSeen += b.rowCount();
         return compiled != null ? compiled.select(b) : Evaluator.select(filter.condition(), b);

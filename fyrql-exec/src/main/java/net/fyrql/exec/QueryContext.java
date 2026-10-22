@@ -12,11 +12,20 @@
 package net.fyrql.exec;
 
 import net.fyrql.connector.BatchReader;
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.SourceStatistics;
+import net.fyrql.core.plan.PlanNode;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -33,6 +42,12 @@ import java.util.concurrent.atomic.LongAdder;
  * {@link #withTimeout(Duration)}; the engine cancels the query with
  * {@link Reason#TIMEOUT} once it has run that long since the context was
  * created.
+ * <p>
+ * It counts what each operator and scan of the query does under its label,
+ * such as {@code Filter#2}: the rows, batches and time of the operators,
+ * what the scans read from their sources, see {@link #source(String)}, and
+ * the code compiled for the query, see {@link #statistics()}. The shared
+ * {@link #NONE} counts nothing.
  */
 public final class QueryContext {
 
@@ -66,6 +81,14 @@ public final class QueryContext {
     private final LongAdder spilledParts = new LongAdder();
     private final LongAdder spilledBytes = new LongAdder();
     private final LongAdder readBytes = new LongAdder();
+    private final Map<String, OperatorCounters> operators = new ConcurrentHashMap<>();
+    private final List<String> operatorOrder = Collections.synchronizedList(new ArrayList<>());
+    private final Map<String, SourceCounters> sources = new ConcurrentHashMap<>();
+    private final List<String> sourceOrder = Collections.synchronizedList(new ArrayList<>());
+    private final LongAdder compiled = new LongAdder();
+    private final LongAdder compileNanos = new LongAdder();
+    private volatile PlanNode plan;
+    private volatile long finished;
 
     /** A context that is not canceled yet, with the timeout of the engine. */
     public QueryContext() {
@@ -174,14 +197,102 @@ public final class QueryContext {
     }
 
     /** Counts a part that an operator of the query spilled to disk, with its bytes. */
-    void spilled(long bytes) {
+    void spilled(String operator, long bytes) {
         spilledParts.increment();
         spilledBytes.add(bytes);
+        if (counting()) {
+            operator(operator).spilled(bytes);
+        }
     }
 
     /** Counts bytes that an operator of the query read back from disk. */
-    void readBack(long bytes) {
+    void readBack(String operator, long bytes) {
         readBytes.add(bytes);
+        if (counting()) {
+            operator(operator).readBack(bytes);
+        }
+    }
+
+    /** Tells whether the context counts what the query does, which all but {@link #NONE} do. */
+    boolean counting() {
+        return cancellable;
+    }
+
+    /** Returns the counters of the operators of a label; only for a context that counts. */
+    OperatorCounters operator(String label) {
+        return operators.computeIfAbsent(label, l -> {
+            operatorOrder.add(l);
+            return new OperatorCounters();
+        });
+    }
+
+    /**
+     * Returns the counters of the scan or part of the plan that a source
+     * runs of a label, which the engine makes current while it reads, see
+     * {@link SourceCounters#enter(SourceCounters)}; {@link SourceCounters#NONE}
+     * for {@link #NONE}.
+     */
+    public SourceCounters source(String label) {
+        if (!counting()) {
+            return SourceCounters.NONE;
+        }
+        return sources.computeIfAbsent(label, l -> {
+            sourceOrder.add(l);
+            return new SourceCounters();
+        });
+    }
+
+    /** Counts code compiled for the query, or taken from the cache, with the time it took. */
+    void compiled(long nanos) {
+        if (counting()) {
+            compiled.increment();
+            compileNanos.add(nanos);
+        }
+    }
+
+    /**
+     * Notes the plan that the query runs, after it is optimized, so that
+     * the labels of the counters can be found in it; the first plan counts.
+     */
+    public void plan(PlanNode plan) {
+        if (this.plan == null && counting()) {
+            synchronized (this) {
+                if (this.plan == null) {
+                    this.plan = plan;
+                }
+            }
+        }
+    }
+
+    /** Ends the time of the query, once its result is closed; the first call counts. */
+    public void finished() {
+        if (finished == 0) {
+            long now = System.nanoTime();
+            finished = now == 0 ? 1 : now;
+        }
+    }
+
+    /**
+     * Returns what the query did so far, or until it {@link #finished()}:
+     * the operators and scans under their labels, the spilling, the code
+     * compiled for it and the time.
+     */
+    public QueryStatistics statistics() {
+        long end = finished;
+        Duration elapsed = Duration.ofNanos((end != 0 ? end : System.nanoTime()) - created);
+        Map<String, OperatorStatistics> ops = new LinkedHashMap<>();
+        Set<Long> threads = new HashSet<>();
+        for (String label : List.copyOf(operatorOrder)) {
+            OperatorCounters c = operators.get(label);
+            ops.put(label, c.snapshot());
+            c.threads(threads);
+        }
+        Map<String, SourceStatistics> read = new LinkedHashMap<>();
+        for (String label : List.copyOf(sourceOrder)) {
+            read.put(label, sources.get(label).snapshot());
+        }
+        return new QueryStatistics(elapsed, plan, ops, read, spill(), compiled.sum(), compileNanos.sum(),
+                threads.size());
     }
 
     /**

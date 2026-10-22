@@ -11,6 +11,9 @@
 
 package net.fyrql.connector.s3;
 
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.SourceRequest;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
@@ -61,10 +64,12 @@ final class S3Client implements AutoCloseable {
     private final Duration timeout;
     private final int retries;
     private final HttpClient http;
+    private final String source;
 
     /**
      * Creates a client.
      *
+     * @param source the name of the source, for the requests it counts, see {@link SourceRequest}
      * @param endpoint the endpoint, such as {@code https://s3.eu-central-1.amazonaws.com}
      * @param region the region of the signatures
      * @param pathStyle whether the bucket is the first part of the path
@@ -73,8 +78,9 @@ final class S3Client implements AutoCloseable {
      * @param timeout the time to wait for a connection and for an answer
      * @param retries how often a failed request is tried again
      */
-    S3Client(URI endpoint, String region, boolean pathStyle, S3Credentials credentials, Duration timeout,
-            int retries) {
+    S3Client(String source, URI endpoint, String region, boolean pathStyle, S3Credentials credentials,
+            Duration timeout, int retries) {
+        this.source = Objects.requireNonNull(source, "source");
         this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
         this.region = Objects.requireNonNull(region, "region");
         this.pathStyle = pathStyle;
@@ -316,7 +322,9 @@ final class S3Client implements AutoCloseable {
     }
 
     /**
-     * Sends a request, again after a failure that may pass.
+     * Sends a request, again after a failure that may pass; each attempt
+     * counts as a request for the scan the thread works for, the bytes of
+     * the body as they are read, see {@link SourceCounters}.
      *
      * @param key the key, or {@code null} for a request to the bucket
      * @param headers further headers by their names in lower case, all signed
@@ -359,12 +367,17 @@ final class S3Client implements AutoCloseable {
                         payloadHash, now, region, credentials.accessKey(), credentials.secretKey()));
             }
             HttpResponse<InputStream> response;
+            SourceCounters counters = SourceCounters.current();
+            SourceRequest call = SourceRequest.start();
             try {
-                response = http.send(request.build(), HttpResponse.BodyHandlers.ofInputStream());
+                response = http.send(request.build(), info -> HttpResponse.BodySubscribers.mapping(
+                        HttpResponse.BodySubscribers.ofInputStream(), counters::counted));
             } catch (InterruptedException e) {
+                call.done(source, method, uri.toString(), 0, 0);
                 Thread.currentThread().interrupt();
                 throw new InterruptedIOException("Interrupted while waiting for S3: " + method + " " + uri);
             } catch (IOException e) {
+                call.done(source, method, uri.toString(), 0, 0);
                 if (attempt >= retries) {
                     throw new IOException("S3 did not answer " + method + " " + uri + ": " + e, e);
                 }
@@ -372,6 +385,8 @@ final class S3Client implements AutoCloseable {
                 continue;
             }
             int status = response.statusCode();
+            call.done(source, method, uri.toString(), status,
+                    response.headers().firstValueAsLong("Content-Length").orElse(0));
             if ((status >= 500 || status == 429) && attempt < retries) {
                 response.body().close();
                 pause(attempt);

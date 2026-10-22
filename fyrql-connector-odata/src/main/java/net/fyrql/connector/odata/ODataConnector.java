@@ -728,7 +728,7 @@ public final class ODataConnector implements Connector {
 
         private HttpTransport transport(Map<String, String> headers) {
             HttpTransport.Builder b = HttpTransport.builder().accept("application/json").headers(headers)
-                    .timeout(timeout);
+                    .timeout(timeout).source(name);
             if (client != null) {
                 b.client(client);
             }

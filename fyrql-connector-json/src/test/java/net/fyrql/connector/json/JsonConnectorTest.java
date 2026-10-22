@@ -16,6 +16,7 @@ import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Split;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
@@ -409,6 +410,24 @@ class JsonConnectorTest {
             JsonConnector small = JsonConnector.builder("js").format(format).file("t", file)
                     .splitSize(Files.size(file)).build();
             assertEquals(1, splits(small, "t"));
+        }
+    }
+
+    @Test
+    void aScanCountsTheBytesOfTheFileOrOfItsParts() throws IOException {
+        StringBuilder json = new StringBuilder();
+        for (int r = 0; r < 2000; r++) {
+            json.append("{\"id\": ").append(r).append(", \"s\": \"row ").append(r).append("\"}\n");
+        }
+        Path file = dir.resolve("counted.jsonl");
+        Files.writeString(file, json, StandardCharsets.UTF_8);
+        for (long splitSize : new long[] {0, 1000}) {
+            JsonConnector c = JsonConnector.builder("js").file("t", file).splitSize(splitSize).build();
+            SourceCounters counters = new SourceCounters();
+            try (SourceCounters.Scope s = SourceCounters.enter(counters)) {
+                assertEquals(2000, readSplits(c, "t", 0, 1).size());
+            }
+            assertEquals(Files.size(file), counters.snapshot().bytes(), "split size " + splitSize);
         }
     }
 

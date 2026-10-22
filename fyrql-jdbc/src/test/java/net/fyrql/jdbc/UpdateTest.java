@@ -103,6 +103,27 @@ class UpdateTest {
     }
 
     @Test
+    void explainAnalyzeOfAStatementThatWritesIsAQueryThatWrites() throws SQLException {
+        try (Statement s = c.createStatement()) {
+            s.executeUpdate("CREATE TABLE t AS SELECT 1 AS a");
+            List<String> plan = StatementTest.rows(s.executeQuery("EXPLAIN ANALYZE INSERT INTO t VALUES (2), (3)"));
+            assertTrue(plan.get(0).matches("Analyzed in .*: 2 rows written, .*"), String.join("\n", plan));
+            assertEquals("Insert into mem.main.t", plan.get(1));
+            assertEquals(List.of("1", "2", "3"), StatementTest.rows(s.executeQuery("SELECT a FROM t ORDER BY a")));
+            assertEquals("42809", assertThrows(SQLException.class,
+                    () -> s.executeUpdate("EXPLAIN ANALYZE INSERT INTO t VALUES (4)")).getSQLState());
+            c.setReadOnly(true);
+            assertEquals("25006", assertThrows(SQLException.class,
+                    () -> s.executeQuery("EXPLAIN ANALYZE INSERT INTO t VALUES (4)")).getSQLState());
+            plan = StatementTest.rows(s.executeQuery("EXPLAIN ANALYZE SELECT a FROM t WHERE a > 1"));
+            assertTrue(plan.get(0).matches("Analyzed in .*: 2 rows, .*"), String.join("\n", plan));
+            assertTrue(plan.get(1).contains(" -- 2 rows, "), String.join("\n", plan));
+            c.setReadOnly(false);
+            assertEquals(List.of("1", "2", "3"), StatementTest.rows(s.executeQuery("SELECT a FROM t ORDER BY a")));
+        }
+    }
+
+    @Test
     void failuresHaveTheirStates() throws SQLException {
         try (Statement s = c.createStatement()) {
             s.executeUpdate("CREATE TABLE t (a INTEGER NOT NULL)");

@@ -15,6 +15,8 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.SourceStatistics;
 import net.fyrql.connector.Split;
 import net.fyrql.core.expr.Evaluator;
 import net.fyrql.core.expr.Expression;
@@ -33,6 +35,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -254,6 +257,23 @@ class ParquetPruningTest {
             }
         }
         assertTrue(failures.isEmpty(), String.join("\n", failures));
+    }
+
+    @Test
+    void aScanCountsTheRowGroupsItReadsAndSkipsAndTheBytesItReads() throws IOException {
+        ParquetConnector c = ParquetConnector.builder("pq").path("t", bloom).recordReads(true).build();
+        Expression filter = new Expression.Between(col(0), lit(DataType.INTEGER, 4250),
+                lit(DataType.INTEGER, 4260));
+        SourceCounters counters = new SourceCounters();
+        try (SourceCounters.Scope s = SourceCounters.enter(counters)) {
+            scan(c, List.of(filter));
+        }
+        SourceStatistics read = counters.snapshot();
+        assertEquals(1, c.reads().size());
+        assertEquals(1, read.rowGroupsRead());
+        assertEquals(9, read.rowGroupsSkipped());
+        assertTrue(read.bytes() > 0 && read.bytes() < Files.size(bloom), read::toString);
+        assertEquals(0, read.requests(), "a local file takes no requests");
     }
 
     @Test

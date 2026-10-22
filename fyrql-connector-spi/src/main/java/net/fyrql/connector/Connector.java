@@ -31,6 +31,14 @@ import java.util.Optional;
  * in the plan of the engine.
  * <p>
  * A source that can be written to offers a {@link #writer()}.
+ * <p>
+ * For {@code EXPLAIN ANALYZE}, a connector may report what a scan reads to
+ * {@link SourceCounters#current()}: its requests through
+ * {@link SourceRequest}, the bytes, row groups and files it reads and
+ * skips, and the statements it sends. The engine makes the counters of the
+ * scan current while it plans, splits, opens and reads it, on the thread
+ * that calls the connector; what a connector reads on a thread of its own
+ * counts for no scan.
  */
 public interface Connector extends AutoCloseable {
 

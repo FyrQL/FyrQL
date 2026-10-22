@@ -573,6 +573,18 @@ class PreparedStatementTest {
         }
     }
 
+    @Test
+    void anExplainAnalyzeOfAPreparedQueryRunsItWithItsValues() throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("EXPLAIN ANALYZE SELECT i FROM t WHERE i = ?")) {
+            assertEquals("INTEGER", ps.getParameterMetaData().getParameterTypeName(1));
+            ps.setInt(1, 3);
+            assertEquals(List.of("plan"), labels(ps.getMetaData()));
+            List<String> plan = StatementTest.rows(ps.executeQuery());
+            assertTrue(plan.get(0).matches("Analyzed in .*: \\d+ rows?, .*"), String.join("\n", plan));
+            assertTrue(plan.get(1).contains(" -- "), String.join("\n", plan));
+        }
+    }
+
     /** Sets the parameters of a statement. */
     private interface Setter {
         void set(PreparedStatement ps) throws SQLException;

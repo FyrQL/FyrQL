@@ -13,6 +13,8 @@ package net.fyrql.connector.http;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.SourceStatistics;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -94,6 +96,23 @@ class HttpTransportTest {
         assertEquals("request", lastHeaders.get("x-source"));
         transport.get(url("/ok"), Map.of("Accept", "application/xml")).close();
         assertEquals("application/xml", lastHeaders.get("accept"));
+    }
+
+    @Test
+    void eachRequestCountsForTheScanOfTheThreadWithTheBytesOfItsBody() throws IOException {
+        SourceCounters counters = new SourceCounters();
+        try (SourceCounters.Scope s = SourceCounters.enter(counters)) {
+            try (HttpTransport.Response response = transport.get(url("/ok"), Map.of())) {
+                response.body().readAllBytes();
+            }
+            try (HttpTransport.Response response = transport.getAllowingErrors(url("/missing"), Map.of(), "query")) {
+                assertEquals("{\"error\": {\"message\": \"gone\"}}", response.excerpt());
+            }
+        }
+        transport.get(url("/ok"), Map.of()).close();
+        SourceStatistics read = counters.snapshot();
+        assertEquals(2, read.requests());
+        assertEquals("{\"a\": 1}".length() + "{\"error\": {\"message\": \"gone\"}}".length(), read.bytes());
     }
 
     @Test

@@ -32,6 +32,7 @@ import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.Globs;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
@@ -676,6 +677,9 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     public BatchReader open(Split split) {
         Table table = table(split.plan().table());
         RecordReader handler = new RecordReader(table, split.plan().wholeColumns(), split.plan().output(), batchSize);
+        if (table.remote() == null) {
+            counted(table, split.state() instanceof PageRange range ? range : null);
+        }
         if (split.state() instanceof PageRange range) {
             return pages(table, handler, range);
         }
@@ -706,6 +710,29 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 }
             }
         };
+    }
+
+    /**
+     * Counts the bytes of a local file, or of the part of it that a split
+     * reads, for the scan the thread works for, see {@link SourceCounters}.
+     */
+    private static void counted(Table table, PageRange range) {
+        SourceCounters counters = SourceCounters.current();
+        if (counters == SourceCounters.NONE) {
+            return;
+        }
+        try {
+            long size = Files.size(table.file());
+            if (range == null) {
+                counters.bytes(size);
+                return;
+            }
+            List<CsvIndex.CsvPage> pages = range.index().pages();
+            long end = range.to() < pages.size() ? pages.get(range.to()).offset() : size;
+            counters.bytes(end - pages.get(range.from()).offset());
+        } catch (IOException e) {
+            // Reading the file reports it.
+        }
     }
 
     /** Reads the pages of a part of a file, a batch from each; the header is in the first page only. */

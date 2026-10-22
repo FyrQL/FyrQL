@@ -15,7 +15,9 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CreateTable;
 import net.fyrql.sql.ast.CreateTable.ColumnDefinition;
+import net.fyrql.sql.ast.CopyTo;
 import net.fyrql.sql.ast.DropTable;
+import net.fyrql.sql.ast.Explain;
 import net.fyrql.sql.ast.InsertInto;
 import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.ast.Query;
@@ -156,8 +158,42 @@ class StatementParserTest {
     }
 
     @Test
+    void explainTakesAStatementWithItsPositions() {
+        Explain e = assertInstanceOf(Explain.class, parse("EXPLAIN SELECT a FROM t WHERE a > 1"));
+        assertFalse(e.analyze());
+        assertEquals(new Position(1, 1), e.position());
+        assertEquals("SELECT a FROM t WHERE (a > 1)", SqlPrinter.print(assertInstanceOf(Query.class, e.statement())));
+
+        e = assertInstanceOf(Explain.class, parse("-- the plan\n  explain\n  Analyze INSERT INTO t VALUES (1);"));
+        assertTrue(e.analyze());
+        assertEquals(new Position(2, 3), e.position());
+        assertEquals(new Position(3, 23), assertInstanceOf(InsertInto.class, e.statement()).position());
+
+        e = assertInstanceOf(Explain.class, parse("EXPLAIN /* a copy */ COPY t TO 'x.csv'"));
+        assertEquals("x.csv", assertInstanceOf(CopyTo.class, e.statement()).path());
+
+        SqlParser.ParameterizedStatement p = SqlParser.parseStatementWithParameters(
+                "EXPLAIN ANALYZE SELECT a FROM t WHERE a = ?");
+        assertTrue(assertInstanceOf(Explain.class, p.statement()).analyze());
+        assertEquals(1, p.parameters().size());
+        assertEquals(new Position(1, 43), p.parameters().get(0).position());
+
+        Map<String, String> cases = new LinkedHashMap<>();
+        cases.put("EXPLAIN EXPLAIN SELECT 1", "EXPLAIN cannot explain EXPLAIN@1:9");
+        cases.put("EXPLAIN ANALYZE explain SELECT 1", "EXPLAIN cannot explain EXPLAIN@1:17");
+        cases.put("EXPLAIN", "Empty query@0:0");
+        cases.put("EXPLAIN ANALYZE", "Empty query@0:0");
+        for (Map.Entry<String, String> c : cases.entrySet()) {
+            SqlException x = assertThrows(SqlException.class, () -> parse(c.getKey()), c.getKey());
+            assertEquals(c.getValue(), x.reason() + "@" + x.position().line() + ":" + x.position().column(),
+                    c.getKey());
+        }
+    }
+
+    @Test
     void theQueryParserTakesQueriesOnly() {
-        for (String sql : List.of("CREATE TABLE t AS SELECT 1", "INSERT INTO t VALUES (1)", "DROP TABLE t")) {
+        for (String sql : List.of("CREATE TABLE t AS SELECT 1", "INSERT INTO t VALUES (1)", "DROP TABLE t",
+                "EXPLAIN SELECT 1")) {
             SqlException e = assertThrows(SqlException.class, () -> SqlParser.parse(sql), sql);
             assertTrue(e.reason().startsWith("Only queries are supported, not "), e.reason());
         }

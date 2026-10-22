@@ -146,39 +146,66 @@ public final class Codegen {
         return compiler == null ? CodegenStatistics.NONE : compiler.statistics();
     }
 
-    /** Compiles an expression, or returns {@code null} if the compiler declines or fails. */
-    CompiledProjection projection(Expression e, Schema input) {
+    /**
+     * Compiles an expression, or returns {@code null} if the compiler
+     * declines or fails; compiled code counts for the query, see
+     * {@link QueryContext#statistics()}.
+     */
+    CompiledProjection projection(Expression e, Schema input, QueryContext context) {
+        if (compiler == null) {
+            return null;
+        }
+        long start = System.nanoTime();
         try {
-            return compiler == null ? null : compiler.projection(e, input);
+            return counted(compiler.projection(e, input), start, context);
         } catch (RuntimeException | LinkageError | StackOverflowError failed) {
             return null;
         }
     }
 
     /** Compiles a condition, or returns {@code null} if the compiler declines or fails. */
-    CompiledFilter filter(Expression condition, Schema input) {
+    CompiledFilter filter(Expression condition, Schema input, QueryContext context) {
+        if (compiler == null) {
+            return null;
+        }
+        long start = System.nanoTime();
         try {
-            return compiler == null ? null : compiler.filter(condition, input);
+            return counted(compiler.filter(condition, input), start, context);
         } catch (RuntimeException | LinkageError | StackOverflowError failed) {
             return null;
         }
     }
 
     /** Compiles a chain, or returns {@code null} if the compiler declines or fails. */
-    CompiledPipeline pipeline(PipelineSpec spec) {
+    CompiledPipeline pipeline(PipelineSpec spec, QueryContext context) {
+        if (compiler == null) {
+            return null;
+        }
+        long start = System.nanoTime();
         try {
-            return compiler == null ? null : compiler.pipeline(spec);
+            return counted(compiler.pipeline(spec), start, context);
         } catch (RuntimeException | LinkageError | StackOverflowError failed) {
             return null;
         }
     }
 
     /** Compiles key functions, or returns {@code null} if the compiler declines or fails. */
-    KeyFunctions keys(List<DataType> types) {
+    KeyFunctions keys(List<DataType> types, QueryContext context) {
+        if (compiler == null || types.isEmpty()) {
+            return null;
+        }
+        long start = System.nanoTime();
         try {
-            return compiler == null || types.isEmpty() ? null : compiler.keys(types);
+            return counted(compiler.keys(types), start, context);
         } catch (RuntimeException | LinkageError | StackOverflowError failed) {
             return null;
         }
+    }
+
+    private static <T> T counted(T compiled, long start, QueryContext context) {
+        if (compiled != null) {
+            context.compiled(System.nanoTime() - start);
+        }
+        return compiled;
     }
 }

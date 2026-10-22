@@ -21,6 +21,7 @@ import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
@@ -387,7 +388,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * Returns a split per row group of the files of the table as they are
      * now, in the order of the files, without empty row groups and without
      * those in which no row can pass the filters; under a limit only the
-     * row groups it needs. {@code count(*)} is one split.
+     * row groups it needs. {@code count(*)} is one split. The row groups
+     * read and skipped count for the scan, see {@link SourceCounters}.
      *
      * @throws IllegalArgumentException if the files no longer exist or no
      *         longer have the columns of the table, or if a file cannot be
@@ -408,14 +410,17 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
                     : FilterTranslation.translate(state.filters(), footer.schema(), plan.columns());
             List<BlockMetaData> blocks = footer.metadata().getBlocks();
             List<BlockMetaData> passing = predicate == null ? blocks : files.passing(footer, predicate);
+            int read = 0;
             for (int b = 0; b < blocks.size() && left > 0; b++) {
                 long rows = blocks.get(b).getRowCount();
                 if (rows > 0 && contains(passing, blocks.get(b))) {
                     long take = Math.min(rows, left);
                     left -= take;
                     splits.add(new Split(plan, splits.size(), new RowGroup(footer, b, take, predicate)));
+                    read++;
                 }
             }
+            SourceCounters.current().rowGroups(read, blocks.size() - read);
         }
         return splits;
     }

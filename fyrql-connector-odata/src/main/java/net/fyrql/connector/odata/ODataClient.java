@@ -16,6 +16,7 @@ import net.fyrql.connector.http.HttpTransport;
 
 import java.net.URI;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -62,7 +63,7 @@ final class ODataClient implements AutoCloseable {
             }
             HttpTransport.Response response;
             try {
-                response = transport.getAllowingErrors(decorated, all);
+                response = transport.getAllowingErrors(decorated, all, kind.name().toLowerCase(Locale.ROOT));
             } catch (HttpSourceException e) {
                 throw target.failed(decorated, e);
             }

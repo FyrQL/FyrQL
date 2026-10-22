@@ -90,6 +90,35 @@ final class CopyParser {
         return end - i == 4 && sql.regionMatches(true, i, "copy", 0, 4);
     }
 
+    /**
+     * Returns where a word ends that comes first in a text from an offset,
+     * after spaces and comments, in any case; -1 if another token comes first.
+     */
+    static int word(String sql, int from, String word) {
+        int i = skipSpaceAndComments(sql, from);
+        int end = i;
+        while (end < sql.length() && isIdentifierPart(sql.charAt(end))) {
+            end++;
+        }
+        return end - i == word.length() && sql.regionMatches(true, i, word, 0, word.length()) ? end : -1;
+    }
+
+    /** Returns the position of the first token of a text from an offset, after spaces and comments. */
+    static Position token(String sql, int from) {
+        return position(sql, skipSpaceAndComments(sql, from));
+    }
+
+    /** Returns a text with spaces in place of what comes before an offset; line ends stay. */
+    static String from(String sql, int offset) {
+        char[] text = sql.toCharArray();
+        for (int i = 0; i < offset && i < text.length; i++) {
+            if (text[i] != '\n' && text[i] != '\r') {
+                text[i] = ' ';
+            }
+        }
+        return new String(text);
+    }
+
     /** Returns the position of the word {@code COPY} of a text that starts with it. */
     static Position start(String sql) {
         return position(sql, skipSpaceAndComments(sql, 0));

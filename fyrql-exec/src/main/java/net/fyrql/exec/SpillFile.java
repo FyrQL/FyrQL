@@ -39,14 +39,22 @@ import java.util.List;
  * written takes far longer than writing it; once the engine holds
  * {@link SpillDirectory#MAX_OPEN_FILES} files open, a finished one is closed
  * and opened again to be read.
+ * <p>
+ * While Java Flight Recorder records, a finished file is an event
+ * {@code net.fyrql.Spill} from its first batch on, see {@link SpillEvent}.
  */
 final class SpillFile implements AutoCloseable {
+
+    /** Whether the module {@code jdk.jfr} is there, as it may not be in a runtime made with jlink. */
+    private static final boolean RECORDABLE = ModuleLayer.boot().findModule("jdk.jfr").isPresent();
 
     private final SpillDirectory directory;
     private final Path path;
     private final String operator;
+    private final String what;
     private final Schema schema;
     private final QueryContext context;
+    private SpillEvent event;
     private final List<SpillReader> readers = new ArrayList<>();
     private FileChannel channel;
     private SpillFormat.Writer writer;
@@ -55,10 +63,12 @@ final class SpillFile implements AutoCloseable {
     private long rows;
     private int batches;
 
-    SpillFile(SpillDirectory directory, Path path, String operator, Schema schema, QueryContext context) {
+    SpillFile(SpillDirectory directory, Path path, String operator, String what, Schema schema,
+            QueryContext context) {
         this.directory = directory;
         this.path = path;
         this.operator = operator;
+        this.what = what;
         this.schema = schema;
         this.context = context;
     }
@@ -99,6 +109,9 @@ final class SpillFile implements AutoCloseable {
         }
         try {
             if (writer == null) {
+                if (RECORDABLE) {
+                    event = SpillEvent.start();
+                }
                 channel = FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ,
                         StandardOpenOption.WRITE);
                 directory.opened();
@@ -132,8 +145,12 @@ final class SpillFile implements AutoCloseable {
             throw failure("Spilling to ", e);
         }
         bytes = w.bytes();
-        context.spilled(bytes);
+        context.spilled(operator, bytes);
         directory.spilled(bytes);
+        if (event != null) {
+            event.done(operator, what, rows, batches, bytes);
+            event = null;
+        }
     }
 
     private void closeChannel() throws IOException {
@@ -242,7 +259,7 @@ final class SpillFile implements AutoCloseable {
             }
             long delta = reader.bytes() - counted;
             counted += delta;
-            context.readBack(delta);
+            context.readBack(operator, delta);
             directory.readBack(delta);
             return b;
         }

@@ -64,6 +64,7 @@ final class ZoneBinding {
             case BoundStatement.Insert i -> new BoundStatement.Insert(i.table(), plan(i.input(), zone));
             case BoundStatement.Drop d -> d;
             case BoundStatement.Set s -> s;
+            case BoundStatement.Explain e -> new BoundStatement.Explain(e.analyze(), statement(e.statement(), zone));
         };
     }
 

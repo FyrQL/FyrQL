@@ -12,10 +12,12 @@
 package net.fyrql.connector.jdbc;
 
 import net.fyrql.FyrQL;
+import net.fyrql.QueryResult;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceStatistics;
 import net.fyrql.connector.Split;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
@@ -341,6 +343,23 @@ class JdbcConnectorTest {
             assertEquals(10, engine.rows("SELECT n FROM big WHERE n > 99990").size());
             assertTrue(connector.statements().get(1).endsWith("WHERE (t.\"N\" > CAST(99990 AS INTEGER))"),
                     connector.statements().get(1));
+        }
+    }
+
+    @Test
+    void aQueryNotesTheStatementsOfItsScansAndTheirRequests() {
+        TestDatabase db = TestDatabase.create(JdbcDialect.H2);
+        db.execute("CREATE TABLE big AS SELECT CAST(X AS BIGINT) AS n FROM SYSTEM_RANGE(1, 1000)");
+        JdbcConnector connector = JdbcConnector.builder("db").url(db.url()).recordStatements(true).build();
+        try (FyrQL engine = FyrQL.builder().register(connector).build()) {
+            List<SourceStatistics> read;
+            try (QueryResult result = engine.sql("SELECT a.n FROM big a JOIN big b ON a.n = b.n + 1 WHERE b.n > 990")) {
+                assertEquals(9, result.rows().size());
+                read = List.copyOf(result.statistics().sources().values());
+            }
+            assertEquals(connector.statements(), read.stream().flatMap(s -> s.statements().stream()).toList());
+            assertEquals(connector.statements().size(), read.stream().mapToLong(SourceStatistics::requests).sum());
+            assertTrue(read.stream().allMatch(s -> s.splits() == 1), read::toString);
         }
     }
 

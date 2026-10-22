@@ -39,6 +39,8 @@ import org.junit.jupiter.api.Test;
 import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.FileStores;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.SourceStatistics;
 import net.fyrql.core.expr.Evaluator;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expression.ComparisonOp;
@@ -136,6 +138,24 @@ class FilePruningTest {
         Set<String> truncated = filesRead("part", new Expression.In(col(4, DataType.VARCHAR), List.of(
                 lit(DataType.VARCHAR, "beta1"), lit(DataType.VARCHAR, "gamma2"))));
         truncated.forEach(f -> assertTrue(f.replace('\\', '/').matches(".*/name_trunc=(be|ga)/.*"), f));
+    }
+
+    @Test
+    void aScanCountsTheFilesAndRowGroupsItReadsAndSkips() throws IOException {
+        int total = allFiles("part").size();
+        TableRef ref = scan("part");
+        connector.clearReads();
+        SourceCounters counters = new SourceCounters();
+        try (SourceCounters.Scope s = SourceCounters.enter(counters)) {
+            read(ref, cmp(ComparisonOp.EQ, col(1, DataType.VARCHAR), lit(DataType.VARCHAR, "a")));
+        }
+        SourceStatistics read = counters.snapshot();
+        Set<String> files = new TreeSet<>();
+        connector.reads().forEach(r -> files.add(r.file()));
+        assertTrue(read.filesRead() >= files.size() && read.filesRead() > 0, read::toString);
+        assertTrue(read.filesSkipped() > 0 && read.filesRead() + read.filesSkipped() <= total, read::toString);
+        assertEquals(connector.reads().size(), read.rowGroupsRead());
+        assertTrue(read.bytes() > 0);
     }
 
     @Test

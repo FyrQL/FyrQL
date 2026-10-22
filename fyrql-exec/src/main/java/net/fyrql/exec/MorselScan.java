@@ -12,6 +12,7 @@
 package net.fyrql.exec;
 
 import net.fyrql.connector.BatchReader;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.vector.Batch;
 
@@ -43,6 +44,7 @@ final class MorselScan extends AbstractOperator {
     private Morsel morsel;
     private volatile BatchReader reader;
     private boolean registered;
+    private SourceCounters counters;
 
     /**
      * @param chain   the chain whose morsels the scan takes
@@ -64,6 +66,15 @@ final class MorselScan extends AbstractOperator {
 
     @Override
     Batch compute() {
+        if (counters == null) {
+            counters = context().source(label());
+        }
+        try (SourceCounters.Scope scope = SourceCounters.enter(counters)) {
+            return read();
+        }
+    }
+
+    private Batch read() {
         if (!registered) {
             registered = true;
             // One registration for all splits: canceling the query stops the reader of the current one.

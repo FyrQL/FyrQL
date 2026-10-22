@@ -54,7 +54,7 @@ final class ProjectOperator extends AbstractOperator {
             for (int i = 0; i < compiled.length; i++) {
                 Expression e = project.columns().get(i).expression();
                 if (!(e instanceof Expression.Column)) {
-                    compiled[i] = codegen.projection(e, project.input().schema());
+                    compiled[i] = codegen.projection(e, project.input().schema(), context());
                 }
             }
         }

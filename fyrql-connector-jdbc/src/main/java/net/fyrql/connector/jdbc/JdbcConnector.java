@@ -18,6 +18,7 @@ import net.fyrql.connector.Connector;
 import net.fyrql.connector.RemotePlan;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.Writer;
 import net.fyrql.core.expr.Expression;
@@ -596,8 +597,12 @@ public final class JdbcConnector implements Connector {
         return JdbcReader.open(name, statement, connections, dialect, output, fetchSize, batchSize);
     }
 
-    /** Tells the listener about a statement about to be sent, and records it. */
+    /**
+     * Tells the listener about a statement about to be sent, records it,
+     * and notes it for the scan the thread works for, see {@link SourceCounters}.
+     */
     private void record(String sql) {
+        SourceCounters.current().statement(sql);
         if (listener != null) {
             listener.accept(sql);
         }

@@ -11,6 +11,7 @@
 
 package net.fyrql.connector.parquet;
 
+import net.fyrql.connector.SourceCounters;
 import org.apache.parquet.io.InputFile;
 import org.apache.parquet.io.SeekableInputStream;
 
@@ -25,6 +26,8 @@ import java.nio.file.Path;
  * {@code LocalInputFile}, whose {@code read(byte[], int, int)} reads one
  * byte at a time, the stream reads a range of bytes at once, which matters
  * where the reader reads through {@code InputStream}, as for dictionaries.
+ * The bytes read count for the scan the stream was opened for, see
+ * {@link SourceCounters}.
  */
 final class LocalFile implements InputFile {
 
@@ -48,15 +51,27 @@ final class LocalFile implements InputFile {
     @Override
     public SeekableInputStream newStream() throws IOException {
         RandomAccessFile file = new RandomAccessFile(path.toFile(), "r");
+        SourceCounters counters = SourceCounters.current();
         return new SeekableInputStream() {
             @Override
             public int read() throws IOException {
-                return file.read();
+                int b = file.read();
+                if (b >= 0) {
+                    counters.bytes(1);
+                }
+                return b;
             }
 
             @Override
             public int read(byte[] bytes, int offset, int length) throws IOException {
-                return file.read(bytes, offset, length);
+                return counted(file.read(bytes, offset, length));
+            }
+
+            private int counted(int n) {
+                if (n > 0) {
+                    counters.bytes(n);
+                }
+                return n;
             }
 
             @Override
@@ -72,11 +87,13 @@ final class LocalFile implements InputFile {
             @Override
             public void readFully(byte[] bytes) throws IOException {
                 file.readFully(bytes);
+                counters.bytes(bytes.length);
             }
 
             @Override
             public void readFully(byte[] bytes, int offset, int length) throws IOException {
                 file.readFully(bytes, offset, length);
+                counters.bytes(length);
             }
 
             @Override
@@ -85,14 +102,15 @@ final class LocalFile implements InputFile {
                     return 0;
                 }
                 if (buffer.hasArray()) {
-                    int n = file.read(buffer.array(), buffer.arrayOffset() + buffer.position(), buffer.remaining());
+                    int n = counted(file.read(buffer.array(), buffer.arrayOffset() + buffer.position(),
+                            buffer.remaining()));
                     if (n > 0) {
                         buffer.position(buffer.position() + n);
                     }
                     return n;
                 }
                 byte[] bytes = new byte[buffer.remaining()];
-                int n = file.read(bytes);
+                int n = counted(file.read(bytes));
                 if (n > 0) {
                     buffer.put(bytes, 0, n);
                 }

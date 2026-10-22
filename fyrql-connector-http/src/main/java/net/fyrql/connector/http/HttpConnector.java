@@ -367,7 +367,7 @@ public final class HttpConnector implements Connector {
             }
             HttpTransport.Builder transport = HttpTransport.builder()
                     .accept("application/json, application/x-ndjson;q=0.9, */*;q=0.1").headers(headers)
-                    .timeout(timeout);
+                    .timeout(timeout).source(name);
             if (client != null) {
                 transport.client(client);
             }

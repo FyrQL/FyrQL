@@ -48,6 +48,11 @@ warehouse first.
   See [JDBC driver](docs/manual.md#jdbc-driver),
   [Flight SQL server](docs/manual.md#flight-sql-server),
   [File access](docs/manual.md#file-access) and [Time limits](docs/manual.md#time-limits).
+- **Observable.** `EXPLAIN ANALYZE` runs a query and shows for each node of its plan the
+  rows, batches, time and threads, and for each scan the splits, row groups, requests,
+  bytes and statements of its source; queries, requests to sources, compiled code and
+  spilled parts are events of Java Flight Recorder.
+  See [Observing queries](docs/manual.md#observing-queries).
 - **Pure Java.** No JNI, no native libraries, no Hadoop: Parquet and Iceberg are read
   with codecs in pure Java, and Arrow allocates its memory without Netty or native code.
   The same JARs run wherever Java 21 runs, also where native code is not allowed.

@@ -12,6 +12,7 @@
 package net.fyrql.exec;
 
 import net.fyrql.connector.BatchReader;
+import net.fyrql.connector.SourceCounters;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
@@ -27,6 +28,7 @@ final class ScanOperator extends AbstractOperator {
     private final String what;
     private final Function<QueryContext, BatchReader> opener;
     private BatchReader reader;
+    private SourceCounters counters;
 
     ScanOperator(String label, PlanNode.Scan scan, TableSource source) {
         this(label, scan, scan.table().toString(), context -> source.open(scan, context));
@@ -45,6 +47,15 @@ final class ScanOperator extends AbstractOperator {
 
     @Override
     Batch compute() {
+        if (counters == null) {
+            counters = context().source(label());
+        }
+        try (SourceCounters.Scope scope = SourceCounters.enter(counters)) {
+            return read();
+        }
+    }
+
+    private Batch read() {
         if (reader == null) {
             reader = opener.apply(context());
             context().register(reader);

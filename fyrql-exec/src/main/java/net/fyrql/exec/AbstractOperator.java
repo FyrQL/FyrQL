@@ -21,6 +21,10 @@ import net.fyrql.core.vector.Batch;
  * context of the query before and after it is computed; once the query is
  * canceled, any error is a {@link QueryCancelledException}, since a source
  * that was asked to stop fails with an error of its own.
+ * <p>
+ * Unless the context is {@link QueryContext#NONE}, each batch also counts
+ * for the operator under its label, with the time it took less the time of
+ * the inputs, see {@link Timing}.
  */
 abstract class AbstractOperator implements Operator {
 
@@ -30,6 +34,9 @@ abstract class AbstractOperator implements Operator {
     private final String label;
     private final Schema schema;
     private QueryContext context = QueryContext.NONE;
+    /** Whether the batches are timed, and the counters they count for, {@code null} if for none. */
+    private boolean timed;
+    private OperatorCounters.Part counters;
 
     AbstractOperator(String label, Schema schema) {
         this.label = label;
@@ -44,6 +51,17 @@ abstract class AbstractOperator implements Operator {
     /** Sets the context of the query, once the operator is built. */
     void attach(QueryContext context) {
         this.context = context;
+        timed = context.counting();
+        counters = timed && counts() ? context.operator(label).part() : null;
+    }
+
+    /**
+     * Tells whether the operator counts its batches and time under its
+     * label; an operator that passes on the batches of others with the same
+     * label counts nothing, and its time counts for no operator.
+     */
+    boolean counts() {
+        return true;
     }
 
     /** Returns the context of the query. */
@@ -68,6 +86,23 @@ abstract class AbstractOperator implements Operator {
 
     @Override
     public final Batch next() {
+        if (!timed) {
+            return batch();
+        }
+        Timing timing = Timing.current();
+        long start = timing.begin(counters);
+        try {
+            Batch b = batch();
+            if (b != null && counters != null) {
+                counters.batch(b.rowCount());
+            }
+            return b;
+        } finally {
+            timing.end(start);
+        }
+    }
+
+    private Batch batch() {
         context.check(label);
         try {
             Batch b = compute();

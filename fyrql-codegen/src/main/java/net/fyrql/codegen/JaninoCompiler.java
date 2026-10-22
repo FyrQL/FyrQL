@@ -73,6 +73,8 @@ public final class JaninoCompiler implements ExpressionCompiler {
 
     /** The cached value of a source that does not compile, or whose class has a method too long for the JIT. */
     private static final Object FAILED = new Object();
+    /** Whether the module {@code jdk.jfr} is there, as it may not be in a runtime made with jlink. */
+    private static final boolean RECORDABLE = ModuleLayer.boot().findModule("jdk.jfr").isPresent();
 
     private final Map<String, Object> cache = new LinkedHashMap<>(64, 0.75f, true) {
         @Override
@@ -178,27 +180,40 @@ public final class JaninoCompiler implements ExpressionCompiler {
         }
     }
 
-    /** Compiles a unit; returns its class, or {@link #FAILED}. */
+    /**
+     * Compiles a unit; returns its class, or {@link #FAILED}. While Java
+     * Flight Recorder records, this is an event {@code net.fyrql.Compile}.
+     */
     private Object compile(ExpressionCodegen.Unit unit, Class<?> type) {
         dump(unit);
-        ClassBodyEvaluator evaluator = new ClassBodyEvaluator();
-        evaluator.setParentClassLoader(JaninoCompiler.class.getClassLoader());
-        evaluator.setClassName("net.fyrql.generated." + unit.className());
-        evaluator.setDefaultImports(IMPORTS);
-        evaluator.setImplementedInterfaces(new Class<?>[] {type});
+        CompileEvent event = RECORDABLE ? CompileEvent.start() : null;
+        String outcome = "failed";
         try {
-            evaluator.cook(unit.source());
-            for (byte[] classFile : evaluator.getBytecodes().values()) {
-                if (ClassFiles.maxCodeLength(classFile) > HUGE_METHOD) {
-                    return FAILED;
+            ClassBodyEvaluator evaluator = new ClassBodyEvaluator();
+            evaluator.setParentClassLoader(JaninoCompiler.class.getClassLoader());
+            evaluator.setClassName("net.fyrql.generated." + unit.className());
+            evaluator.setDefaultImports(IMPORTS);
+            evaluator.setImplementedInterfaces(new Class<?>[] {type});
+            try {
+                evaluator.cook(unit.source());
+                for (byte[] classFile : evaluator.getBytecodes().values()) {
+                    if (ClassFiles.maxCodeLength(classFile) > HUGE_METHOD) {
+                        outcome = "tooLarge";
+                        return FAILED;
+                    }
                 }
+                compiled.incrementAndGet();
+                outcome = "compiled";
+                return evaluator.getClazz();
+            } catch (CompileException | RuntimeException | LinkageError | StackOverflowError e) {
+                // Too big for the JVM, or a gap of the generator: the operator keeps interpreting.
+                failures.incrementAndGet();
+                return FAILED;
             }
-            compiled.incrementAndGet();
-            return evaluator.getClazz();
-        } catch (CompileException | RuntimeException | LinkageError | StackOverflowError e) {
-            // Too big for the JVM, or a gap of the generator: the operator keeps interpreting.
-            failures.incrementAndGet();
-            return FAILED;
+        } finally {
+            if (event != null) {
+                event.done(type.getSimpleName(), unit.className(), unit.source().length(), outcome);
+            }
         }
     }
 

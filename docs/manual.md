@@ -2,10 +2,10 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.10.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.11.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow
-and the Flight SQL server, the SQL it takes and where it differs from DuckDB, and how it
-runs queries, with measurements. [Getting started](getting-started.md) is a shorter tour,
+and the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it
+runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
 and the [README](../README.md) an overview.
 
 ## Contents
@@ -39,6 +39,9 @@ and the [README](../README.md) an overview.
 - [Parallel execution](#parallel-execution)
 - [Time limits](#time-limits)
 - [Memory budget and spilling](#memory-budget-and-spilling)
+- [Observing queries](#observing-queries)
+  - [EXPLAIN ANALYZE](#explain-analyze)
+  - [JFR events](#jfr-events)
 - [Performance](#performance)
   - [TPC-H at scale factor 1](#tpc-h-at-scale-factor-1)
   - [Compiled code and scans](#compiled-code-and-scans)
@@ -99,7 +102,9 @@ marks the nodes whose expressions or keys the engine compiles once enough rows p
 larger tables, `[codegen pipeline]` marks a chain of nodes that runs as one compiled loop;
 see [Code generation](#code-generation). `[parallel]` marks the top of a chain that runs
 on several threads when its source has several parts; see
-[Parallel execution](#parallel-execution). `engine.plan(sql)` returns the plan itself,
+[Parallel execution](#parallel-execution). `EXPLAIN ANALYZE`, or
+`engine.explainAnalyze(sql)`, runs the query and shows what each node did; see
+[Observing queries](#observing-queries). `engine.plan(sql)` returns the plan itself,
 `engine.rows(sql)` all rows at once. A query
 that does not parse or bind throws an `SqlException` with the position in the text, for
 example `Referenced column "x" not found in FROM clause! at line 1, column 33`.
@@ -906,8 +911,11 @@ schemas, tables and columns, with the number of rows of a table, or an estimate,
 `REMARKS` if the source has one; it reads only the sources the catalog in the call matches.
 
 A statement runs one query: a `SELECT`, `WITH`, `VALUES` or set operation; or one
-statement that [writes](#writing-and-loading); or `EXPLAIN` followed by either, which gives the plan as
-rows of one column `plan`. The parameters
+statement that [writes](#writing-and-loading); or `EXPLAIN` or `EXPLAIN ANALYZE` followed by either,
+which gives the plan as rows of one column `plan`. `EXPLAIN ANALYZE` runs the statement
+first, see [EXPLAIN ANALYZE](#explain-analyze): of a statement that writes, it writes,
+and a read-only connection refuses it with `25006`; `executeUpdate` refuses any
+`EXPLAIN` with `42809`. The parameters
 `?` of a `PreparedStatement` go into the text as literals of the values they are set to,
 before the text is parsed; a parameter of a `MAP` type is not supported.
 `getParameterMetaData` gives the types the engine infers for the parameters (see
@@ -1152,8 +1160,9 @@ server leaves the engine open. That engine keeps the file access it was built wi
 `fileAccess(FileAccess.NONE)`, or `READ` and allowed locations.
 
 The server runs queries as the JDBC driver does: a `SELECT`, `WITH`, `VALUES` or set
-operation, or `EXPLAIN` followed by a query, which gives the plan as rows of one column
-`plan`. A query is bound when the client asks for it, and its batches go out as the
+operation, or `EXPLAIN` or `EXPLAIN ANALYZE` followed by a statement, which gives the
+plan as rows of one column `plan`; `EXPLAIN ANALYZE` runs when the client reads its
+stream, and an update with `EXPLAIN` fails with `INVALID_ARGUMENT`. A query is bound when the client asks for it, and its batches go out as the
 engine gives them, as fast as the client takes them; a client that cancels the query, or
 closes its stream before the end, stops it. A prepared statement tells the types of its
 parameters as their schema and takes one row of values. The calls for metadata give the
@@ -1248,8 +1257,9 @@ names of `getColumns` of its `DatabaseMetaData`.
 
 ## Supported SQL
 
-Queries, and the statements of [Writing](#writing-and-loading). Names, types and the meaning of the
-forms follow DuckDB 1.5.6.
+Queries, the statements of [Writing](#writing-and-loading), and `EXPLAIN` and `EXPLAIN ANALYZE`
+of either, see [Observing queries](#observing-queries). Names, types and the meaning of
+the forms follow DuckDB 1.5.6.
 
 - `SELECT [DISTINCT]` with `*`, `t.*`, `* EXCLUDE (...)` and `* REPLACE (...)`; an alias
   of the select list can be used by later items, in `WHERE`, `GROUP BY`, `HAVING` and
@@ -1988,7 +1998,8 @@ created when an operator spills first and deleted when the engine closes, and th
 of an operator are deleted when the query ends, also after a failure or a cancel. A
 directory left behind by a process that ended without closing its engine may be deleted
 by hand. The files hold the vectors of the batches as they are, without compression.
-`QueryResult.spill()` tells what a query spilled and read back, in parts and bytes, and
+`QueryResult.spill()` tells what a query spilled and read back, in parts and bytes,
+[EXPLAIN ANALYZE](#explain-analyze) what each of its operators spilled, and
 `FyrQL.spillStatistics()` the sums of all queries of the engine.
 
 ```java
@@ -2000,6 +2011,97 @@ FyrQL engine = FyrQL.builder()
 ```
 
 [Performance](#spilling) shows what spilling costs.
+
+## Observing queries
+
+Every query counts what its operators and scans do: the rows and batches each operator
+returns, the time it works, the threads it works on and what it spills to disk, and what
+each scan reads from its source. `EXPLAIN ANALYZE` shows these numbers with the plan,
+`QueryResult.statistics()` gives them to the program, and while Java Flight Recorder
+records, queries, requests to sources, compiled code and spilled parts are events.
+
+### EXPLAIN ANALYZE
+
+`EXPLAIN ANALYZE` followed by a statement runs the statement, reads and drops the rows of
+a query, and gives the plan as rows of one column `plan`, as `EXPLAIN` does, with the
+numbers of the run after `--` on the line of each node. `engine.explainAnalyze(sql)` gives
+the same text. A run of the query of [Using the engine](#using-the-engine), over the five
+orders and three customers, on two threads, gave:
+
+```
+Analyzed in 3.17 ms: 2 rows, 1 thread
+Sort #2 DESC -- 2 rows, 1 batch, 56.5 us, 1 thread
+  Project #0 AS region, #1 AS orders, #2 AS revenue -- 2 rows, 1 batch, 11.9 us, 1 thread
+    Aggregate GROUP BY #0: count(*) AS "count_star()", sum(#1) AS "sum(o.amount)" [codegen] -- 2 rows, 1 batch, 127 us, 1 thread
+      Project #3 AS "#group0", #0 AS "#argument0" [parallel] -- 4 rows, 1 batch, 7.70 us, 1 thread
+        Join INNER ON l#1 = r#0 [codegen] -- 4 rows, 1 batch, 196 us, 1 thread
+          Project #1 AS amount, CAST(#0 AS BIGINT) AS "#key0" [codegen] -- 5 rows, 1 batch, 40.1 us, 1 thread
+            Scan mem.main.orders (customerId INTEGER, amount DECIMAL(10,2)) -- 5 rows, 1 batch, 176 us, 1 thread; 1 split
+          Scan csv.main.customers (id BIGINT, region VARCHAR) [parallel] -- 3 rows, 1 batch, 976 us, 1 thread; 1 split, 34 bytes
+```
+
+- The first line has the time from the start of the query until its result was closed,
+  the rows of the result, the threads its operators worked on, the compiled code it used,
+  taken from the cache or compiled, with the time to get it, and what it spilled to disk.
+- After `--` come the rows and batches the operator of the node returned, its time, and
+  the threads it worked on. The time is the time the operator worked without the time of
+  its inputs, summed over its threads: on several threads, the times of the operators
+  may add up to more than the time of the query, and the time a thread waits for the
+  workers of a segment counts for no operator.
+- A scan, and a part of the plan that a source runs (`Remote`), adds what it read: its
+  splits; the row groups of Parquet and Iceberg files it read of all, the others skipped
+  by their statistics and Bloom filters; the data files of an Iceberg table it read of
+  all; the requests to S3, an HTTP endpoint, an OData service or a database, with the time
+  until their answers came; and the bytes it read, of the answers or of local files (of a
+  CSV or JSON file, the bytes of the parts it opened). Each statement sent to a database
+  follows on a line of its own after `>`.
+- An operator that spilled adds the bytes and parts it wrote and the bytes it read back.
+- The top of a compiled pipeline, `[codegen pipeline]`, has the numbers of the whole
+  pipeline, and the nodes below it have none; the top of a segment, `[parallel]`, has
+  those of its copies on all workers.
+
+`EXPLAIN ANALYZE` of a statement that writes writes, as in DuckDB: the first line has the
+rows written, followed by the line of the statement and the plan of its rows, indented.
+The JDBC driver and the Flight SQL server run it as a query, see
+[JDBC driver](#jdbc-driver).
+
+`QueryResult.statistics()` gives the numbers of a query as a `QueryStatistics`, so far
+or, once the result is closed, in all: the plan it ran, an `OperatorStatistics` and a
+`SourceStatistics` for each label such as `Filter#2`, the spilling, the compiled code and
+the threads; `engine.explain(statistics)` prints them as `EXPLAIN ANALYZE` does, without
+its first line. `engine.explainAnalyze(plan)` and
+`engine.explainAnalyze(statement, context)` run a plan, or a bound statement in a context
+with a timeout, see [Time limits](#time-limits).
+
+The counters cost each operator two readings of the clock per batch, about 60 ns on the
+laptop of the measurements, and twice that while all twelve threads are busy. In the
+queries of TPC-H Q1 and Q6 over four million rows in memory, the difference was within
+the noise of the runs (3 %); only a scan that does nothing with its batches shows it.
+
+A connector reports what it reads to `SourceCounters.current()`, on the thread the
+engine calls it on, and a request through `SourceRequest`, which also makes the event
+`net.fyrql.SourceRequest`; see the Javadoc of `Connector`.
+
+### JFR events
+
+While Java Flight Recorder records, FyrQL commits four events of the category `FyrQL`,
+which JDK Mission Control shows:
+
+| Event | Fields | Duration |
+| --- | --- | --- |
+| `net.fyrql.Query` | `sql` (the text of the statement, at most 1,000 characters, or else the first line of its plan), `rows` (read from the result, or written), `outcome` (`ok`, `failed`, `cancelled` or `timeout`), `error`, `spilledBytes` | from the start of the run until the result is closed, or until a statement that writes has written |
+| `net.fyrql.SourceRequest` | `source`, `kind` (such as `GET`, `query` or `next_page`), `target` (a URL or a statement, at most 1,000 characters), `status`, `bytes` (as the answer announces them) | from sending a request to S3, an HTTP endpoint, an OData service or a database until its answer came |
+| `net.fyrql.Compile` | `kind` (such as `CompiledFilter` or `CompiledPipeline`), `className`, `sourceLength`, `outcome` (`compiled`, `tooLarge` or `failed`) | the compilation of a class of generated code, not one taken from the cache |
+| `net.fyrql.Spill` | `operator` (such as `Sort#1`), `what` (such as `run`), `rows`, `batches`, `bytes` | a part an operator spilled, from its first batch until it was finished |
+
+```
+java -XX:StartFlightRecording=filename=fyrql.jfr -jar application.jar
+jfr print --events 'net.fyrql.*' fyrql.jfr
+```
+
+The events are on by default in a recording. Without a recording, an event costs the
+creation of an object that the JIT compiler removes; in a runtime without the module
+`jdk.jfr`, such as one built by `jlink` without it, FyrQL makes none.
 
 ## Performance
 

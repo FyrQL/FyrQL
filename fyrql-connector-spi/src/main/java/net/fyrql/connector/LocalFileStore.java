@@ -143,7 +143,7 @@ public final class LocalFileStore implements FileStore {
 
         @Override
         public InputStream open() throws IOException {
-            return Files.newInputStream(file);
+            return SourceCounters.current().counted(Files.newInputStream(file));
         }
 
         @Override
@@ -157,6 +157,7 @@ public final class LocalFileStore implements FileStore {
                     }
                     total += n;
                 }
+                SourceCounters.current().bytes(total);
                 return total == 0 && position >= channel.size() ? -1 : total;
             }
         }

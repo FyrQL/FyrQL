@@ -715,6 +715,7 @@ final class HashAggregateOperator extends AbstractOperator {
      * Thrown when a merge of a partition that went to disk does not fit in
      * the budget, so that the partition is cut into smaller ones.
      */
+    @SuppressWarnings("serial")
     private static final class OverBudget extends RuntimeException {
         final long bytes;
 
@@ -1425,7 +1426,8 @@ final class HashAggregateOperator extends AbstractOperator {
         private void askKeys() {
             if (!keysAsked && codegen.due(rowsSeen)) {
                 keysAsked = true;
-                KeyFunctions compiled = codegen.keys(keyColumnList.stream().map(inputSchema::type).toList());
+                KeyFunctions compiled = codegen.keys(keyColumnList.stream().map(inputSchema::type).toList(),
+                        context());
                 if (compiled != null) {
                     keys = compiled;
                 }

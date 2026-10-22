@@ -272,7 +272,7 @@ public final class S3Connector implements Connector {
                     throw new IllegalArgumentException("The S3 source " + name + ": " + ex.getMessage(), ex);
                 }
             }
-            S3Client client = new S3Client(uri, r, path, c, timeout, retries);
+            S3Client client = new S3Client(name, uri, r, path, c, timeout, retries);
             return new S3Connector(name, new S3FileStore(client, partSize));
         }
     }

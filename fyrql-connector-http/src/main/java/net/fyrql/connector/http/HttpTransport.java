@@ -11,6 +11,9 @@
 
 package net.fyrql.connector.http;
 
+import net.fyrql.connector.SourceCounters;
+import net.fyrql.connector.SourceRequest;
+
 import java.io.BufferedInputStream;
 import java.io.Closeable;
 import java.io.IOException;
@@ -40,6 +43,9 @@ import java.util.zip.GZIPInputStream;
  * {@link HttpSourceException} that names the URL; so is a status other
  * than 2xx where the caller asks for it, with the start of the body. The
  * values of the headers never appear in messages.
+ * <p>
+ * Each request counts for the scan the thread works for, the bytes of its
+ * body as they are read, see {@link SourceCounters}.
  */
 public final class HttpTransport implements AutoCloseable {
 
@@ -54,8 +60,10 @@ public final class HttpTransport implements AutoCloseable {
     private final Duration timeout;
     private final HttpClient client;
     private final boolean ownsClient;
+    private final String source;
 
     private HttpTransport(Builder b, HttpClient client, boolean ownsClient) {
+        this.source = b.source;
         this.headers = Collections.unmodifiableMap(new LinkedHashMap<>(b.headers));
         this.accept = b.accept;
         this.timeout = b.timeout;
@@ -143,7 +151,16 @@ public final class HttpTransport implements AutoCloseable {
      * @throws HttpSourceException if there is no answer
      */
     public Response getAllowingErrors(URI uri, Map<String, String> headers) {
-        return send("GET", uri, HttpRequest.BodyPublishers.noBody(), headers);
+        return getAllowingErrors(uri, headers, "GET");
+    }
+
+    /**
+     * Sends a {@code GET} as {@link #getAllowingErrors(URI, Map)} does, that
+     * counts as a request of a kind, such as {@code query}, see
+     * {@link SourceRequest}.
+     */
+    public Response getAllowingErrors(URI uri, Map<String, String> headers, String kind) {
+        return send("GET", kind, uri, HttpRequest.BodyPublishers.noBody(), headers);
     }
 
     /**
@@ -156,10 +173,11 @@ public final class HttpTransport implements AutoCloseable {
     public Response post(URI uri, String contentType, byte[] body, Map<String, String> headers) {
         Map<String, String> all = new LinkedHashMap<>(headers);
         all.put("Content-Type", contentType);
-        return send("POST", uri, HttpRequest.BodyPublishers.ofByteArray(body), all);
+        return send("POST", "POST", uri, HttpRequest.BodyPublishers.ofByteArray(body), all);
     }
 
-    private Response send(String method, URI uri, HttpRequest.BodyPublisher body, Map<String, String> extra) {
+    private Response send(String method, String kind, URI uri, HttpRequest.BodyPublisher body,
+            Map<String, String> extra) {
         HttpRequest.Builder request = HttpRequest.newBuilder(uri).method(method, body).timeout(timeout);
         if (!hasHeader(this.headers, "Accept") && !hasHeader(extra, "Accept")) {
             request.header("Accept", accept);
@@ -174,18 +192,26 @@ public final class HttpTransport implements AutoCloseable {
         });
         extra.forEach(request::header);
         HttpResponse<InputStream> response;
+        SourceCounters counters = SourceCounters.current();
+        SourceRequest call = SourceRequest.start();
         try {
-            response = client.send(request.build(), HttpResponse.BodyHandlers.ofInputStream());
+            response = client.send(request.build(), info -> HttpResponse.BodySubscribers.mapping(
+                    HttpResponse.BodySubscribers.ofInputStream(), counters::counted));
         } catch (HttpTimeoutException e) {
+            call.done(source, kind, uri.toString(), 0, 0);
             throw new HttpSourceException(method + " " + uri + " timed out after " + timeout.toMillis() + " ms",
                     uri, -1, e);
         } catch (IOException e) {
+            call.done(source, kind, uri.toString(), 0, 0);
             throw new HttpSourceException(method + " " + uri + " failed: " + e, uri, -1, e);
         } catch (InterruptedException e) {
+            call.done(source, kind, uri.toString(), 0, 0);
             Thread.currentThread().interrupt();
             throw new HttpSourceException(method + " " + uri + " was interrupted", uri, -1, e);
         }
         int status = response.statusCode();
+        call.done(source, kind, uri.toString(), status,
+                response.headers().firstValueAsLong("Content-Length").orElse(0));
         String encoding = response.headers().firstValue("Content-Encoding").orElse("identity").strip()
                 .toLowerCase(Locale.ROOT);
         if (!encoding.equals("identity") && !encoding.equals("gzip")) {
@@ -245,8 +271,18 @@ public final class HttpTransport implements AutoCloseable {
         private String accept = "application/json";
         private Duration timeout = DEFAULT_TIMEOUT;
         private HttpClient client;
+        private String source = "http";
 
         private Builder() {
+        }
+
+        /**
+         * Sets the name of the source, for the requests it counts, see
+         * {@link SourceRequest}; {@code http} by default.
+         */
+        public Builder source(String source) {
+            this.source = Objects.requireNonNull(source, "source");
+            return this;
         }
 
         /**

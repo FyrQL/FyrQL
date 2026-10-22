@@ -23,6 +23,7 @@ import net.fyrql.sql.ast.CopyFrom;
 import net.fyrql.sql.ast.CopyTo;
 import net.fyrql.sql.ast.CreateTable;
 import net.fyrql.sql.ast.DropTable;
+import net.fyrql.sql.ast.Explain;
 import net.fyrql.sql.ast.ResetVariable;
 import net.fyrql.sql.ast.SetVariable;
 import net.fyrql.sql.ast.ShowVariable;
@@ -86,6 +87,7 @@ final class StatementBinder {
             case SetVariable s -> new BoundStatement.Set(setting(s.name(), s.position()),
                     ExpressionBinder.check(() -> zoneName(s.value(), s.position()), s.position(), null));
             case ResetVariable r -> new BoundStatement.Set(setting(r.name(), r.position()), null);
+            case Explain e -> new BoundStatement.Explain(e.analyze(), statement(e.statement()));
             case ShowVariable s -> {
                 String name = setting(s.name(), s.position());
                 yield new BoundStatement.Query(new PlanNode.Values(Schema.of(new Schema.Field(name, DataType.VARCHAR)),

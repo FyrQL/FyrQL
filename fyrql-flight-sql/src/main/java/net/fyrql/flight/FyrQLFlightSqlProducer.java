@@ -20,7 +20,6 @@ import net.fyrql.PreparedQuery;
 import net.fyrql.QueryResult;
 import net.fyrql.arrow.ArrowToBatch;
 import net.fyrql.arrow.BatchToArrow;
-import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
@@ -64,8 +63,6 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Answers the calls of Flight SQL with an engine of FyrQL. A query is
@@ -87,17 +84,13 @@ import java.util.regex.Pattern;
  */
 final class FyrQLFlightSqlProducer implements FlightSqlProducer {
 
-    /** The result of {@code EXPLAIN}: the plan, one line per row. */
-    private static final Schema PLAN = Schema.of(new Schema.Field("plan", DataType.VARCHAR, false));
-    private static final Pattern EXPLAIN = Pattern.compile("\\s*EXPLAIN\\s+(.*)",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final String NOT_AN_UPDATE = "A query returns rows, not a number of rows written; run it"
             + " as a query";
     private static final long WAIT_MILLIS = 100;
     private static final Duration MIN_EXPIRY_PERIOD = Duration.ofSeconds(1);
     private static final Duration MAX_EXPIRY_PERIOD = Duration.ofMinutes(1);
 
-    /** The batches of a query, or the lines of an explained plan. */
+    /** The batches of a query or of {@code EXPLAIN}, or the row of the count of a statement that wrote. */
     private interface Rows extends AutoCloseable {
         /** Returns the next batch, or {@code null} after the last one. */
         Batch next();
@@ -106,22 +99,26 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         void close();
     }
 
-    /** A query the server gave out a ticket for, with the contexts of its runs. */
+    /**
+     * A query or {@code EXPLAIN} the server gave out a ticket for, which runs
+     * when its stream is read, or the count of a statement that wrote; with
+     * the contexts of its runs.
+     */
     private static final class Statement {
         final org.apache.arrow.vector.types.pojo.Schema schema;
-        final PlanNode plan;
+        final BoundStatement statement;
         final Batch lines;
         final Set<QueryContext> runs = ConcurrentHashMap.newKeySet();
         volatile boolean cancelled;
 
-        Statement(Schema schema, PlanNode plan, Batch lines) {
+        Statement(Schema schema, BoundStatement statement, Batch lines) {
             this.schema = Metadata.resultSchema(schema);
-            this.plan = plan;
+            this.statement = statement;
             this.lines = lines;
         }
 
         Rows open(FyrQL engine, QueryContext context) {
-            if (plan == null) {
+            if (statement == null) {
                 return new Rows() {
                     private boolean sent;
 
@@ -139,7 +136,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                     }
                 };
             }
-            QueryResult result = engine.execute(plan, context);
+            QueryResult result = engine.execute(statement, context);
             return new Rows() {
                 @Override
                 public Batch next() {
@@ -165,21 +162,18 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     private record Values(List<Object> values, List<DataType> types) {
     }
 
-    /** A prepared statement: its statement, or the statement it explains, and the values bound last. */
+    /** A prepared statement and the values bound last. */
     private static final class Prepared {
         final PreparedQuery query;
-        final String explained;
         final Parameters parameters;
         final org.apache.arrow.vector.types.pojo.Schema schema;
         final org.apache.arrow.vector.types.pojo.Schema parameterSchema;
         volatile Values values;
 
-        Prepared(PreparedQuery query, String explained) {
+        Prepared(PreparedQuery query) {
             this.query = query;
-            this.explained = explained;
-            this.parameters = query == null ? null : Parameters.parse(query.sql());
-            this.schema = Metadata.resultSchema(query == null ? PLAN
-                    : query.writes() ? new Schema(List.of()) : query.schema());
+            this.parameters = Parameters.parse(query.sql());
+            this.schema = Metadata.resultSchema(query.writes() ? new Schema(List.of()) : query.schema());
             List<Schema.Field> fields = new ArrayList<>();
             List<DataType> types = parameterTypes();
             for (int i = 0; i < types.size(); i++) {
@@ -189,7 +183,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
 
         List<DataType> parameterTypes() {
-            return query == null ? List.of() : query.parameterTypes();
+            return query.parameterTypes();
         }
 
         /**
@@ -357,30 +351,25 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
     }
 
-    /**
-     * Binds a query, or explains a statement for {@code EXPLAIN} and a
-     * statement; a statement that writes runs now, see {@link #run(BoundStatement)}.
-     */
+    /** Binds a statement; a statement that writes runs now, see {@link #run(BoundStatement)}. */
     private Statement statement(String sql) {
-        Matcher m = EXPLAIN.matcher(sql);
-        if (m.matches()) {
-            return explain(engine, m.group(1));
-        }
         return run(engine.statement(sql));
     }
 
-    /** Binds a prepared statement with the values bound last, or explains it; a statement that writes runs now. */
+    /** Binds a prepared statement with the values bound last; a statement that writes runs now. */
     private Statement statement(Prepared p) {
-        return p.query == null ? explain(engine, p.explained) : run(p.bind(engine, p.values));
+        return run(p.bind(engine, p.values));
     }
 
     /**
-     * Returns the statement of a query; a statement that writes runs to its
-     * end, and its result is the row of its count.
+     * Returns the statement of a query or of {@code EXPLAIN}, which runs when
+     * its stream is read, also {@code EXPLAIN ANALYZE} of a statement that
+     * writes; a statement that writes runs to its end now, and its result is
+     * the row of its count.
      */
     private Statement run(BoundStatement bound) {
-        if (bound instanceof BoundStatement.Query q) {
-            return new Statement(q.plan().schema(), q.plan(), null);
+        if (bound instanceof BoundStatement.Query || bound instanceof BoundStatement.Explain) {
+            return new Statement(bound.schema(), bound, null);
         }
         Object[] count = {update(bound)};
         return new Statement(BoundStatement.COUNT, null, Batch.ofRows(BoundStatement.COUNT, List.<Object[]>of(count)));
@@ -436,14 +425,6 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             types.add(untyped ? parameterTypes.get(i) : batch.schema().type(i));
         }
         return types;
-    }
-
-    private static Statement explain(FyrQL engine, String sql) {
-        List<Object[]> rows = new ArrayList<>();
-        for (String line : engine.explain(sql).split("\n")) {
-            rows.add(new Object[] {line});
-        }
-        return new Statement(PLAN, null, Batch.ofRows(PLAN, rows));
     }
 
     /**
@@ -532,9 +513,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             FlightDescriptor descriptor) {
         try {
             noTransaction(command.hasTransactionId());
-            Matcher m = EXPLAIN.matcher(command.getQuery());
-            return new SchemaResult(m.matches() ? explain(engine, m.group(1)).schema
-                    : Metadata.resultSchema(engine.statement(command.getQuery()).schema()));
+            return new SchemaResult(Metadata.resultSchema(engine.statement(command.getQuery()).schema()));
         } catch (RuntimeException e) {
             throw FlightErrors.of(e);
         }
@@ -589,9 +568,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         return () -> {
             try {
                 noTransaction(command.hasTransactionId());
-                BoundStatement statement = EXPLAIN.matcher(command.getQuery()).matches() ? null
-                        : engine.statement(command.getQuery());
-                if (statement == null || statement instanceof BoundStatement.Query) {
+                BoundStatement statement = engine.statement(command.getQuery());
+                if (statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain) {
                     throw FlightErrors.invalid(NOT_AN_UPDATE);
                 }
                 long count = update(statement);
@@ -609,15 +587,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             StreamListener<Result> listener) {
         try {
             noTransaction(request.hasTransactionId());
-            Matcher m = EXPLAIN.matcher(request.getQuery());
-            Prepared p;
-            if (m.matches()) {
-                // Explains the query now, so that a query that does not bind fails here.
-                explain(engine, m.group(1));
-                p = new Prepared(null, m.group(1));
-            } else {
-                p = new Prepared(engine.prepare(request.getQuery()), null);
-            }
+            Prepared p = new Prepared(engine.prepare(request.getQuery()));
             ByteString handle = prepared.add(owner(context), p);
             FlightSql.ActionCreatePreparedStatementResult result = FlightSql.ActionCreatePreparedStatementResult
                     .newBuilder().setPreparedStatementHandle(handle)
@@ -724,7 +694,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         return () -> {
             try {
                 Prepared p = prepared.get(command.getPreparedStatementHandle(), owner(context));
-                if (p.query == null || !p.query.writes()) {
+                if (!p.query.writes()) {
                     throw FlightErrors.invalid(NOT_AN_UPDATE);
                 }
                 List<DataType> parameterTypes = p.parameterTypes();
