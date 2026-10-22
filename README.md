@@ -124,10 +124,11 @@ against the interpreter, of one thread against twelve and of spilling are under
 FyrQL is young: version 0.x, not yet used in production, and its API may still change.
 It writes results into files, tables in memory and databases, but does not update or
 delete rows; the hash tables of the joins of a query must fit into the memory budget,
-since only aggregations, sorts and windows spill to disk; and where all data is in local
-files and native code is fine, DuckDB itself is faster. FyrQL is meant for the other
-case: data spread across databases, files and services, queried from a Java application
-or a JDBC tool, without moving it first.
+since only aggregations, sorts and windows spill to disk; and where native code is fine
+and the sources are ones DuckDB reads, DuckDB is faster. FyrQL is meant for Java
+applications and JDBC tools that query data across databases, files and services in
+plain Java: any JDBC driver, connectors written in Java, and no native libraries or
+extensions to load.
 
 ## Building
 

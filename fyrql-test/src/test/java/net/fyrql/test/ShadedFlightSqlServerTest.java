@@ -125,9 +125,30 @@ class ShadedFlightSqlServerTest {
             return read(log);
         }
 
+        /**
+         * Ends the process and deletes its log. On Windows, the file may stay
+         * open for a moment after the process ended, so that the deletion of
+         * the temporary directory would fail.
+         */
         @Override
         public void close() {
             stop(process);
+            for (int attempt = 0; ; attempt++) {
+                try {
+                    Files.deleteIfExists(log);
+                    return;
+                } catch (IOException e) {
+                    if (attempt == 50) {
+                        return;
+                    }
+                }
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
         }
 
         private static void stop(Process process) {
