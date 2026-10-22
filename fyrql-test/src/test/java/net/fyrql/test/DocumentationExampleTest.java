@@ -27,7 +27,7 @@ import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
-import net.fyrql.exec.spi.PipelineSpec;
+import net.fyrql.exec.compiled.PipelineSpec;
 import net.fyrql.sql.SqlException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

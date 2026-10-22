@@ -11,7 +11,7 @@
 
 package net.fyrql.test.connector;
 
-import net.fyrql.sql.render.GenericDialect;
+import net.fyrql.connector.jdbc.JdbcConnector;
 import net.fyrql.test.db.TestDatabases;
 import org.junit.jupiter.api.Test;
 
@@ -58,12 +58,12 @@ class JdbcConformanceTest {
     @Test
     void h2SqlServer() {
         JdbcConformance.check(JdbcConformance.h2("MSSQLServer", b -> b.quote("[")
-                .limitStyle(GenericDialect.LimitStyle.TOP)));
+                .limitStyle(JdbcConnector.LimitStyle.TOP)));
     }
 
     @Test
     void h2MySql() {
-        JdbcConformance.check(JdbcConformance.h2("MySQL", b -> b.limitStyle(GenericDialect.LimitStyle.LIMIT)));
+        JdbcConformance.check(JdbcConformance.h2("MySQL", b -> b.limitStyle(JdbcConnector.LimitStyle.LIMIT)));
     }
 
     @Test

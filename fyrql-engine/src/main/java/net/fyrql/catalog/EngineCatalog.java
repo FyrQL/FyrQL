@@ -22,7 +22,7 @@ import net.fyrql.connector.TableFunctionProvider;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.bind.CatalogView;
 
 import java.io.UncheckedIOException;
@@ -44,6 +44,8 @@ import java.util.function.Supplier;
  * the writers and the readers of file formats. The locations that table
  * functions and {@code COPY} name are checked against the
  * {@link FileAccessPolicy} of the engine before a source gets them.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class EngineCatalog implements CatalogView {
 

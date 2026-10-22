@@ -19,6 +19,7 @@ import net.fyrql.FyrQL;
 import net.fyrql.PreparedQuery;
 import net.fyrql.QueryResult;
 import net.fyrql.Session;
+import net.fyrql.SqlStatement;
 import net.fyrql.arrow.ArrowToBatch;
 import net.fyrql.arrow.BatchToArrow;
 import net.fyrql.core.type.DataType;
@@ -26,7 +27,6 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.QueryContext;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.bind.BoundStatement;
 import net.fyrql.sql.bind.Settings;
 import net.fyrql.sql.parse.Parameters;
 import org.apache.arrow.flight.CallStatus;
@@ -128,13 +128,13 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
      */
     private static final class Statement {
         final org.apache.arrow.vector.types.pojo.Schema schema;
-        final BoundStatement statement;
+        final SqlStatement statement;
         final Batch lines;
         final Session session;
         final Set<QueryContext> runs = ConcurrentHashMap.newKeySet();
         volatile boolean cancelled;
 
-        Statement(Schema schema, BoundStatement statement, Batch lines, Session session) {
+        Statement(Schema schema, SqlStatement statement, Batch lines, Session session) {
             this.schema = Metadata.resultSchema(schema);
             this.statement = statement;
             this.lines = lines;
@@ -217,7 +217,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
          *
          * @param v the values, {@code null} if none were bound
          */
-        BoundStatement bind(Values v, Session session) {
+        SqlStatement bind(Values v, Session session) {
             List<DataType> types = parameterTypes();
             if (v == null) {
                 if (!types.isEmpty()) {
@@ -389,7 +389,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
     }
 
-    /** Binds a statement in a session; a statement that writes runs now, see {@link #run(BoundStatement, Session)}. */
+    /** Binds a statement in a session; a statement that writes runs now, see {@link #run(SqlStatement, Session)}. */
     private Statement statement(String sql, Session session) {
         return run(session.statement(sql), session);
     }
@@ -405,13 +405,12 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
      * writes; a statement that writes runs to its end now, and its result is
      * the row of its count.
      */
-    private Statement run(BoundStatement bound, Session session) {
-        if (bound instanceof BoundStatement.Query || bound instanceof BoundStatement.Explain) {
+    private Statement run(SqlStatement bound, Session session) {
+        if (bound.isQuery()) {
             return new Statement(bound.schema(), bound, null, session);
         }
         Object[] count = {update(bound, session)};
-        return new Statement(BoundStatement.COUNT, null, Batch.ofRows(BoundStatement.COUNT, List.<Object[]>of(count)),
-                session);
+        return new Statement(bound.schema(), null, Batch.ofRows(bound.schema(), List.<Object[]>of(count)), session);
     }
 
     /**
@@ -419,7 +418,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
      * queries than allowed run already, and returns the rows it wrote;
      * {@code SET} changes the session.
      */
-    private long update(BoundStatement statement, Session session) {
+    private long update(SqlStatement statement, Session session) {
         if (!queries.tryAcquire()) {
             throw busy();
         }
@@ -610,8 +609,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         return () -> {
             try {
                 noTransaction(command.hasTransactionId());
-                BoundStatement statement = session.statement(command.getQuery());
-                if (statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain) {
+                SqlStatement statement = session.statement(command.getQuery());
+                if (statement.isQuery()) {
                     throw FlightErrors.invalid(NOT_AN_UPDATE);
                 }
                 long count = update(statement, session);

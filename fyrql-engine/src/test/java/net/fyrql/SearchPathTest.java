@@ -95,7 +95,9 @@ class SearchPathTest {
     }
 
     private static String column(FyrQL engine, String sql, SearchPath path) {
-        return engine.plan(sql, path).schema().name(0);
+        Session session = engine.newSession();
+        session.use(path);
+        return session.plan(sql).schema().name(0);
     }
 
     @Test
@@ -119,14 +121,14 @@ class SearchPathTest {
     void thePathOfTheBuilderStaysAndAnUnknownSourceIsAnError() {
         try (FyrQL engine = FyrQL.builder().register(new Source("a")).register(new Source("b")).defaultSource("b")
                 .build()) {
-            engine.plan("SELECT * FROM t", new SearchPath("a", "main"));
+            assertEquals("a_t", column(engine, "SELECT * FROM t", new SearchPath("a", "main")));
             assertEquals("b_t", engine.plan("SELECT * FROM t").schema().name(0));
             EngineCatalog catalog = engine.catalog();
             assertSame(catalog, catalog.withSearchPath(new SearchPath("b", "main")));
             assertEquals(new SearchPath("a", "other"), catalog.withSearchPath(new SearchPath("a", "other"))
                     .searchPath());
             IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                    () -> engine.plan("SELECT 1", new SearchPath("c", "main")));
+                    () -> engine.newSession().use(new SearchPath("c", "main")));
             assertEquals("The default source c is not registered; registered: [a, b]", e.getMessage());
         }
     }

@@ -12,7 +12,9 @@
 /**
  * An Arrow Flight SQL server for an engine of FyrQL. Clients in Python,
  * Java and other languages send SQL and read the results as Arrow record
- * batches. The server reads and does not write; it runs without native
- * code, with TLS from the JDK.
+ * batches, and write with the statements of SQL that write. It runs
+ * without native code, with TLS from the JDK.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 package net.fyrql.flight;

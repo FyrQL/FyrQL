@@ -19,7 +19,6 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
-import net.fyrql.sql.render.GenericDialect;
 import net.fyrql.test.DuckDbReference;
 import net.fyrql.test.ResultComparison;
 import net.fyrql.test.connector.JdbcConformance.Target;
@@ -88,12 +87,12 @@ class JdbcWriteConformanceTest {
 
     @Test
     void h2SqlServer() {
-        check(JdbcConformance.h2("MSSQLServer", b -> b.quote("[").limitStyle(GenericDialect.LimitStyle.TOP)));
+        check(JdbcConformance.h2("MSSQLServer", b -> b.quote("[").limitStyle(JdbcConnector.LimitStyle.TOP)));
     }
 
     @Test
     void h2MySql() {
-        check(JdbcConformance.h2("MySQL", b -> b.limitStyle(GenericDialect.LimitStyle.LIMIT)));
+        check(JdbcConformance.h2("MySQL", b -> b.limitStyle(JdbcConnector.LimitStyle.LIMIT)));
     }
 
     @Test

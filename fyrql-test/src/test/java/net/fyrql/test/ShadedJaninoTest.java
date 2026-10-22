@@ -68,7 +68,7 @@ class ShadedJaninoTest {
             assertTrue(names.stream().noneMatch(n -> n.matches("META-INF/[^/]*\\.(SF|DSA|RSA)")), "signature files");
             assertTrue(names.contains("META-INF/licenses/janino-LICENSE.txt"), "Janino's license");
             assertTrue(names.contains("META-INF/services/net.fyrql.internal.commons.compiler.ICompilerFactory"));
-            assertTrue(names.contains("META-INF/services/net.fyrql.exec.spi.ExpressionCompiler"));
+            assertTrue(names.contains("META-INF/services/net.fyrql.exec.compiled.ExpressionCompiler"));
             assertEquals("net.fyrql.codegen", jar.getManifest().getMainAttributes().getValue("Automatic-Module-Name"));
         }
     }

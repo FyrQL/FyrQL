@@ -14,7 +14,7 @@ package net.fyrql.sql.parse;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CopyFrom;
 import net.fyrql.sql.ast.CopyTo;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.SqlPrinter;
 import org.junit.jupiter.api.Test;
 

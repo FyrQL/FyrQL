@@ -31,6 +31,8 @@ import java.time.Period;
  * The text form is DuckDB's: {@code 1 year 2 months -3 days 04:05:06.5},
  * {@code 00:00:00} for zero; {@link #parse} reads it and the other forms of
  * DuckDB, without ISO 8601.
+ * <p>
+ * Part of the SPI for connectors; covered by the compatibility promise.
  */
 public final class Interval implements Comparable<Interval> {
 

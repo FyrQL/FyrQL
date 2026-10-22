@@ -18,7 +18,7 @@ import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.JoinType;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
-import net.fyrql.exec.spi.PipelineSpec;
+import net.fyrql.exec.compiled.PipelineSpec;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28,7 +28,7 @@ import java.util.Map;
 import java.util.function.Function;
 
 /**
- * Generates the class body of a {@link net.fyrql.exec.spi.CompiledPipeline}:
+ * Generates the class body of a {@link net.fyrql.exec.compiled.CompiledPipeline}:
  * one loop over the rows of a batch of the source, in which the stages run
  * one after the other for each row. A filter skips the rest of the row
  * unless its condition is {@code TRUE}; a projection computes all its
@@ -37,7 +37,7 @@ import java.util.function.Function;
  * column is the input vector, or its selected rows, and a computed column
  * is wrapped from the array it was collected in.
  * <p>
- * A join probes the {@link net.fyrql.exec.spi.JoinTable} of its build side
+ * A join probes the {@link net.fyrql.exec.compiled.JoinTable} of its build side
  * with the hash of its keys, which is the hash of the interpreter, bit for
  * bit, follows the chain of the slot and compares the keys; a row with a
  * {@code NULL} key has no candidates, and without keys every build row is

@@ -11,6 +11,8 @@
 
 package net.fyrql.sql.ast;
 
+import net.fyrql.sql.Position;
+
 import java.util.List;
 import java.util.Objects;
 

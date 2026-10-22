@@ -24,6 +24,8 @@ import java.util.Map;
  * value of the single column {@code json}. A layout comes from
  * {@link JsonSchemaInference#infer} or, for a schema that is given, from
  * {@link #of}.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class JsonLayout {
 

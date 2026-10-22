@@ -28,7 +28,7 @@ import net.fyrql.core.value.Dates;
 import net.fyrql.core.value.Interval;
 import net.fyrql.core.value.ZonedDates;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.SqlExpr;
 
 import java.time.LocalDate;

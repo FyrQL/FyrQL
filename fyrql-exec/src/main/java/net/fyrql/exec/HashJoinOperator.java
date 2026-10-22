@@ -19,10 +19,10 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.BooleanVector;
 import net.fyrql.core.vector.Vector;
-import net.fyrql.exec.spi.CompiledFilter;
-import net.fyrql.exec.spi.InterpretedKeys;
-import net.fyrql.exec.spi.JoinTable;
-import net.fyrql.exec.spi.KeyFunctions;
+import net.fyrql.exec.compiled.CompiledFilter;
+import net.fyrql.exec.compiled.InterpretedKeys;
+import net.fyrql.exec.compiled.JoinTable;
+import net.fyrql.exec.compiled.KeyFunctions;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;

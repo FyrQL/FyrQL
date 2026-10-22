@@ -26,7 +26,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * target. {@link #commit} gives it the name of the target, replacing a file
  * of that name; {@link #close} without a commit deletes it.
  */
-public final class TemporaryFile implements AutoCloseable {
+final class TemporaryFile implements AutoCloseable {
 
     private final Path target;
     private final Path path;

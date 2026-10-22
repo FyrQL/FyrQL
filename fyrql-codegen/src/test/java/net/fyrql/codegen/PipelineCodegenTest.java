@@ -32,9 +32,9 @@ import net.fyrql.exec.QueryContext;
 import net.fyrql.exec.QueryException;
 import net.fyrql.exec.Splits;
 import net.fyrql.exec.TableSource;
-import net.fyrql.exec.spi.CompiledPipeline;
-import net.fyrql.exec.spi.JoinTable;
-import net.fyrql.exec.spi.PipelineSpec;
+import net.fyrql.exec.compiled.CompiledPipeline;
+import net.fyrql.exec.compiled.JoinTable;
+import net.fyrql.exec.compiled.PipelineSpec;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;

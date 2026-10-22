@@ -179,7 +179,7 @@ public final class JdbcConformance {
                         : t == DataType.TIMESTAMPTZ ? DataType.TIMESTAMP : t,
                 (t, v) -> v instanceof Byte b ? (Object) (short) b : v instanceof UUID || v instanceof Interval
                         ? v.toString() : v,
-                GENERIC_PUSHED, b -> b.limitStyle(GenericDialect.LimitStyle.FETCH_FIRST));
+                GENERIC_PUSHED, b -> b.limitStyle(JdbcConnector.LimitStyle.FETCH_FIRST));
     }
 
     /**

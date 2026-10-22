@@ -22,8 +22,8 @@ import net.fyrql.core.vector.BigIntVector;
 import net.fyrql.core.vector.IntVector;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
-import net.fyrql.exec.spi.InterpretedKeys;
-import net.fyrql.exec.spi.KeyFunctions;
+import net.fyrql.exec.compiled.InterpretedKeys;
+import net.fyrql.exec.compiled.KeyFunctions;
 
 import java.math.BigInteger;
 import java.util.ArrayDeque;

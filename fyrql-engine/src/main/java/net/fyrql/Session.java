@@ -18,7 +18,7 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.value.ZonedDates;
 import net.fyrql.exec.QueryContext;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.ResetVariable;
 import net.fyrql.sql.ast.SetVariable;
 import net.fyrql.sql.bind.Binder;
@@ -334,20 +334,26 @@ public final class Session {
      *
      * @throws SqlException if the statement cannot be parsed or bound
      */
-    public BoundStatement statement(String sql) {
+    public SqlStatement statement(String sql) {
+        return new SqlStatement(bind(sql), sql);
+    }
+
+    /** Parses and binds a statement in this session. */
+    BoundStatement bind(String sql) {
         return binder().bind(SqlParser.parseStatement(sql));
     }
 
     /**
      * Parses and binds a statement in this session with names looked up
-     * along another search path, e.g. the one a prepared query kept, see
-     * {@link FyrQL#statement(String, SearchPath)}.
+     * along another search path, e.g. the one a prepared query kept; a
+     * table to create goes to the default source and schema of the path if
+     * its name does not say otherwise.
      *
      * @throws SqlException             if the statement cannot be parsed or bound
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
-    public BoundStatement statement(String sql, SearchPath searchPath) {
-        return binder(searchPath).bind(SqlParser.parseStatement(sql));
+    public SqlStatement statement(String sql, SearchPath searchPath) {
+        return new SqlStatement(binder(searchPath).bind(SqlParser.parseStatement(sql)), sql);
     }
 
     /**
@@ -380,7 +386,12 @@ public final class Session {
      * @throws IllegalArgumentException if the values do not fit the parameters
      * @throws SqlException             if the statement does not bind any more
      */
-    public BoundStatement statement(PreparedQuery query, List<?> values) {
+    public SqlStatement statement(PreparedQuery query, List<?> values) {
+        return new SqlStatement(bind(query, values), null);
+    }
+
+    /** Binds a prepared statement with values for its parameters in this session. */
+    private BoundStatement bind(PreparedQuery query, List<?> values) {
         BoundStatement statement = binder(query.searchPath()).bind(SqlParser.parseStatement(
                 FyrQL.render(query, values)));
         return statement instanceof BoundStatement.Query q
@@ -395,7 +406,7 @@ public final class Session {
      * @throws SqlException             if the statement does not bind any more, or a write fails
      */
     public QueryResult execute(PreparedQuery query, List<?> values) {
-        return execute(statement(query, values), new QueryContext());
+        return engine.execute(bind(query, values), new QueryContext(), null, this);
     }
 
     /**
@@ -406,7 +417,7 @@ public final class Session {
      * @throws SqlException             if the statement does not bind any more, or a write fails
      */
     public QueryResult execute(PreparedQuery query, List<?> values, QueryContext context) {
-        return execute(statement(query, values), context);
+        return engine.execute(bind(query, values), context, null, this);
     }
 
     /**
@@ -430,7 +441,7 @@ public final class Session {
      * @throws SqlException             if the statement does not bind any more, is a query, or fails
      */
     public long update(PreparedQuery query, List<?> values) {
-        return update(statement(query, values), new QueryContext());
+        return engine.update(bind(query, values), new QueryContext(), null, this);
     }
 
     /**
@@ -440,7 +451,7 @@ public final class Session {
      * @throws SqlException if the statement cannot be parsed or bound, or a write fails
      */
     public QueryResult sql(String sql) {
-        return engine.execute(statement(sql), new QueryContext(), sql, this);
+        return engine.execute(bind(sql), new QueryContext(), sql, this);
     }
 
     /**
@@ -461,28 +472,28 @@ public final class Session {
      * @throws SqlException if the statement cannot be parsed or bound, is a query, or fails
      */
     public long update(String sql) {
-        return engine.update(statement(sql), new QueryContext(), sql, this);
+        return engine.update(bind(sql), new QueryContext(), sql, this);
     }
 
     /**
      * Runs a bound statement in this session, see
-     * {@link FyrQL#execute(BoundStatement, QueryContext)}; {@code SET}
+     * {@link FyrQL#execute(SqlStatement, QueryContext)}; {@code SET}
      * changes this session. The caller closes the result.
      *
      * @throws SqlException if the write fails
      */
-    public QueryResult execute(BoundStatement statement, QueryContext context) {
-        return engine.execute(statement, context, null, this);
+    public QueryResult execute(SqlStatement statement, QueryContext context) {
+        return engine.execute(statement.bound(), context, statement.sql(), this);
     }
 
     /**
      * Runs a bound statement that writes in this session, see
-     * {@link FyrQL#update(BoundStatement, QueryContext)}.
+     * {@link FyrQL#update(SqlStatement, QueryContext)}.
      *
      * @throws SqlException if the statement is a query or {@code EXPLAIN}, or the write fails
      */
-    public long update(BoundStatement statement, QueryContext context) {
-        return engine.update(statement, context, null, this);
+    public long update(SqlStatement statement, QueryContext context) {
+        return engine.update(statement.bound(), context, statement.sql(), this);
     }
 
     /**
@@ -499,7 +510,7 @@ public final class Session {
      * @throws SqlException if the statement cannot be parsed or bound
      */
     public String explain(String sql) {
-        return engine.explain(statement(sql));
+        return engine.explain(bind(sql));
     }
 
     /**
@@ -509,17 +520,17 @@ public final class Session {
      * @throws SqlException if the statement cannot be parsed or bound, or fails
      */
     public String explainAnalyze(String sql) {
-        return engine.explainAnalyze(statement(sql), new QueryContext(), this);
+        return engine.explainAnalyze(bind(sql), new QueryContext(), this);
     }
 
     /**
      * Runs a bound statement in this session in a context of the caller and
      * returns its plan with what each operator did, see
-     * {@link FyrQL#explainAnalyze(BoundStatement, QueryContext)}.
+     * {@link FyrQL#explainAnalyze(SqlStatement, QueryContext)}.
      *
      * @throws SqlException if the statement fails
      */
-    public String explainAnalyze(BoundStatement statement, QueryContext context) {
-        return engine.explainAnalyze(statement, context, this);
+    public String explainAnalyze(SqlStatement statement, QueryContext context) {
+        return engine.explainAnalyze(statement.bound(), context, this);
     }
 }

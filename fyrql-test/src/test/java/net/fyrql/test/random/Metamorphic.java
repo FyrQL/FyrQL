@@ -19,7 +19,7 @@ import net.fyrql.core.value.Interval;
 import net.fyrql.exec.QueryException;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.FromItem;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.Query;
 import net.fyrql.sql.ast.QueryBody;
 import net.fyrql.sql.ast.SelectItem;

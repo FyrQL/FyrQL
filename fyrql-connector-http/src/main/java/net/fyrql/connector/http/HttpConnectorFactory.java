@@ -25,6 +25,8 @@ import java.util.Map;
  * {@code timeout} (such as {@code 10s}), and {@code format},
  * {@code sampleSize}, {@code ignoreErrors} and {@code batchSize} as for
  * JSON files.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class HttpConnectorFactory implements ConnectorFactory {
 

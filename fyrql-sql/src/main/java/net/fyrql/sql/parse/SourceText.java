@@ -11,7 +11,7 @@
 
 package net.fyrql.sql.parse;
 
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.sf.jsqlparser.parser.Token;
 
 import java.util.ArrayList;

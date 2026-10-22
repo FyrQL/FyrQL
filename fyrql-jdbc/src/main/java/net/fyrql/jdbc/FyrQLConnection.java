@@ -13,12 +13,12 @@ package net.fyrql.jdbc;
 
 import net.fyrql.FyrQL;
 import net.fyrql.Session;
+import net.fyrql.SqlStatement;
 import net.fyrql.catalog.SearchPath;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.exec.QueryContext;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.bind.BoundStatement;
 
 import java.sql.Array;
 import java.sql.Blob;
@@ -53,8 +53,11 @@ import java.util.concurrent.locks.ReentrantLock;
  * opened over an engine of the application with
  * {@link FyrQLDriver#connect(FyrQL, boolean)}. The connection is always in
  * auto-commit: a statement that writes is one transaction of the source
- * it writes to, if the source has transactions; the methods of
- * transactions are accepted and do nothing. A connection set read-only
+ * it writes to, if the source has transactions, and takes effect at once.
+ * The methods of transactions are accepted and do nothing, as tools call
+ * them when they connect: {@code setAutoCommit(false)} leaves the
+ * connection in auto-commit, and {@code rollback()} after a statement that
+ * wrote undoes nothing. A connection set read-only
  * refuses statements that write with {@code 25006}. The connection is a
  * {@link Session} of the engine of its own, also over an engine that
  * connections share: {@code SET}, {@code RESET} and {@code USE} change
@@ -157,8 +160,8 @@ final class FyrQLConnection implements Connection {
         lock.lock();
         try {
             checkOpen();
-            BoundStatement statement = session.statement(sql);
-            boolean query = statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain;
+            SqlStatement statement = session.statement(sql);
+            boolean query = statement.isQuery();
             expect(expected, query ? Kind.QUERY : Kind.UPDATE);
             if (readOnly && statement.writes()) {
                 throw SqlStates.create("The connection is read-only and runs no statement that writes",
@@ -196,9 +199,8 @@ final class FyrQLConnection implements Connection {
         lock.lock();
         try {
             checkOpen();
-            BoundStatement statement = session.statement(sql);
-            return statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain
-                    ? statement.schema() : null;
+            SqlStatement statement = session.statement(sql);
+            return statement.isQuery() ? statement.schema() : null;
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
         } finally {

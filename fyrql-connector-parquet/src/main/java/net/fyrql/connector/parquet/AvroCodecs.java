@@ -29,6 +29,8 @@ import java.util.zip.InflaterOutputStream;
  * {@code java.util.zip}, {@code snappy} and {@code zstandard} through
  * aircompressor, all in pure Java. They live in this module because
  * aircompressor is renamed into its JAR.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class AvroCodecs {
 

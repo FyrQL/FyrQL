@@ -17,7 +17,7 @@ import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.JoinType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
-import net.fyrql.exec.spi.JoinTable;
+import net.fyrql.exec.compiled.JoinTable;
 
 import java.util.ArrayList;
 import java.util.Collections;

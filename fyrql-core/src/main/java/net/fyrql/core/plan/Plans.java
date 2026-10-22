@@ -20,7 +20,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.UnaryOperator;
 
-/** Helpers over plan trees: traversal, rebuilding, identities and printing. */
+/**
+ * Helpers over plan trees: traversal, rebuilding, identities and printing.
+ * <p>
+ * Internal; not covered by the compatibility promise.
+ */
 public final class Plans {
 
     private Plans() {

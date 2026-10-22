@@ -25,7 +25,7 @@ import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.Operator;
 import net.fyrql.exec.QueryContext;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.bind.BoundStatement;
 
 import java.util.ArrayList;

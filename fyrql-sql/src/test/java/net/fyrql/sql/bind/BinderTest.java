@@ -18,7 +18,7 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.parse.SqlParser;
 import org.junit.jupiter.api.Test;
 

@@ -14,13 +14,13 @@ package net.fyrql.codegen;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
-import net.fyrql.exec.spi.CodegenStatistics;
-import net.fyrql.exec.spi.CompiledFilter;
-import net.fyrql.exec.spi.CompiledPipeline;
-import net.fyrql.exec.spi.CompiledProjection;
-import net.fyrql.exec.spi.ExpressionCompiler;
-import net.fyrql.exec.spi.KeyFunctions;
-import net.fyrql.exec.spi.PipelineSpec;
+import net.fyrql.exec.CodegenStatistics;
+import net.fyrql.exec.compiled.CompiledFilter;
+import net.fyrql.exec.compiled.CompiledPipeline;
+import net.fyrql.exec.compiled.CompiledProjection;
+import net.fyrql.exec.compiled.ExpressionCompiler;
+import net.fyrql.exec.compiled.KeyFunctions;
+import net.fyrql.exec.compiled.PipelineSpec;
 import org.codehaus.commons.compiler.CompileException;
 import org.codehaus.janino.ClassBodyEvaluator;
 
@@ -69,7 +69,7 @@ public final class JaninoCompiler implements ExpressionCompiler {
         "net.fyrql.core.expr.Expression", "net.fyrql.core.expr.ScalarOps", "net.fyrql.core.value.Casts",
         "net.fyrql.core.value.ConversionException", "net.fyrql.core.value.Order",
         "net.fyrql.core.function.ScalarFunction", "net.fyrql.core.function.Strings", "java.math.BigDecimal",
-        "net.fyrql.codegen.GeneratedSupport", "net.fyrql.core.type.Schema", "net.fyrql.exec.spi.JoinTable"};
+        "net.fyrql.codegen.GeneratedSupport", "net.fyrql.core.type.Schema", "net.fyrql.exec.compiled.JoinTable"};
 
     /** The cached value of a source that does not compile, or whose class has a method too long for the JIT. */
     private static final Object FAILED = new Object();

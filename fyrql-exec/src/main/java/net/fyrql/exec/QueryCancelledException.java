@@ -16,6 +16,8 @@ package net.fyrql.exec;
  * message tells why and names the operator that stopped, e.g.
  * {@code The query was canceled in Sort#1}; the cause, if any, is the
  * error with which a source stopped when it was asked to.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public final class QueryCancelledException extends QueryException {
 

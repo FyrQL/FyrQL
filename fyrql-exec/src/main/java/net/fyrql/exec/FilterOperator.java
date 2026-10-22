@@ -14,7 +14,7 @@ package net.fyrql.exec;
 import net.fyrql.core.expr.Evaluator;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.vector.Batch;
-import net.fyrql.exec.spi.CompiledFilter;
+import net.fyrql.exec.compiled.CompiledFilter;
 
 /**
  * Keeps the rows whose condition is {@code true}, see {@link Evaluator#select};

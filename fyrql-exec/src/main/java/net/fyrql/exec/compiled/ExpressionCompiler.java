@@ -9,11 +9,12 @@
  * defined by the Mozilla Public License, v. 2.0.
  */
 
-package net.fyrql.exec.spi;
+package net.fyrql.exec.compiled;
 
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.exec.CodegenStatistics;
 
 import java.util.List;
 

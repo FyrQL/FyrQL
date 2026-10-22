@@ -33,6 +33,8 @@ import java.math.RoundingMode;
  * them, it asks {@link #nullDivisor(ArithmeticOp, long)} or
  * {@link #nullDivisor(ArithmeticOp, double)} whether the operation gives
  * {@code NULL}, and does not call them for {@code NULL} operands.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class ScalarOps {
 

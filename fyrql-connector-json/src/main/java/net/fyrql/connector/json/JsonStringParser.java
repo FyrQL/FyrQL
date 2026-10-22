@@ -18,6 +18,8 @@ import net.fyrql.core.type.DataType;
  * place of the cast of a string to the type, for a source whose strings
  * have forms of their own, such as dates written as
  * {@code /Date(1700000000000)/}; see {@link JsonLayout#of(net.fyrql.core.type.Schema, JsonStringParser)}.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 @FunctionalInterface
 public interface JsonStringParser {

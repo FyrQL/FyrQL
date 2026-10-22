@@ -14,7 +14,7 @@ package net.fyrql.sql.bind;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 
 import java.util.List;
 import java.util.Locale;

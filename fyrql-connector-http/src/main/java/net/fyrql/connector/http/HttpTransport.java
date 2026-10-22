@@ -46,6 +46,8 @@ import java.util.zip.GZIPInputStream;
  * <p>
  * Each request counts for the scan the thread works for, the bytes of its
  * body as they are read, see {@link SourceCounters}.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class HttpTransport implements AutoCloseable {
 

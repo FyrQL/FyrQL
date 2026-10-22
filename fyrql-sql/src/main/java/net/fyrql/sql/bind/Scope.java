@@ -13,7 +13,7 @@ package net.fyrql.sql.bind;
 
 import net.fyrql.core.expr.Expression;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 
 import java.util.ArrayList;
 import java.util.Collections;

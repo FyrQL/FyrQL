@@ -13,7 +13,7 @@ package net.fyrql.test.random;
 
 import net.fyrql.sql.ast.FromItem;
 import net.fyrql.sql.ast.OrderItem;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.Query;
 import net.fyrql.sql.ast.QueryBody;
 import net.fyrql.sql.ast.SelectItem;

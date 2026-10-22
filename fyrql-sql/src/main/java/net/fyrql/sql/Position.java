@@ -9,7 +9,7 @@
  * defined by the Mozilla Public License, v. 2.0.
  */
 
-package net.fyrql.sql.ast;
+package net.fyrql.sql;
 
 import java.io.Serializable;
 

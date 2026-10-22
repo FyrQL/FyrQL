@@ -30,6 +30,8 @@ import java.util.Optional;
  * the bytes by which a file in such a store is read ahead for small reads,
  * such as {@code 1MB}, the default. A source without tables serves only the
  * table functions.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class ParquetConnectorFactory implements ConnectorFactory {
 

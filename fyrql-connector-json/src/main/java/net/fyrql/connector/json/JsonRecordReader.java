@@ -57,6 +57,8 @@ import java.util.Set;
  * {@code ignore_errors} the value that does not fit is {@code NULL}, and a
  * second or unknown key is skipped. A layout that was given skips unknown
  * keys always.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class JsonRecordReader implements BatchReader {
 

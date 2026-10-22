@@ -14,7 +14,7 @@ package net.fyrql.sql.bind;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expressions;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.SqlExpr;
 
 import java.util.ArrayList;

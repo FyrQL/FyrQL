@@ -32,6 +32,8 @@ import java.util.Map;
  * @param compiled     the compiled expressions, keys and pipelines the operators asked for and got
  * @param compileNanos the time it took to get them, compiled or taken from the cache, in nanoseconds
  * @param threads      the threads the operators worked on
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public record QueryStatistics(Duration elapsed, PlanNode plan, Map<String, OperatorStatistics> operators,
         Map<String, SourceStatistics> sources, SpillStatistics spill, long compiled, long compileNanos,

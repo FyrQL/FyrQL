@@ -15,9 +15,9 @@ import net.fyrql.connector.Batches;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.vector.Batch;
-import net.fyrql.exec.spi.InterpretedKeys;
-import net.fyrql.exec.spi.JoinTable;
-import net.fyrql.exec.spi.KeyFunctions;
+import net.fyrql.exec.compiled.InterpretedKeys;
+import net.fyrql.exec.compiled.JoinTable;
+import net.fyrql.exec.compiled.KeyFunctions;
 
 import java.util.ArrayList;
 import java.util.List;

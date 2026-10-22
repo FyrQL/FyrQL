@@ -48,6 +48,8 @@ import java.util.concurrent.atomic.LongAdder;
  * what the scans read from their sources, see {@link #source(String)}, and
  * the code compiled for the query, see {@link #statistics()}. The shared
  * {@link #NONE} counts nothing.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public final class QueryContext {
 

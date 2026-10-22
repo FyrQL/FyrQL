@@ -65,7 +65,7 @@ import java.util.UUID;
  * <li>A primitive column is {@code NOT NULL}; everything else is nullable.</li>
  * </ul>
  */
-public final class JavaTypes {
+final class JavaTypes {
 
     /** The type of a {@code BigDecimal} column without an explicit type. */
     public static final Decimal DEFAULT_DECIMAL = DataType.decimal(38, 10);

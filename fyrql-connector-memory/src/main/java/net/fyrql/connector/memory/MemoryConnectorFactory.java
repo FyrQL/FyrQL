@@ -22,6 +22,8 @@ import java.util.Map;
  * {@code batchSize} and {@code splitRows}. Such a source starts without
  * tables; SQL creates them with {@code CREATE TABLE}, and they live as long
  * as the engine.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class MemoryConnectorFactory implements ConnectorFactory {
 

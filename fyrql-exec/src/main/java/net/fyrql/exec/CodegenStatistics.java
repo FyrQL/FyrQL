@@ -9,10 +9,10 @@
  * defined by the Mozilla Public License, v. 2.0.
  */
 
-package net.fyrql.exec.spi;
+package net.fyrql.exec;
 
 /**
- * What an {@link ExpressionCompiler} has done so far.
+ * What the code generation has done so far.
  *
  * @param compiled     the classes compiled
  * @param cacheHits    the requests answered from the cache of classes
@@ -21,6 +21,8 @@ package net.fyrql.exec.spi;
  *                     method too long for the JIT
  * @param failures     the compilations that failed
  * @param compileNanos the time spent generating and compiling code
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public record CodegenStatistics(long compiled, long cacheHits, long declined, long failures, long compileNanos) {
 

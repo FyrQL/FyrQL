@@ -156,7 +156,7 @@ class ExplainAnalyzeTest {
     @Test
     void theTimeoutOfTheContextEndsTheRun() {
         try (FyrQL engine = builder(2).build()) {
-            BoundStatement slow = engine.statement("SELECT count(*) FROM t a, t b, t c WHERE a.n + b.n = c.n");
+            SqlStatement slow = engine.statement("SELECT count(*) FROM t a, t b, t c WHERE a.n + b.n = c.n");
             QueryCancelledException e = assertThrows(QueryCancelledException.class,
                     () -> engine.explainAnalyze(slow, QueryContext.withTimeout(Duration.ofMillis(100))));
             assertEquals(QueryContext.Reason.TIMEOUT, e.reason());

@@ -19,6 +19,8 @@ package net.fyrql.exec;
  * @param parts        the parts written
  * @param bytesWritten the bytes of the parts written
  * @param bytesRead    the bytes read back
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public record SpillStatistics(long parts, long bytesWritten, long bytesRead) {
 

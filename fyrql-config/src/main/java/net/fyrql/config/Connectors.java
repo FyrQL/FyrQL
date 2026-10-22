@@ -24,6 +24,8 @@ import java.util.TreeMap;
  * Finds the factories of connectors on the class path and creates sources
  * with them. A type is there when the module of its connector is, such as
  * {@code fyrql-connector-csv} for {@code csv}.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class Connectors {
 

@@ -17,7 +17,7 @@ import net.fyrql.connector.FileAccessException;
 import net.fyrql.connector.csv.CsvConnector;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.test.WrittenFiles;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;

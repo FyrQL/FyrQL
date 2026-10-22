@@ -49,6 +49,8 @@ import java.util.Optional;
  * services, {@code timeout} (such as {@code 10s}), {@code pageSize} for
  * the pages of services of version 4, and {@code batchSize}.</li>
  * </ul>
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class ODataConnectorFactory implements ConnectorFactory {
 

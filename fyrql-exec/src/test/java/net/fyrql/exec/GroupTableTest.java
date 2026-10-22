@@ -18,7 +18,7 @@ import net.fyrql.core.value.DataGenerator;
 import net.fyrql.core.value.Keys;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
-import net.fyrql.exec.spi.InterpretedKeys;
+import net.fyrql.exec.compiled.InterpretedKeys;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;

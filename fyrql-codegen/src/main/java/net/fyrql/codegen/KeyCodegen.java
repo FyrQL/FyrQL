@@ -17,9 +17,9 @@ import net.fyrql.core.type.DataType.Decimal;
 import java.util.List;
 
 /**
- * Generates the class body of {@link net.fyrql.exec.spi.KeyFunctions} for
+ * Generates the class body of {@link net.fyrql.exec.compiled.KeyFunctions} for
  * keys of given types: the hash of
- * {@link net.fyrql.exec.spi.InterpretedKeys}, bit for bit, and the same
+ * {@link net.fyrql.exec.compiled.InterpretedKeys}, bit for bit, and the same
  * equality, with the typed getters of the vectors instead of a switch over
  * the vector classes per value. The hash and the equality of single values
  * serve the joins of a pipeline as well.

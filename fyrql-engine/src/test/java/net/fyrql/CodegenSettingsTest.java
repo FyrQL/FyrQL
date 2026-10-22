@@ -12,7 +12,7 @@
 package net.fyrql;
 
 import net.fyrql.exec.CodegenMode;
-import net.fyrql.exec.spi.CodegenStatistics;
+import net.fyrql.exec.CodegenStatistics;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

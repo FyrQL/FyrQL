@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.12.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.12.5 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow
 and the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -49,6 +49,7 @@ and the [README](../README.md) an overview.
   - [Threads](#threads)
   - [Spilling](#spilling)
   - [Results through Arrow, Flight SQL and JDBC](#results-through-arrow-flight-sql-and-jdbc)
+- [Compatibility](#compatibility)
 - [Modules](#modules)
 - [Building and testing](#building-and-testing)
 
@@ -175,7 +176,9 @@ session run, so that `engine.update("SET TimeZone = 'UTC'")` changes the time zo
 next `engine.sql(...)`. `engine.newSession()` starts another one with the settings of the
 builder, e.g. one per client. A session has the methods of the engine that parse, bind and
 run SQL (`sql`, `rows`, `update`, `statement`, `prepare`, `execute`, `explain` and
-`explainAnalyze`), needs no closing and may be used from several threads. Every
+`explainAnalyze`), needs no closing and may be used from several threads; `statement`
+binds a statement without running it, as a `SqlStatement` with the columns of its result,
+which `execute` runs in a `QueryContext` of the caller that can cancel it. Every
 connection of the [JDBC driver](#jdbc-driver) is a session, and so is every client of the
 [Flight SQL server](#flight-sql-server).
 
@@ -1025,10 +1028,13 @@ which returns `false` and leaves the number of rows written to `getUpdateCount`.
 fails with `42809` before it runs the other kind. `addBatch` and `executeBatch` run a
 list of statements, or a `PreparedStatement` with several sets of values, one after the
 other, and stop at the first that fails with a `BatchUpdateException`, which holds the
-counts of those before it, whose rows stay written. A connection is in auto-commit, and
-each statement is a transaction of its own in the source it writes to: `commit` and
-`rollback` do nothing. `setReadOnly(true)` makes a statement that writes fail with
-`25006`. Results are read forward only, a call runs one statement and not a script, and
+counts of those before it, whose rows stay written. A connection is always in
+auto-commit: each statement is a transaction of its own in the source it writes to and
+takes effect at once. The methods of transactions are accepted, since tools call them when
+they connect, and do nothing: after `setAutoCommit(false)`, `getAutoCommit()` is still
+`true`, `commit()` does nothing, and `rollback()` after a statement that wrote undoes
+nothing. Savepoints fail with `0A000`. `setReadOnly(true)` makes a statement that writes
+fail with `25006`. Results are read forward only, a call runs one statement and not a script, and
 there are no stored procedures and no generated keys.
 
 ### DBeaver
@@ -1055,7 +1061,9 @@ keeps it at one. DBeaver runs a statement that writes with `execute` and shows t
 number of rows written. Its navigator shows a new table after a refresh only with a
 single connection: a table in memory exists only in the engine of the connection that
 created it, and the engine of another connection learns of a table created in a
-database only when that connection opens anew, as with Invalidate/Reconnect.
+database only when that connection opens anew, as with Invalidate/Reconnect. DBeaver
+should stay in auto-commit, its default: in its manual commit mode, Commit and Rollback do
+nothing, and what a statement wrote stays.
 
 ## Arrow
 
@@ -1074,7 +1082,8 @@ try (BufferAllocator allocator = new RootAllocator();
 }
 ```
 
-`ArrowResults.reader` also takes a search path, a prepared query with its values, or a
+`ArrowResults.reader` also takes a session, with its time zone and search path, a
+prepared query with its values, or a
 `QueryResult` that is already running; `cancel()` stops the query, and closing the reader
 closes the result. `BatchToArrow` writes a single batch into a root, and `ArrowToBatch`
 reads a root as a batch. The values are copied, since the vectors of FyrQL live on the
@@ -2146,8 +2155,8 @@ or, once the result is closed, in all: the plan it ran, an `OperatorStatistics` 
 `SourceStatistics` for each label such as `Filter#2`, the spilling, the compiled code and
 the threads; `engine.explain(statistics)` prints them as `EXPLAIN ANALYZE` does, without
 its first line. `engine.explainAnalyze(plan)` and
-`engine.explainAnalyze(statement, context)` run a plan, or a bound statement in a context
-with a timeout, see [Time limits](#time-limits).
+`engine.explainAnalyze(statement, context)` run a plan, or a `SqlStatement` of
+`engine.statement(sql)` in a context with a timeout, see [Time limits](#time-limits).
 
 The counters cost each operator two readings of the clock per batch, about 60 ns on the
 laptop of the measurements, and twice that while all twelve threads are busy. In the
@@ -2352,6 +2361,79 @@ with the `FlightSqlClient` of Arrow Java, and 4.67 s through the JDBC driver wit
 on one thread: into Arrow in 40 ms with four columns of fixed width, in 116 ms with nine
 columns of which three are strings, and in 102 ms with a list and a struct; back from
 Arrow in 80, 344 and 467 ms.
+
+## Compatibility
+
+From version 1.0.0 on, FyrQL follows [Semantic Versioning](https://semver.org): a minor
+version adds to what is promised and a patch version fixes it, and only a major version
+breaks it. Until then, in the versions 0.x, anything may still change. The promise
+covers
+
+- the API for applications and the SPI for connectors, the packages and classes the
+  table below lists as such;
+- the keys of the [configuration file](#configuration-file) and of the URL of the
+  [JDBC driver](#jdbc-driver), and the command line of the
+  [Flight SQL server](#flight-sql-server);
+- the behavior of SQL: the statements, functions and types FyrQL takes, the results it
+  gives, the types it maps to JDBC and Arrow, and the SQLSTATEs of its errors;
+- the list of [Differences from DuckDB](#differences-from-duckdb): FyrQL behaves as it
+  says, and an entry goes in a minor version only when FyrQL then behaves as DuckDB.
+
+The SPI changes within a major version only so that a connector written for one minor
+version keeps working with the next:
+
+- interfaces of the SPI get new methods only with defaults;
+- `PlanNode` and `Expression` may get new kinds of nodes. The engine offers a connector
+  filters and parts of plans of any kind, whatever its `Capabilities` say, and a
+  connector declines what it does not know, e.g. with a `default` branch that takes the
+  filter or the part over not at all;
+- the components of the records of the API and the SPI stay the same, since a new one
+  would break their constructors and record patterns.
+
+Not covered are the internal packages and classes, the output of `EXPLAIN` and
+`EXPLAIN ANALYZE`, the format of the files spilled to disk, the texts of messages, the
+names and fields of the JFR events, the code that code generation writes, and the Maven
+coordinates.
+
+Each package says its tier in its Javadoc, and a class that differs from its package says
+its own; a test checks that the API and the SPI name no internal type and that this table
+lists the same tiers. Besides the classes in the table, three methods of the API are
+internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
+
+| Package | Tier | Classes of another tier |
+| --- | --- | --- |
+| `net.fyrql` | API | - |
+| `net.fyrql.catalog` | API | `EngineCatalog` (internal) |
+| `net.fyrql.config` | API | `Connectors` (internal) |
+| `net.fyrql.jdbc` | API | - |
+| `net.fyrql.arrow` | API | `ArrowTypes` (internal) |
+| `net.fyrql.flight` | API | - |
+| `net.fyrql.sql` | API | - |
+| `net.fyrql.connector.memory` | API | `MemoryConnectorFactory` (internal) |
+| `net.fyrql.connector.csv` | API | `CsvConnectorFactory` (internal) |
+| `net.fyrql.connector.json` | API | `JsonConnectorFactory`, `JsonLayout`, `JsonPointers`, `JsonRecordReader`, `JsonSchemaInference`, `JsonStringParser` (internal) |
+| `net.fyrql.connector.parquet` | API | `ParquetConnectorFactory`, `AvroCodecs`, `ParquetFile` (internal) |
+| `net.fyrql.connector.iceberg` | API | `IcebergConnectorFactory` (internal) |
+| `net.fyrql.connector.http` | API | `HttpConnectorFactory`, `HttpTransport` (internal) |
+| `net.fyrql.connector.odata` | API | `ODataConnectorFactory` (internal) |
+| `net.fyrql.connector.jdbc` | API | `JdbcConnectorFactory` (internal) |
+| `net.fyrql.connector.s3` | API | `S3ConnectorFactory` (internal) |
+| `net.fyrql.connector` | SPI | - |
+| `net.fyrql.core.type` | SPI | - |
+| `net.fyrql.core.vector` | SPI | `SpillFormat` (internal) |
+| `net.fyrql.core.plan` | SPI | `Plans` (internal) |
+| `net.fyrql.core.expr` | SPI | `ScalarOps` (internal) |
+| `net.fyrql.core.value` | Internal | `Interval` (SPI) |
+| `net.fyrql.core.function` | Internal | `FunctionRegistry`, `ScalarFunction` (API) |
+| `net.fyrql.exec` | Internal | `QueryContext`, `QueryException`, `QueryCancelledException`, `QueryStatistics`, `OperatorStatistics`, `SpillStatistics`, `CodegenStatistics`, `CodegenMode` (API) |
+| `net.fyrql.exec.compiled` | Internal | - |
+| `net.fyrql.codegen` | Internal | - |
+| `net.fyrql.sql.ast` | Internal | - |
+| `net.fyrql.sql.bind` | Internal | - |
+| `net.fyrql.sql.parse` | Internal | - |
+| `net.fyrql.sql.render` | Internal | - |
+| `net.fyrql.optimizer` | Internal | - |
+| `net.fyrql.bench` | Internal | - |
 
 ## Modules
 

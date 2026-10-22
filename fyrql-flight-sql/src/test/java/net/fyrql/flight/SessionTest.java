@@ -22,7 +22,6 @@ import org.apache.arrow.flight.SessionOptionValue;
 import org.apache.arrow.flight.SessionOptionValueFactory;
 import org.apache.arrow.flight.SessionOptionValueVisitor;
 import org.apache.arrow.flight.SetSessionOptionsRequest;
-import org.apache.arrow.flight.SetSessionOptionsResult;
 import org.apache.arrow.flight.client.ClientCookieMiddleware;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.junit.jupiter.api.AfterEach;

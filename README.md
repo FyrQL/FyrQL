@@ -134,7 +134,8 @@ against the interpreter, of one thread against twelve and of spilling are under
 
 ## Status
 
-FyrQL is young: version 0.x, not yet used in production, and its API may still change.
+FyrQL is young: version 0.x, not yet used in production, and its API may still change
+until 1.0.0; what 1.0.0 promises is under [Compatibility](docs/manual.md#compatibility).
 It writes results into files, tables in memory and databases, but does not update or
 delete rows; the hash tables of the joins of a query must fit into the memory budget,
 since only aggregations, sorts and windows spill to disk; and where native code is fine

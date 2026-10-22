@@ -114,6 +114,26 @@ public final class JdbcConnector implements Connector {
      */
     public static final int MAX_SPLITS = 8;
 
+    /** How the generic dialect keeps the first rows of a statement, see {@link Builder#limitStyle}. */
+    public enum LimitStyle {
+        /** By the driver, with {@code Statement.setMaxRows}; every database has it. */
+        MAX_ROWS,
+        /** {@code FETCH FIRST n ROWS ONLY}, as in SQL:2008, Oracle 12c, Db2 and Derby. */
+        FETCH_FIRST,
+        /** {@code LIMIT n}. */
+        LIMIT,
+        /** {@code SELECT TOP n}, as in SQL Server and Sybase. */
+        TOP
+    }
+
+    /**
+     * A type whose values the database of the generic dialect is trusted to
+     * store, compare and order as FyrQL does, see {@link Builder#trust}.
+     */
+    public enum Trust {
+        DECIMAL, DOUBLE, TIMESTAMP, BOOLEAN
+    }
+
     private final String name;
     private final Connections connections;
     private final JdbcDialect dialect;
@@ -172,6 +192,9 @@ public final class JdbcConnector implements Connector {
      * Returns the dialect of the SQL the connector sends: the one of its
      * {@linkplain #dialect() database}, or for the generic dialect one with
      * the settings of the connector.
+     * <p>
+     * Internal; not covered by the compatibility promise.
+
      */
     public Dialect sql() {
         return sql;
@@ -638,8 +661,8 @@ public final class JdbcConnector implements Connector {
         private final Map<String, String> splitColumns = new HashMap<>();
         private Boolean pushdownFilters;
         private String quote;
-        private GenericDialect.LimitStyle limitStyle;
-        private Set<GenericDialect.Trust> trusted;
+        private LimitStyle limitStyle;
+        private Set<Trust> trusted;
 
         private Builder(String name) {
             this.name = Objects.requireNonNull(name, "name");
@@ -825,7 +848,7 @@ public final class JdbcConnector implements Connector {
          * Sets how the generic dialect keeps the first rows; by default
          * with {@code Statement.setMaxRows}.
          */
-        public Builder limitStyle(GenericDialect.LimitStyle style) {
+        public Builder limitStyle(LimitStyle style) {
             this.limitStyle = Objects.requireNonNull(style, "style");
             return this;
         }
@@ -835,7 +858,7 @@ public final class JdbcConnector implements Connector {
          * compare as FyrQL does, besides integers and dates; none by
          * default.
          */
-        public Builder trust(Set<GenericDialect.Trust> types) {
+        public Builder trust(Set<Trust> types) {
             this.trusted = types.isEmpty() ? Set.of() : EnumSet.copyOf(types);
             return this;
         }
@@ -882,9 +905,13 @@ public final class JdbcConnector implements Connector {
                 }
                 return new JdbcConnector(this, connections, d, d.sql());
             }
+            Set<GenericDialect.Trust> types = EnumSet.noneOf(GenericDialect.Trust.class);
+            for (Trust t : trusted != null ? trusted : Set.<Trust>of()) {
+                types.add(GenericDialect.Trust.valueOf(t.name()));
+            }
             GenericDialect.Settings settings = new GenericDialect.Settings(quote != null ? quote : quoteOf(told),
-                    limitStyle != null ? limitStyle : GenericDialect.LimitStyle.MAX_ROWS,
-                    trusted != null ? trusted : Set.of(), pushdownFilters == null || pushdownFilters);
+                    GenericDialect.LimitStyle.valueOf((limitStyle != null ? limitStyle : LimitStyle.MAX_ROWS).name()),
+                    types, pushdownFilters == null || pushdownFilters);
             return new JdbcConnector(this, connections, d, GenericDialect.of(settings));
         }
 

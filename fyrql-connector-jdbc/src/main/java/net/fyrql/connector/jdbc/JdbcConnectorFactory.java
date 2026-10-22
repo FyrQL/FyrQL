@@ -14,7 +14,6 @@ package net.fyrql.connector.jdbc;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.ConnectorFactory;
 
-import net.fyrql.sql.render.GenericDialect;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -43,6 +42,8 @@ import java.util.Set;
  * and {@link JdbcConnector.Builder#splitColumn}), and
  * {@code properties.<key>} for any property of the driver. A relative path in the URL is resolved by the driver, not
  * against the directory of the configuration.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class JdbcConnectorFactory implements ConnectorFactory {
 
@@ -93,21 +94,21 @@ public final class JdbcConnectorFactory implements ConnectorFactory {
         };
     }
 
-    private static GenericDialect.LimitStyle limit(String value) {
+    private static JdbcConnector.LimitStyle limit(String value) {
         return switch (value.strip().toLowerCase(Locale.ROOT)) {
-            case "maxrows" -> GenericDialect.LimitStyle.MAX_ROWS;
-            case "fetchfirst" -> GenericDialect.LimitStyle.FETCH_FIRST;
-            case "limit" -> GenericDialect.LimitStyle.LIMIT;
-            case "top" -> GenericDialect.LimitStyle.TOP;
+            case "maxrows" -> JdbcConnector.LimitStyle.MAX_ROWS;
+            case "fetchfirst" -> JdbcConnector.LimitStyle.FETCH_FIRST;
+            case "limit" -> JdbcConnector.LimitStyle.LIMIT;
+            case "top" -> JdbcConnector.LimitStyle.TOP;
             default -> throw new IllegalArgumentException(value);
         };
     }
 
-    private static Set<GenericDialect.Trust> trust(String value) {
-        Set<GenericDialect.Trust> types = EnumSet.noneOf(GenericDialect.Trust.class);
+    private static Set<JdbcConnector.Trust> trust(String value) {
+        Set<JdbcConnector.Trust> types = EnumSet.noneOf(JdbcConnector.Trust.class);
         for (String t : value.split(",")) {
             if (!t.isBlank()) {
-                types.add(GenericDialect.Trust.valueOf(t.strip().toUpperCase(Locale.ROOT)));
+                types.add(JdbcConnector.Trust.valueOf(t.strip().toUpperCase(Locale.ROOT)));
             }
         }
         return types;

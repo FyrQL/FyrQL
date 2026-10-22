@@ -22,6 +22,8 @@ import java.util.List;
  * given the argument types, and the computation on Java values. A function
  * that returns {@code NULL} whenever an argument is {@code NULL} says so
  * through {@link #nullOnNullInput()}, and then never sees a {@code null}.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public interface ScalarFunction {
 

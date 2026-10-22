@@ -15,7 +15,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.value.Casts;
 import net.fyrql.core.value.Conversions;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlExpr.BinaryOp;
 import net.fyrql.sql.ast.SqlExpr.LiteralKind;

@@ -13,5 +13,8 @@
  * Apache Iceberg tables as a source: the metadata file, the manifest list
  * and the manifests name the Parquet data files and delete files of a
  * snapshot, which the Parquet connector reads.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
+ * Classes marked otherwise in their documentation are the exceptions.
  */
 package net.fyrql.connector.iceberg;

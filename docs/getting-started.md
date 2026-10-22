@@ -39,22 +39,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.12.0</version>
+    <version>0.12.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.12.0</version>
+    <version>0.12.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.12.0</version>
+    <version>0.12.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.12.0</version>
+    <version>0.12.5</version>
 </dependency>
 ```
 
@@ -453,7 +453,9 @@ connectors in one JAR, built as `fyrql-jdbc-all/target/fyrql-jdbc-all-<version>.
 In the Driver Manager of DBeaver, a new driver gets the class name
 `net.fyrql.jdbc.FyrQLDriver`, the URL template `jdbc:fyrql:?config={file}` without user
 and password, and as libraries the JAR and the JDBC drivers of the databases that the
-configuration file names. A connection with that driver then asks for the file.
+configuration file names. A connection with that driver then asks for the file. A
+connection is always in auto-commit: each statement takes effect at once, and `commit` and
+`rollback` do nothing, so DBeaver stays in auto-commit, its default.
 
 More: [JDBC driver](manual.md#jdbc-driver), [DBeaver](manual.md#dbeaver).
 

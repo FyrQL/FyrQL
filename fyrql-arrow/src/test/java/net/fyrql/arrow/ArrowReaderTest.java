@@ -14,6 +14,7 @@ package net.fyrql.arrow;
 import net.fyrql.FyrQL;
 import net.fyrql.PreparedQuery;
 import net.fyrql.QueryResult;
+import net.fyrql.Session;
 import net.fyrql.catalog.SearchPath;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.plan.PlanNode;
@@ -132,16 +133,18 @@ class ArrowReaderTest {
     }
 
     @Test
-    void aSearchPathResolvesTheNames() throws IOException {
+    void aSessionResolvesTheNamesAlongItsSearchPath() throws IOException {
         try (FyrQL two = FyrQL.builder()
                 .register(MemoryConnector.builder("a").table("x", Schema.of(DataType.VARCHAR),
                         List.<Object[]>of(new Object[] {"from a"})).build())
                 .register(MemoryConnector.builder("b").table("x", Schema.of(DataType.VARCHAR),
                         List.<Object[]>of(new Object[] {"from b"})).build())
-                .build();
-                FyrQLArrowReader reader = ArrowResults.reader(two, "SELECT * FROM x", new SearchPath("b", "main"),
-                        allocator)) {
-            assertEquals(List.of(List.of("from b")), TestRows.comparable(readAll(reader)));
+                .build()) {
+            Session session = two.newSession();
+            session.use(new SearchPath("b", "main"));
+            try (FyrQLArrowReader reader = ArrowResults.reader(session, "SELECT * FROM x", allocator)) {
+                assertEquals(List.of(List.of("from b")), TestRows.comparable(readAll(reader)));
+            }
         }
     }
 

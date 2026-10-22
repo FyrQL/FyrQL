@@ -23,7 +23,7 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
-import net.fyrql.exec.spi.JoinTable;
+import net.fyrql.exec.compiled.JoinTable;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;

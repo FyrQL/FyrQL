@@ -32,6 +32,8 @@ import java.util.Optional;
  * and {@code timestampFormat}; and {@code batchSize} and {@code splitSize}
  * (a number of bytes, such as {@code 4MiB}). A source without files serves
  * only the table functions.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class JsonConnectorFactory implements ConnectorFactory {
 

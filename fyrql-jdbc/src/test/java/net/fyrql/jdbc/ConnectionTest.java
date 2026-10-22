@@ -248,7 +248,7 @@ class ConnectionTest {
             assertEquals("name", p.getMetaData().getColumnName(1));
             e = assertThrows(SQLException.class, () -> other.createStatement().executeQuery("SELECT name FROM t"));
             assertEquals("42712", e.getSQLState(), "another connection keeps its own catalog");
-            assertNull(engine.catalog().searchPath().defaultSource(), "the engine keeps its search path");
+            assertNull(engine.session().searchPath().defaultSource(), "the engine keeps its search path");
         }
     }
 

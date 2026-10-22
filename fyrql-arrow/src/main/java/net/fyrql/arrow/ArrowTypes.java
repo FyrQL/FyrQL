@@ -61,6 +61,8 @@ import java.util.Map;
  * {@code LargeList}, list views, {@code RunEndEncoded} and
  * a dictionary inside a nested type fail with an {@link ArrowTypeException};
  * a dictionary at the top is decoded by {@link ArrowToBatch}.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class ArrowTypes {
 

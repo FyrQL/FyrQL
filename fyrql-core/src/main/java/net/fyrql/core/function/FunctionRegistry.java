@@ -22,6 +22,8 @@ import java.util.Map;
 /**
  * The scalar functions known by name. Several functions may share a name;
  * the first one that accepts the argument types wins.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public final class FunctionRegistry {
 

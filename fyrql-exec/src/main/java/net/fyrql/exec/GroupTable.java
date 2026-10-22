@@ -15,7 +15,7 @@ import net.fyrql.connector.Batches;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
-import net.fyrql.exec.spi.KeyFunctions;
+import net.fyrql.exec.compiled.KeyFunctions;
 
 import java.util.ArrayList;
 import java.util.Arrays;

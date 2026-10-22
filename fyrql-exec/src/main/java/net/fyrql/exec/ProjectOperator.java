@@ -16,7 +16,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
-import net.fyrql.exec.spi.CompiledProjection;
+import net.fyrql.exec.compiled.CompiledProjection;
 
 import java.util.ArrayList;
 import java.util.List;

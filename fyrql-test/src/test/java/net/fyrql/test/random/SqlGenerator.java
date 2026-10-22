@@ -17,7 +17,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.ast.FromItem;
 import net.fyrql.sql.ast.OrderItem;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.Query;
 import net.fyrql.sql.ast.QueryBody;
 import net.fyrql.sql.ast.SelectItem;

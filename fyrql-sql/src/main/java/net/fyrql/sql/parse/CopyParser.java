@@ -12,7 +12,7 @@
 package net.fyrql.sql.parse;
 
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.ResetVariable;
 import net.fyrql.sql.ast.SetVariable;
 import net.fyrql.sql.ast.ShowVariable;

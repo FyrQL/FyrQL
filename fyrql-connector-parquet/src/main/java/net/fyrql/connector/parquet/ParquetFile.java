@@ -41,6 +41,8 @@ import java.util.function.Consumer;
  * digits and the same scale, but only a primitive column or a field of a
  * {@code STRUCT} outside of lists, and a column read twice as the same
  * type.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class ParquetFile {
 

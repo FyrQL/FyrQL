@@ -13,13 +13,13 @@ package net.fyrql.connector.jdbc;
 
 import net.fyrql.FyrQL;
 import net.fyrql.connector.ConnectorFactory;
+import net.fyrql.connector.jdbc.JdbcConnector.LimitStyle;
+import net.fyrql.connector.jdbc.JdbcConnector.Trust;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Conversions;
 import net.fyrql.sql.render.GenericDialect;
-import net.fyrql.sql.render.GenericDialect.LimitStyle;
-import net.fyrql.sql.render.GenericDialect.Trust;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -235,7 +235,8 @@ class GenericDialectConnectorTest {
         TestDatabase db = items(TestDatabase.h2Mode("MSSQLServer"));
         JdbcConnector connector = (JdbcConnector) factory.create("db", Map.of("url", db.url(), "dialect", "generic",
                 "pushdown", "none", "quote", "[", "limit", "top", "trust", "decimal, Double"));
-        assertEquals(new GenericDialect.Settings("[", LimitStyle.TOP, Set.of(Trust.DECIMAL, Trust.DOUBLE), false),
+        assertEquals(new GenericDialect.Settings("[", GenericDialect.LimitStyle.TOP,
+                Set.of(GenericDialect.Trust.DECIMAL, GenericDialect.Trust.DOUBLE), false),
                 ((GenericDialect) connector.sql()).settings());
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
             assertEquals(List.of(new BigDecimal("1.25")), engine.rows("SELECT n FROM items WHERE id = 1").stream()
@@ -243,7 +244,7 @@ class GenericDialectConnectorTest {
         }
         JdbcConnector defaults = (JdbcConnector) factory.create("db", Map.of("url", db.url(), "dialect", "generic",
                 "quote", "none", "limit", "fetchFirst"));
-        assertEquals(new GenericDialect.Settings("", LimitStyle.FETCH_FIRST, Set.of(), true),
+        assertEquals(new GenericDialect.Settings("", GenericDialect.LimitStyle.FETCH_FIRST, Set.of(), true),
                 ((GenericDialect) defaults.sql()).settings());
         for (Map.Entry<String, String> bad : Map.of("pushdown", "all", "limit", "rownum", "trust", "uuid", "quote",
                 "'").entrySet()) {

@@ -89,6 +89,9 @@ public enum JdbcDialect {
      * Returns the dialect of the SQL the connector sends; for
      * {@link #GENERIC} with the default settings, which the connector may
      * replace.
+     * <p>
+     * Internal; not covered by the compatibility promise.
+
      */
     public Dialect sql() {
         return sql;

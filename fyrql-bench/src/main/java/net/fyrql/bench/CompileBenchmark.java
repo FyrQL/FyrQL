@@ -14,7 +14,7 @@ package net.fyrql.bench;
 import net.fyrql.codegen.JaninoCompiler;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
-import net.fyrql.exec.spi.PipelineSpec;
+import net.fyrql.exec.compiled.PipelineSpec;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;

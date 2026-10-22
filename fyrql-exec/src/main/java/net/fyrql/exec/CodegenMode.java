@@ -13,7 +13,11 @@ package net.fyrql.exec;
 
 import java.util.Locale;
 
-/** When the executor compiles expressions and keys instead of interpreting them. */
+/**
+ * When the executor compiles expressions and keys instead of interpreting them.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
+ */
 public enum CodegenMode {
 
     /** Never; everything runs in the interpreter. */

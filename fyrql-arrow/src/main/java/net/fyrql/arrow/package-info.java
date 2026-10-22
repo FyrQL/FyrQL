@@ -14,5 +14,8 @@
  * of FyrQL. The vectors of Arrow live outside the heap; the memory module
  * of Arrow needs {@code --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED}
  * on the command line of the JVM.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
+ * Classes marked otherwise in their documentation are the exceptions.
  */
 package net.fyrql.arrow;

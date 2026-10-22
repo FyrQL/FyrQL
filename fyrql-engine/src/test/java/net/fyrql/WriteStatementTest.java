@@ -89,7 +89,7 @@ class WriteStatementTest {
     void createTableAsGivesTheCountOfItsRows() {
         try (FyrQL engine = engine()) {
             String sql = "CREATE TABLE t AS SELECT n, n * 2 AS d FROM (VALUES (1), (2), (3)) v(n)";
-            assertInstanceOf(BoundStatement.Create.class, engine.statement(sql));
+            assertInstanceOf(BoundStatement.Create.class, engine.statement(sql).bound());
             try (QueryResult result = engine.sql(sql)) {
                 assertEquals(BoundStatement.COUNT, result.schema());
                 assertEquals(List.of(List.of(3L)), result.rows().stream().map(Arrays::asList).toList());
@@ -208,9 +208,11 @@ class WriteStatementTest {
         try (FyrQL engine = engine()) {
             assertEquals(1, engine.update("CREATE TABLE other.t2 AS SELECT 1 AS a"));
             assertEquals(0, engine.update("CREATE TABLE other.main.t3 (a INTEGER)"));
-            assertEquals(1, engine.update("CREATE TABLE t4 AS SELECT 1 AS a", new SearchPath("other", "main")));
+            Session other = engine.newSession();
+            other.use(new SearchPath("other", "main"));
+            assertEquals(1, other.update("CREATE TABLE t4 AS SELECT 1 AS a"));
             assertEquals(List.of("t2", "t3", "t4"), engine.connector("other").catalog().tables("main"));
-            assertEquals(1, engine.update("INSERT INTO t3 VALUES (5)", new SearchPath("other", "main")));
+            assertEquals(1, other.update("INSERT INTO t3 VALUES (5)"));
             assertEquals(List.of(List.of(5)), rows(engine, "SELECT * FROM other.t3"));
 
             assertEquals("Source or schema with name nowhere does not exist",
@@ -244,7 +246,7 @@ class WriteStatementTest {
         try (FyrQL engine = engine()) {
             QueryContext context = new QueryContext();
             context.cancel();
-            BoundStatement create = engine.statement("CREATE TABLE c AS SELECT * FROM people");
+            SqlStatement create = engine.statement("CREATE TABLE c AS SELECT * FROM people");
             assertThrows(QueryCancelledException.class, () -> engine.update(create, context));
             assertEquals(List.of("people"), engine.connector("mem").catalog().tables("main"));
         }

@@ -41,6 +41,8 @@ import java.util.Objects;
  * values, also under its {@code NULL}s. Nothing is compressed, and nothing
  * describes the batches: the format lives no longer than the process that
  * writes it, and the reader is given the schema of the writer.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class SpillFormat {
 

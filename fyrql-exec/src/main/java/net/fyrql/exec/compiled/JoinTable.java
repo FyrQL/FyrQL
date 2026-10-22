@@ -9,7 +9,7 @@
  * defined by the Mozilla Public License, v. 2.0.
  */
 
-package net.fyrql.exec.spi;
+package net.fyrql.exec.compiled;
 
 import net.fyrql.connector.Batches;
 import net.fyrql.core.type.Schema;

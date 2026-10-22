@@ -30,6 +30,8 @@ import java.util.Optional;
  * {@code charset}, {@code sampleRows}, {@code batchSize} and
  * {@code splitSize} (a number of bytes, such as {@code 4MiB}), which apply to
  * every file. A source without files serves only the table functions.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class CsvConnectorFactory implements ConnectorFactory {
 

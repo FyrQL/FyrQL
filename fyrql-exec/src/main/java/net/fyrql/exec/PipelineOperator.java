@@ -16,11 +16,11 @@ import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.JoinType;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.vector.Batch;
-import net.fyrql.exec.spi.CompiledPipeline;
-import net.fyrql.exec.spi.InterpretedKeys;
-import net.fyrql.exec.spi.JoinTable;
-import net.fyrql.exec.spi.KeyFunctions;
-import net.fyrql.exec.spi.PipelineSpec;
+import net.fyrql.exec.compiled.CompiledPipeline;
+import net.fyrql.exec.compiled.InterpretedKeys;
+import net.fyrql.exec.compiled.JoinTable;
+import net.fyrql.exec.compiled.KeyFunctions;
+import net.fyrql.exec.compiled.PipelineSpec;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;

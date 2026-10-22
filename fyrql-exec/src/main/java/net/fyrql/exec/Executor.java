@@ -14,8 +14,8 @@ package net.fyrql.exec;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
 import net.fyrql.core.vector.Batch;
-import net.fyrql.exec.spi.CompiledPipeline;
-import net.fyrql.exec.spi.JoinTable;
+import net.fyrql.exec.compiled.CompiledPipeline;
+import net.fyrql.exec.compiled.JoinTable;
 
 import java.util.ArrayList;
 import java.util.Collections;

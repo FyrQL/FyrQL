@@ -23,6 +23,8 @@ package net.fyrql.exec;
  * @param spilledParts the parts it spilled to disk
  * @param spilledBytes the bytes of the parts it spilled
  * @param readBack     the bytes it read back from disk
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public record OperatorStatistics(long rows, long batches, long nanos, int threads, long spilledParts,
         long spilledBytes, long readBack) {

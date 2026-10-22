@@ -21,7 +21,7 @@ import java.util.Set;
  * digits and underscores, not starting with a digit, that is no keyword of
  * DuckDB in any case.
  */
-public final class Identifiers {
+final class Identifiers {
 
     /** The keywords of DuckDB 1.5.6, as {@code duckdb_keywords()} lists them, of every category. */
     private static final Set<String> KEYWORDS = Set.of((

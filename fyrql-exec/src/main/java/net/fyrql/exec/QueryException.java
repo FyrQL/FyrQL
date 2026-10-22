@@ -15,6 +15,8 @@ package net.fyrql.exec;
  * A query failed while it ran: an overflow, a conversion error, a memory
  * budget exceeded. The message names the operator; the cause is the error
  * itself.
+ * <p>
+ * Part of the API; covered by the compatibility promise.
  */
 public class QueryException extends RuntimeException {
 

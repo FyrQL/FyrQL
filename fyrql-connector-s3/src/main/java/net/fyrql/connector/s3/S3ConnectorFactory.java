@@ -27,6 +27,8 @@ import java.util.Optional;
  * such as {@code 8MB}; and {@code retries}. What is not given comes from
  * the environment, see {@link S3Connector.Builder}. No message names the
  * value of an option.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class S3ConnectorFactory implements ConnectorFactory {
 

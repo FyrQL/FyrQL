@@ -278,7 +278,7 @@ class ShadedJdbcDriverTest {
                     "net.fyrql.connector.iceberg.IcebergConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),
-                    services(jar, "net.fyrql.exec.spi.ExpressionCompiler"));
+                    services(jar, "net.fyrql.exec.compiled.ExpressionCompiler"));
             assertEquals(List.of("net.fyrql.internal.janino.CompilerFactory"),
                     services(jar, "net.fyrql.internal.commons.compiler.ICompilerFactory"));
             for (String license : List.of("THIRD-PARTY.txt", "apache-2.0-LICENSE.txt", "jackson-NOTICE.txt",

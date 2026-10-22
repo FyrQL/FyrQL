@@ -14,7 +14,7 @@ package net.fyrql.arrow;
 import net.fyrql.FyrQL;
 import net.fyrql.PreparedQuery;
 import net.fyrql.QueryResult;
-import net.fyrql.catalog.SearchPath;
+import net.fyrql.Session;
 import org.apache.arrow.memory.BufferAllocator;
 
 import java.util.List;
@@ -48,15 +48,13 @@ public final class ArrowResults {
     }
 
     /**
-     * Runs a query with names looked up along a search path, see
-     * {@link FyrQL#plan(String, SearchPath)}; the caller closes the reader.
+     * Runs a query in a session, with its time zone and search path, see
+     * {@link Session#sql(String)}; the caller closes the reader.
      *
      * @throws net.fyrql.sql.SqlException if the query cannot be parsed or bound
-     * @throws IllegalArgumentException if the default source of the path is not registered
      */
-    public static FyrQLArrowReader reader(FyrQL engine, String sql, SearchPath searchPath,
-            BufferAllocator allocator) {
-        return reader(engine.sql(sql, searchPath), allocator);
+    public static FyrQLArrowReader reader(Session session, String sql, BufferAllocator allocator) {
+        return reader(session.sql(sql), allocator);
     }
 
     /**

@@ -40,6 +40,8 @@ import java.util.Optional;
  * <p>
  * The engine creates a source of this type without options when the
  * factory is on the class path, for the table functions.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class IcebergConnectorFactory implements ConnectorFactory {
 

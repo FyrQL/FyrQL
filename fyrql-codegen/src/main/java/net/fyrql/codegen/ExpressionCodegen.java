@@ -171,7 +171,7 @@ final class ExpressionCodegen {
         return true;
     }
 
-    /** Generates a {@link net.fyrql.exec.spi.CompiledProjection} of an expression. */
+    /** Generates a {@link net.fyrql.exec.compiled.CompiledProjection} of an expression. */
     static Unit projection(Expression e) {
         ExpressionCodegen g = new ExpressionCodegen();
         Val result = g.gen(e);
@@ -210,7 +210,7 @@ final class ExpressionCodegen {
         return g.unit(w, PROJECTION);
     }
 
-    /** Generates a {@link net.fyrql.exec.spi.CompiledFilter} of a condition. */
+    /** Generates a {@link net.fyrql.exec.compiled.CompiledFilter} of a condition. */
     static Unit filter(Expression condition) {
         ExpressionCodegen g = new ExpressionCodegen();
         String pass = g.select(condition);

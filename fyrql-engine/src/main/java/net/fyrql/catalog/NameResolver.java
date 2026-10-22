@@ -14,7 +14,7 @@ package net.fyrql.catalog;
 import net.fyrql.connector.Connector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.sql.SqlException;
-import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.Position;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -41,7 +41,7 @@ import java.util.stream.Collectors;
  * The name of a new table, see {@link #resolveNew}, is resolved to a
  * source and a schema in the same way, without the table.
  */
-public final class NameResolver {
+final class NameResolver {
 
     private final Map<String, Connector> sources;
     private final SearchPath searchPath;

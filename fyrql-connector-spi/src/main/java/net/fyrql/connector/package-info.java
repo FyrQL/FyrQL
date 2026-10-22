@@ -80,7 +80,20 @@
  * <li>Each statement is a transaction of its own in one source; there is
  * no transaction over several statements or sources.</li>
  * </ul>
- * Later versions add methods with defaults, so that connectors written
- * against this version keep compiling.
+ * The rules by which the SPI evolves within a major version, so that
+ * connectors written against one minor version keep working with the
+ * next:
+ * <ul>
+ * <li>Interfaces of the SPI get new methods only with defaults.</li>
+ * <li>{@link net.fyrql.core.plan.PlanNode} and
+ * {@link net.fyrql.core.expr.Expression} may get new kinds of nodes.
+ * The engine offers a connector filters and parts of plans with any
+ * kind, whatever its {@link net.fyrql.connector.Capabilities} say; a
+ * connector declines what it does not know, e.g. with a {@code default}
+ * branch that takes the filter or the part over not at all.</li>
+ * <li>The components of the records of the SPI stay the same.</li>
+ * </ul>
+ * <p>
+ * Part of the SPI for connectors; covered by the compatibility promise.
  */
 package net.fyrql.connector;

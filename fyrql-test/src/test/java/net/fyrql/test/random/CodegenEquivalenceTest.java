@@ -18,9 +18,9 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.Keys;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
-import net.fyrql.exec.spi.CodegenStatistics;
-import net.fyrql.exec.spi.CompiledFilter;
-import net.fyrql.exec.spi.CompiledProjection;
+import net.fyrql.exec.CodegenStatistics;
+import net.fyrql.exec.compiled.CompiledFilter;
+import net.fyrql.exec.compiled.CompiledProjection;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;

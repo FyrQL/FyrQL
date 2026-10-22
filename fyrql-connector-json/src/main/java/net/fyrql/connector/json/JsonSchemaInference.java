@@ -36,6 +36,8 @@ import java.util.List;
  * stay {@code VARCHAR}; the raw JSON text is a {@code VARCHAR}, so a column
  * of it compares as text; an input that starts with an array is that one
  * array, see {@link JsonFormat#AUTO}.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class JsonSchemaInference {
 

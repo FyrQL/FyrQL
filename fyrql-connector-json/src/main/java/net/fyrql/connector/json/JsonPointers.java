@@ -19,6 +19,8 @@ import com.fasterxml.jackson.core.JsonPointer;
  * {@code /} before each key or index, such as {@code /data} or
  * {@code /result/items}, with {@code ~0} for {@code ~} and {@code ~1} for
  * {@code /} in a key.
+ * <p>
+ * Internal; not covered by the compatibility promise.
  */
 public final class JsonPointers {
 
