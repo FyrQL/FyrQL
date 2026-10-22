@@ -1048,7 +1048,9 @@ server:
 - `handleTimeout`: how long a statement or a prepared statement stays without use until
   the server forgets it, by default 10 minutes.
 - `maxQueries`: the most queries that run at once, by default twice the threads of the
-  engine; another one fails with `RESOURCE_EXHAUSTED`.
+  engine; another one fails with `RESOURCE_EXHAUSTED`. A query leaves its place before
+  the server sends the end of its stream or its error, so that a client that has read
+  it to its end can run its next query at once.
 
 The server prints the line `FyrQL Flight SQL server <version> listening on
 grpc+tcp://127.0.0.1:32010`, or with `grpc+tls`, and runs until the JVM ends, as with

@@ -200,9 +200,8 @@ final class TestServer implements AutoCloseable {
     }
 
     /**
-     * Waits until the server runs no query: the server releases a query only
-     * after it has sent the end of its stream, so a client that has read all
-     * of its rows may still see it run for a moment.
+     * Waits until the server runs no query: a query that a client stopped
+     * reading runs until the server notices it.
      */
     void awaitNoQuery() throws InterruptedException {
         awaitTrue("the server runs no query", 2000, () -> server.runningQueries() == 0);

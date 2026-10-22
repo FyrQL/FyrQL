@@ -64,7 +64,7 @@ class ConcurrencyTest {
             } finally {
                 pool.shutdownNow();
             }
-            server.awaitNoQuery();
+            assertEquals(0, server.server.runningQueries());
         }
     }
 
@@ -84,6 +84,19 @@ class ConcurrencyTest {
             }
             server.awaitNoQuery();
             assertEquals(2, TestServer.rows(second, second.execute("SELECT k FROM tiny")).size());
+        }
+    }
+
+    @Test
+    void aQueryReadToItsEndLeavesItsPlaceAtOnce() throws Exception {
+        try (TestServer server = new TestServer(ServerConfig.defaults().withPort(0).withMaxQueries(1))) {
+            FlightSqlClient client = server.client();
+            for (int q = 0; q < QUERIES; q++) {
+                assertEquals(2, TestServer.rows(client, client.execute("SELECT k FROM tiny")).size());
+                TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "", () -> TestServer.rows(client,
+                        client.execute("SELECT CAST(v AS INTEGER) FROM tiny")));
+                assertEquals(0, server.server.runningQueries());
+            }
         }
     }
 

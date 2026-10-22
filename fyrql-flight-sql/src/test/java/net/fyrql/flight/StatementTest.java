@@ -130,7 +130,7 @@ class StatementTest {
                 () -> client.executeUpdate("INSERT INTO tiny VALUES (3, 'three')"));
         TestServer.fails(FlightStatusCode.NOT_FOUND, "The statement is unknown",
                 () -> TestServer.rows(client, info));
-        server.awaitNoQuery();
+        assertEquals(0, server.server.runningQueries());
     }
 
     @Test

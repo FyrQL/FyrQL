@@ -446,7 +446,12 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         return new Statement(PLAN, null, Batch.ofRows(PLAN, rows));
     }
 
-    /** Runs a statement and sends its batches, unless more queries than allowed run already. */
+    /**
+     * Runs a statement and sends its batches, unless more queries than
+     * allowed run already. The query leaves its place before the server
+     * sends the end of its stream or its error, so that a client that has
+     * read it to its end can run its next query at once.
+     */
     private void run(Statement s, ServerStreamListener listener) {
         if (s.cancelled) {
             listener.error(CallStatus.CANCELLED.withDescription("The query was canceled").toRuntimeException());
@@ -458,6 +463,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
         QueryContext context = new QueryContext();
         s.runs.add(context);
+        boolean released = false;
         buffers.readLock().lock();
         try {
             Backpressure ready = new Backpressure(listener, context);
@@ -474,22 +480,32 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                         return;
                     }
                     if (context.isCancelled()) {
+                        queries.release();
+                        released = true;
                         listener.error(CallStatus.CANCELLED.withDescription(context.reason().message())
                                 .toRuntimeException());
                         return;
                     }
                     listener.putNext();
                 }
+                queries.release();
+                released = true;
                 listener.completed();
             }
         } catch (RuntimeException e) {
+            if (!released) {
+                queries.release();
+                released = true;
+            }
             if (!listener.isCancelled()) {
                 listener.error(FlightErrors.of(e));
             }
         } finally {
             buffers.readLock().unlock();
             s.runs.remove(context);
-            queries.release();
+            if (!released) {
+                queries.release();
+            }
         }
     }
 
