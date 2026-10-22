@@ -80,7 +80,7 @@ class UpdateTest {
         TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "A query returns rows",
                 () -> client.executeUpdate("EXPLAIN INSERT INTO mem.w VALUES (3, 'x')"));
         assertEquals(List.of(List.of(2L)), rows("SELECT count(*) FROM w"));
-        assertEquals(0, server.server.runningQueries());
+        server.awaitNoQuery();
     }
 
     @Test
@@ -129,6 +129,6 @@ class UpdateTest {
         }
         assertEquals(List.of(List.of(1, "a"), Arrays.asList(2, null), List.of(3, "c"), List.of(4, "d"), List.of(7, "g"),
                 List.of(11, "one"), List.of(12, "two")), rows("SELECT k, v FROM w ORDER BY k"));
-        assertEquals(0, server.server.runningQueries());
+        server.awaitNoQuery();
     }
 }

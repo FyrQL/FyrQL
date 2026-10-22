@@ -64,7 +64,7 @@ class ConcurrencyTest {
             } finally {
                 pool.shutdownNow();
             }
-            assertEquals(0, server.server.runningQueries());
+            server.awaitNoQuery();
         }
     }
 
@@ -82,7 +82,7 @@ class ConcurrencyTest {
                 TestServer.fails(FlightStatusCode.RESOURCE_EXHAUSTED, "The server runs 1 queries, the most it runs at"
                         + " once (maxQueries)", () -> TestServer.rows(second, small));
             }
-            TestServer.awaitTrue("the server runs no query", 2000, () -> server.server.runningQueries() == 0);
+            server.awaitNoQuery();
             assertEquals(2, TestServer.rows(second, second.execute("SELECT k FROM tiny")).size());
         }
     }

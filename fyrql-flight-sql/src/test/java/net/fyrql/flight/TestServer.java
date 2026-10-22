@@ -199,6 +199,15 @@ final class TestServer implements AutoCloseable {
         return e;
     }
 
+    /**
+     * Waits until the server runs no query: the server releases a query only
+     * after it has sent the end of its stream, so a client that has read all
+     * of its rows may still see it run for a moment.
+     */
+    void awaitNoQuery() throws InterruptedException {
+        awaitTrue("the server runs no query", 2000, () -> server.runningQueries() == 0);
+    }
+
     /** Waits until a condition holds, at most a time in milliseconds; fails after it. */
     static void awaitTrue(String what, long millis, BooleanSupplier condition) throws InterruptedException {
         long end = System.nanoTime() + millis * 1_000_000L;
