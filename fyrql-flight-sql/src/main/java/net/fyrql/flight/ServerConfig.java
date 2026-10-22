@@ -37,6 +37,7 @@ import java.util.Objects;
  *     alice: ${env:ALICE_PASSWORD}
  *   token: ${env:FYRQL_TOKEN}
  *   handleTimeout: 10m
+ *   sessionTimeout: 1h
  *   maxQueries: 16
  * }</pre>
  * With {@code users}, a client signs in with a name and password and goes
@@ -52,11 +53,14 @@ import java.util.Objects;
  * @param token the bearer token every client may send, or {@code null}
  * @param handleTimeout how long a statement or prepared statement stays
  *        without use until the server forgets it
+ * @param sessionTimeout how long the session of a client, with its
+ *        settings, stays without use until the server forgets it; zero for
+ *        ever
  * @param maxQueries the most queries that run at once, or 0 for twice the
  *        threads of the engine
  */
 public record ServerConfig(String host, int port, Path certificate, Path key, Map<String, String> users, String token,
-        Duration handleTimeout, int maxQueries) {
+        Duration handleTimeout, Duration sessionTimeout, int maxQueries) {
 
     /** The address the server listens on by default: the loopback address. */
     public static final String DEFAULT_HOST = "127.0.0.1";
@@ -66,6 +70,9 @@ public record ServerConfig(String host, int port, Path certificate, Path key, Ma
 
     /** How long a statement or prepared statement stays without use by default. */
     public static final Duration DEFAULT_HANDLE_TIMEOUT = Duration.ofMinutes(10);
+
+    /** How long the session of a client stays without use by default. */
+    public static final Duration DEFAULT_SESSION_TIMEOUT = Duration.ofHours(1);
 
     private static final int MAX_PORT = 65_535;
 
@@ -98,6 +105,10 @@ public record ServerConfig(String host, int port, Path certificate, Path key, Ma
         if (handleTimeout.isNegative() || handleTimeout.isZero()) {
             throw new IllegalArgumentException("The handle timeout of the server must be positive");
         }
+        Objects.requireNonNull(sessionTimeout, "sessionTimeout");
+        if (sessionTimeout.isNegative()) {
+            throw new IllegalArgumentException("The session timeout of the server must not be negative");
+        }
         if (maxQueries < 0) {
             throw new IllegalArgumentException("maxQueries of the server must not be negative");
         }
@@ -105,7 +116,8 @@ public record ServerConfig(String host, int port, Path certificate, Path key, Ma
 
     /** Returns the settings of a server on the loopback address and the default port, without TLS and sign-in. */
     public static ServerConfig defaults() {
-        return new ServerConfig(DEFAULT_HOST, DEFAULT_PORT, null, null, Map.of(), null, DEFAULT_HANDLE_TIMEOUT, 0);
+        return new ServerConfig(DEFAULT_HOST, DEFAULT_PORT, null, null, Map.of(), null, DEFAULT_HANDLE_TIMEOUT,
+                DEFAULT_SESSION_TIMEOUT, 0);
     }
 
     /**
@@ -132,44 +144,60 @@ public record ServerConfig(String host, int port, Path certificate, Path key, Ma
         Map<String, String> users = o.prefixed("users", "<name>");
         String token = o.string("token").orElse(null);
         Duration handleTimeout = o.duration("handleTimeout").orElse(DEFAULT_HANDLE_TIMEOUT);
+        Duration sessionTimeout = o.string("sessionTimeout").map(String::strip).filter("0"::equals).isPresent()
+                ? Duration.ZERO : o.duration("sessionTimeout").orElse(DEFAULT_SESSION_TIMEOUT);
         int maxQueries = o.integer("maxQueries").orElse(0);
         o.rejectUnknown();
-        return new ServerConfig(host, port, certificate, key, users, token, handleTimeout, maxQueries);
+        return new ServerConfig(host, port, certificate, key, users, token, handleTimeout, sessionTimeout,
+                maxQueries);
     }
 
     /** Returns these settings with another host. */
     public ServerConfig withHost(String newHost) {
-        return new ServerConfig(newHost, port, certificate, key, users, token, handleTimeout, maxQueries);
+        return new ServerConfig(newHost, port, certificate, key, users, token, handleTimeout, sessionTimeout,
+                maxQueries);
     }
 
     /** Returns these settings with another port. */
     public ServerConfig withPort(int newPort) {
-        return new ServerConfig(host, newPort, certificate, key, users, token, handleTimeout, maxQueries);
+        return new ServerConfig(host, newPort, certificate, key, users, token, handleTimeout, sessionTimeout,
+                maxQueries);
     }
 
     /** Returns these settings with users who sign in with their passwords. */
     public ServerConfig withUsers(Map<String, String> newUsers) {
-        return new ServerConfig(host, port, certificate, key, newUsers, token, handleTimeout, maxQueries);
+        return new ServerConfig(host, port, certificate, key, newUsers, token, handleTimeout, sessionTimeout,
+                maxQueries);
     }
 
     /** Returns these settings with a bearer token every client may send. */
     public ServerConfig withToken(String newToken) {
-        return new ServerConfig(host, port, certificate, key, users, newToken, handleTimeout, maxQueries);
+        return new ServerConfig(host, port, certificate, key, users, newToken, handleTimeout, sessionTimeout,
+                maxQueries);
     }
 
     /** Returns these settings with TLS from a certificate chain and its private key. */
     public ServerConfig withTls(Path newCertificate, Path newKey) {
-        return new ServerConfig(host, port, newCertificate, newKey, users, token, handleTimeout, maxQueries);
+        return new ServerConfig(host, port, newCertificate, newKey, users, token, handleTimeout, sessionTimeout,
+                maxQueries);
     }
 
     /** Returns these settings with another handle timeout. */
     public ServerConfig withHandleTimeout(Duration newHandleTimeout) {
-        return new ServerConfig(host, port, certificate, key, users, token, newHandleTimeout, maxQueries);
+        return new ServerConfig(host, port, certificate, key, users, token, newHandleTimeout, sessionTimeout,
+                maxQueries);
+    }
+
+    /** Returns these settings with another session timeout, zero for sessions that never expire. */
+    public ServerConfig withSessionTimeout(Duration newSessionTimeout) {
+        return new ServerConfig(host, port, certificate, key, users, token, handleTimeout, newSessionTimeout,
+                maxQueries);
     }
 
     /** Returns these settings with another number of queries that run at once. */
     public ServerConfig withMaxQueries(int newMaxQueries) {
-        return new ServerConfig(host, port, certificate, key, users, token, handleTimeout, newMaxQueries);
+        return new ServerConfig(host, port, certificate, key, users, token, handleTimeout, sessionTimeout,
+                newMaxQueries);
     }
 
     /** Tells whether the server uses TLS. */
@@ -215,6 +243,6 @@ public record ServerConfig(String host, int port, Path certificate, Path key, Ma
     public String toString() {
         return "ServerConfig[host=" + host + ", port=" + port + ", certificate=" + certificate + ", key=" + key
                 + ", users=" + users.keySet() + ", token=" + (token == null ? "none" : "set") + ", handleTimeout="
-                + handleTimeout + ", maxQueries=" + maxQueries + "]";
+                + handleTimeout + ", sessionTimeout=" + sessionTimeout + ", maxQueries=" + maxQueries + "]";
     }
 }

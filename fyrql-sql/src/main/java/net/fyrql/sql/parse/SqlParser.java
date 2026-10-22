@@ -103,8 +103,9 @@ public final class SqlParser {
     /**
      * Parses a statement: a query, {@code COPY ... TO}, {@code COPY ... FROM},
      * {@code CREATE TABLE}, {@code INSERT INTO} or {@code DROP TABLE}, or
-     * one of these after {@code EXPLAIN} or {@code EXPLAIN ANALYZE}; a
-     * trailing semicolon is allowed.
+     * one of these after {@code EXPLAIN} or {@code EXPLAIN ANALYZE}, or a
+     * statement of the settings of the session, {@code SET}, {@code RESET},
+     * {@code SHOW} or {@code USE}; a trailing semicolon is allowed.
      *
      * @throws SqlException if the text is not one statement of the supported
      *         forms, or has a parameter
@@ -145,6 +146,13 @@ public final class SqlParser {
                 throw new SqlException("Only queries are supported, not COPY", CopyParser.start(sql));
             }
             return copy(sql, parameters);
+        }
+        String setting = CopyParser.settingWord(sql);
+        if (setting != null) {
+            if (!writes) {
+                throw new SqlException("Only queries are supported, not " + setting, CopyParser.start(sql));
+            }
+            return new ParameterizedStatement(CopyParser.setting(sql), List.of());
         }
         SourceText source = SourceText.of(sql);
         Statements statements = statements(source);

@@ -1,0 +1,525 @@
+/*
+ * Copyright 2026 the FyrQL authors
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *
+ * This Source Code Form is "Incompatible With Secondary Licenses", as
+ * defined by the Mozilla Public License, v. 2.0.
+ */
+
+package net.fyrql;
+
+import net.fyrql.catalog.EngineCatalog;
+import net.fyrql.catalog.SearchPath;
+import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.plan.TableRef;
+import net.fyrql.core.value.ZonedDates;
+import net.fyrql.exec.QueryContext;
+import net.fyrql.sql.SqlException;
+import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.ast.ResetVariable;
+import net.fyrql.sql.ast.SetVariable;
+import net.fyrql.sql.bind.Binder;
+import net.fyrql.sql.bind.BoundStatement;
+import net.fyrql.sql.bind.Settings;
+import net.fyrql.sql.parse.SqlParser;
+
+import java.time.Duration;
+import java.time.ZoneId;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+
+/**
+ * A session of an engine: the settings that {@code SET}, {@code RESET},
+ * {@code SHOW}, {@code USE} and {@code current_setting} read and change,
+ * and the methods of the engine that parse, bind and run statements with
+ * them. The settings are
+ * <ul>
+ * <li>{@code TimeZone}, the time zone in which values of
+ * {@code TIMESTAMP WITH TIME ZONE} are shown and their calendar computes,
+ * see {@link #timeZone()};</li>
+ * <li>{@code search_path}, the default source and schema, in which names
+ * of fewer than three parts are looked up first, see {@link #searchPath()};
+ * {@code USE source[.schema]} sets it, and a value of one part names a
+ * source, or else a schema of the default source;</li>
+ * <li>{@code statement_timeout}, the timeout of a statement that asks for
+ * none, see {@link #queryTimeout()}.</li>
+ * </ul>
+ * A session starts with the settings of the builder of the engine, see
+ * {@link FyrQL.Builder#timeZone}, {@link FyrQL.Builder#defaultSource},
+ * {@link FyrQL.Builder#defaultSchema} and {@link FyrQL.Builder#queryTimeout},
+ * and {@code RESET} returns to them. The memory budget, the threads, code
+ * generation, pushdown and the access to files belong to the engine.
+ * <p>
+ * The engine has a session of its own, see {@link FyrQL#session()}, in
+ * which its methods without a session run; {@link FyrQL#newSession()}
+ * starts another one, e.g. one per connection of a client. A session holds
+ * nothing to close, and it may be used from several threads; a change of
+ * a setting applies to the statements bound after it.
+ *
+ * <pre>{@code
+ * Session session = engine.newSession();
+ * session.update("SET TimeZone = 'Europe/Berlin'");
+ * List<Object[]> rows = session.rows("SELECT now()");
+ * }</pre>
+ */
+public final class Session {
+
+    private final FyrQL engine;
+    private volatile ZoneId zone;
+    /** The timeout of a statement that asks for none, {@code null} for none. */
+    private volatile Duration timeout;
+    private volatile Names names;
+
+    /** The catalog of the search path of the session and the binder over it. */
+    private record Names(EngineCatalog catalog, Binder binder) {
+    }
+
+    /**
+     * The session of an engine.
+     *
+     * @param catalog the catalog of the engine, which adds the time zone of
+     *        this session to the options of files
+     */
+    Session(FyrQL engine, ZoneId zone, Duration timeout, EngineCatalog catalog) {
+        this.engine = engine;
+        this.zone = zone;
+        this.timeout = timeout;
+        this.names = names(catalog);
+    }
+
+    /** A session of an engine with a search path, see {@link FyrQL#newSession()}. */
+    Session(FyrQL engine, ZoneId zone, Duration timeout, SearchPath searchPath) {
+        this.engine = engine;
+        this.zone = zone;
+        this.timeout = timeout;
+        this.names = names(engine.catalog().withSession(searchPath, this::timeZone));
+    }
+
+    private Names names(EngineCatalog catalog) {
+        SearchPath path = catalog.searchPath();
+        return new Names(catalog, new Binder(catalog, engine.functions(), this::timeZone, name -> value(name, path)));
+    }
+
+    /** Returns the engine of the session. */
+    public FyrQL engine() {
+        return engine;
+    }
+
+    /**
+     * Returns the time zone, in which values of {@code TIMESTAMP WITH TIME ZONE}
+     * are shown and their calendar computes: that of the builder of the
+     * engine, until {@code SET TimeZone} changes it.
+     */
+    public ZoneId timeZone() {
+        return zone;
+    }
+
+    /**
+     * Returns the search path, along which names of fewer than three parts
+     * are looked up: that of the builder of the engine, until
+     * {@code SET search_path}, {@code USE} or {@link #use(SearchPath)}
+     * changes it.
+     */
+    public SearchPath searchPath() {
+        return names.catalog().searchPath();
+    }
+
+    /**
+     * Returns the timeout of a statement that asks for none: that of the
+     * builder of the engine, until {@code SET statement_timeout} changes it;
+     * nothing for none. It is at most {@link FyrQL#maxQueryTimeout()} when a
+     * statement runs.
+     */
+    public Optional<Duration> queryTimeout() {
+        return Optional.ofNullable(timeout);
+    }
+
+    /** Returns the timeout of a statement that asks for none, {@code null} for none. */
+    Duration timeout() {
+        return timeout;
+    }
+
+    /** Returns the catalog of the session, which adds its time zone to the options of files. */
+    EngineCatalog catalog() {
+        return names.catalog();
+    }
+
+    /**
+     * Returns the value of a setting as {@code SHOW} shows it, e.g.
+     * {@code Europe/Berlin}, {@code memory.main} or {@code 30s}.
+     *
+     * @param name the name in any case, see {@link Settings#NAMES}
+     * @throws IllegalArgumentException if there is no setting of the name
+     */
+    public String setting(String name) {
+        String setting = Settings.name(name);
+        if (setting == null) {
+            throw new IllegalArgumentException("unrecognized configuration parameter \"" + name + "\"");
+        }
+        return value(setting, searchPath());
+    }
+
+    /** Returns the settings by name as {@code SHOW ALL} shows them, in its order. */
+    public Map<String, String> settings() {
+        Map<String, String> settings = new LinkedHashMap<>();
+        for (String name : Settings.NAMES) {
+            settings.put(name, setting(name));
+        }
+        return settings;
+    }
+
+    /** Returns the value of a setting as SHOW shows it, with a search path. */
+    private String value(String name, SearchPath path) {
+        return switch (name) {
+            case Settings.TIME_ZONE -> ZonedDates.name(zone);
+            case Settings.SEARCH_PATH -> path.defaultSource() == null ? ""
+                    : Settings.searchPathText(List.of(path.defaultSource(), path.defaultSchema()));
+            default -> Settings.timeoutText(timeout == null ? Duration.ZERO : timeout);
+        };
+    }
+
+    /**
+     * Sets a setting as {@code SET name = 'value'} does.
+     *
+     * @throws SqlException if there is no setting of the name, or the value does not fit it
+     */
+    public void set(String name, String value) {
+        apply((BoundStatement.Set) binder().bind(new SetVariable(name, value, Position.UNKNOWN)));
+    }
+
+    /**
+     * Returns a setting to the value of the builder of the engine, as
+     * {@code RESET name} does; {@code ALL} resets every setting.
+     *
+     * @throws SqlException if there is no setting of the name
+     */
+    public void reset(String name) {
+        apply((BoundStatement.Set) binder().bind(new ResetVariable(name, Position.UNKNOWN)));
+    }
+
+    /**
+     * Sets the search path, along which names of fewer than three parts are
+     * looked up; the table functions of its default source come first.
+     *
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public void use(SearchPath searchPath) {
+        Objects.requireNonNull(searchPath, "searchPath");
+        Names current = names;
+        if (!searchPath.equals(current.catalog().searchPath())) {
+            names = names(current.catalog().withSearchPath(searchPath));
+        }
+    }
+
+    /**
+     * Applies {@code SET} or {@code RESET} of a setting.
+     *
+     * @throws SqlException if the source or schema of a search path does not exist
+     */
+    void apply(BoundStatement.Set setting) {
+        String value = setting.value();
+        switch (setting.name()) {
+            case Settings.ALL -> {
+                for (String name : Settings.NAMES) {
+                    apply(new BoundStatement.Set(name, null));
+                }
+            }
+            case Settings.TIME_ZONE -> zone = value == null ? engine.initialZone() : ZonedDates.zone(value);
+            case Settings.SEARCH_PATH -> use(value == null ? engine.catalog().searchPath() : searchPath(value));
+            case Settings.STATEMENT_TIMEOUT -> {
+                Duration t = value == null ? engine.queryTimeout().orElse(null) : Settings.timeout(value);
+                timeout = t == null || t.isZero() ? null : t;
+            }
+            default -> throw new IllegalArgumentException("No setting " + setting.name());
+        }
+    }
+
+    /**
+     * Returns the search path of a value of {@code search_path}: the source
+     * and the schema match exactly, or else ignoring case if that is unique.
+     * A value of one part is a source, with the schema {@code main}, or else
+     * a schema of the default source, as in {@code USE} of DuckDB and as
+     * pgjdbc sets a schema; an empty value is no default source.
+     */
+    private SearchPath searchPath(String value) {
+        List<String> parts = Settings.searchPath(value);
+        if (parts.isEmpty()) {
+            return new SearchPath(null, TableRef.MAIN);
+        }
+        List<String> sources = engine.sources();
+        String source = match(sources, parts.get(0));
+        if (parts.size() == 1) {
+            if (source != null) {
+                return new SearchPath(source, TableRef.MAIN);
+            }
+            String current = searchPath().defaultSource();
+            List<String> schemas = current == null ? List.of() : engine.connector(current).catalog().schemas();
+            String schema = match(schemas, parts.get(0));
+            if (schema != null) {
+                return new SearchPath(current, schema);
+            }
+            throw new SqlException("No source or schema " + parts.get(0) + "; the sources are "
+                    + String.join(", ", sources) + (current == null ? ""
+                    : ", the schemas of " + current + " are " + String.join(", ", schemas)), Position.UNKNOWN);
+        }
+        if (source == null) {
+            throw new SqlException("No source " + parts.get(0) + "; there are " + String.join(", ", sources),
+                    Position.UNKNOWN);
+        }
+        List<String> schemas = engine.connector(source).catalog().schemas();
+        String schema = match(schemas, parts.get(1));
+        if (schema == null) {
+            throw new SqlException("No schema " + parts.get(1) + " in the source " + source + "; there are "
+                    + String.join(", ", schemas), Position.UNKNOWN);
+        }
+        return new SearchPath(source, schema);
+    }
+
+    /**
+     * Returns the name that matches exactly, or else the only one that
+     * matches ignoring case; {@code null} if there is none or more than one.
+     */
+    private static String match(List<String> names, String name) {
+        if (names.contains(name)) {
+            return name;
+        }
+        String match = null;
+        for (String n : names) {
+            if (n.equalsIgnoreCase(name)) {
+                if (match != null) {
+                    return null;
+                }
+                match = n;
+            }
+        }
+        return match;
+    }
+
+    /** Returns the binder of the session. */
+    Binder binder() {
+        return names.binder();
+    }
+
+    /**
+     * Returns a binder of the session with another search path.
+     *
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    Binder binder(SearchPath searchPath) {
+        Names current = names;
+        if (searchPath.equals(current.catalog().searchPath())) {
+            return current.binder();
+        }
+        return new Binder(current.catalog().withSearchPath(searchPath), engine.functions(), this::timeZone,
+                name -> value(name, searchPath));
+    }
+
+    /**
+     * Parses and binds a query in this session, see {@link FyrQL#plan(String)}.
+     *
+     * @throws SqlException if the query cannot be parsed or bound, or is no query
+     */
+    public PlanNode plan(String sql) {
+        return binder().bind(SqlParser.parse(sql));
+    }
+
+    /**
+     * Parses and binds a statement in this session, see {@link FyrQL#statement(String)}.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound
+     */
+    public BoundStatement statement(String sql) {
+        return binder().bind(SqlParser.parseStatement(sql));
+    }
+
+    /**
+     * Parses and binds a statement in this session with names looked up
+     * along another search path, e.g. the one a prepared query kept, see
+     * {@link FyrQL#statement(String, SearchPath)}.
+     *
+     * @throws SqlException             if the statement cannot be parsed or bound
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public BoundStatement statement(String sql, SearchPath searchPath) {
+        return binder(searchPath).bind(SqlParser.parseStatement(sql));
+    }
+
+    /**
+     * Prepares a query with parameters in this session, see
+     * {@link FyrQL#prepare(String)}; it keeps the search path of the session
+     * at this call.
+     *
+     * @throws SqlException if the query cannot be parsed or bound, or a parameter has no type
+     */
+    public PreparedQuery prepare(String sql) {
+        return engine.prepare(sql, searchPath(), binder());
+    }
+
+    /**
+     * Binds a prepared query with values for its parameters in this session,
+     * see {@link FyrQL#plan(PreparedQuery, List)}.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the query does not bind any more, or is no query
+     */
+    public PlanNode plan(PreparedQuery query, List<?> values) {
+        return FyrQL.conform(binder(query.searchPath()).bind(SqlParser.parse(FyrQL.render(query, values))),
+                query.schema());
+    }
+
+    /**
+     * Binds a prepared statement with values for its parameters in this
+     * session, see {@link FyrQL#statement(PreparedQuery, List)}.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the statement does not bind any more
+     */
+    public BoundStatement statement(PreparedQuery query, List<?> values) {
+        BoundStatement statement = binder(query.searchPath()).bind(SqlParser.parseStatement(
+                FyrQL.render(query, values)));
+        return statement instanceof BoundStatement.Query q
+                ? new BoundStatement.Query(FyrQL.conform(q.plan(), query.schema())) : statement;
+    }
+
+    /**
+     * Runs a prepared statement with values for its parameters in this
+     * session; the caller closes the result.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the statement does not bind any more, or a write fails
+     */
+    public QueryResult execute(PreparedQuery query, List<?> values) {
+        return execute(statement(query, values), new QueryContext());
+    }
+
+    /**
+     * Runs a prepared statement with values for its parameters in this
+     * session, in a context of the caller; the caller closes the result.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the statement does not bind any more, or a write fails
+     */
+    public QueryResult execute(PreparedQuery query, List<?> values, QueryContext context) {
+        return execute(statement(query, values), context);
+    }
+
+    /**
+     * Runs a prepared query with values for its parameters in this session
+     * and collects all rows as Java values.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the query does not bind any more
+     */
+    public List<Object[]> rows(PreparedQuery query, List<?> values) {
+        try (QueryResult result = execute(query, values)) {
+            return result.rows();
+        }
+    }
+
+    /**
+     * Runs a prepared statement that writes with values for its parameters
+     * in this session and returns the number of rows written.
+     *
+     * @throws IllegalArgumentException if the values do not fit the parameters
+     * @throws SqlException             if the statement does not bind any more, is a query, or fails
+     */
+    public long update(PreparedQuery query, List<?> values) {
+        return update(statement(query, values), new QueryContext());
+    }
+
+    /**
+     * Runs a statement in this session, see {@link FyrQL#sql(String)}; the
+     * caller closes the result.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound, or a write fails
+     */
+    public QueryResult sql(String sql) {
+        return engine.execute(statement(sql), new QueryContext(), sql, this);
+    }
+
+    /**
+     * Runs a statement in this session and collects all rows as Java values.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound, or a write fails
+     */
+    public List<Object[]> rows(String sql) {
+        try (QueryResult result = sql(sql)) {
+            return result.rows();
+        }
+    }
+
+    /**
+     * Runs a statement that writes, or one of the settings, in this session
+     * and returns the number of rows written, see {@link FyrQL#update(String)}.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound, is a query, or fails
+     */
+    public long update(String sql) {
+        return engine.update(statement(sql), new QueryContext(), sql, this);
+    }
+
+    /**
+     * Runs a bound statement in this session, see
+     * {@link FyrQL#execute(BoundStatement, QueryContext)}; {@code SET}
+     * changes this session. The caller closes the result.
+     *
+     * @throws SqlException if the write fails
+     */
+    public QueryResult execute(BoundStatement statement, QueryContext context) {
+        return engine.execute(statement, context, null, this);
+    }
+
+    /**
+     * Runs a bound statement that writes in this session, see
+     * {@link FyrQL#update(BoundStatement, QueryContext)}.
+     *
+     * @throws SqlException if the statement is a query or {@code EXPLAIN}, or the write fails
+     */
+    public long update(BoundStatement statement, QueryContext context) {
+        return engine.update(statement, context, null, this);
+    }
+
+    /**
+     * Runs a plan with the timeout of this session, see
+     * {@link FyrQL#execute(PlanNode, QueryContext)}; the caller closes the result.
+     */
+    public QueryResult execute(PlanNode plan, QueryContext context) {
+        return engine.execute(plan, context, null, this);
+    }
+
+    /**
+     * Returns the plan of a statement bound in this session, see {@link FyrQL#explain(String)}.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound
+     */
+    public String explain(String sql) {
+        return engine.explain(statement(sql));
+    }
+
+    /**
+     * Runs a statement in this session and returns its plan with what each
+     * operator did, see {@link FyrQL#explainAnalyze(String)}.
+     *
+     * @throws SqlException if the statement cannot be parsed or bound, or fails
+     */
+    public String explainAnalyze(String sql) {
+        return engine.explainAnalyze(statement(sql), new QueryContext(), this);
+    }
+
+    /**
+     * Runs a bound statement in this session in a context of the caller and
+     * returns its plan with what each operator did, see
+     * {@link FyrQL#explainAnalyze(BoundStatement, QueryContext)}.
+     *
+     * @throws SqlException if the statement fails
+     */
+    public String explainAnalyze(BoundStatement statement, QueryContext context) {
+        return engine.explainAnalyze(statement, context, this);
+    }
+}

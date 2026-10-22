@@ -42,7 +42,7 @@ class SearchPathTest {
      * table, and a table function {@code read_x} that names the source too.
      * It cannot be scanned.
      */
-    private record Source(String name) implements Connector, TableFunctionProvider {
+    record Source(String name) implements Connector, TableFunctionProvider {
 
         @Override
         public Catalog catalog() {

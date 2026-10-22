@@ -44,6 +44,7 @@ class ServerConfigTest {
                         bob: builder
                       token: t0ken
                       handleTimeout: 90s
+                      sessionTimeout: 2h
                       maxQueries: 3
                     """, DIR);
             ServerConfig config = ServerConfig.of(engine);
@@ -54,6 +55,7 @@ class ServerConfigTest {
             assertEquals(Map.of("alice", "wonderland", "bob", "builder"), config.users());
             assertEquals("t0ken", config.token());
             assertEquals(Duration.ofSeconds(90), config.handleTimeout());
+            assertEquals(Duration.ofHours(2), config.sessionTimeout());
             assertEquals(3, config.maxQueries());
             assertTrue(config.tls());
             assertTrue(config.signIn());
@@ -73,6 +75,8 @@ class ServerConfigTest {
         assertNull(config.certificate());
         assertEquals(Map.of(), config.users());
         assertEquals(Duration.ofMinutes(10), config.handleTimeout());
+        assertEquals(Duration.ofHours(1), config.sessionTimeout());
+        assertEquals(Duration.ZERO, ServerConfig.read(Map.of("sessionTimeout", "0"), DIR).sessionTimeout());
         assertEquals(0, config.maxQueries());
         assertFalse(config.tls());
         assertFalse(config.signIn());
@@ -81,7 +85,7 @@ class ServerConfigTest {
     @Test
     void errorsNameTheSettingAndNeverItsValue() {
         assertEquals("The server has an unknown option prot; known are host, port, tls.certificate, tls.key,"
-                + " users.<name>, token, handleTimeout, maxQueries", failure(Map.of("prot", "1")));
+                + " users.<name>, token, handleTimeout, sessionTimeout, maxQueries", failure(Map.of("prot", "1")));
         assertEquals("The option port of the server must be an integer: x", failure(Map.of("port", "x")));
         assertEquals("The port of the server must be from 0 to 65535, not 70000", failure(Map.of("port", "70000")));
         assertEquals("TLS needs both tls.certificate and tls.key", failure(Map.of("tls.certificate", "c.pem")));

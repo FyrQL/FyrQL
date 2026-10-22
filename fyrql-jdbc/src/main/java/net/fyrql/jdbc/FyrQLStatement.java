@@ -49,7 +49,7 @@ class FyrQLStatement implements Statement {
 
     /** Returns the time zone of the session of the connection. */
     ZoneId zone() {
-        return connection.engine().timeZone();
+        return connection.session().timeZone();
     }
     private final int holdability;
     private FyrQLResultSet resultSet;

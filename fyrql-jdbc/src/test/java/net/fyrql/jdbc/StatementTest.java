@@ -267,6 +267,27 @@ class StatementTest {
         }
     }
 
+    @Test
+    void theSettingsOfTheSessionAreStatements() throws SQLException {
+        try (Statement s = c.createStatement()) {
+            assertFalse(s.execute("SET TimeZone = 'Europe/Berlin'"));
+            assertEquals(0, s.getUpdateCount());
+            assertTrue(s.execute("SHOW TimeZone"));
+            assertEquals("TimeZone", s.getResultSet().getMetaData().getColumnName(1));
+            assertEquals(List.of("Europe/Berlin"), rows(s.getResultSet()));
+            assertEquals(0, s.executeUpdate("RESET TimeZone"));
+            ResultSet all = s.executeQuery("SHOW ALL");
+            assertEquals("name", all.getMetaData().getColumnName(1));
+            assertEquals("setting", all.getMetaData().getColumnName(2));
+            assertEquals(3, rows(all).size());
+            assertEquals(0, s.executeUpdate("USE shop"));
+            assertEquals("shop", c.getCatalog());
+            assertEquals("42809", assertThrows(SQLException.class, () -> s.executeQuery("SET TimeZone = 'UTC'"))
+                    .getSQLState());
+            assertEquals("42809", assertThrows(SQLException.class, () -> s.executeUpdate("SHOW ALL")).getSQLState());
+        }
+    }
+
     /** Returns the rows as text, the values separated by a space; closes the result set. */
     static List<String> rows(ResultSet rs) throws SQLException {
         List<String> rows = new ArrayList<>();

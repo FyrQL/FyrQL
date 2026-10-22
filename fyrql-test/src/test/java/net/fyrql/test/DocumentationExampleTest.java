@@ -15,6 +15,8 @@ import net.fyrql.FyrQL;
 import net.fyrql.PreparedQuery;
 import net.fyrql.exec.CodegenMode;
 import net.fyrql.QueryResult;
+import net.fyrql.Session;
+import net.fyrql.catalog.SearchPath;
 import net.fyrql.codegen.JaninoCompiler;
 import net.fyrql.connector.csv.CsvConnector;
 import net.fyrql.connector.iceberg.IcebergTestTables;
@@ -41,6 +43,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -291,6 +294,24 @@ class DocumentationExampleTest {
                 "2024-10-27 07:00:00", "2024-10-27 07:00:00", "00:15:00", "90 days 12:00:00", "Europe/Berlin",
                 "TIMESTAMP WITH TIME ZONE"), values);
         assertEquals(before, reset);
+    }
+
+    @Test
+    void theSessionExampleRuns() {
+        try (FyrQL engine = FyrQL.builder().register(MemoryConnector.builder("shop").build())
+                .register(MemoryConnector.builder("crm").build()).timeZone(ZoneId.of("UTC")).build()) {
+            // As in the manual.
+            Session berlin = engine.newSession();
+            berlin.update("SET TimeZone = 'Europe/Berlin'");
+            berlin.set("statement_timeout", "30s");
+            berlin.use(new SearchPath("shop", "main"));
+            List<Object[]> rows = berlin.rows("SELECT current_setting('TimeZone'), current_setting('search_path')");
+            assertEquals(List.of("Europe/Berlin", "shop.main"), Arrays.asList(rows.get(0)));
+            assertEquals("UTC", engine.timeZone().getId());
+            assertEquals(List.of(List.of("TimeZone", "Europe/Berlin"), List.of("search_path", "shop.main"),
+                    List.of("statement_timeout", "30s")), berlin.rows("SHOW ALL").stream().map(Arrays::asList)
+                    .toList());
+        }
     }
 
     @Test

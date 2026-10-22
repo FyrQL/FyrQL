@@ -12,6 +12,7 @@
 package net.fyrql.sql.bind;
 
 import net.fyrql.core.function.FunctionRegistry;
+import net.fyrql.core.value.ZonedDates;
 
 import java.time.Instant;
 import java.time.ZoneId;
@@ -30,12 +31,18 @@ import java.util.Set;
  * @param parameters the types of the parameters, which the binding adds to
  */
 record BindContext(FunctionRegistry functions, Set<String> functionNames, Instant now, ZoneId zone,
-        ParameterTypes parameters) {
+        Settings settings, ParameterTypes parameters) {
     BindContext {
         Objects.requireNonNull(functions, "functions");
         functionNames = Set.copyOf(functionNames);
         Objects.requireNonNull(now, "now");
         Objects.requireNonNull(zone, "zone");
+        Objects.requireNonNull(settings, "settings");
         Objects.requireNonNull(parameters, "parameters");
+    }
+
+    /** Returns the value of a setting as {@code SHOW} shows it, by its name as FyrQL spells it. */
+    String setting(String name) {
+        return name.equals(Settings.TIME_ZONE) ? ZonedDates.name(zone) : settings.value(name);
     }
 }

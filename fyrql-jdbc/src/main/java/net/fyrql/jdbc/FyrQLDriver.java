@@ -54,7 +54,8 @@ import java.util.logging.Logger;
  * The same keys may be given as properties of the connection, which win
  * over the URL. Each connection builds an engine of its own and closes it
  * with the connection; {@link #connect(FyrQL, boolean)} opens a
- * connection over an engine of the application instead. The connectors
+ * connection over an engine of the application instead. Either way, a
+ * connection is a session of its own, with its own settings. The connectors
  * are found with the class loader of the driver.
  * <p>
  * The driver registers itself with {@link DriverManager} when its class is
@@ -80,7 +81,9 @@ public final class FyrQLDriver implements Driver {
 
     /**
      * Opens a connection over an engine of the application; its sources
-     * become the catalogs of the connection.
+     * become the catalogs of the connection. The connection is a new
+     * session of the engine, see {@link FyrQL#newSession()}, so that
+     * {@code SET} in it changes neither the engine nor other connections.
      *
      * @param closeEngineOnClose whether closing the connection closes the engine
      */

@@ -18,26 +18,38 @@ import com.google.protobuf.Message;
 import net.fyrql.FyrQL;
 import net.fyrql.PreparedQuery;
 import net.fyrql.QueryResult;
+import net.fyrql.Session;
 import net.fyrql.arrow.ArrowToBatch;
 import net.fyrql.arrow.BatchToArrow;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.QueryContext;
+import net.fyrql.sql.SqlException;
 import net.fyrql.sql.bind.BoundStatement;
+import net.fyrql.sql.bind.Settings;
 import net.fyrql.sql.parse.Parameters;
 import org.apache.arrow.flight.CallStatus;
 import org.apache.arrow.flight.CancelFlightInfoRequest;
 import org.apache.arrow.flight.CancelStatus;
+import org.apache.arrow.flight.CloseSessionRequest;
+import org.apache.arrow.flight.CloseSessionResult;
 import org.apache.arrow.flight.Criteria;
 import org.apache.arrow.flight.FlightDescriptor;
 import org.apache.arrow.flight.FlightEndpoint;
 import org.apache.arrow.flight.FlightInfo;
 import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.arrow.flight.FlightStream;
+import org.apache.arrow.flight.GetSessionOptionsRequest;
+import org.apache.arrow.flight.GetSessionOptionsResult;
 import org.apache.arrow.flight.PutResult;
 import org.apache.arrow.flight.Result;
 import org.apache.arrow.flight.SchemaResult;
+import org.apache.arrow.flight.SessionOptionValue;
+import org.apache.arrow.flight.SessionOptionValueFactory;
+import org.apache.arrow.flight.SessionOptionValueVisitor;
+import org.apache.arrow.flight.SetSessionOptionsRequest;
+import org.apache.arrow.flight.SetSessionOptionsResult;
 import org.apache.arrow.flight.Ticket;
 import org.apache.arrow.flight.sql.FlightSqlProducer;
 import org.apache.arrow.flight.sql.SqlInfoBuilder;
@@ -51,7 +63,9 @@ import org.apache.arrow.vector.types.pojo.Field;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -81,6 +95,14 @@ import java.util.function.Supplier;
  * statement that writes has a result without columns, as clients such as
  * the JDBC driver of Arrow take it for an update. Each statement that
  * writes counts as a query while it runs; the server has no transactions.
+ * <p>
+ * Each client is a session of the engine, see {@link Sessions}: its
+ * statements bind and run with the settings of the session, which
+ * {@code SET} and the actions {@code SetSessionOptions},
+ * {@code GetSessionOptions} and {@code CloseSession} of Flight change and
+ * read. A statement keeps the session it was bound in; a prepared statement
+ * binds in the session of the call that runs it, along the search path it
+ * was prepared with.
  */
 final class FyrQLFlightSqlProducer implements FlightSqlProducer {
 
@@ -108,16 +130,18 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         final org.apache.arrow.vector.types.pojo.Schema schema;
         final BoundStatement statement;
         final Batch lines;
+        final Session session;
         final Set<QueryContext> runs = ConcurrentHashMap.newKeySet();
         volatile boolean cancelled;
 
-        Statement(Schema schema, BoundStatement statement, Batch lines) {
+        Statement(Schema schema, BoundStatement statement, Batch lines, Session session) {
             this.schema = Metadata.resultSchema(schema);
             this.statement = statement;
             this.lines = lines;
+            this.session = session;
         }
 
-        Rows open(FyrQL engine, QueryContext context) {
+        Rows open(QueryContext context) {
             if (statement == null) {
                 return new Rows() {
                     private boolean sent;
@@ -136,7 +160,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                     }
                 };
             }
-            QueryResult result = engine.execute(statement, context);
+            QueryResult result = session.execute(statement, context);
             return new Rows() {
                 @Override
                 public Batch next() {
@@ -187,34 +211,34 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
 
         /**
-         * Binds the statement with a row of values: with values of the
-         * types of the parameters, or {@code NULL}, as the engine prepared
-         * it; otherwise with literals of the types of the values.
+         * Binds the statement in a session with a row of values: with values
+         * of the types of the parameters, or {@code NULL}, as the engine
+         * prepared it; otherwise with literals of the types of the values.
          *
          * @param v the values, {@code null} if none were bound
          */
-        BoundStatement bind(FyrQL engine, Values v) {
+        BoundStatement bind(Values v, Session session) {
             List<DataType> types = parameterTypes();
             if (v == null) {
                 if (!types.isEmpty()) {
                     throw FlightErrors.invalid("The prepared statement has " + types.size() + " parameters and no"
                             + " values; bind a row of values first");
                 }
-                return engine.statement(query, List.of());
+                return session.statement(query, List.of());
             }
             boolean fit = true;
             for (int i = 0; i < types.size() && fit; i++) {
                 fit = v.values().get(i) == null || v.types().get(i).equals(types.get(i));
             }
             if (fit) {
-                return engine.statement(query, v.values());
+                return session.statement(query, v.values());
             }
             String[] literals = new String[types.size()];
             for (int i = 0; i < literals.length; i++) {
                 Object value = v.values().get(i);
                 literals[i] = Parameters.literal(value, value == null ? types.get(i) : v.types().get(i));
             }
-            return engine.statement(parameters.render(literals), query.searchPath());
+            return session.statement(parameters.render(literals), query.searchPath());
         }
     }
 
@@ -274,14 +298,17 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     private final Handles<Prepared> prepared;
     private final ScheduledExecutorService expiry;
     private final SqlInfoBuilder sqlInfo;
+    private final Sessions sessions;
 
     /**
      * @param engine the engine that runs the queries; it stays open when the producer closes
      * @param allocator the allocator of the Arrow buffers of the results
      * @param config the handle timeout and the most queries at once
+     * @param sessions the sessions of the clients, which the producer expires with the handles
      */
-    FyrQLFlightSqlProducer(FyrQL engine, BufferAllocator allocator, ServerConfig config) {
+    FyrQLFlightSqlProducer(FyrQL engine, BufferAllocator allocator, ServerConfig config, Sessions sessions) {
         this.engine = Objects.requireNonNull(engine, "engine");
+        this.sessions = Objects.requireNonNull(sessions, "sessions");
         this.allocator = Objects.requireNonNull(allocator, "allocator");
         this.maxQueries = config.maxQueries() > 0 ? config.maxQueries() : 2 * engine.threads();
         this.queries = new Semaphore(maxQueries);
@@ -297,6 +324,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         expiry.scheduleWithFixedDelay(() -> {
             statements.expire();
             prepared.expire();
+            sessions.expire();
         }, period, period, TimeUnit.NANOSECONDS);
         this.sqlInfo = Metadata.sqlInfo(FlightSqlServer.VERSION, FlightSqlServer.ARROW_VERSION);
     }
@@ -332,8 +360,18 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         return statements.size() + prepared.size();
     }
 
+    /** Returns the number of sessions of clients the server holds. */
+    int sessions() {
+        return sessions.size();
+    }
+
     private static String owner(CallContext context) {
         return Objects.requireNonNullElse(context.peerIdentity(), "");
+    }
+
+    /** Returns the session of the client of a call. */
+    private Session session(CallContext context) {
+        return sessions.session(context, owner(context));
     }
 
     private static Ticket ticket(Message command) {
@@ -351,14 +389,14 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
         }
     }
 
-    /** Binds a statement; a statement that writes runs now, see {@link #run(BoundStatement)}. */
-    private Statement statement(String sql) {
-        return run(engine.statement(sql));
+    /** Binds a statement in a session; a statement that writes runs now, see {@link #run(BoundStatement, Session)}. */
+    private Statement statement(String sql, Session session) {
+        return run(session.statement(sql), session);
     }
 
     /** Binds a prepared statement with the values bound last; a statement that writes runs now. */
-    private Statement statement(Prepared p) {
-        return run(p.bind(engine, p.values));
+    private Statement statement(Prepared p, Session session) {
+        return run(p.bind(p.values, session), session);
     }
 
     /**
@@ -367,24 +405,26 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
      * writes; a statement that writes runs to its end now, and its result is
      * the row of its count.
      */
-    private Statement run(BoundStatement bound) {
+    private Statement run(BoundStatement bound, Session session) {
         if (bound instanceof BoundStatement.Query || bound instanceof BoundStatement.Explain) {
-            return new Statement(bound.schema(), bound, null);
+            return new Statement(bound.schema(), bound, null, session);
         }
-        Object[] count = {update(bound)};
-        return new Statement(BoundStatement.COUNT, null, Batch.ofRows(BoundStatement.COUNT, List.<Object[]>of(count)));
+        Object[] count = {update(bound, session)};
+        return new Statement(BoundStatement.COUNT, null, Batch.ofRows(BoundStatement.COUNT, List.<Object[]>of(count)),
+                session);
     }
 
     /**
-     * Runs a statement that writes to its end, unless more queries than
-     * allowed run already, and returns the rows it wrote.
+     * Runs a statement that writes in a session to its end, unless more
+     * queries than allowed run already, and returns the rows it wrote;
+     * {@code SET} changes the session.
      */
-    private long update(BoundStatement statement) {
+    private long update(BoundStatement statement, Session session) {
         if (!queries.tryAcquire()) {
             throw busy();
         }
         try {
-            return engine.update(statement, new QueryContext());
+            return session.update(statement, new QueryContext());
         } finally {
             queries.release();
         }
@@ -452,7 +492,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                 context.cancel();
             }
             try (BufferAllocator a = allocator.newChildAllocator("query", 0, Long.MAX_VALUE);
-                    Rows rows = s.open(engine, context);
+                    Rows rows = s.open(context);
                     VectorSchemaRoot root = VectorSchemaRoot.create(s.schema, a)) {
                 listener.start(root);
                 for (Batch b = rows.next(); b != null; b = rows.next()) {
@@ -498,7 +538,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             FlightDescriptor descriptor) {
         try {
             noTransaction(command.hasTransactionId());
-            Statement s = statement(command.getQuery());
+            Statement s = statement(command.getQuery(), session(context));
             ByteString handle = statements.add(owner(context), s);
             return info(s.schema, descriptor, ticket(FlightSql.TicketStatementQuery.newBuilder()
                     .setStatementHandle(handle).build()));
@@ -513,7 +553,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             FlightDescriptor descriptor) {
         try {
             noTransaction(command.hasTransactionId());
-            return new SchemaResult(Metadata.resultSchema(engine.statement(command.getQuery()).schema()));
+            return new SchemaResult(Metadata.resultSchema(session(context).statement(command.getQuery())
+                    .schema()));
         } catch (RuntimeException e) {
             throw FlightErrors.of(e);
         }
@@ -565,14 +606,15 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     @Override
     public Runnable acceptPutStatement(FlightSql.CommandStatementUpdate command, CallContext context,
             FlightStream flightStream, StreamListener<PutResult> ackStream) {
+        Session session = session(context);
         return () -> {
             try {
                 noTransaction(command.hasTransactionId());
-                BoundStatement statement = engine.statement(command.getQuery());
+                BoundStatement statement = session.statement(command.getQuery());
                 if (statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain) {
                     throw FlightErrors.invalid(NOT_AN_UPDATE);
                 }
-                long count = update(statement);
+                long count = update(statement, session);
                 complete(ackStream, FlightSql.DoPutUpdateResult.newBuilder().setRecordCount(count).build());
             } catch (RuntimeException e) {
                 ackStream.onError(FlightErrors.of(e));
@@ -587,7 +629,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             StreamListener<Result> listener) {
         try {
             noTransaction(request.hasTransactionId());
-            Prepared p = new Prepared(engine.prepare(request.getQuery()));
+            Prepared p = new Prepared(session(context).prepare(request.getQuery()));
             ByteString handle = prepared.add(owner(context), p);
             FlightSql.ActionCreatePreparedStatementResult result = FlightSql.ActionCreatePreparedStatementResult
                     .newBuilder().setPreparedStatementHandle(handle)
@@ -652,7 +694,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     public FlightInfo getFlightInfoPreparedStatement(FlightSql.CommandPreparedStatementQuery command,
             CallContext context, FlightDescriptor descriptor) {
         try {
-            Statement s = statement(prepared.get(command.getPreparedStatementHandle(), owner(context)));
+            Statement s = statement(prepared.get(command.getPreparedStatementHandle(), owner(context)),
+                    session(context));
             ByteString handle = statements.add(owner(context), s);
             return info(s.schema, descriptor, ticket(FlightSql.TicketStatementQuery.newBuilder()
                     .setStatementHandle(handle).build()));
@@ -672,7 +715,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             ServerStreamListener listener) {
         Statement s;
         try {
-            s = statement(prepared.get(command.getPreparedStatementHandle(), owner(context)));
+            s = statement(prepared.get(command.getPreparedStatementHandle(), owner(context)), session(context));
         } catch (RuntimeException e) {
             listener.error(FlightErrors.of(e));
             return;
@@ -691,6 +734,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     @Override
     public Runnable acceptPutPreparedStatementUpdate(FlightSql.CommandPreparedStatementUpdate command,
             CallContext context, FlightStream flightStream, StreamListener<PutResult> ackStream) {
+        Session session = session(context);
         return () -> {
             try {
                 Prepared p = prepared.get(command.getPreparedStatementHandle(), owner(context));
@@ -710,7 +754,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                     for (int r = 0; r < batch.rowCount(); r++) {
                         rows++;
                         try {
-                            count += update(p.bind(engine, new Values(Arrays.asList(batch.row(r)), types)));
+                            count += update(p.bind(new Values(Arrays.asList(batch.row(r)), types), session),
+                                    session);
                         } catch (RuntimeException e) {
                             FlightRuntimeException f = FlightErrors.of(e);
                             throw f.status().withDescription("Row " + rows + " of the values fails, after "
@@ -720,7 +765,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                     }
                 }
                 if (parameterTypes.isEmpty()) {
-                    count = update(p.bind(engine, null));
+                    count = update(p.bind(null, session), session);
                 }
                 complete(ackStream, FlightSql.DoPutUpdateResult.newBuilder().setRecordCount(count).build());
             } catch (RuntimeException e) {
@@ -867,6 +912,111 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     public void getStreamCrossReference(FlightSql.CommandGetCrossReference command, CallContext context,
             ServerStreamListener listener) {
         send(Schemas.GET_CROSS_REFERENCE_SCHEMA, listener, List::of);
+    }
+
+    // ---------------------------------------------------------------- sessions
+
+    /** The text of a value of a session option, {@code null} for an empty value or a list. */
+    private static final SessionOptionValueVisitor<String> TEXT = new SessionOptionValueVisitor<>() {
+        @Override
+        public String visit(String value) {
+            return value;
+        }
+
+        @Override
+        public String visit(boolean value) {
+            return Boolean.toString(value);
+        }
+
+        @Override
+        public String visit(long value) {
+            return Long.toString(value);
+        }
+
+        @Override
+        public String visit(double value) {
+            return Double.toString(value);
+        }
+
+        @Override
+        public String visit(String[] value) {
+            return null;
+        }
+
+        @Override
+        public String visit(Void value) {
+            return null;
+        }
+    };
+
+    /**
+     * Sets settings of the session of the client, as {@code SET} does; an
+     * empty value resets one, as {@code RESET} does. A name that is no
+     * setting is {@code INVALID_NAME}, a value that does not fit it, or a
+     * list, {@code INVALID_VALUE}; the other options are set all the same.
+     */
+    @Override
+    public void setSessionOptions(SetSessionOptionsRequest request, CallContext context,
+            StreamListener<SetSessionOptionsResult> listener) {
+        try {
+            Session session = session(context);
+            Map<String, SetSessionOptionsResult.Error> errors = new LinkedHashMap<>();
+            for (Map.Entry<String, SessionOptionValue> option : request.getSessionOptions().entrySet()) {
+                String name = option.getKey();
+                if (Settings.name(name) == null) {
+                    errors.put(name, new SetSessionOptionsResult.Error(
+                            SetSessionOptionsResult.ErrorValue.INVALID_NAME));
+                    continue;
+                }
+                SessionOptionValue value = option.getValue();
+                String text = value.acceptVisitor(TEXT);
+                try {
+                    if (value.isEmpty()) {
+                        session.reset(name);
+                    } else if (text == null) {
+                        throw new IllegalArgumentException("A list is no value of " + name);
+                    } else {
+                        session.set(name, text);
+                    }
+                } catch (SqlException | IllegalArgumentException e) {
+                    errors.put(name, new SetSessionOptionsResult.Error(
+                            SetSessionOptionsResult.ErrorValue.INVALID_VALUE));
+                }
+            }
+            listener.onNext(new SetSessionOptionsResult(errors));
+            listener.onCompleted();
+        } catch (RuntimeException e) {
+            listener.onError(FlightErrors.of(e));
+        }
+    }
+
+    /** Returns the settings of the session of the client, as {@code SHOW ALL} shows them, as strings. */
+    @Override
+    public void getSessionOptions(GetSessionOptionsRequest request, CallContext context,
+            StreamListener<GetSessionOptionsResult> listener) {
+        try {
+            Map<String, SessionOptionValue> options = new LinkedHashMap<>();
+            for (Map.Entry<String, String> s : session(context).settings().entrySet()) {
+                options.put(s.getKey(), SessionOptionValueFactory.makeSessionOptionValue(s.getValue()));
+            }
+            listener.onNext(new GetSessionOptionsResult(options));
+            listener.onCompleted();
+        } catch (RuntimeException e) {
+            listener.onError(FlightErrors.of(e));
+        }
+    }
+
+    /**
+     * Forgets the session of the client and removes its cookie; the next
+     * call of the client starts a new one. Its statements and prepared
+     * statements keep the session.
+     */
+    @Override
+    public void closeSession(CloseSessionRequest request, CallContext context,
+            StreamListener<CloseSessionResult> listener) {
+        sessions.close(context, owner(context));
+        listener.onNext(new CloseSessionResult(CloseSessionResult.Status.CLOSED));
+        listener.onCompleted();
     }
 
     @Override

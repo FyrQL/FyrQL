@@ -170,8 +170,10 @@ public sealed interface BoundStatement {
      * {@code SET} or {@code RESET} of a setting of the session; its result
      * is a count of 0.
      *
-     * @param name the name of the setting as FyrQL spells it, e.g. {@code TimeZone}
-     * @param value the new value, checked, or {@code null} for the value the session started with
+     * @param name the name of the setting as FyrQL spells it, see
+     *        {@link Settings#NAMES}, or {@link Settings#ALL} for every setting
+     * @param value the new value, checked and written as {@code SHOW} shows
+     *        it, or {@code null} for the value the session started with
      */
     record Set(String name, String value) implements BoundStatement {
         public Set {

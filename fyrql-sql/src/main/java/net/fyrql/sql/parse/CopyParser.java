@@ -13,6 +13,10 @@ package net.fyrql.sql.parse;
 
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.Position;
+import net.fyrql.sql.ast.ResetVariable;
+import net.fyrql.sql.ast.SetVariable;
+import net.fyrql.sql.ast.ShowVariable;
+import net.fyrql.sql.ast.Statement;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -33,6 +37,19 @@ import java.util.Map;
  * strings, quoted names and comments, and is parsed as any query; the
  * rest of the text is read here. A value is a word, a string, a number,
  * or absent, which stands for {@code true}.
+ * <p>
+ * The statements of the settings of the session are read here as well, in
+ * the forms of PostgreSQL and DuckDB, of which JSqlParser knows only some:
+ * <pre>
+ * SET [SESSION] name { = | TO } value [;]
+ * SET TIME ZONE value [;]
+ * RESET { name | ALL } [;]
+ * SHOW { name | ALL } [;]
+ * USE source[.schema] [;]
+ * </pre>
+ * A value is a string, a number, or a name with dots; {@code DEFAULT} as
+ * the value is {@code RESET}. {@code SET LOCAL} and a list of values are
+ * not supported.
  */
 final class CopyParser {
 
@@ -88,6 +105,35 @@ final class CopyParser {
             end++;
         }
         return end - i == 4 && sql.regionMatches(true, i, "copy", 0, 4);
+    }
+
+    /**
+     * Returns the word in upper case with which a text starts if it is a
+     * statement of the settings: {@code SET}, {@code RESET}, {@code SHOW}
+     * or {@code USE}; {@code null} if it is none.
+     */
+    static String settingWord(String sql) {
+        for (String w : List.of("SET", "RESET", "SHOW", "USE")) {
+            if (word(sql, 0, w) >= 0) {
+                return w;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Reads a statement of the settings, see {@link #settingWord(String)}:
+     * {@code SET} as a {@link SetVariable}, {@code RESET} and
+     * {@code SET ... DEFAULT} as a {@link ResetVariable}, {@code SHOW} as a
+     * {@link ShowVariable}, and {@code USE} as a {@link SetVariable} of
+     * {@code search_path}.
+     *
+     * @throws SqlException with the position of the error if the text is no such statement
+     */
+    static Statement setting(String sql) {
+        CopyParser p = new CopyParser(sql);
+        p.tokenize();
+        return p.setting();
     }
 
     /**
@@ -233,6 +279,13 @@ final class CopyParser {
                 throw syntaxError(close);
             }
         }
+        end();
+        return new Copy(queryStart, queryEnd, List.copyOf(name), List.copyOf(columns), namePosition, from,
+                path.value(), position(sql, path.start()), Collections.unmodifiableMap(options));
+    }
+
+    /** Reads the end of the statement: a semicolon or none, then the end of the text. */
+    private void end() {
         boolean semicolon = peek().isSymbol(';');
         if (semicolon) {
             take();
@@ -242,8 +295,96 @@ final class CopyParser {
             throw semicolon ? new SqlException("Only one statement is supported", position(sql, end.start()))
                     : syntaxError(end);
         }
-        return new Copy(queryStart, queryEnd, List.copyOf(name), List.copyOf(columns), namePosition, from,
-                path.value(), position(sql, path.start()), Collections.unmodifiableMap(options));
+    }
+
+    private Statement setting() {
+        Token verb = take();
+        Position position = position(sql, verb.start());
+        Statement statement;
+        if (verb.is("USE")) {
+            List<Token> name = new ArrayList<>();
+            name.add(nameToken(take()));
+            while (peek().isSymbol('.')) {
+                take();
+                name.add(nameToken(take()));
+            }
+            statement = new SetVariable("search_path", dotted(name), position);
+        } else if (verb.is("SHOW") || verb.is("RESET")) {
+            String name = nameToken(take()).value();
+            statement = verb.is("SHOW") ? new ShowVariable(name, position) : new ResetVariable(name, position);
+        } else {
+            Token t = peek();
+            if (t.is("LOCAL") && isName(tokens.get(next + 1))) {
+                throw new SqlException("Not supported: SET LOCAL, as FyrQL has no transactions; SET sets a setting"
+                        + " of the session", position(sql, t.start()));
+            }
+            if (t.is("SESSION") && isName(tokens.get(next + 1))) {
+                take();
+            }
+            Token nameToken = nameToken(take());
+            String name = nameToken.value();
+            if (nameToken.is("TIME") && peek().is("ZONE")) {
+                take();
+                name = "TimeZone";
+            } else if (peek().isSymbol('=') || peek().is("TO")) {
+                take();
+            }
+            Token value = peek();
+            Token after = tokens.get(Math.min(next + 1, tokens.size() - 1));
+            if (value.is("DEFAULT") && (after.kind() == Kind.END || after.isSymbol(';'))) {
+                take();
+                statement = new ResetVariable(name, position);
+            } else {
+                statement = new SetVariable(name, value(), position);
+            }
+            if (peek().isSymbol(',')) {
+                throw new SqlException("Not supported: more than one value in SET, which sets one setting to one"
+                        + " value", position(sql, peek().start()));
+            }
+        }
+        end();
+        return statement;
+    }
+
+    /** Reads the value of {@code SET}: a string, a number with its sign, or a name with dots. */
+    private String value() {
+        Token t = take();
+        if (t.kind() == Kind.STRING || t.kind() == Kind.NUMBER) {
+            return t.value();
+        }
+        if ((t.isSymbol('-') || t.isSymbol('+')) && peek().kind() == Kind.NUMBER) {
+            return (t.isSymbol('-') ? "-" : "") + take().value();
+        }
+        if (isName(t)) {
+            List<Token> name = new ArrayList<>(List.of(t));
+            while (peek().isSymbol('.')) {
+                take();
+                name.add(nameToken(take()));
+            }
+            return name.size() == 1 ? t.value() : dotted(name);
+        }
+        throw syntaxError(t);
+    }
+
+    /** Returns a name of several parts as text, a quoted part in double quotes. */
+    private static String dotted(List<Token> name) {
+        StringBuilder sb = new StringBuilder();
+        for (Token t : name) {
+            sb.append(sb.isEmpty() ? "" : ".").append(t.kind() == Kind.QUOTED
+                    ? '"' + t.value().replace("\"", "\"\"") + '"' : t.value());
+        }
+        return sb.toString();
+    }
+
+    private static boolean isName(Token t) {
+        return t.kind() == Kind.WORD || t.kind() == Kind.QUOTED;
+    }
+
+    private Token nameToken(Token t) {
+        if (!isName(t)) {
+            throw syntaxError(t);
+        }
+        return t;
     }
 
     /** Reads {@code option [value]} into the options. */

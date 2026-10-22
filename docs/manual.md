@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.11.5 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.12.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow
 and the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -12,6 +12,7 @@ and the [README](../README.md) an overview.
 
 - [Using the engine](#using-the-engine)
   - [Engine settings](#engine-settings)
+  - [Sessions](#sessions)
 - [Connectors](#connectors)
 - [Writing and loading](#writing-and-loading)
   - [Files](#files)
@@ -145,8 +146,8 @@ take their default from a system property.
 
 | Builder method | Key in a file or URL | Default | Meaning |
 | --- | --- | --- | --- |
-| `defaultSource(String)` | `defaultSource` | the only source, if exactly one is registered | The source in which names of fewer than three parts are looked up first |
-| `defaultSchema(String)` | `defaultSchema` | `main` | The schema of the default source in which one-part names are looked up first |
+| `defaultSource(String)` | `defaultSource` | the only source, if exactly one is registered | The source in which names of fewer than three parts are looked up first, as every [session](#sessions) starts |
+| `defaultSchema(String)` | `defaultSchema` | `main` | The schema of the default source in which one-part names are looked up first, as every session starts |
 | `functions(FunctionRegistry)` | - | `FunctionRegistry.standard()` | The scalar functions of queries; an application adds its own to a registry of the built-in ones |
 | `batchSize(int)` | `batchSize` | 2048 | The rows of a batch |
 | `memoryBudget(long)` | `memoryBudget` | no limit | The bytes that the queries of the engine hold together; see [Memory budget and spilling](#memory-budget-and-spilling) |
@@ -158,12 +159,60 @@ take their default from a system property.
 | `threads(int)` | `threads` | the system property `fyrql.threads`, or the number of processors | The most threads on which one query runs at a time; see [Parallel execution](#parallel-execution) |
 | `preserveOrder(boolean)` | `preserveOrder` | `true` | Whether rows that no `ORDER BY` orders come in the order of their sources, as on one thread |
 | `implicitSources(boolean)` | `implicitSources`, in a file only | `true` | Whether the engine adds a source for each format of files on the class path; see [Formats](#formats) |
-| `timeZone(ZoneId)` | `timeZone` | the time zone of the JVM | The time zone of the session; see [Time zone](#time-zone) |
+| `timeZone(ZoneId)` | `timeZone` | the time zone of the JVM | The time zone with which every [session](#sessions) starts; see [Time zone](#time-zone) |
 | `fileAccess(FileAccess)` | `fileAccess`: `none`, `read` or `readWrite` | `READ_WRITE`; `none` in the Flight SQL server | What statements may do with the files and objects they name; see [File access](#file-access) |
 | `allowedLocations(List<String>)` | `allowedLocations` | anywhere | The directories and prefixes, such as `s3://lake/`, under which they may do it |
-| `queryTimeout(Duration)` | `queryTimeout`, such as `30s` | no limit | How long a query may run that asks for no timeout of its own; see [Time limits](#time-limits) |
+| `queryTimeout(Duration)` | `queryTimeout`, such as `30s` | no limit | How long a query may run that asks for no timeout of its own, as every [session](#sessions) starts; see [Time limits](#time-limits) |
 | `maxQueryTimeout(Duration)` | `maxQueryTimeout` | no limit | How long any query may run, also one that asks for a longer timeout |
 | `classLoader(ClassLoader)` | - | the loader of the engine | The class loader in which the engine looks for the factories of the implicit sources |
+
+### Sessions
+
+The settings that `SET` changes belong to a session, `net.fyrql.Session`: the time zone,
+the search path (the default source and schema) and the timeout of a statement. The
+engine has a session of its own, `engine.session()`, in which its methods without a
+session run, so that `engine.update("SET TimeZone = 'UTC'")` changes the time zone of the
+next `engine.sql(...)`. `engine.newSession()` starts another one with the settings of the
+builder, e.g. one per client. A session has the methods of the engine that parse, bind and
+run SQL (`sql`, `rows`, `update`, `statement`, `prepare`, `execute`, `explain` and
+`explainAnalyze`), needs no closing and may be used from several threads. Every
+connection of the [JDBC driver](#jdbc-driver) is a session, and so is every client of the
+[Flight SQL server](#flight-sql-server).
+
+```java
+Session berlin = engine.newSession();
+berlin.update("SET TimeZone = 'Europe/Berlin'");
+berlin.set("statement_timeout", "30s");
+berlin.use(new SearchPath("shop", "main"));
+List<Object[]> rows = berlin.rows("SELECT current_setting('TimeZone'), current_setting('search_path')");
+// [Europe/Berlin, shop.main]; engine.timeZone() is still the zone of the builder
+```
+
+| Setting | Values | Starts with | Meaning |
+| --- | --- | --- | --- |
+| `TimeZone` | a zone such as `Europe/Berlin` | `timeZone` of the builder | The zone of `TIMESTAMPTZ`; see [Time zone](#time-zone) |
+| `search_path` | `source`, `source.schema`, a schema of the default source, or empty | `defaultSource` and `defaultSchema` | Where names of fewer than three parts are looked up first |
+| `statement_timeout` | milliseconds, or a number with `ms`, `s`, `min`, `h` or `d`; `0` for none | `queryTimeout` | The timeout of a statement that asks for none; see [Time limits](#time-limits) |
+
+The statements of a session, with the names of the settings in any case:
+
+- `SET name = value`, `SET name TO value` and `SET SESSION name = value`, with a string, a
+  number or a name as the value; `SET TIME ZONE 'zone'`; `SET name TO DEFAULT` is
+  `RESET name`.
+- `RESET name` returns a setting to the value of the builder, `RESET ALL` all of them.
+- `SHOW name` gives one row of one column named after the setting, `SHOW ALL` one row per
+  setting with the columns `name` and `setting`; `current_setting('name')` gives the value
+  in an expression.
+- `USE source` and `USE source.schema` set the search path, as `SET search_path` does.
+
+A `search_path` of one part is a source, with the schema `main`, or else a schema of the
+default source, as `USE` in DuckDB; an empty one leaves no default source. `SHOW` writes
+it as `source.schema`, a part with a dot in double quotes, and a timeout in the largest
+unit that gives a whole number, such as `30s` or `1500ms`. `SET LOCAL` and more than one
+value in one `SET` are not supported, and another name fails with `unrecognized
+configuration parameter`. A prepared query keeps the search path of the session it was
+prepared in. The memory budget, the threads, code generation, pushdown and the access to
+files belong to the engine, not to a session.
 
 ## Connectors
 
@@ -904,9 +953,11 @@ which `CREATE TABLE memory.t AS ...` creates tables that live as long as the con
 Every connection builds an engine of its own and closes it when the connection closes; an
 application with an engine of its own opens a connection over it with
 `FyrQLDriver.connect(engine, false)`, which leaves the engine open, and
-`FyrQLDataSource` is a `DataSource` for either way. The catalog of a connection is its
-default source and the schema its default schema: `setCatalog` and `setSchema` change
-where names of fewer than three parts are looked up, for this connection only. The
+`FyrQLDataSource` is a `DataSource` for either way. Either way, a connection is a
+[session](#sessions) of its own: `SET`, `RESET` and `USE` change only it, also when
+connections share an engine. The catalog of a connection is its default source and the
+schema its default schema: `setCatalog` and `setSchema` change where names of fewer than
+three parts are looked up, for this connection only. The
 `DatabaseMetaData` shows the sources as catalogs, with the term `source`, and their
 schemas, tables and columns, with the number of rows of a table, or an estimate, in
 `REMARKS` if the source has one; it reads only the sources the catalog in the call matches.
@@ -1102,6 +1153,7 @@ server:
     alice: ${env:ALICE_PASSWORD}
   token: ${env:FYRQL_TOKEN}
   handleTimeout: 10m
+  sessionTimeout: 1h
   maxQueries: 16
 ```
 
@@ -1117,6 +1169,8 @@ server:
   not supported.
 - `handleTimeout`: how long a statement or a prepared statement stays without use until
   the server forgets it, by default 10 minutes.
+- `sessionTimeout`: how long the [session](#sessions) of a client stays without use until
+  the server forgets it, by default an hour; `0` keeps it until the server stops.
 - `maxQueries`: the most queries that run at once, by default twice the threads of the
   engine; another one fails with `RESOURCE_EXHAUSTED`. A query leaves its place before
   the server sends the end of its stream or its error, so that a client that has read
@@ -1140,7 +1194,8 @@ engine:
 
 The server prints the line `FyrQL Flight SQL server <version> listening on
 grpc+tcp://127.0.0.1:32010`, or with `grpc+tls`, and a line such as `File access from SQL:
-read under /srv/data, s3://lake/; query timeout: 30s, at most 5m`, and runs until the JVM
+read under /srv/data, s3://lake/; query timeout: 30s, at most 5m; session timeout: 1h`,
+and runs until the JVM
 ends, as with Ctrl+C, and then closes the engine. It logs the warnings and errors of Arrow and gRPC to
 the standard error stream. The JAR has the same libraries renamed as the one of the
 [JDBC driver](#dbeaver), and Arrow, gRPC, Netty and protobuf in their own packages; its
@@ -1183,6 +1238,20 @@ parse or bind, values out of range, a failed cast and a write the target refuses
 `RESOURCE_EXHAUSTED` for the memory budget and `maxQueries`, which counts statements that
 write too, `CANCELLED` for a cancelled query, `TIMED_OUT` for one past its timeout, and
 `INTERNAL` for an error of a source. All clients share the engine, with its threads and its memory budget.
+
+Every client is a [session](#sessions). The server sets the cookie
+`arrow_flight_session_id`, the one the clients of Arrow keep, finds the session of a
+client by it and forgets one that belongs to another user. The actions
+`SetSessionOptions`, `GetSessionOptions` and `CloseSession` of Flight set, show and end
+the session with the names of the settings and their values as strings; a number is taken
+as milliseconds for `statement_timeout`, an empty value resets a setting, and another name
+or a value that does not fit comes back as `INVALID_NAME` or `INVALID_VALUE`. The Flight
+SQL JDBC driver of Arrow keeps cookies by default, ADBC with the option
+`adbc.flight.sql.rpc.with_cookie_middleware` set to `"true"`, and pyarrow with
+`pyarrow.flight.ClientMiddlewareFactory` of its own. A client that keeps no cookies gets
+the settings of the engine in each call, so that its `SET` does not reach its next
+statement. A statement keeps the session it was bound in; a prepared statement binds in
+the session of the call that runs it.
 
 ### Python
 
@@ -1259,8 +1328,9 @@ names of `getColumns` of its `DatabaseMetaData`.
 ## Supported SQL
 
 Queries, the statements of [Writing](#writing-and-loading), and `EXPLAIN` and `EXPLAIN ANALYZE`
-of either, see [Observing queries](#observing-queries). Names, types and the meaning of
-the forms follow DuckDB 1.5.6.
+of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHOW` and
+`USE`, see [Sessions](#sessions). Names, types and the meaning of the forms follow DuckDB
+1.5.6.
 
 - `SELECT [DISTINCT]` with `*`, `t.*`, `* EXCLUDE (...)` and `* REPLACE (...)`; an alias
   of the select list can be used by later items, in `WHERE`, `GROUP BY`, `HAVING` and
@@ -1411,12 +1481,12 @@ in DuckDB. That zone is the one of the JVM, unless the builder sets another with
 `timeZone(ZoneId)`, the [configuration file](#configuration-file) with `timeZone` under
 `engine`, or the URL of the [JDBC driver](#jdbc-driver) with `timeZone`; the
 [Flight SQL server](#flight-sql-server) takes the one of its configuration file.
-`SET TimeZone = 'Europe/Berlin'` changes it for the engine, `RESET TimeZone` restores
-the one it was built with, and `SHOW TimeZone` and `current_setting('TimeZone')` give
-it. A zone is a name of the tz database, such as `Europe/Berlin` or `UTC`, or an
-abbreviation such as `PST`; an offset such as `+02:00` is none. The zone belongs to the
-engine: each connection of the JDBC driver has an engine of its own, and all clients of
-the Flight SQL server share one.
+`SET TimeZone = 'Europe/Berlin'` changes it for the [session](#sessions), `RESET
+TimeZone` restores the one of the builder, and `SHOW TimeZone` and
+`current_setting('TimeZone')` give it. A zone is a name of the tz database, such as
+`Europe/Berlin` or `UTC`, or an abbreviation such as `PST`; an offset such as `+02:00` is
+none. Each connection of the JDBC driver and each client of the Flight SQL server is a
+session with a zone of its own.
 
 In the zone of the session, a literal or a string without an offset is read; `now()` and
 `current_timestamp` give the instant of the query, and `current_date`, `current_time`
@@ -1963,6 +2033,11 @@ with the SQLState `HYT00` in the JDBC driver and the status `TIMED_OUT` in the
 the first timeout, cancels the queries, and ends when the engine closes; a query with the
 context `QueryContext.NONE` has no timeout. In a configuration file and the URL of the
 JDBC driver, a timeout is a duration such as `500ms`, `30s`, `5m` or `PT30S`.
+
+A [session](#sessions) has a timeout of its own, `statement_timeout`, which starts as the
+`queryTimeout` and takes its place for the statements of the session:
+`SET statement_timeout = '30s'`, or `= 30000` in milliseconds, and `0` for none. A timeout
+that a query asks for wins over it, and the `maxQueryTimeout` bounds it as every timeout.
 
 ## Memory budget and spilling
 

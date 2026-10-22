@@ -66,23 +66,23 @@ final class Writes {
      * @return the number of rows written
      * @throws SqlException if the target does not fit, or a sink refuses what it is given
      */
-    long run(BoundStatement statement, QueryContext context) {
+    long run(BoundStatement statement, QueryContext context, Session session) {
         return switch (statement) {
             case BoundStatement.Query q -> throw new IllegalArgumentException("A query writes nothing");
             case BoundStatement.Explain e -> throw new IllegalArgumentException("EXPLAIN writes nothing");
-            case BoundStatement.Copy c -> copy(c, context);
+            case BoundStatement.Copy c -> copy(c, context, session);
             case BoundStatement.CopyFrom c -> insert(new BoundStatement.Insert(c.table(), c.input()), context);
             case BoundStatement.Create c -> create(c, context);
             case BoundStatement.Insert i -> insert(i, context);
             case BoundStatement.Drop d -> drop(d);
             case BoundStatement.Set s -> {
-                engine.apply(s);
+                session.apply(s);
                 yield 0;
             }
         };
     }
 
-    private long copy(BoundStatement.Copy copy, QueryContext context) {
+    private long copy(BoundStatement.Copy copy, QueryContext context, Session session) {
         FileWriterProvider provider = engine.catalog().fileWriter(copy.format()).orElseThrow(() ->
                 new SqlException("No source writes files of the format " + copy.format()
                         + EngineCatalog.moduleHint(copy.format())
@@ -91,7 +91,7 @@ final class Writes {
         EngineCatalog.checkLocal(copy.path());
         engine.catalog().checkFileWrite(copy.path());
         Schema schema = copy.input().schema();
-        Map<String, String> options = engine.catalog().withTimeZone(copy.options());
+        Map<String, String> options = session.catalog().withTimeZone(copy.options());
         return write(() -> provider.openFile(copy.format(), copy.path(), schema, options), rows(copy.input()),
                 null, null, context);
     }

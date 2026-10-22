@@ -77,9 +77,10 @@ public final class FlightSqlServer implements AutoCloseable {
                 : Location.forGrpcInsecure(config.host(), config.port());
         this.allocator = new RootAllocator();
         try {
-            this.producer = new FyrQLFlightSqlProducer(engine, allocator, config);
+            Sessions sessions = new Sessions(engine, config.sessionTimeout(), System::nanoTime);
+            this.producer = new FyrQLFlightSqlProducer(engine, allocator, config, sessions);
             FlightServer.Builder b = FlightServer.builder(allocator, location, producer)
-                    .headerAuthenticator(SignIn.of(config));
+                    .headerAuthenticator(SignIn.of(config)).middleware(Sessions.KEY, sessions);
             if (config.tls()) {
                 b.useTls(config.certificate().toFile(), config.key().toFile());
             }
@@ -170,6 +171,11 @@ public final class FlightSqlServer implements AutoCloseable {
     /** Returns the number of statements and prepared statements the server holds handles for. */
     int handles() {
         return producer.handles();
+    }
+
+    /** Returns the number of sessions of clients the server holds. */
+    int sessions() {
+        return producer.sessions();
     }
 
     /**

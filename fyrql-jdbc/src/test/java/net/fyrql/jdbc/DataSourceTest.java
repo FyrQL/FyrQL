@@ -60,6 +60,11 @@ class DataSourceTest {
             try (Connection a = ds.getConnection(); Connection b = ds.getConnection()) {
                 assertSame(engine, a.unwrap(FyrQL.class));
                 assertSame(engine, b.unwrap(FyrQL.class));
+                String zone = engine.timeZone().getId().equals("Asia/Tokyo") ? "Europe/Berlin" : "Asia/Tokyo";
+                a.createStatement().execute("SET TimeZone = '" + zone + "'");
+                assertEquals(List.of(zone), StatementTest.rows(a.createStatement().executeQuery("SHOW TimeZone")));
+                assertEquals(List.of(engine.timeZone().getId()), StatementTest.rows(b.createStatement()
+                        .executeQuery("SHOW TimeZone")), "the connections share the engine, not its settings");
             }
             assertEquals(0, shop.closes.get());
             assertNull(((FyrQLDataSource) ds).getUrl());

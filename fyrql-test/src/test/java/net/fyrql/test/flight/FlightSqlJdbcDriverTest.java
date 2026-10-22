@@ -139,6 +139,33 @@ class FlightSqlJdbcDriverTest {
     }
 
     @Test
+    void eachConnectionOfTheDriverOfArrowIsASessionOfItsOwn() throws SQLException {
+        String url = "jdbc:arrow-flight-sql://localhost:" + server.port() + "/?useEncryption=false";
+        try (Connection berlin = DriverManager.getConnection(url);
+                Connection tokyo = DriverManager.getConnection(url);
+                Statement b = berlin.createStatement();
+                Statement t = tokyo.createStatement()) {
+            b.executeUpdate("SET TimeZone = 'Europe/Berlin'");
+            t.executeUpdate("SET TimeZone = 'Asia/Tokyo'");
+            assertEquals("Europe/Berlin", first(b, "SHOW TimeZone"));
+            assertEquals("Asia/Tokyo", first(t, "SHOW TimeZone"));
+            String now = "SELECT CAST(TIMESTAMPTZ '2024-01-01 12:00:00+00' AS VARCHAR)";
+            assertEquals("2024-01-01 13:00:00+01", first(b, now));
+            assertEquals("2024-01-01 21:00:00+09", first(t, now));
+            b.executeUpdate("USE wide");
+            assertEquals("wide.main", first(b, "SHOW search_path"));
+            assertEquals("", first(t, "SHOW search_path"));
+        }
+    }
+
+    private static String first(Statement s, String sql) throws SQLException {
+        try (ResultSet rs = s.executeQuery(sql)) {
+            assertTrue(rs.next());
+            return rs.getString(1);
+        }
+    }
+
+    @Test
     void aHugeintOf39DigitsDoesNotFitArrow() {
         SQLException e = assertThrows(SQLException.class, () -> {
             try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery("SELECT hi FROM wide.t")) {

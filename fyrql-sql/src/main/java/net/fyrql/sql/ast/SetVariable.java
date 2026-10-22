@@ -14,11 +14,13 @@ package net.fyrql.sql.ast;
 import java.util.Objects;
 
 /**
- * {@code SET name = 'value'} or {@code SET name 'value'}: a setting of the
- * session, of which FyrQL knows {@code TimeZone}.
+ * {@code SET name = 'value'} or {@code SET name TO 'value'}: a setting of
+ * the session; {@code USE source[.schema]} is a {@code SET} of
+ * {@code search_path}.
  *
  * @param name the name of the setting, as written
- * @param value the value, the text of a string or the name as written
+ * @param value the value, the text of a string, a number, or a name as
+ *        written, its parts separated by dots, a quoted part in double quotes
  * @param position the position of the statement
  */
 public record SetVariable(String name, String value, Position position) implements Statement {

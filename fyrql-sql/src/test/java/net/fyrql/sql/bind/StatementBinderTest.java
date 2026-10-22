@@ -22,6 +22,8 @@ import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.parse.SqlParser;
 import org.junit.jupiter.api.Test;
 
+import java.time.ZoneId;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -297,6 +299,70 @@ class StatementBinderTest {
         assertNull(d.table());
         assertEquals(List.of("nope"), d.name());
         assertEquals("Table with name nope does not exist@1:12", error("DROP TABLE nope"));
+    }
+
+    @Test
+    void setChecksTheValueAndWritesItAsShowShowsIt() {
+        Map<String, BoundStatement> cases = new LinkedHashMap<>();
+        cases.put("SET timezone = 'Europe/Berlin'", new BoundStatement.Set("TimeZone", "Europe/Berlin"));
+        cases.put("SET TIME ZONE 'UTC'", new BoundStatement.Set("TimeZone", "UTC"));
+        cases.put("USE mem.main", new BoundStatement.Set("search_path", "mem.main"));
+        cases.put("USE \"My.Source\"", new BoundStatement.Set("search_path", "\"My.Source\""));
+        cases.put("SET SEARCH_PATH = ' mem '", new BoundStatement.Set("search_path", "mem"));
+        cases.put("SET search_path = '\"a\"\"b\".s'", new BoundStatement.Set("search_path", "\"a\"\"b\".s"));
+        cases.put("SET search_path = ''", new BoundStatement.Set("search_path", ""));
+        cases.put("SET statement_timeout = 5000", new BoundStatement.Set("statement_timeout", "5s"));
+        cases.put("SET statement_timeout = '1500'", new BoundStatement.Set("statement_timeout", "1500ms"));
+        cases.put("SET statement_timeout = '120 s'", new BoundStatement.Set("statement_timeout", "2min"));
+        cases.put("SET statement_timeout = '2m'", new BoundStatement.Set("statement_timeout", "2min"));
+        cases.put("SET statement_timeout = 'PT24H'", new BoundStatement.Set("statement_timeout", "1d"));
+        cases.put("SET statement_timeout = 0", new BoundStatement.Set("statement_timeout", "0"));
+        cases.put("RESET TIMEZONE", new BoundStatement.Set("TimeZone", null));
+        cases.put("SET search_path TO DEFAULT", new BoundStatement.Set("search_path", null));
+        cases.put("RESET ALL", new BoundStatement.Set("ALL", null));
+        for (Map.Entry<String, BoundStatement> c : cases.entrySet()) {
+            assertEquals(c.getValue(), bind(c.getKey()), c.getKey());
+        }
+        assertEquals("unrecognized configuration parameter \"work_mem\"@1:1", error("SET work_mem = '1GB'"));
+        assertEquals("unrecognized configuration parameter \"work_mem\"@1:1", error("SHOW work_mem"));
+        assertEquals("unrecognized configuration parameter \"work_mem\"@1:1", error("RESET work_mem"));
+        assertEquals("unrecognized configuration parameter \"ALL\"@1:1", error("SET ALL = 1"));
+        assertEquals("Unknown TimeZone 'Nowhere/City'!@1:1", error("SET TimeZone = 'Nowhere/City'"));
+        assertEquals("invalid value for parameter \"search_path\": \"a.b.c\": it names a source, or a source and"
+                + " a schema, such as memory or memory.main@1:1", error("SET search_path = a.b.c"));
+        assertEquals("invalid value for parameter \"search_path\": \"a.\": a part is empty@1:1",
+                error("SET search_path = 'a.'"));
+        String invalid = "\": it is a number of milliseconds, or one with the unit ms, s, min, h or d, such as 30s@1:1";
+        assertEquals("invalid value for parameter \"statement_timeout\": \"-1" + invalid,
+                error("SET statement_timeout = -1"));
+        assertEquals("invalid value for parameter \"statement_timeout\": \"5 parsecs" + invalid,
+                error("SET statement_timeout = '5 parsecs'"));
+    }
+
+    @Test
+    void showAndCurrentSettingReadTheSettingsOfTheSession() {
+        Binder binder = new Binder(CATALOG, FunctionRegistry.standard(), () -> ZoneId.of("Asia/Tokyo"),
+                name -> name.equals(Settings.SEARCH_PATH) ? "mem.main" : "30s");
+        PlanNode.Values all = assertInstanceOf(PlanNode.Values.class, assertInstanceOf(BoundStatement.Query.class,
+                binder.bind(SqlParser.parseStatement("SHOW ALL"))).plan());
+        assertEquals(Schema.of(new Schema.Field("name", DataType.VARCHAR),
+                new Schema.Field("setting", DataType.VARCHAR)), all.schema());
+        assertEquals(List.of(List.of("TimeZone", "Asia/Tokyo"), List.of("search_path", "mem.main"),
+                List.of("statement_timeout", "30s")), all.rows().stream().map(Arrays::asList).toList());
+        PlanNode.Values one = assertInstanceOf(PlanNode.Values.class, assertInstanceOf(BoundStatement.Query.class,
+                binder.bind(SqlParser.parseStatement("SHOW Statement_Timeout"))).plan());
+        assertEquals(Schema.of(new Schema.Field("statement_timeout", DataType.VARCHAR)), one.schema());
+        assertEquals(List.of(List.of("30s")), one.rows().stream().map(Arrays::asList).toList());
+        PlanNode.Project p = assertInstanceOf(PlanNode.Project.class, binder.bind(SqlParser.parse(
+                "SELECT current_setting('SEARCH_PATH'), current_setting('statement_timeout'),"
+                        + " current_setting('timezone')")));
+        assertEquals(List.of(new Expression.Literal(DataType.VARCHAR, "mem.main"),
+                new Expression.Literal(DataType.VARCHAR, "30s"),
+                new Expression.Literal(DataType.VARCHAR, "Asia/Tokyo")),
+                p.columns().stream().map(PlanNode.NamedExpression::expression).toList());
+        assertEquals(List.of(List.of("search_path", ""), List.of("statement_timeout", "0")),
+                assertInstanceOf(PlanNode.Values.class, assertInstanceOf(BoundStatement.Query.class,
+                        bind("SHOW ALL")).plan()).rows().stream().skip(1).map(Arrays::asList).toList());
     }
 
     @Test

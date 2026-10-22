@@ -15,9 +15,9 @@ import java.util.Objects;
 
 /**
  * {@code SHOW name}: the value of a setting of the session, as a query of
- * one row.
+ * one row; {@code SHOW ALL} every setting, one per row.
  *
- * @param name the name of the setting, as written
+ * @param name the name of the setting, as written, or {@code ALL}
  * @param position the position of the statement
  */
 public record ShowVariable(String name, Position position) implements Statement {

@@ -33,6 +33,7 @@ import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLWarning;
 import java.sql.Statement;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -318,6 +319,54 @@ class ConnectionTest {
             assertEquals("Other_id", column(c, "SELECT * FROM t"));
             assertEquals("main_id", column(c, "SELECT * FROM main.t"));
             assertEquals("Other_id", column(c, "SELECT * FROM two.other.t"));
+        }
+    }
+
+    @Test
+    void connectionsOverOneEngineAreSessionsOfTheirOwn() throws SQLException {
+        try (FyrQL engine = FyrQL.builder().register(new CountingConnector("shop"))
+                .register(new CountingConnector("crm", 3, 10)).timeZone(ZoneId.of("UTC")).build();
+                Connection berlin = FyrQLDriver.connect(engine, false);
+                Connection tokyo = FyrQLDriver.connect(engine, false);
+                Statement b = berlin.createStatement();
+                Statement t = tokyo.createStatement()) {
+            assertFalse(b.execute("SET TimeZone = 'Europe/Berlin'"));
+            assertEquals(0, t.executeUpdate("SET TIME ZONE 'Asia/Tokyo'"));
+            String sql = "SELECT TIMESTAMPTZ '2024-01-01 12:00:00+00', current_setting('TimeZone')";
+            assertEquals(List.of("2024-01-01 13:00:00+01 Europe/Berlin"), StatementTest.rows(b.executeQuery(sql)));
+            assertEquals(List.of("2024-01-01 21:00:00+09 Asia/Tokyo"), StatementTest.rows(t.executeQuery(sql)));
+            assertEquals(ZoneId.of("UTC"), engine.timeZone(), "the engine keeps its time zone");
+
+            b.execute("USE crm");
+            assertEquals("crm", berlin.getCatalog());
+            assertNull(tokyo.getCatalog());
+            assertEquals(List.of("r1", "r2", "r3"), StatementTest.rows(b.executeQuery("SELECT name FROM t")));
+            tokyo.setCatalog("shop");
+            assertEquals(List.of("shop.main"), StatementTest.rows(t.executeQuery("SHOW search_path")));
+            assertEquals(List.of("TimeZone Europe/Berlin", "search_path crm.main", "statement_timeout 0"),
+                    StatementTest.rows(b.executeQuery("SHOW ALL")));
+            b.execute("RESET ALL");
+            assertNull(berlin.getCatalog());
+            assertEquals(List.of("UTC"), StatementTest.rows(b.executeQuery("SHOW TimeZone")));
+            assertEquals(List.of("Asia/Tokyo"), StatementTest.rows(t.executeQuery("SHOW TimeZone")));
+            assertEquals("shop", tokyo.getCatalog());
+            SQLException e = assertThrows(SQLException.class, () -> b.execute("USE erp"));
+            assertTrue(e.getMessage().startsWith("No source or schema erp; the sources are "), e.getMessage());
+        }
+    }
+
+    @Test
+    void theTimeoutOfTheSessionEndsItsQueries() throws SQLException {
+        try (FyrQL engine = FyrQL.builder().register(new CancelTest.SlowConnector("endless", true)).build();
+                Connection c = FyrQLDriver.connect(engine, false);
+                Connection other = FyrQLDriver.connect(engine, false);
+                Statement s = c.createStatement()) {
+            s.execute("SET statement_timeout = '300ms'");
+            SQLException e = assertThrows(SQLException.class, () -> s.executeQuery("SELECT count(*) FROM endless.t"));
+            assertEquals(SqlStates.TIMEOUT, e.getSQLState());
+            assertEquals(List.of("300ms"), StatementTest.rows(s.executeQuery("SHOW statement_timeout")));
+            assertEquals(List.of("0"), StatementTest.rows(other.createStatement().executeQuery(
+                    "SHOW statement_timeout")), "another connection keeps its own timeout");
         }
     }
 

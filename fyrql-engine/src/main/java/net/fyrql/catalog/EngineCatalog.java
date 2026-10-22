@@ -143,6 +143,16 @@ public final class EngineCatalog implements CatalogView {
         return searchPath.equals(searchPath()) ? this : new EngineCatalog(sources, searchPath, zone, policy);
     }
 
+    /**
+     * Returns a catalog over the same sources with a search path, in the
+     * time zone of a session, which it reads from that session.
+     *
+     * @throws IllegalArgumentException if the default source of the path is not registered
+     */
+    public EngineCatalog withSession(SearchPath searchPath, Supplier<ZoneId> zone) {
+        return new EngineCatalog(sources, searchPath, zone, policy);
+    }
+
     /** Returns which locations table functions and {@code COPY} may read and write. */
     public FileAccessPolicy fileAccessPolicy() {
         return policy;

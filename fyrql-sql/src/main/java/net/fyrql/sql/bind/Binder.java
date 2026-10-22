@@ -74,6 +74,7 @@ public final class Binder {
     private final CatalogView catalog;
     private final FunctionRegistry functions;
     private final Supplier<ZoneId> zone;
+    private final Settings settings;
 
     /** A binder in the time zone of the JVM. */
     public Binder(CatalogView catalog, FunctionRegistry functions) {
@@ -82,9 +83,19 @@ public final class Binder {
 
     /** A binder in the time zone the supplier gives at each binding, the time zone of the session. */
     public Binder(CatalogView catalog, FunctionRegistry functions, Supplier<ZoneId> zone) {
+        this(catalog, functions, zone, Settings.DEFAULT);
+    }
+
+    /**
+     * A binder in the time zone the supplier gives at each binding, with
+     * the other settings of the session, which {@code SHOW} and
+     * {@code current_setting} read at each binding.
+     */
+    public Binder(CatalogView catalog, FunctionRegistry functions, Supplier<ZoneId> zone, Settings settings) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.functions = Objects.requireNonNull(functions, "functions");
         this.zone = Objects.requireNonNull(zone, "zone");
+        this.settings = Objects.requireNonNull(settings, "settings");
     }
 
     /**
@@ -238,6 +249,6 @@ public final class Binder {
     }
 
     private BindContext context(Instant now, ZoneId zone, ParameterTypes parameters) {
-        return new BindContext(functions, new HashSet<>(functions.names()), now, zone, parameters);
+        return new BindContext(functions, new HashSet<>(functions.names()), now, zone, settings, parameters);
     }
 }

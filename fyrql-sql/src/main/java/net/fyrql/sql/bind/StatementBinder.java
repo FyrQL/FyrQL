@@ -84,24 +84,55 @@ final class StatementBinder {
             case CreateTable c -> create(c);
             case InsertInto i -> insert(i);
             case DropTable d -> drop(d);
-            case SetVariable s -> new BoundStatement.Set(setting(s.name(), s.position()),
-                    ExpressionBinder.check(() -> zoneName(s.value(), s.position()), s.position(), null));
-            case ResetVariable r -> new BoundStatement.Set(setting(r.name(), r.position()), null);
+            case SetVariable s -> set(s);
+            case ResetVariable r -> new BoundStatement.Set(setting(r.name(), r.position(), true), null);
             case Explain e -> new BoundStatement.Explain(e.analyze(), statement(e.statement()));
-            case ShowVariable s -> {
-                String name = setting(s.name(), s.position());
-                yield new BoundStatement.Query(new PlanNode.Values(Schema.of(new Schema.Field(name, DataType.VARCHAR)),
-                        List.<Object[]>of(new Object[] {ZonedDates.name(context.zone())})));
-            }
+            case ShowVariable s -> show(s);
         };
     }
 
-    /** The name of a setting as FyrQL spells it; {@code TimeZone} is the only one. */
-    private static String setting(String name, Position position) {
-        if (!name.equalsIgnoreCase("TimeZone")) {
+    /**
+     * The name of a setting as FyrQL spells it, see {@link Settings#NAMES}.
+     *
+     * @param all whether {@code ALL} may stand for every setting
+     */
+    private static String setting(String name, Position position, boolean all) {
+        if (all && name.equalsIgnoreCase(Settings.ALL)) {
+            return Settings.ALL;
+        }
+        String setting = Settings.name(name);
+        if (setting == null) {
             throw new SqlException("unrecognized configuration parameter \"" + name + "\"", position);
         }
-        return "TimeZone";
+        return setting;
+    }
+
+    /** {@code SET}, with the value checked and written as {@code SHOW} shows it. */
+    private BoundStatement set(SetVariable s) {
+        String name = setting(s.name(), s.position(), false);
+        String value = switch (name) {
+            case Settings.TIME_ZONE -> zoneName(s.value(), s.position());
+            case Settings.SEARCH_PATH -> ExpressionBinder.check(
+                    () -> Settings.searchPathText(Settings.searchPath(s.value())), s.position(), null);
+            default -> ExpressionBinder.check(() -> Settings.timeoutText(Settings.timeout(s.value())),
+                    s.position(), null);
+        };
+        return new BoundStatement.Set(name, value);
+    }
+
+    /** {@code SHOW}: a row of the value, or for {@code ALL} a row of the name and value of each setting. */
+    private BoundStatement show(ShowVariable s) {
+        String name = setting(s.name(), s.position(), true);
+        if (name.equals(Settings.ALL)) {
+            List<Object[]> rows = new ArrayList<>();
+            for (String n : Settings.NAMES) {
+                rows.add(new Object[] {n, context.setting(n)});
+            }
+            return new BoundStatement.Query(new PlanNode.Values(Schema.of(new Schema.Field("name", DataType.VARCHAR),
+                    new Schema.Field("setting", DataType.VARCHAR)), rows));
+        }
+        return new BoundStatement.Query(new PlanNode.Values(Schema.of(new Schema.Field(name, DataType.VARCHAR)),
+                List.<Object[]>of(new Object[] {context.setting(name)})));
     }
 
     /** The name of a time zone as the session shows it. */

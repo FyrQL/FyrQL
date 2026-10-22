@@ -15,9 +15,6 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CreateTable.ColumnDefinition;
 import net.fyrql.sql.ast.DropTable;
-import net.fyrql.sql.ast.ResetVariable;
-import net.fyrql.sql.ast.SetVariable;
-import net.fyrql.sql.ast.ShowVariable;
 import net.fyrql.sql.ast.FromItem;
 import net.fyrql.sql.ast.InsertInto;
 import net.fyrql.sql.ast.OrderItem;
@@ -101,9 +98,6 @@ import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.create.table.CreateTable;
-import net.sf.jsqlparser.statement.ResetStatement;
-import net.sf.jsqlparser.statement.SetStatement;
-import net.sf.jsqlparser.statement.ShowStatement;
 import net.sf.jsqlparser.statement.drop.Drop;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.AllColumns;
@@ -182,9 +176,6 @@ final class JSqlParserAdapter {
             throw new SqlException("Only queries are supported, not " + words(statement), position(statement));
         }
         return switch (statement) {
-            case SetStatement s -> set(s);
-            case ShowStatement s -> new ShowVariable(s.getName(), position(statement));
-            case ResetStatement r -> new ResetVariable(r.getName(), position(statement));
             case CreateTable c -> createTable(c);
             case Insert i -> insert(i);
             case Drop d when "TABLE".equalsIgnoreCase(d.getType()) -> drop(d);
@@ -193,16 +184,6 @@ final class JSqlParserAdapter {
             default -> throw new SqlException("Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are"
                     + " supported, not " + words(statement), position(statement));
         };
-    }
-
-    /** {@code SET name = value} or {@code SET name value}, of one setting and one value. */
-    private SetVariable set(SetStatement s) {
-        if (s.getCount() != 1 || s.getExpressions(0).size() != 1 || s.getEffectParameter() != null) {
-            throw unsupported("this form of SET", s);
-        }
-        Expression value = s.getExpressions(0).get(0);
-        String text = value instanceof StringValue v ? v.getValue() : value.toString();
-        return new SetVariable(String.valueOf(s.getName(0)), text, position(s));
     }
 
     // ---- statements that write

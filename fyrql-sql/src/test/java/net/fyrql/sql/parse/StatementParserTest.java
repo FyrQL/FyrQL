@@ -22,6 +22,9 @@ import net.fyrql.sql.ast.InsertInto;
 import net.fyrql.sql.ast.Position;
 import net.fyrql.sql.ast.Query;
 import net.fyrql.sql.ast.QueryBody;
+import net.fyrql.sql.ast.ResetVariable;
+import net.fyrql.sql.ast.SetVariable;
+import net.fyrql.sql.ast.ShowVariable;
 import net.fyrql.sql.ast.SqlPrinter;
 import net.fyrql.sql.ast.Statement;
 import org.junit.jupiter.api.Test;
@@ -37,7 +40,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** The statements besides queries: {@code CREATE TABLE}, {@code INSERT INTO} and {@code DROP TABLE}. */
+/**
+ * The statements besides queries: {@code CREATE TABLE}, {@code INSERT INTO},
+ * {@code DROP TABLE}, and {@code SET}, {@code RESET}, {@code SHOW} and
+ * {@code USE} of the settings of the session.
+ */
 class StatementParserTest {
 
     private static Statement parse(String sql) {
@@ -191,9 +198,62 @@ class StatementParserTest {
     }
 
     @Test
+    void settingsOfTheSession() {
+        Position start = new Position(1, 1);
+        Map<String, Statement> cases = new LinkedHashMap<>();
+        cases.put("SET TimeZone = 'Europe/Berlin'", new SetVariable("TimeZone", "Europe/Berlin", start));
+        cases.put("set timezone to 'UTC';", new SetVariable("timezone", "UTC", start));
+        cases.put("SET TimeZone 'UTC'", new SetVariable("TimeZone", "UTC", start));
+        cases.put("SET SESSION TimeZone = UTC", new SetVariable("TimeZone", "UTC", start));
+        cases.put("SET TIME ZONE 'America/New_York'", new SetVariable("TimeZone", "America/New_York", start));
+        cases.put("SET \"TimeZone\" = \"UTC\"", new SetVariable("TimeZone", "UTC", start));
+        cases.put("SET statement_timeout = 5000", new SetVariable("statement_timeout", "5000", start));
+        cases.put("SET statement_timeout TO '5min'", new SetVariable("statement_timeout", "5min", start));
+        cases.put("SET search_path = mem.main", new SetVariable("search_path", "mem.main", start));
+        cases.put("SET search_path = \"My.Source\".s", new SetVariable("search_path", "\"My.Source\".s", start));
+        cases.put("SET search_path = ''", new SetVariable("search_path", "", start));
+        cases.put("SET extra_float_digits = -3", new SetVariable("extra_float_digits", "-3", start));
+        cases.put("SET TimeZone TO DEFAULT", new ResetVariable("TimeZone", start));
+        cases.put("RESET TimeZone", new ResetVariable("TimeZone", start));
+        cases.put("RESET ALL;", new ResetVariable("ALL", start));
+        cases.put("SHOW search_path", new ShowVariable("search_path", start));
+        cases.put("  show all", new ShowVariable("all", new Position(1, 3)));
+        cases.put("USE mem", new SetVariable("search_path", "mem", start));
+        cases.put("USE mem.main;", new SetVariable("search_path", "mem.main", start));
+        cases.put("USE \"My\".\"S\"", new SetVariable("search_path", "\"My\".\"S\"", start));
+        for (Map.Entry<String, Statement> c : cases.entrySet()) {
+            assertEquals(c.getValue(), parse(c.getKey()), c.getKey());
+        }
+        Explain e = assertInstanceOf(Explain.class, parse("EXPLAIN SET TimeZone = 'UTC'"));
+        assertEquals(new SetVariable("TimeZone", "UTC", new Position(1, 9)), e.statement());
+    }
+
+    @Test
+    void settingErrors() {
+        Map<String, String> cases = new LinkedHashMap<>();
+        cases.put("SET LOCAL TimeZone = 'UTC'",
+                "Not supported: SET LOCAL, as FyrQL has no transactions; SET sets a setting of the session@1:5");
+        cases.put("SET a = 1, b = 2",
+                "Not supported: more than one value in SET, which sets one setting to one value@1:10");
+        cases.put("SET search_path = public, pg_catalog",
+                "Not supported: more than one value in SET, which sets one setting to one value@1:25");
+        cases.put("SET TimeZone = 'UTC'; SET TimeZone = 'UTC'", "Only one statement is supported@1:23");
+        cases.put("SET TimeZone =", "Syntax error at end of input@1:15");
+        cases.put("SET = 1", "Syntax error at or near \"=\"@1:5");
+        cases.put("SET statement_timeout = 5s", "Syntax error at or near \"s\"@1:26");
+        cases.put("SHOW TABLES FROM x", "Syntax error at or near \"FROM\"@1:13");
+        cases.put("USE 'mem'", "Syntax error at or near \"'mem'\"@1:5");
+        for (Map.Entry<String, String> c : cases.entrySet()) {
+            SqlException e = assertThrows(SqlException.class, () -> parse(c.getKey()), c.getKey());
+            assertEquals(c.getValue(), e.reason() + "@" + e.position().line() + ":" + e.position().column(),
+                    c.getKey());
+        }
+    }
+
+    @Test
     void theQueryParserTakesQueriesOnly() {
         for (String sql : List.of("CREATE TABLE t AS SELECT 1", "INSERT INTO t VALUES (1)", "DROP TABLE t",
-                "EXPLAIN SELECT 1")) {
+                "EXPLAIN SELECT 1", "SET TimeZone = 'UTC'", "SHOW ALL", "USE mem")) {
             SqlException e = assertThrows(SqlException.class, () -> SqlParser.parse(sql), sql);
             assertTrue(e.reason().startsWith("Only queries are supported, not "), e.reason());
         }

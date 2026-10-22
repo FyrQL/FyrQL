@@ -99,7 +99,7 @@ class QueryTimeoutTest {
     }
 
     /** Runs a statement that must time out, and returns after how many milliseconds it did. */
-    private static long timesOut(Executable statement) {
+    static long timesOut(Executable statement) {
         long start = System.nanoTime();
         RuntimeException e = assertThrows(RuntimeException.class, statement);
         long millis = (System.nanoTime() - start) / 1_000_000;

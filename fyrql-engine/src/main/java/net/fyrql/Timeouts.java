@@ -61,7 +61,17 @@ final class Timeouts implements AutoCloseable {
      * of the engine, at most the upper bound; {@code null} for none.
      */
     Duration effective(Duration requested) {
-        Duration t = requested != null ? requested : queryTimeout;
+        return effective(requested, queryTimeout);
+    }
+
+    /**
+     * Returns the timeout of a query: the one it asks for, or else the one
+     * of its session, at most the upper bound; {@code null} for none.
+     *
+     * @param session the timeout of the session, {@code null} for none
+     */
+    Duration effective(Duration requested, Duration session) {
+        Duration t = requested != null ? requested : session;
         return maxQueryTimeout != null && (t == null || t.compareTo(maxQueryTimeout) > 0) ? maxQueryTimeout : t;
     }
 
@@ -71,10 +81,11 @@ final class Timeouts implements AutoCloseable {
      * passed already; the caller stops the returned timeout, see
      * {@link #stop}, when the query ends before.
      *
+     * @param session the timeout of the session of the query, {@code null} for none
      * @return the timeout, or {@code null} if the query has none or cannot be canceled
      */
-    ScheduledFuture<?> start(QueryContext context) {
-        Duration t = effective(context.timeout());
+    ScheduledFuture<?> start(QueryContext context, Duration session) {
+        Duration t = effective(context.timeout(), session);
         if (t == null || !context.isCancellable()) {
             return null;
         }

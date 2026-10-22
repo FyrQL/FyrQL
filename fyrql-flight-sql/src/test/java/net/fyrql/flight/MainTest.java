@@ -70,6 +70,7 @@ class MainTest {
                 server:
                   port: 1
                   handleTimeout: 1m
+                  sessionTimeout: 0
                 """);
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         PrintStream out = new PrintStream(bytes, true, StandardCharsets.UTF_8);
@@ -78,8 +79,8 @@ class MainTest {
                 BufferAllocator allocator = new RootAllocator()) {
             int port = running.server().port();
             assertEquals("FyrQL Flight SQL server " + FlightSqlServer.VERSION + " listening on grpc+tcp://127.0.0.1:"
-                    + port + System.lineSeparator() + "File access from SQL: none; query timeout: none"
-                    + System.lineSeparator(), bytes.toString(StandardCharsets.UTF_8));
+                    + port + System.lineSeparator() + "File access from SQL: none; query timeout: none;"
+                    + " session timeout: none" + System.lineSeparator(), bytes.toString(StandardCharsets.UTF_8));
             try (FlightSqlClient client = new FlightSqlClient(FlightClient.builder(allocator,
                     Location.forGrpcInsecure("127.0.0.1", port)).build())) {
                 assertEquals(List.of(List.of(1)), TestServer.comparable(TestServer.rows(client,
@@ -115,7 +116,7 @@ class MainTest {
                 FlightSqlClient client = new FlightSqlClient(FlightClient.builder(allocator,
                         Location.forGrpcInsecure("127.0.0.1", running.server().port())).build())) {
             assertTrue(bytes.toString(StandardCharsets.UTF_8).endsWith("File access from SQL: readWrite under "
-                    + data.toRealPath() + "; query timeout: 30s, at most 5m" + System.lineSeparator()),
+                    + data.toRealPath() + "; query timeout: 30s, at most 5m; session timeout: 1h" + System.lineSeparator()),
                     bytes.toString(StandardCharsets.UTF_8));
             TestServer.fails(FlightStatusCode.UNAUTHORIZED, "Writing " + outside + " is not allowed: it is not under"
                     + " the allowed locations", () -> client.executeUpdate("COPY (SELECT 1 AS k) TO '" + outside

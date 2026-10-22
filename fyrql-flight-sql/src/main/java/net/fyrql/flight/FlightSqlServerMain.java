@@ -180,7 +180,9 @@ public final class FlightSqlServerMain {
             throw e;
         }
         out.println("FyrQL Flight SQL server " + FlightSqlServer.VERSION + " listening on " + s.uri());
-        out.println("File access from SQL: " + fileAccess(engine) + "; query timeout: " + timeout(engine));
+        out.println("File access from SQL: " + fileAccess(engine) + "; query timeout: " + timeout(engine)
+                + "; session timeout: " + (s.config().sessionTimeout().isZero() ? "none"
+                : text(s.config().sessionTimeout())));
         return new Running(s, engine);
     }
 

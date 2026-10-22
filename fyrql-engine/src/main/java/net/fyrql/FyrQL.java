@@ -36,7 +36,6 @@ import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
-import net.fyrql.core.value.ZonedDates;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.Codegen;
 import net.fyrql.exec.CodegenMode;
@@ -93,6 +92,11 @@ import java.util.concurrent.ScheduledFuture;
  * expressions, filters and keys of operators that process many rows; see
  * {@link Builder#codegen}.
  * <p>
+ * The settings that {@code SET} changes, the time zone, the search path
+ * and the timeout of a statement, belong to a {@link Session}: the methods
+ * of the engine run in its own session, see {@link #session()}, and
+ * {@link #newSession()} starts another one, e.g. one per client.
+ * <p>
  * Besides queries, {@link #sql(String)} runs the statements that write:
  * {@code COPY ... TO} a file, and {@code CREATE TABLE [AS]},
  * {@code INSERT INTO}, {@code COPY ... FROM} a file and {@code DROP TABLE}
@@ -127,7 +131,6 @@ public final class FyrQL implements AutoCloseable {
     private final EngineCatalog catalog;
     private final CatalogTables catalogTables;
     private final FunctionRegistry functions;
-    private final Binder binder;
     private final Optimizer optimizer;
     private final Executor executor;
     private final Codegen codegen;
@@ -136,9 +139,10 @@ public final class FyrQL implements AutoCloseable {
     private final SpillDirectory spill;
     /** The timeouts of the queries. */
     private final Timeouts timeouts;
-    /** The time zone the session starts with, to which {@code RESET TimeZone} returns. */
+    /** The time zone every session starts with, to which {@code RESET TimeZone} returns. */
     private final ZoneId initialZone;
-    private volatile ZoneId zone;
+    /** The session of the engine, in which its methods without a session run. */
+    private final Session session;
 
     private FyrQL(Map<String, Connector> connectors, SearchPath searchPath, FunctionRegistry functions,
             MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options, int threads,
@@ -150,8 +154,6 @@ public final class FyrQL implements AutoCloseable {
         this.catalogTables = new CatalogTables(this.connectors);
         this.functions = functions;
         this.initialZone = zone;
-        this.zone = zone;
-        this.binder = new Binder(catalog, functions, this::timeZone);
         this.optimizer = new Optimizer(this::connector, options);
         this.codegen = codegen;
         this.writes = new Writes(this);
@@ -181,9 +183,14 @@ public final class FyrQL implements AutoCloseable {
                 return FyrQL.this.open(remote);
             }
         }, budget, batchSize, codegen, threads, preserveOrder, spill);
+        this.session = new Session(this, zone, timeouts.queryTimeout(), catalog);
     }
 
-    /** Returns the catalog: names along the search path, columns, and table functions. */
+    /**
+     * Returns the catalog: names along the search path of the builder,
+     * columns, and table functions, in the time zone of the session of the
+     * engine.
+     */
     public EngineCatalog catalog() {
         return catalog;
     }
@@ -283,19 +290,35 @@ public final class FyrQL implements AutoCloseable {
     }
 
     /**
-     * Returns the time zone of the session, in which values of
+     * Returns the time zone of the session of the engine, in which values of
      * {@code TIMESTAMP WITH TIME ZONE} are shown and their calendar computes:
-     * that of the builder, until {@code SET TimeZone} changes it. The engine
-     * is one session; every connection of the JDBC driver has an engine of
-     * its own.
+     * that of the builder, until {@code SET TimeZone} through a method of the
+     * engine changes it; see {@link Session#timeZone()}.
      */
     public ZoneId timeZone() {
-        return zone;
+        return session.timeZone();
     }
 
-    /** Applies {@code SET} or {@code RESET} of a setting, the time zone. */
-    void apply(BoundStatement.Set setting) {
-        zone = setting.value() == null ? initialZone : ZonedDates.zone(setting.value());
+    /** Returns the time zone of the builder, with which every session starts. */
+    ZoneId initialZone() {
+        return initialZone;
+    }
+
+    /**
+     * Returns the session of the engine, in which its methods without a
+     * session run, such as {@link #sql(String)} and {@link #update(String)}:
+     * {@code SET} through them changes this session.
+     */
+    public Session session() {
+        return session;
+    }
+
+    /**
+     * Starts a session with the settings of the builder, e.g. for a client;
+     * {@code SET} in it changes only it. A session needs no closing.
+     */
+    public Session newSession() {
+        return new Session(this, initialZone, timeouts.queryTimeout(), catalog.searchPath());
     }
 
     /** Returns the connector of a source. */
@@ -349,7 +372,7 @@ public final class FyrQL implements AutoCloseable {
      *         query; the message names the position in the text
      */
     public PlanNode plan(String sql) {
-        return binder.bind(SqlParser.parse(sql));
+        return session.plan(sql);
     }
 
     /**
@@ -361,12 +384,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public PlanNode plan(String sql, SearchPath searchPath) {
-        return binder(searchPath).bind(SqlParser.parse(sql));
-    }
-
-    private Binder binder(SearchPath searchPath) {
-        EngineCatalog c = catalog.withSearchPath(searchPath);
-        return c == catalog ? binder : new Binder(c, functions, this::timeZone);
+        return session.binder(searchPath).bind(SqlParser.parse(sql));
     }
 
     /**
@@ -378,7 +396,7 @@ public final class FyrQL implements AutoCloseable {
      *         message names the position in the text
      */
     public BoundStatement statement(String sql) {
-        return binder.bind(SqlParser.parseStatement(sql));
+        return session.statement(sql);
     }
 
     /**
@@ -391,7 +409,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public BoundStatement statement(String sql, SearchPath searchPath) {
-        return binder(searchPath).bind(SqlParser.parseStatement(sql));
+        return session.binder(searchPath).bind(SqlParser.parseStatement(sql));
     }
 
     /**
@@ -414,7 +432,7 @@ public final class FyrQL implements AutoCloseable {
      *         parameter has no type or one with a {@code MAP}
      */
     public PreparedQuery prepare(String sql) {
-        return prepare(sql, catalog.searchPath());
+        return session.prepare(sql);
     }
 
     /**
@@ -426,8 +444,13 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public PreparedQuery prepare(String sql, SearchPath searchPath) {
+        return prepare(sql, searchPath, session.binder(searchPath));
+    }
+
+    /** Prepares a query with a binder of a session along a search path. */
+    PreparedQuery prepare(String sql, SearchPath searchPath, Binder binder) {
         SqlParser.ParameterizedStatement parsed = SqlParser.parseStatementWithParameters(sql);
-        Binder.PreparedStatement bound = binder(searchPath).prepare(parsed.statement(), parsed.parameters());
+        Binder.PreparedStatement bound = binder.prepare(parsed.statement(), parsed.parameters());
         List<DataType> types = bound.parameterTypes();
         for (int i = 0; i < types.size(); i++) {
             if (Parameters.hasMap(types.get(i))) {
@@ -457,7 +480,7 @@ public final class FyrQL implements AutoCloseable {
      *         a change of a source, or is no query
      */
     public PlanNode plan(PreparedQuery query, List<?> values) {
-        return conform(plan(render(query, values), query.searchPath()), query.schema());
+        return session.plan(query, values);
     }
 
     /**
@@ -469,13 +492,11 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException             if the statement does not bind any more
      */
     public BoundStatement statement(PreparedQuery query, List<?> values) {
-        BoundStatement statement = statement(render(query, values), query.searchPath());
-        return statement instanceof BoundStatement.Query q
-                ? new BoundStatement.Query(conform(q.plan(), query.schema())) : statement;
+        return session.statement(query, values);
     }
 
     /** Returns the text of a prepared statement with a literal of each value in place of its parameter. */
-    private static String render(PreparedQuery query, List<?> values) {
+    static String render(PreparedQuery query, List<?> values) {
         List<DataType> types = query.parameterTypes();
         if (values.size() != types.size()) {
             throw new IllegalArgumentException("The query has " + types.size() + " parameters, not " + values.size()
@@ -498,7 +519,7 @@ public final class FyrQL implements AutoCloseable {
      * {@code NULL} folds an expression into a bare {@code NULL}, typed
      * {@code INTEGER}.
      */
-    private static PlanNode conform(PlanNode plan, Schema schema) {
+    static PlanNode conform(PlanNode plan, Schema schema) {
         Schema actual = plan.schema();
         if (actual.size() != schema.size()) {
             throw new IllegalStateException("The query has the columns " + actual + ", not " + schema);
@@ -529,7 +550,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException             if the statement does not bind any more, or a write fails
      */
     public QueryResult execute(PreparedQuery query, List<?> values) {
-        return execute(statement(query, values), new QueryContext());
+        return session.execute(query, values);
     }
 
     /**
@@ -541,7 +562,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException             if the statement does not bind any more, or a write fails
      */
     public QueryResult execute(PreparedQuery query, List<?> values, QueryContext context) {
-        return execute(statement(query, values), context);
+        return session.execute(query, values, context);
     }
 
     /**
@@ -565,7 +586,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException             if the statement does not bind any more, is a query, or fails
      */
     public long update(PreparedQuery query, List<?> values) {
-        return update(statement(query, values), new QueryContext());
+        return session.update(query, values);
     }
 
     /**
@@ -575,7 +596,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException if the statement cannot be parsed or bound, or a write fails
      */
     public QueryResult sql(String sql) {
-        return execute(statement(sql), new QueryContext(), sql);
+        return session.sql(sql);
     }
 
     /**
@@ -586,7 +607,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public QueryResult sql(String sql, SearchPath searchPath) {
-        return execute(statement(sql, searchPath), new QueryContext(), sql);
+        return execute(statement(sql, searchPath), new QueryContext(), sql, session);
     }
 
     /**
@@ -608,7 +629,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException if the statement cannot be parsed or bound, is a query, or fails
      */
     public long update(String sql) {
-        return update(statement(sql), new QueryContext(), sql);
+        return session.update(sql);
     }
 
     /**
@@ -620,7 +641,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public long update(String sql, SearchPath searchPath) {
-        return update(statement(sql, searchPath), new QueryContext(), sql);
+        return update(statement(sql, searchPath), new QueryContext(), sql, session);
     }
 
     /**
@@ -631,26 +652,27 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException if the statement is a query or {@code EXPLAIN}, or the write fails
      */
     public long update(BoundStatement statement, QueryContext context) {
-        return update(statement, context, null);
+        return update(statement, context, null, session);
     }
 
     /**
-     * Runs a statement that writes, see {@link #update(BoundStatement, QueryContext)},
-     * as an event of Java Flight Recorder, if one is recorded.
+     * Runs a statement that writes in a session, see
+     * {@link #update(BoundStatement, QueryContext)}, as an event of Java
+     * Flight Recorder, if one is recorded; {@code SET} changes the session.
      *
      * @param sql the text of the statement, or {@code null} for its line in {@link #explain(String)}
      */
-    private long update(BoundStatement statement, QueryContext context, String sql) {
+    long update(BoundStatement statement, QueryContext context, String sql, Session session) {
         if (statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain) {
             throw new SqlException((statement instanceof BoundStatement.Query ? "A query" : "EXPLAIN")
                     + " returns rows, not a number of rows written; run it with sql", Position.UNKNOWN);
         }
         QueryEvent event = RECORDABLE ? QueryEvent.start() : null;
-        ScheduledFuture<?> timeout = timeouts.start(context);
+        ScheduledFuture<?> timeout = timeouts.start(context, session.timeout());
         long count = 0;
         Throwable failure = null;
         try {
-            count = writes.run(statement, context);
+            count = writes.run(statement, context, session);
             return count;
         } catch (RuntimeException | Error e) {
             failure = e;
@@ -675,27 +697,27 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException if the write fails
      */
     public QueryResult execute(BoundStatement statement, QueryContext context) {
-        return execute(statement, context, null);
+        return execute(statement, context, null, session);
     }
 
     /**
-     * Runs a bound statement, see {@link #execute(BoundStatement, QueryContext)}.
+     * Runs a bound statement in a session, see {@link #execute(BoundStatement, QueryContext)}.
      *
      * @param sql the text of the statement for its event of Java Flight Recorder, or {@code null}
      */
-    private QueryResult execute(BoundStatement statement, QueryContext context, String sql) {
+    QueryResult execute(BoundStatement statement, QueryContext context, String sql, Session session) {
         if (statement instanceof BoundStatement.Query q) {
-            return execute(q.plan(), context, sql);
+            return execute(q.plan(), context, sql, session);
         }
         if (statement instanceof BoundStatement.Explain e) {
-            String plan = e.analyze() ? explainAnalyze(e.statement(), context) : explain(e.statement());
+            String plan = e.analyze() ? explainAnalyze(e.statement(), context, session) : explain(e.statement());
             List<Object[]> lines = new ArrayList<>();
             for (String line : plan.split("\n")) {
                 lines.add(new Object[] {line});
             }
             return result(new PlanNode.Values(BoundStatement.PLAN, lines), context);
         }
-        long count = update(statement, context, sql);
+        long count = update(statement, context, sql, session);
         return result(new PlanNode.Values(BoundStatement.COUNT, List.<Object[]>of(new Object[] {count})), context);
     }
 
@@ -786,7 +808,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException if the statement cannot be parsed or bound, or fails
      */
     public String explainAnalyze(String sql) {
-        return explainAnalyze(statement(sql), new QueryContext());
+        return session.explainAnalyze(sql);
     }
 
     /**
@@ -798,7 +820,7 @@ public final class FyrQL implements AutoCloseable {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public String explainAnalyze(String sql, SearchPath searchPath) {
-        return explainAnalyze(statement(sql, searchPath), new QueryContext());
+        return explainAnalyze(statement(sql, searchPath), new QueryContext(), session);
     }
 
     /** Runs a plan and returns it with what each operator did, see {@link #explainAnalyze(String)}. */
@@ -815,10 +837,15 @@ public final class FyrQL implements AutoCloseable {
      * @throws SqlException if the statement fails
      */
     public String explainAnalyze(BoundStatement statement, QueryContext context) {
+        return explainAnalyze(statement, context, session);
+    }
+
+    /** Runs a statement in a session and returns its plan with what each operator did. */
+    String explainAnalyze(BoundStatement statement, QueryContext context, Session session) {
         BoundStatement run = statement instanceof BoundStatement.Explain e ? e.statement() : statement;
         if (run instanceof BoundStatement.Query q) {
             long rows = 0;
-            try (QueryResult result = execute(q.plan(), context)) {
+            try (QueryResult result = execute(q.plan(), context, null, session)) {
                 for (Batch b = result.nextBatch(); b != null; b = result.nextBatch()) {
                     rows += b.rowCount();
                 }
@@ -826,7 +853,7 @@ public final class FyrQL implements AutoCloseable {
             QueryStatistics statistics = context.statistics();
             return Explain.analyzed(statistics, rows, false) + "\n" + explain(statistics);
         }
-        long written = update(run, context);
+        long written = update(run, context, null, session);
         context.finished();
         QueryStatistics statistics = context.statistics();
         StringBuilder sb = new StringBuilder(Explain.analyzed(statistics, written, true)).append('\n')
@@ -876,19 +903,20 @@ public final class FyrQL implements AutoCloseable {
      * context is canceled with {@link QueryContext.Reason#TIMEOUT}.
      */
     public QueryResult execute(PlanNode plan, QueryContext context) {
-        return execute(plan, context, null);
+        return execute(plan, context, null, session);
     }
 
     /**
-     * Runs a plan, see {@link #execute(PlanNode, QueryContext)}; while Java
-     * Flight Recorder records, the run is an event {@code net.fyrql.Query}
-     * until the result is closed.
+     * Runs a plan with the timeout of a session, see
+     * {@link #execute(PlanNode, QueryContext)}; while Java Flight Recorder
+     * records, the run is an event {@code net.fyrql.Query} until the result
+     * is closed.
      *
      * @param sql the text of the statement for the event, or {@code null} for the first line of the plan
      */
-    private QueryResult execute(PlanNode plan, QueryContext context, String sql) {
+    QueryResult execute(PlanNode plan, QueryContext context, String sql, Session session) {
         QueryEvent event = RECORDABLE ? QueryEvent.start() : null;
-        ScheduledFuture<?> timeout = timeouts.start(context);
+        ScheduledFuture<?> timeout = timeouts.start(context, session.timeout());
         try {
             return new QueryResult(open(plan, context), context, timeout, event, sql);
         } catch (RuntimeException | Error e) {
@@ -1282,8 +1310,9 @@ public final class FyrQL implements AutoCloseable {
          * Sets the time zone of the session, in which values of
          * {@code TIMESTAMP WITH TIME ZONE} are shown, compared with local
          * dates and timestamps, and computed in the calendar; by default the
-         * time zone of the JVM, as in DuckDB. {@code SET TimeZone} changes
-         * it for the engine, {@code RESET TimeZone} returns to this one.
+         * time zone of the JVM, as in DuckDB. Every session starts with it,
+         * {@code SET TimeZone} changes it for a session, see {@link Session},
+         * {@code RESET TimeZone} returns to this one.
          */
         public Builder timeZone(ZoneId zone) {
             this.timeZone = Objects.requireNonNull(zone, "zone");

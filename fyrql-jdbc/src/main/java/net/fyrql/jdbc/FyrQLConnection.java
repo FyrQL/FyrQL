@@ -12,6 +12,7 @@
 package net.fyrql.jdbc;
 
 import net.fyrql.FyrQL;
+import net.fyrql.Session;
 import net.fyrql.catalog.SearchPath;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -54,12 +55,14 @@ import java.util.concurrent.locks.ReentrantLock;
  * auto-commit: a statement that writes is one transaction of the source
  * it writes to, if the source has transactions; the methods of
  * transactions are accepted and do nothing. A connection set read-only
- * refuses statements that write with {@code 25006}. The catalog is the
- * default source and the
- * schema the default schema in which the queries of the connection look up
- * names of fewer than three parts, at first those of the engine; changing
- * them affects only this connection. The connection unwraps to the
- * {@link FyrQL} engine.
+ * refuses statements that write with {@code 25006}. The connection is a
+ * {@link Session} of the engine of its own, also over an engine that
+ * connections share: {@code SET}, {@code RESET} and {@code USE} change
+ * only this connection. The catalog is the default source and the schema
+ * the default schema in which the queries of the connection look up names
+ * of fewer than three parts, at first those of the engine, the search path
+ * of the session; changing them affects only this connection. The
+ * connection unwraps to the {@link FyrQL} engine.
  * <p>
  * The queries of a connection run one at a time: starting a query and
  * reading a batch of its result take a lock of the connection.
@@ -73,7 +76,7 @@ final class FyrQLConnection implements Connection {
     private final ReentrantLock lock = new ReentrantLock();
     private final Set<FyrQLStatement> statements = ConcurrentHashMap.newKeySet();
     private final Properties clientInfo = new Properties();
-    private volatile SearchPath searchPath;
+    private final Session session;
     private volatile boolean readOnly;
     private SQLWarning warnings;
     private int holdability = ResultSet.CLOSE_CURSORS_AT_COMMIT;
@@ -83,7 +86,7 @@ final class FyrQLConnection implements Connection {
         this.engine = Objects.requireNonNull(engine, "engine");
         this.closeEngine = closeEngine;
         this.url = url;
-        this.searchPath = engine.catalog().searchPath();
+        this.session = engine.newSession();
     }
 
     /** Returns the engine. */
@@ -96,9 +99,14 @@ final class FyrQLConnection implements Connection {
         return url;
     }
 
+    /** Returns the session of the connection. */
+    Session session() {
+        return session;
+    }
+
     /** Returns the search path of the queries of the connection. */
     SearchPath searchPath() {
-        return searchPath;
+        return session.searchPath();
     }
 
     /** Adds a warning to the chain of the connection. */
@@ -149,7 +157,7 @@ final class FyrQLConnection implements Connection {
         lock.lock();
         try {
             checkOpen();
-            BoundStatement statement = engine.statement(sql, searchPath);
+            BoundStatement statement = session.statement(sql);
             boolean query = statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain;
             expect(expected, query ? Kind.QUERY : Kind.UPDATE);
             if (readOnly && statement.writes()) {
@@ -157,9 +165,9 @@ final class FyrQLConnection implements Connection {
                         SqlStates.READ_ONLY, null);
             }
             if (query) {
-                return new Outcome(BatchSource.of(engine.execute(statement, context), context), -1);
+                return new Outcome(BatchSource.of(session.execute(statement, context), context), -1);
             }
-            return new Outcome(null, engine.update(statement, context));
+            return new Outcome(null, session.update(statement, context));
         } catch (RuntimeException e) {
             throw SqlStates.map(e);
         } finally {
@@ -188,7 +196,7 @@ final class FyrQLConnection implements Connection {
         lock.lock();
         try {
             checkOpen();
-            BoundStatement statement = engine.statement(sql, searchPath);
+            BoundStatement statement = session.statement(sql);
             return statement instanceof BoundStatement.Query || statement instanceof BoundStatement.Explain
                     ? statement.schema() : null;
         } catch (RuntimeException e) {
@@ -213,7 +221,7 @@ final class FyrQLConnection implements Connection {
         lock.lock();
         try {
             checkOpen();
-            return engine.prepare(sql, searchPath).parameterTypes();
+            return session.prepare(sql).parameterTypes();
         } catch (SqlException e) {
             return null;
         } catch (RuntimeException e) {
@@ -463,7 +471,7 @@ final class FyrQLConnection implements Connection {
         if (source == null) {
             throw new SQLException(unknown("source", catalog, engine.sources()), SqlStates.INVALID_CATALOG);
         }
-        searchPath = new SearchPath(source, searchPath.defaultSchema());
+        session.use(new SearchPath(source, session.searchPath().defaultSchema()));
     }
 
     /**
@@ -497,7 +505,7 @@ final class FyrQLConnection implements Connection {
     @Override
     public String getCatalog() throws SQLException {
         checkOpen();
-        return searchPath.defaultSource();
+        return session.searchPath().defaultSource();
     }
 
     /** Accepts every level; there are no transactions. */
@@ -679,7 +687,7 @@ final class FyrQLConnection implements Connection {
         if (schema == null) {
             return;
         }
-        SearchPath path = searchPath;
+        SearchPath path = session.searchPath();
         String name = schema;
         if (path.defaultSource() != null) {
             List<String> schemas;
@@ -694,13 +702,13 @@ final class FyrQLConnection implements Connection {
                         + path.defaultSource(), SqlStates.INVALID_SCHEMA);
             }
         }
-        searchPath = new SearchPath(path.defaultSource(), name);
+        session.use(new SearchPath(path.defaultSource(), name));
     }
 
     @Override
     public String getSchema() throws SQLException {
         checkOpen();
-        return searchPath.defaultSchema();
+        return session.searchPath().defaultSchema();
     }
 
     /** Closes the connection. */

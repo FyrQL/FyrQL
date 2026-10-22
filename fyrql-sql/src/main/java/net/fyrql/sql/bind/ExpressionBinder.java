@@ -1234,10 +1234,11 @@ final class ExpressionBinder {
                         || l.kind() != SqlExpr.LiteralKind.STRING) {
                     throw new SqlException("current_setting requires a constant name", p);
                 }
-                if (!l.text().equalsIgnoreCase("TimeZone")) {
+                String setting = Settings.name(l.text());
+                if (setting == null) {
                     throw new SqlException("unrecognized configuration parameter \"" + l.text() + "\"", p);
                 }
-                return Bound.typed(new Expression.Literal(DataType.VARCHAR, ZonedDates.name(context.zone())));
+                return Bound.typed(new Expression.Literal(DataType.VARCHAR, context.setting(setting)));
             }
             case "age" -> {
                 if (args.size() == 1) {

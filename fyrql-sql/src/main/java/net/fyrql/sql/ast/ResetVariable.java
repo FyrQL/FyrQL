@@ -15,9 +15,9 @@ import java.util.Objects;
 
 /**
  * {@code RESET name}: a setting of the session back to the value it started
- * with.
+ * with; {@code RESET ALL} every setting.
  *
- * @param name the name of the setting, as written
+ * @param name the name of the setting, as written, or {@code ALL}
  * @param position the position of the statement
  */
 public record ResetVariable(String name, Position position) implements Statement {

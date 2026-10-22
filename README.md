@@ -44,10 +44,12 @@ warehouse first.
   DBeaver; results come as Apache Arrow vectors, in the process or from a Flight SQL
   server in one executable JAR, which Python reads through ADBC into pyarrow and pandas.
   Rules for the files that statements may read and write, which the server closes by
-  default, and time limits for queries let others use an engine.
+  default, time limits for queries, and sessions with their own time zone, search path
+  and timeout for each connection and client let others use an engine.
   See [JDBC driver](docs/manual.md#jdbc-driver),
   [Flight SQL server](docs/manual.md#flight-sql-server),
-  [File access](docs/manual.md#file-access) and [Time limits](docs/manual.md#time-limits).
+  [File access](docs/manual.md#file-access), [Time limits](docs/manual.md#time-limits) and
+  [Sessions](docs/manual.md#sessions).
 - **Observable.** `EXPLAIN ANALYZE` runs a query and shows for each node of its plan the
   rows, batches, time and threads, and for each scan the splits, row groups, requests,
   bytes and statements of its source; queries, requests to sources, compiled code and
