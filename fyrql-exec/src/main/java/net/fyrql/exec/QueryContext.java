@@ -13,8 +13,10 @@ package net.fyrql.exec;
 
 import net.fyrql.connector.BatchReader;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -27,7 +29,10 @@ import java.util.concurrent.atomic.LongAdder;
  * a remote source ends too. Canceling is final: the first reason stays.
  * <p>
  * The context also counts what the operators of the query spill to disk,
- * see {@link #spill()}.
+ * see {@link #spill()}, and carries the timeout the caller asks for, see
+ * {@link #withTimeout(Duration)}; the engine cancels the query with
+ * {@link Reason#TIMEOUT} once it has run that long since the context was
+ * created.
  */
 public final class QueryContext {
 
@@ -51,22 +56,55 @@ public final class QueryContext {
     }
 
     /** The context of the queries that cannot be canceled. */
-    public static final QueryContext NONE = new QueryContext(false);
+    public static final QueryContext NONE = new QueryContext(false, null);
 
     private final boolean cancellable;
+    private final Duration timeout;
+    private final long created = System.nanoTime();
     private final List<BatchReader> readers = new ArrayList<>();
     private volatile Reason reason;
     private final LongAdder spilledParts = new LongAdder();
     private final LongAdder spilledBytes = new LongAdder();
     private final LongAdder readBytes = new LongAdder();
 
-    /** A context that is not canceled yet. */
+    /** A context that is not canceled yet, with the timeout of the engine. */
     public QueryContext() {
-        this(true);
+        this(true, null);
     }
 
-    private QueryContext(boolean cancellable) {
+    private QueryContext(boolean cancellable, Duration timeout) {
         this.cancellable = cancellable;
+        this.timeout = timeout;
+    }
+
+    /**
+     * Returns a context that is not canceled yet, for a query that may run
+     * at most as long as given, counted from now; the engine shortens the
+     * timeout to its upper bound, if it has one.
+     *
+     * @throws IllegalArgumentException if the timeout is not positive
+     */
+    public static QueryContext withTimeout(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isNegative() || timeout.isZero()) {
+            throw new IllegalArgumentException("A timeout must be positive: " + timeout);
+        }
+        return new QueryContext(true, timeout);
+    }
+
+    /** Returns the timeout the caller asked for, or {@code null} for the one of the engine. */
+    public Duration timeout() {
+        return timeout;
+    }
+
+    /** Returns the time since the context was created. */
+    public Duration elapsed() {
+        return Duration.ofNanos(System.nanoTime() - created);
+    }
+
+    /** Tells whether the query can be canceled, which all but {@link #NONE} can. */
+    public boolean isCancellable() {
+        return cancellable;
     }
 
     /** Cancels the query on request. */

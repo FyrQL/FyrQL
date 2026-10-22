@@ -18,13 +18,13 @@ import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.ZoneId;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.ScheduledFuture;
 
 /**
  * A statement that runs one statement of SQL at a time; each run closes
@@ -96,28 +96,14 @@ class FyrQLStatement implements Statement {
         }
         closeResultSet();
         updateCount = -1;
-        QueryContext context = new QueryContext();
+        QueryContext context = queryTimeout > 0 ? QueryContext.withTimeout(Duration.ofSeconds(queryTimeout))
+                : new QueryContext();
         running = context;
-        ScheduledFuture<?> timeout = queryTimeout > 0 ? Timeouts.schedule(queryTimeout, context) : null;
-        FyrQLConnection.Outcome outcome;
-        try {
-            outcome = connection.run(sql, context, expected);
-        } catch (SQLException | RuntimeException e) {
-            if (timeout != null) {
-                timeout.cancel(false);
-            }
-            throw e;
-        }
+        FyrQLConnection.Outcome outcome = connection.run(sql, context, expected);
         BatchSource source = outcome.rows();
         if (source == null) {
-            if (timeout != null) {
-                timeout.cancel(false);
-            }
             updateCount = outcome.count();
             return null;
-        }
-        if (timeout != null) {
-            source = BatchSource.whenClosed(source, () -> timeout.cancel(false));
         }
         FyrQLResultSet rs = new FyrQLResultSet(this, source, maxRows, connection.lock(), holdability);
         synchronized (this) {
@@ -482,7 +468,9 @@ class FyrQLStatement implements Statement {
      * Sets the seconds a query may run, from the next run on: from its
      * start until its result set is read or closed, which includes the
      * time the application takes between the rows. Then the query is
-     * canceled and fails with {@code HYT00}; {@code 0} is no limit.
+     * canceled and fails with {@code HYT00}. {@code 0} takes the timeout
+     * of the engine, the setting {@code queryTimeout}, which is no limit by
+     * default; the setting {@code maxQueryTimeout} shortens any timeout.
      */
     @Override
     public void setQueryTimeout(int seconds) throws SQLException {

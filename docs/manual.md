@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.9.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.10.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow
 and the Flight SQL server, the SQL it takes and where it differs from DuckDB, and how it
 runs queries, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -18,6 +18,7 @@ and the [README](../README.md) an overview.
   - [Formats](#formats)
   - [Loading](#loading)
   - [Tables](#tables)
+- [File access](#file-access)
 - [Configuration file](#configuration-file)
 - [JDBC driver](#jdbc-driver)
   - [DBeaver](#dbeaver)
@@ -36,6 +37,7 @@ and the [README](../README.md) an overview.
 - [Optimizer](#optimizer)
 - [Code generation](#code-generation)
 - [Parallel execution](#parallel-execution)
+- [Time limits](#time-limits)
 - [Memory budget and spilling](#memory-budget-and-spilling)
 - [Performance](#performance)
   - [TPC-H at scale factor 1](#tpc-h-at-scale-factor-1)
@@ -152,6 +154,10 @@ take their default from a system property.
 | `preserveOrder(boolean)` | `preserveOrder` | `true` | Whether rows that no `ORDER BY` orders come in the order of their sources, as on one thread |
 | `implicitSources(boolean)` | `implicitSources`, in a file only | `true` | Whether the engine adds a source for each format of files on the class path; see [Formats](#formats) |
 | `timeZone(ZoneId)` | `timeZone` | the time zone of the JVM | The time zone of the session; see [Time zone](#time-zone) |
+| `fileAccess(FileAccess)` | `fileAccess`: `none`, `read` or `readWrite` | `READ_WRITE`; `none` in the Flight SQL server | What statements may do with the files and objects they name; see [File access](#file-access) |
+| `allowedLocations(List<String>)` | `allowedLocations` | anywhere | The directories and prefixes, such as `s3://lake/`, under which they may do it |
+| `queryTimeout(Duration)` | `queryTimeout`, such as `30s` | no limit | How long a query may run that asks for no timeout of its own; see [Time limits](#time-limits) |
+| `maxQueryTimeout(Duration)` | `maxQueryTimeout` | no limit | How long any query may run, also one that asks for a longer timeout |
 | `classLoader(ClassLoader)` | - | the loader of the engine | The class loader in which the engine looks for the factories of the implicit sources |
 
 ## Connectors
@@ -667,6 +673,52 @@ interval stored as text as a `VARCHAR`. A database through the generic dialect t
 4,000 characters. With MySQL, `rewriteBatchedStatements=true` in the URL sends a batch
 as one statement, which is much faster.
 
+## File access
+
+Statements name files and objects of their own: `FROM 'data/orders.csv'`, the table
+functions such as `read_parquet` and `iceberg_scan`, `COPY ... TO` and `COPY ... FROM`.
+The setting `fileAccess` says what they may do with them: `readWrite`, the default of the
+engine and of the [JDBC driver](#jdbc-driver), reads and writes them, `read` only reads
+them, and `none` neither, the default of the [Flight SQL server](#flight-sql-server).
+The setting `allowedLocations` says where: directories and prefixes of objects, such as
+`data` and `s3://lake/`, under which a location must lie; without it, every location
+does, as far as `fileAccess` goes. The tables of the sources that an application or a
+configuration file registers are not affected: an engine with `fileAccess` `none` still
+reads the table `orders` of a source of the type `csv` over the directory `data`.
+
+```java
+FyrQL engine = FyrQL.builder()
+        .register(CsvConnector.builder("csv").directory(Path.of("data")).build())
+        .fileAccess(FileAccess.READ)
+        .allowedLocations(List.of("data", "s3://lake/"))
+        .build();
+```
+
+The engine checks a location before a source gets it, also in `EXPLAIN` and when a
+statement is prepared. A local location is resolved as the readers resolve it, a relative
+one against the working directory, and made absolute, without `.` and `..`, with the
+symbolic links followed as far as the path exists; for a pattern such as
+`data/*.parquet`, the directory before the pattern counts. A location lies under an
+allowed directory only by whole names, so that `data` allows `data/2026/orders.csv` but
+not `data2/orders.csv`, and a link in `data` that points elsewhere does not allow its
+target. A location with a scheme, such as `s3://lake/sales/q1.parquet`, is compared as
+text with the scheme in lower case and must not have the parts `.` or `..`; `s3://lake`
+allows `s3://lake/x`, but not `s3://lakehouse/x`. The allowed locations are resolved in
+the same way when the engine is built, in a [configuration file](#configuration-file)
+against its directory, and `engine.allowedLocations()` returns them so. The files of a
+table that `iceberg_scan` reads must all lie under the allowed locations: not only its
+metadata, but also the manifest lists, manifests, data and delete files the metadata
+names, and its scan fails at the first one that does not. The check comes before a file
+is opened; whoever may change an allowed directory, for example put a link in place of a
+directory, can still lead a statement elsewhere, so that the allowed directories belong to
+the operator alone.
+
+A statement that may not read or write a location fails with a message such as
+`Reading data2/orders.csv is not allowed: it is not under the allowed locations
+/srv/data, s3://lake/ at line 1, column 15`, with the SQLState `42501` in the JDBC driver
+and the status `UNAUTHORIZED`, `PERMISSION_DENIED` in gRPC, in the Flight SQL server.
+`allowedLocations` with `fileAccess` `none` is an error when the engine is built.
+
 ## Configuration file
 
 With the module `fyrql-config`, a YAML file names the sources and settings of an engine,
@@ -712,7 +764,10 @@ by dots (`tables.products.url`); an unknown or misspelled option is an error tha
 the known ones. Relative paths are resolved against the directory of the file. A value may
 name an environment variable as `${env:NAME}`, or `${env:NAME:-default}`, and a system
 property as `${sys:name}`, so that secrets need not be in the file. The settings under
-`engine` are those of the builder, listed under [Engine settings](#engine-settings). A
+`engine` are those of the builder, listed under [Engine settings](#engine-settings);
+`allowedLocations` is a list, or a text with commas between its entries, whose relative
+directories are resolved against the directory of the file, and `queryTimeout` and
+`maxQueryTimeout` are durations such as `30s` or `5m`. A
 file whose name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` returns the
 builder instead, so that an application can add sources of its own, such as tables in
 memory. A third section, `server`, holds the settings of the [Flight SQL
@@ -830,7 +885,10 @@ regard to case, values in the URL are decoded from `%xx`, and a blank value coun
 set. The properties `user` and `password`, which tools always send, are ignored; another
 unknown property gives a warning on the connection, and an unknown key in the URL fails
 the connection with `08001`, as does a file with an error. A relative path of the file is
-resolved against the working directory, and the paths in the file against its directory.
+resolved against the working directory, and the paths in the file against its directory;
+so is a relative entry of `allowedLocations` in the URL, or against the working directory
+without a file. `jdbc:fyrql:?fileAccess=read&allowedLocations=data` lets statements read
+only the files under `data` (see [File access](#file-access)).
 Without `config`, the engine has the sources `csv`, `json`, `parquet` and `iceberg`
 without tables, so that file names and table functions can be queried, as in `SELECT *
 FROM 'data/orders.csv'`, `SELECT * FROM read_parquet('lake/events.parquet')` or `SELECT *
@@ -858,13 +916,16 @@ before the text is parsed; a parameter of a `MAP` type is not supported.
 until its first rows while it is executed, as in the drivers of databases, and the rest
 while its result set is read. `cancel()` and a timeout from `setQueryTimeout` stop a
 running query or statement, also one that waits for a database, with the SQLState
-`57014` or `HYT00`. The queries of one connection run one at a time. An
+`57014` or `HYT00`; the timeout counts until the result set is closed. `setQueryTimeout(0)`,
+the default, takes the `queryTimeout` of the engine, and its `maxQueryTimeout` shortens any
+timeout (see [Time limits](#time-limits)). The queries of one connection run one at a time. An
 error has the message of FyrQL, with the position in the text or the node of the plan,
 and the exception of FyrQL as its cause; its SQLState tells the kind, such as `42601` for
 the syntax, `42P01` for an unknown table, `42703` for an unknown column, `42P07` for a
 table that exists already, `23502` for a `NULL` in a column `NOT NULL`, `0A000` for what
 FyrQL does not support, `22003`, `22012` and `22018` for values out of range, a division
-by zero and a failed cast, and `58030` for an error of a source.
+by zero and a failed cast, `42501` for a file the engine does not allow (see
+[File access](#file-access)), and `58030` for an error of a source.
 
 The types map to those of JDBC as follows; `getColumnTypeName` gives the name of the type
 in FyrQL, such as `DECIMAL(15,2)` or `INTEGER[]`, and `getString` the text of a value as
@@ -1052,9 +1113,26 @@ server:
   the server sends the end of its stream or its error, so that a client that has read
   it to its end can run its next query at once.
 
+Unless the section `engine` sets `fileAccess`, the server sets it to `none`: statements of
+clients read and write no files of the machine of the server, while the tables of the
+sources stay readable. `fileAccess: read` with `allowedLocations` opens directories and
+buckets to them; see [File access](#file-access). `queryTimeout` and `maxQueryTimeout`
+under `engine` limit how long the queries of clients run, see [Time limits](#time-limits);
+a client of Flight SQL asks for no timeout of its own, and a deadline of its call that
+passes ends the query as a cancel does.
+
+```yaml
+engine:
+  fileAccess: read
+  allowedLocations: [data, "s3://lake/"]
+  queryTimeout: 30s
+  maxQueryTimeout: 5m
+```
+
 The server prints the line `FyrQL Flight SQL server <version> listening on
-grpc+tcp://127.0.0.1:32010`, or with `grpc+tls`, and runs until the JVM ends, as with
-Ctrl+C, and then closes the engine. It logs the warnings and errors of Arrow and gRPC to
+grpc+tcp://127.0.0.1:32010`, or with `grpc+tls`, and a line such as `File access from SQL:
+read under /srv/data, s3://lake/; query timeout: 30s, at most 5m`, and runs until the JVM
+ends, as with Ctrl+C, and then closes the engine. It logs the warnings and errors of Arrow and gRPC to
 the standard error stream. The JAR has the same libraries renamed as the one of the
 [JDBC driver](#dbeaver), and Arrow, gRPC, Netty and protobuf in their own packages; its
 manifest sets the option of Arrow. The JDBC drivers of databases are not in it: for
@@ -1069,7 +1147,9 @@ java --add-opens=java.base/java.nio=ALL-UNNAMED -cp "fyrql-flight-sql-all-<versi
 An application starts the server over an engine of its own with
 `FlightSqlServer.builder(engine).config(ServerConfig.defaults()).build().start()`, and
 `ServerConfig.of(config)` reads the section `server` of a configuration file; closing the
-server leaves the engine open.
+server leaves the engine open. That engine keeps the file access it was built with,
+`readWrite` by default, so that a server for others builds it with
+`fileAccess(FileAccess.NONE)`, or `READ` and allowed locations.
 
 The server runs queries as the JDBC driver does: a `SELECT`, `WITH`, `VALUES` or set
 operation, or `EXPLAIN` followed by a query, which gives the plan as rows of one column
@@ -1084,12 +1164,15 @@ sent as a query, when the client asks for its flight info, which then gives the 
 `Count`. A prepared statement that writes has a result without columns, as the Flight SQL
 JDBC driver of Arrow expects, and runs once for each row of values the client sends; at
 a row that fails, the rows before it stay written. `COPY` reads and writes files on the
-machine of the server, with paths relative to its working directory. Each statement is a
+machine of the server, with paths relative to its working directory, as far as the
+[file access](#file-access) of the engine allows. Each statement is a
 transaction of its own, and there is no bulk ingestion. An error has the message of
 FyrQL, with the position in the text, and the status `INVALID_ARGUMENT` for a statement that does not
 parse or bind, values out of range, a failed cast and a write the target refuses,
+`UNAUTHORIZED`, `PERMISSION_DENIED` in gRPC, for a file the engine does not allow,
 `RESOURCE_EXHAUSTED` for the memory budget and `maxQueries`, which counts statements that
-write too, `CANCELLED` for a cancelled query, and `INTERNAL` for an error of a source. All clients share the engine, with its threads and its memory budget.
+write too, `CANCELLED` for a cancelled query, `TIMED_OUT` for one past its timeout, and
+`INTERNAL` for an error of a source. All clients share the engine, with its threads and its memory budget.
 
 ### Python
 
@@ -1175,7 +1258,8 @@ forms follow DuckDB 1.5.6.
   `read_csv_auto`, `read_json`, `read_json_auto`, `read_ndjson`, `read_ndjson_auto`,
   `read_parquet`, `parquet_scan`, `iceberg_scan`, `read_iceberg` and
   `iceberg_snapshots`, and file names such as `FROM 'data/orders.csv'`,
-  `FROM 'events.jsonl'` or `FROM 'lake/*.parquet'`; `INNER`, `LEFT`,
+  `FROM 'events.jsonl'` or `FROM 'lake/*.parquet'`, as far as the
+  [file access](#file-access) of the engine allows; `INNER`, `LEFT`,
   `RIGHT`, `FULL` and `CROSS JOIN` with `ON` and any condition without a subquery,
   `USING` or `NATURAL`; `SELECT` without `FROM`.
 - `WHERE`, `GROUP BY` with expressions, positions, aliases and `ALL`, `HAVING`, `ORDER BY`
@@ -1842,6 +1926,32 @@ limit, a set operation or the result, at most two splits per worker, are outside
 memory budget.
 
 [Performance](#threads) shows how operators gain from more threads.
+
+## Time limits
+
+A query, or a statement that writes, may run for a limited time: `queryTimeout` is the
+timeout of a query that asks for none of its own, and `maxQueryTimeout` the upper bound of
+every timeout, also of one that a query asks for. Both have no limit by default, and a
+`queryTimeout` above the `maxQueryTimeout` is an error when the engine is built.
+
+```java
+FyrQL engine = FyrQL.builder()
+        .queryTimeout(Duration.ofSeconds(30))
+        .maxQueryTimeout(Duration.ofMinutes(5))
+        .build();
+```
+
+A query asks for a timeout of its own with `QueryContext.withTimeout(Duration)`, which
+`engine.execute(plan, context)` takes, and so does the [JDBC driver](#jdbc-driver) for
+`Statement.setQueryTimeout`. The timeout counts from the creation of the context, which
+the methods without a context create before the query runs, until the result is closed,
+so that the time the application takes to read the rows counts too. Then the query is
+canceled, as `QueryResult.cancel()` cancels it, and fails with `The query timed out`,
+with the SQLState `HYT00` in the JDBC driver and the status `TIMED_OUT` in the
+[Flight SQL server](#flight-sql-server). One daemon thread of the engine, started with
+the first timeout, cancels the queries, and ends when the engine closes; a query with the
+context `QueryContext.NONE` has no timeout. In a configuration file and the URL of the
+JDBC driver, a timeout is a duration such as `500ms`, `30s`, `5m` or `PT30S`.
 
 ## Memory budget and spilling
 

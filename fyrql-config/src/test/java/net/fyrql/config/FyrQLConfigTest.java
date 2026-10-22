@@ -12,6 +12,8 @@
 package net.fyrql.config;
 
 import net.fyrql.FyrQL;
+import net.fyrql.connector.FileAccess;
+import net.fyrql.connector.FileAccessException;
 import net.fyrql.connector.jdbc.JdbcConnector;
 import net.fyrql.connector.s3.FakeS3Server;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,12 +28,14 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -166,6 +170,46 @@ class FyrQLConfigTest {
         try (FyrQL engine = FyrQLConfig.builder(config("{}")).defaultSource("docs").build()) {
             assertEquals(2, engine.rows("SELECT * FROM products").size());
         }
+    }
+
+    @Test
+    void theFileAccessComesFromTheFileWithLocationsRelativeToIt() throws IOException {
+        Path file = config("fileAccess: read\nallowedLocations: [data, S3://lake]\n");
+        try (FyrQL engine = FyrQLConfig.open(file)) {
+            assertEquals(FileAccess.READ, engine.fileAccess());
+            assertEquals(List.of(dir.resolve("data").toRealPath().toString(), "s3://lake/"), engine.allowedLocations());
+            String customers = dir.resolve("data/customers.csv").toString().replace('\\', '/');
+            assertEquals(3, engine.rows("SELECT * FROM '" + customers + "'").size());
+            String products = dir.resolve("products.json").toString().replace('\\', '/');
+            RuntimeException e = assertThrows(RuntimeException.class, () -> engine.rows("SELECT * FROM '" + products
+                    + "'"));
+            assertInstanceOf(FileAccessException.class, e.getCause());
+            assertEquals(2, engine.rows("SELECT * FROM docs.products").size(), "a registered table");
+        }
+        try (FyrQL engine = FyrQLConfig.open(config("allowedLocations: data\n"))) {
+            assertEquals(FileAccess.READ_WRITE, engine.fileAccess());
+            assertEquals(1, engine.allowedLocations().size());
+        }
+        Path unknown = config("fileAccess: all\n");
+        assertEquals(unknown + ": The option fileAccess of the engine must be none, read or readWrite: all",
+                assertThrows(ConfigException.class, () -> FyrQLConfig.open(unknown)).getMessage());
+        Path none = config("fileAccess: none\nallowedLocations: [data]\n");
+        assertEquals(none + ": Cannot build the engine: allowedLocations needs fileAccess read or readWrite, not none",
+                assertThrows(ConfigException.class, () -> FyrQLConfig.open(none)).getMessage());
+    }
+
+    @Test
+    void theTimeoutsComeFromTheFile() throws IOException {
+        try (FyrQL engine = FyrQLConfig.open(config("queryTimeout: 30s\nmaxQueryTimeout: 5m\n"))) {
+            assertEquals(Optional.of(Duration.ofSeconds(30)), engine.queryTimeout());
+            assertEquals(Optional.of(Duration.ofMinutes(5)), engine.maxQueryTimeout());
+        }
+        Path above = config("queryTimeout: 10m\nmaxQueryTimeout: 5m\n");
+        assertEquals(above + ": Cannot build the engine: The queryTimeout 10m is above the maxQueryTimeout 5m",
+                assertThrows(ConfigException.class, () -> FyrQLConfig.open(above)).getMessage());
+        Path zero = config("queryTimeout: 0s\n");
+        assertTrue(assertThrows(ConfigException.class, () -> FyrQLConfig.open(zero)).getMessage().startsWith(
+                zero + ": The option queryTimeout of the engine must be a duration"));
     }
 
     @Test

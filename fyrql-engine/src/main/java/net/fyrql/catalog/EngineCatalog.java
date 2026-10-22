@@ -12,6 +12,9 @@
 package net.fyrql.catalog;
 
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileAccess;
+import net.fyrql.connector.FileAccessException;
+import net.fyrql.connector.FileAccessPolicy;
 import net.fyrql.connector.FileReaderProvider;
 import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
@@ -38,12 +41,15 @@ import java.util.function.Supplier;
  * {@link NameResolver}, and table functions from the connectors that offer
  * them. A function offered by several connectors is taken from the default
  * source if it offers it, otherwise from the first one registered; so are
- * the writers and the readers of file formats.
+ * the writers and the readers of file formats. The locations that table
+ * functions and {@code COPY} name are checked against the
+ * {@link FileAccessPolicy} of the engine before a source gets them.
  */
 public final class EngineCatalog implements CatalogView {
 
     private final Map<String, Connector> sources;
     private final Supplier<ZoneId> zone;
+    private final FileAccessPolicy policy;
     private final NameResolver resolver;
     private final Map<String, TableFunctionProvider> functions = new LinkedHashMap<>();
     private final Map<String, FileWriterProvider> fileWriters = new LinkedHashMap<>();
@@ -72,7 +78,19 @@ public final class EngineCatalog implements CatalogView {
      *        {@link FileWriterProvider#TIME_ZONE}
      */
     public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone) {
+        this(sources, searchPath, zone, FileAccessPolicy.ALL);
+    }
+
+    /**
+     * A catalog over sources by name, in the order of their registration.
+     *
+     * @param zone the time zone of the session, see {@link #EngineCatalog(Map, SearchPath, Supplier)}
+     * @param policy which locations table functions and {@code COPY} may read and write
+     */
+    public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone,
+            FileAccessPolicy policy) {
         this.zone = zone;
+        this.policy = policy;
         this.sources = new LinkedHashMap<>(sources);
         this.resolver = new NameResolver(sources, searchPath);
         Connector preferred = searchPath.defaultSource() == null ? null : sources.get(searchPath.defaultSource());
@@ -122,7 +140,12 @@ public final class EngineCatalog implements CatalogView {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public EngineCatalog withSearchPath(SearchPath searchPath) {
-        return searchPath.equals(searchPath()) ? this : new EngineCatalog(sources, searchPath, zone);
+        return searchPath.equals(searchPath()) ? this : new EngineCatalog(sources, searchPath, zone, policy);
+    }
+
+    /** Returns which locations table functions and {@code COPY} may read and write. */
+    public FileAccessPolicy fileAccessPolicy() {
+        return policy;
     }
 
     /** Returns options with {@link FileWriterProvider#TIME_ZONE} added unless they have it. */
@@ -177,7 +200,8 @@ public final class EngineCatalog implements CatalogView {
      * the file with the given columns.
      *
      * @throws SqlException if no source reads the format, the path is no
-     *         file, or the source refuses the file, the columns or the options
+     *         file, the engine does not allow to read it, or the source
+     *         refuses the file, the columns or the options
      */
     @Override
     public TableRef fileTable(String format, String path, Schema schema, Map<String, String> options) {
@@ -190,8 +214,27 @@ public final class EngineCatalog implements CatalogView {
         }
         checkLocal(path);
         try {
+            policy.checkRead(path);
             return provider.fileTable(f, path, schema, withTimeZone(options));
+        } catch (FileAccessException e) {
+            throw new SqlException(e.getMessage(), Position.UNKNOWN, e);
         } catch (IllegalArgumentException | UncheckedIOException e) {
+            throw new SqlException(e.getMessage(), Position.UNKNOWN);
+        }
+    }
+
+    /**
+     * Checks that {@code COPY ... TO} may write a file.
+     *
+     * @throws SqlException if the engine does not allow it, or the path is no valid one
+     */
+    @Override
+    public void checkFileWrite(String path) {
+        try {
+            policy.checkWrite(path);
+        } catch (FileAccessException e) {
+            throw new SqlException(e.getMessage(), Position.UNKNOWN, e);
+        } catch (IllegalArgumentException e) {
             throw new SqlException(e.getMessage(), Position.UNKNOWN);
         }
     }
@@ -263,7 +306,15 @@ public final class EngineCatalog implements CatalogView {
         }
         named.putIfAbsent(FileWriterProvider.TIME_ZONE, zone.get().getId());
         try {
+            if (!arguments.isEmpty() && arguments.get(0) instanceof String location) {
+                policy.checkRead(location);
+            } else if (policy.access() == FileAccess.NONE) {
+                throw new FileAccessException("Calling " + function + " is not allowed: the engine allows no"
+                        + " access to files from SQL (fileAccess none)");
+            }
             return provider.bind(function, arguments, named);
+        } catch (FileAccessException e) {
+            throw new SqlException(e.getMessage(), Position.UNKNOWN, e);
         } catch (IllegalArgumentException | UncheckedIOException e) {
             throw new SqlException(e.getMessage(), Position.UNKNOWN);
         }

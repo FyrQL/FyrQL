@@ -12,6 +12,7 @@
 package net.fyrql.flight;
 
 import net.fyrql.arrow.ArrowTypeException;
+import net.fyrql.connector.FileAccessException;
 import net.fyrql.core.value.ConversionException;
 import net.fyrql.exec.QueryCancelledException;
 import net.fyrql.exec.QueryContext;
@@ -33,7 +34,9 @@ final class FlightErrors {
     /**
      * Turns an error of the engine into a status. It comes from the first
      * exception in the chain of causes that tells it: a canceled query is
-     * {@code CANCELLED}, or {@code TIMED_OUT} after its timeout; a query
+     * {@code CANCELLED}, or {@code TIMED_OUT} after its timeout; a file
+     * that the engine does not allow statements to read or write is
+     * {@code UNAUTHORIZED}, which gRPC calls {@code PERMISSION_DENIED}; a query
      * that cannot be parsed or bound, values that do not fit, an overflow
      * or a failed conversion is {@code INVALID_ARGUMENT}; the memory budget
      * of the engine is {@code RESOURCE_EXHAUSTED}; anything else, such as a
@@ -51,6 +54,10 @@ final class FlightErrors {
         for (Throwable t = e; t != null && t.getCause() != t; t = t.getCause()) {
             if (t instanceof QueryCancelledException c) {
                 return c.reason() == QueryContext.Reason.TIMEOUT ? CallStatus.TIMED_OUT : CallStatus.CANCELLED;
+            }
+            if (t instanceof FileAccessException
+                    || t instanceof SqlException && t.getCause() instanceof FileAccessException) {
+                return CallStatus.UNAUTHORIZED;
             }
             if (t instanceof SqlException || t instanceof ArithmeticException || t instanceof ConversionException
                     || t instanceof ArrowTypeException) {

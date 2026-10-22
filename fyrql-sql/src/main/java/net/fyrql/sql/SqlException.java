@@ -28,7 +28,15 @@ public class SqlException extends RuntimeException {
     private final Position position;
 
     public SqlException(String reason, Position position) {
-        super(position.isKnown() ? reason + " at " + position : reason);
+        this(reason, position, null);
+    }
+
+    /**
+     * Creates the exception with the error that caused it, such as a
+     * location that the engine does not allow to read.
+     */
+    public SqlException(String reason, Position position, Throwable cause) {
+        super(position.isKnown() ? reason + " at " + position : reason, cause);
         this.reason = reason;
         this.position = Objects.requireNonNull(position, "position");
     }

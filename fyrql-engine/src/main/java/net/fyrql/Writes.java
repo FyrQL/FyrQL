@@ -88,6 +88,7 @@ final class Writes {
                         + (engine.catalog().fileFormats().isEmpty() ? ""
                         : "; there are " + String.join(", ", engine.catalog().fileFormats())), Position.UNKNOWN));
         EngineCatalog.checkLocal(copy.path());
+        engine.catalog().checkFileWrite(copy.path());
         Schema schema = copy.input().schema();
         Map<String, String> options = engine.catalog().withTimeZone(copy.options());
         return write(() -> provider.openFile(copy.format(), copy.path(), schema, options), rows(copy.input()),

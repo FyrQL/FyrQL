@@ -209,8 +209,10 @@ class DriverTest {
     void thePropertyInfoDescribesTheKeys() throws SQLException {
         DriverPropertyInfo[] info = driver.getPropertyInfo("jdbc:fyrql:?codegen=always", new Properties());
         assertEquals(List.of("config", "defaultSource", "defaultSchema", "batchSize", "memoryBudget", "spill",
-                "spillDirectory", "codegen", "codegenThreshold", "pushdown", "threads", "preserveOrder", "timeZone"),
+                "spillDirectory", "codegen", "codegenThreshold", "pushdown", "threads", "preserveOrder", "timeZone",
+                "fileAccess", "allowedLocations", "queryTimeout", "maxQueryTimeout"),
                 Arrays.stream(info).map(i -> i.name).toList());
+        assertArrayEquals(new String[] {"none", "read", "readWrite"}, info[13].choices);
         assertArrayEquals(new String[] {"true", "false"}, info[5].choices);
         DriverPropertyInfo codegen = info[7];
         assertEquals("always", codegen.value);
@@ -219,7 +221,40 @@ class DriverTest {
         assertTrue(codegen.description.startsWith("When expressions are compiled"));
         assertNull(info[0].value);
         assertNull(info[0].choices);
-        assertEquals(13, driver.getPropertyInfo("jdbc:fyrql:?colour=red", null).length, "a bad URL is no error here");
+        assertEquals(17, driver.getPropertyInfo("jdbc:fyrql:?colour=red", null).length, "a bad URL is no error here");
+    }
+
+    @Test
+    void theTimeoutsComeFromTheUrl() throws SQLException {
+        try (Connection c = driver.connect("jdbc:fyrql:?queryTimeout=30s&maxQueryTimeout=5m", null)) {
+            assertEquals(Optional.of(java.time.Duration.ofSeconds(30)), c.unwrap(FyrQL.class).queryTimeout());
+            assertEquals(Optional.of(java.time.Duration.ofMinutes(5)), c.unwrap(FyrQL.class).maxQueryTimeout());
+        }
+        failsToConnect("jdbc:fyrql:?queryTimeout=soon", "The option queryTimeout of the engine must be a duration");
+    }
+
+    @Test
+    void theFileAccessComesFromTheUrl() throws IOException, SQLException {
+        Path data = Files.createDirectories(dir.resolve("data"));
+        Files.writeString(data.resolve("a.csv"), "k\n1\n", StandardCharsets.UTF_8);
+        Files.writeString(dir.resolve("b.csv"), "k\n2\n", StandardCharsets.UTF_8);
+        String a = data.resolve("a.csv").toString().replace('\\', '/');
+        String b = dir.resolve("b.csv").toString().replace('\\', '/');
+        try (Connection c = driver.connect("jdbc:fyrql:?fileAccess=none", null); Statement s = c.createStatement()) {
+            SQLException e = assertThrows(SQLException.class, () -> s.executeQuery("SELECT * FROM '" + a + "'"));
+            assertEquals("42501", e.getSQLState());
+            assertInstanceOf(java.sql.SQLSyntaxErrorException.class, e);
+            assertTrue(e.getMessage().contains("fileAccess none"), e.getMessage());
+        }
+        Properties p = new Properties();
+        p.setProperty("allowedLocations", data.toString());
+        try (Connection c = driver.connect("jdbc:fyrql:?fileAccess=read", p); Statement s = c.createStatement()) {
+            assertEquals(List.of(1L), first(c, "SELECT * FROM '" + a + "'"));
+            assertEquals("42501", assertThrows(SQLException.class, () -> s.executeQuery("SELECT * FROM '" + b + "'"))
+                    .getSQLState());
+            assertEquals("42501", assertThrows(SQLException.class, () -> s.executeUpdate("COPY (SELECT 1 AS k) TO '"
+                    + data.resolve("c.csv").toString().replace('\\', '/') + "'")).getSQLState());
+        }
     }
 
     private void failsToConnect(String url, String message) {

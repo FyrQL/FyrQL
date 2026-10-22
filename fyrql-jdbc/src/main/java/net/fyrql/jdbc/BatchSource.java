@@ -79,35 +79,6 @@ interface BatchSource {
         };
     }
 
-    /** The batches of a source that runs an action when it is closed, after closing the source. */
-    static BatchSource whenClosed(BatchSource source, Runnable action) {
-        return new BatchSource() {
-            @Override
-            public Schema schema() {
-                return source.schema();
-            }
-
-            @Override
-            public Batch next() {
-                return source.next();
-            }
-
-            @Override
-            public void close() {
-                try {
-                    source.close();
-                } finally {
-                    action.run();
-                }
-            }
-
-            @Override
-            public void cancel() {
-                source.cancel();
-            }
-        };
-    }
-
     /** Rows as one batch. */
     static BatchSource of(Schema schema, List<Object[]> rows) {
         return new BatchSource() {

@@ -77,7 +77,15 @@ record UrlSettings(Map<String, String> values, List<String> unknownProperties) {
             new Key("preserveOrder", "Whether rows that no ORDER BY orders come in the order of their sources",
                     List.of("true", "false")),
             new Key("timeZone", "The time zone of the session, such as Europe/Berlin, in which a timestamp with"
-                    + " time zone is shown; the one of the JVM by default", List.of()));
+                    + " time zone is shown; the one of the JVM by default", List.of()),
+            new Key("fileAccess", "What statements may do with the files they name: none, read or readWrite;"
+                    + " readWrite by default", List.of("none", "read", "readWrite")),
+            new Key("allowedLocations", "The directories and prefixes such as s3://lake/ under which statements"
+                    + " may read and write files, separated by commas; anywhere by default", List.of()),
+            new Key("queryTimeout", "How long a query may run without a query timeout of its statement, such as"
+                    + " 30s or 5m; no limit by default", List.of()),
+            new Key("maxQueryTimeout", "How long any query may run, also with a longer query timeout of its"
+                    + " statement, such as 30s or 5m; no limit by default", List.of()));
 
     private static final List<String> IGNORED = List.of("user", "password");
 

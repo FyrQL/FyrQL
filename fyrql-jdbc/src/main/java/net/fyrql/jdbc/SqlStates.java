@@ -11,6 +11,7 @@
 
 package net.fyrql.jdbc;
 
+import net.fyrql.connector.FileAccessException;
 import net.fyrql.core.value.ConversionException;
 import net.fyrql.exec.QueryCancelledException;
 import net.fyrql.exec.QueryContext;
@@ -62,6 +63,8 @@ final class SqlStates {
     static final String INVALID_SCHEMA = "3F000";
     /** Any other error of the query text. */
     static final String SYNTAX_ERROR_OR_ACCESS_RULE = "42000";
+    /** A file that the engine does not allow statements to read or write. */
+    static final String INSUFFICIENT_PRIVILEGE = "42501";
     /** The query cannot be parsed. */
     static final String SYNTAX_ERROR = "42601";
     /** A column that is neither grouped nor aggregated. */
@@ -144,7 +147,8 @@ final class SqlStates {
     /**
      * Turns an error of the engine into an exception of JDBC. The state
      * comes from the first exception in the chain of causes that tells it:
-     * a canceled query, the reason of a {@link SqlException}, an overflow,
+     * a canceled query, a file the engine does not allow ({@code 42501}),
+     * the reason of a {@link SqlException}, an overflow,
      * a failed conversion, a failing source or the memory budget; otherwise
      * it is {@code HY000}. A canceled query is {@code 57014}, or
      * {@code HYT00} after its timeout, whatever error its sources stopped
@@ -161,6 +165,10 @@ final class SqlStates {
         for (Throwable t = e; t != null && t.getCause() != t; t = t.getCause()) {
             if (t instanceof QueryCancelledException c) {
                 return c.reason() == QueryContext.Reason.TIMEOUT ? TIMEOUT : QUERY_CANCELED;
+            }
+            if (t instanceof FileAccessException
+                    || t instanceof SqlException && t.getCause() instanceof FileAccessException) {
+                return INSUFFICIENT_PRIVILEGE;
             }
             if (t instanceof SqlException s) {
                 return stateOf(s.reason());

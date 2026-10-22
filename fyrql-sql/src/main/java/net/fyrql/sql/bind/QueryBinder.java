@@ -586,7 +586,7 @@ final class QueryBinder {
         try {
             table = catalog.resolve(t.name());
         } catch (SqlException e) {
-            throw new SqlException(e.reason(), t.position());
+            throw new SqlException(e.reason(), t.position(), e.getCause());
         }
         PlanNode.Scan scan = scan(table);
         List<String> path = t.alias() == null ? List.of(table.source(), table.schema(), table.table()) : List.of();
@@ -605,7 +605,7 @@ final class QueryBinder {
         try {
             return catalog.tableFunction(name, arguments, named);
         } catch (SqlException e) {
-            throw new SqlException(e.reason(), position);
+            throw new SqlException(e.reason(), position, e.getCause());
         }
     }
 

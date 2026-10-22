@@ -30,6 +30,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLTimeoutException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -236,6 +237,30 @@ class CancelTest {
                 assertTrue(rs.next());
                 assertFalse(rs.next(), "a query that ends in time is not canceled");
             }
+        }
+    }
+
+    @Test
+    void theTimeoutsOfTheEngineApplyToStatements() throws Exception {
+        SlowConnector endless = new SlowConnector("endless", true);
+        try (FyrQL engine = FyrQL.builder().register(endless).queryTimeout(Duration.ofSeconds(1)).build();
+                Connection c = FyrQLDriver.connect(engine, false); Statement s = c.createStatement()) {
+            assertEquals(0, s.getQueryTimeout());
+            long start = System.nanoTime();
+            SQLTimeoutException e = assertThrows(SQLTimeoutException.class,
+                    () -> s.executeQuery("SELECT count(*) FROM endless.t"));
+            long millis = millisSince(start);
+            assertEquals(SqlStates.TIMEOUT, e.getSQLState());
+            assertTrue(millis >= 900 && millis < 3000, "the query timed out after " + millis + " ms");
+        }
+        try (FyrQL engine = FyrQL.builder().register(endless).maxQueryTimeout(Duration.ofSeconds(1)).build();
+                Connection c = FyrQLDriver.connect(engine, false); Statement s = c.createStatement()) {
+            s.setQueryTimeout(60);
+            long start = System.nanoTime();
+            assertEquals(SqlStates.TIMEOUT, assertThrows(SQLTimeoutException.class,
+                    () -> s.executeQuery("SELECT count(*) FROM endless.t")).getSQLState());
+            long millis = millisSince(start);
+            assertTrue(millis >= 900 && millis < 3000, "the upper bound ended the query after " + millis + " ms");
         }
     }
 

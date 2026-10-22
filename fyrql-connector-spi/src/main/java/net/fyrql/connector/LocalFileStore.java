@@ -56,6 +56,16 @@ public final class LocalFileStore implements FileStore {
      * @throws IllegalArgumentException if the location is no valid path
      */
     public Path path(String location) {
+        return resolve(location, directory);
+    }
+
+    /**
+     * Returns the path of a location, a URI of the scheme {@code file} or
+     * a path, a relative one resolved against a directory.
+     *
+     * @throws IllegalArgumentException if the location is no valid path
+     */
+    public static Path resolve(String location, Path directory) {
         try {
             if (location.regionMatches(true, 0, "file:", 0, 5)) {
                 return Path.of(URI.create(location));

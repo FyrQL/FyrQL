@@ -17,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,17 +34,31 @@ public final class FileStores {
 
     private final Map<String, FileStore> stores;
     private final LocalFileStore local;
+    private final FileAccessPolicy policy;
+
+    /**
+     * Creates the stores, through which statements in SQL may read and
+     * write anywhere.
+     *
+     * @param stores the stores by their schemes, besides the local one
+     * @param directory the directory against which relative local paths are resolved
+     */
+    public FileStores(Map<String, FileStore> stores, Path directory) {
+        this(stores, directory, FileAccessPolicy.ALL);
+    }
 
     /**
      * Creates the stores.
      *
      * @param stores the stores by their schemes, besides the local one
      * @param directory the directory against which relative local paths are resolved
+     * @param policy which locations statements in SQL may read and write
      */
-    public FileStores(Map<String, FileStore> stores, Path directory) {
+    public FileStores(Map<String, FileStore> stores, Path directory, FileAccessPolicy policy) {
         this.stores = new LinkedHashMap<>();
         stores.forEach((scheme, store) -> this.stores.put(scheme.toLowerCase(Locale.ROOT), store));
         this.local = new LocalFileStore(directory);
+        this.policy = Objects.requireNonNull(policy, "policy");
     }
 
     /** Returns the stores with only the local file system, relative paths resolved against a directory. */
@@ -70,6 +85,17 @@ public final class FileStores {
     /** Returns the local file system. */
     public LocalFileStore local() {
         return local;
+    }
+
+    /**
+     * Returns which locations statements in SQL may read and write. The
+     * engine checks the locations the statements name; a connector checks
+     * the further files it reads for a table of such a statement, such as
+     * the data files of an Iceberg table, but not those of the tables
+     * registered with it.
+     */
+    public FileAccessPolicy policy() {
+        return policy;
     }
 
     /**

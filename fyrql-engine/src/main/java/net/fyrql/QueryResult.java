@@ -19,20 +19,24 @@ import net.fyrql.exec.SpillStatistics;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ScheduledFuture;
 
 /**
  * The result of a query: batches on demand, or all rows at once as Java
  * values (see {@link net.fyrql.core.type.DataType} for the value of each
- * type). Closing releases the sources.
+ * type). Closing releases the sources and ends the timeout of the query,
+ * which counts until then.
  */
 public final class QueryResult implements AutoCloseable {
 
     private final Operator operator;
     private final QueryContext context;
+    private final ScheduledFuture<?> timeout;
 
-    QueryResult(Operator operator, QueryContext context) {
+    QueryResult(Operator operator, QueryContext context, ScheduledFuture<?> timeout) {
         this.operator = operator;
         this.context = context;
+        this.timeout = timeout;
     }
 
     /** Returns the columns of the result. */
@@ -74,6 +78,10 @@ public final class QueryResult implements AutoCloseable {
 
     @Override
     public void close() {
-        operator.close();
+        try {
+            operator.close();
+        } finally {
+            Timeouts.stop(timeout);
+        }
     }
 }

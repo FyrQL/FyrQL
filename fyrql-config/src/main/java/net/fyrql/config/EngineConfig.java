@@ -97,6 +97,13 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
         this(sources, settings, Map.of(), directory);
     }
 
+    /** Returns the configuration with a setting of the engine added or replaced. */
+    public EngineConfig withSetting(String key, String value) {
+        Map<String, String> with = new LinkedHashMap<>(settings);
+        with.put(key, value);
+        return new EngineConfig(sources, with, server, directory);
+    }
+
     /**
      * Reads a configuration file, as YAML, or as JSON if its name ends in
      * {@code .json}.

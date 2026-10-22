@@ -15,6 +15,8 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileAccessException;
+import net.fyrql.connector.FileAccessPolicy;
 import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.ScanPlan;
@@ -46,6 +48,7 @@ import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 /**
  * Apache Iceberg tables as a source, read in pure Java without Hadoop and
@@ -105,9 +108,13 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
     private record Table(IcebergFiles.TableSpec spec, IcebergFiles.Resolved resolved, boolean snapshots) {
     }
 
-    /** What a scan remembers: the table in its snapshot, the filters to skip by, the limit and the deletes. */
+    /**
+     * What a scan remembers: the table in its snapshot, the filters to skip
+     * by, the limit and the deletes, and whether the table comes from a
+     * call, whose files the policy of the engine must allow.
+     */
     private record State(IcebergFiles.Resolved table, List<Expression> filters, OptionalLong limit,
-            Deletes deletes) {
+            Deletes deletes, boolean call) {
     }
 
     /** The split of a row group of a data file. */
@@ -363,13 +370,13 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
         Table t = table(table);
         if (t.snapshots()) {
             return Capabilities.NONE.plan(table, SNAPSHOT_COLUMNS, request, new State(t.resolved(), List.of(),
-                    OptionalLong.empty(), null));
+                    OptionalLong.empty(), null, false));
         }
         boolean noDeletes = t.resolved().rowsWithoutDeletes().isPresent();
         Capabilities capabilities = new Capabilities(f -> false, noDeletes, o -> false,
                 a -> noDeletes && countsRows(a), true);
         return capabilities.plan(table, t.resolved().columns(), request, new State(t.resolved(), request.filters(),
-                request.limit(), new Deletes(files)));
+                request.limit(), new Deletes(files), table.table().startsWith(CALL_PREFIX)));
     }
 
     private static boolean countsRows(PlanNode.Aggregation aggregation) {
@@ -394,6 +401,9 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
      *
      * @throws IllegalArgumentException if a file cannot be read, a data file
      *         is not a Parquet file or has no field ids
+     * @throws FileAccessException if the table comes from a call and the
+     *         policy of the engine does not allow to read one of its
+     *         manifest lists, manifests, data or delete files
      */
     @Override
     public List<Split> splits(ScanPlan plan) {
@@ -412,9 +422,28 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
         }
         FilePruning pruning = new FilePruning(table.schema(), plan.columns(), state.filters(),
                 table.metadata().specs());
+        FileAccessPolicy policy = files.stores().policy();
+        Function<String, AvroFile> read = !state.call() ? files::avro : location -> {
+            policy.checkRead(location);
+            return files.avro(location);
+        };
         List<SnapshotScan.FileTask> tasks = table.snapshot() == null ? List.of()
-                : SnapshotScan.plan(table.metadata(), table.location(), table.snapshot(), files::avro,
+                : SnapshotScan.plan(table.metadata(), table.location(), table.snapshot(), read,
                         pruning::mayMatch, pruning::mayMatch);
+        if (state.call()) {
+            for (SnapshotScan.FileTask t : tasks) {
+                policy.checkRead(t.data().location());
+                if (t.deletionVector() != null) {
+                    policy.checkRead(t.deletionVector().location());
+                }
+                for (Manifests.ContentFile d : t.positionDeletes()) {
+                    policy.checkRead(d.location());
+                }
+                for (Manifests.ContentFile d : t.equalityDeletes()) {
+                    policy.checkRead(d.location());
+                }
+            }
+        }
         if (plan.aggregationAccepted()) {
             long rows = 0;
             for (SnapshotScan.FileTask t : tasks) {

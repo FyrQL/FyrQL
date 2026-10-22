@@ -43,8 +43,11 @@ warehouse first.
   a builder or a YAML file. A JDBC driver, also as one JAR, opens it to tools such as
   DBeaver; results come as Apache Arrow vectors, in the process or from a Flight SQL
   server in one executable JAR, which Python reads through ADBC into pyarrow and pandas.
-  See [JDBC driver](docs/manual.md#jdbc-driver) and
-  [Flight SQL server](docs/manual.md#flight-sql-server).
+  Rules for the files that statements may read and write, which the server closes by
+  default, and time limits for queries let others use an engine.
+  See [JDBC driver](docs/manual.md#jdbc-driver),
+  [Flight SQL server](docs/manual.md#flight-sql-server),
+  [File access](docs/manual.md#file-access) and [Time limits](docs/manual.md#time-limits).
 - **Pure Java.** No JNI, no native libraries, no Hadoop: Parquet and Iceberg are read
   with codecs in pure Java, and Arrow allocates its memory without Netty or native code.
   The same JARs run wherever Java 21 runs, also where native code is not allowed.

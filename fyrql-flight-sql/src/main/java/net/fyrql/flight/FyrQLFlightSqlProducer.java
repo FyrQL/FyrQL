@@ -482,8 +482,9 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                     if (context.isCancelled()) {
                         queries.release();
                         released = true;
-                        listener.error(CallStatus.CANCELLED.withDescription(context.reason().message())
-                                .toRuntimeException());
+                        CallStatus status = context.reason() == QueryContext.Reason.TIMEOUT ? CallStatus.TIMED_OUT
+                                : CallStatus.CANCELLED;
+                        listener.error(status.withDescription(context.reason().message()).toRuntimeException());
                         return;
                     }
                     listener.putNext();

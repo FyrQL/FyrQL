@@ -14,6 +14,7 @@ package net.fyrql.flight;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import org.apache.arrow.flight.FlightClient;
+import org.apache.arrow.flight.FlightStatusCode;
 import org.apache.arrow.flight.Location;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.memory.BufferAllocator;
@@ -77,13 +78,57 @@ class MainTest {
                 BufferAllocator allocator = new RootAllocator()) {
             int port = running.server().port();
             assertEquals("FyrQL Flight SQL server " + FlightSqlServer.VERSION + " listening on grpc+tcp://127.0.0.1:"
-                    + port + System.lineSeparator(), bytes.toString(StandardCharsets.UTF_8));
+                    + port + System.lineSeparator() + "File access from SQL: none; query timeout: none"
+                    + System.lineSeparator(), bytes.toString(StandardCharsets.UTF_8));
             try (FlightSqlClient client = new FlightSqlClient(FlightClient.builder(allocator,
                     Location.forGrpcInsecure("127.0.0.1", port)).build())) {
                 assertEquals(List.of(List.of(1)), TestServer.comparable(TestServer.rows(client,
                         client.execute("SELECT 1 AS one"))));
             }
         }
+    }
+
+    @Test
+    @SuppressWarnings("try") // FlightSqlClient.close() may throw InterruptedException.
+    void theServerAllowsNoFilesFromSqlUnlessTheFileDoes() throws Exception {
+        Path data = Files.createDirectories(dir.resolve("data"));
+        String inside = data.resolve("c.csv").toString().replace('\\', '/');
+        String outside = dir.resolve("c.csv").toString().replace('\\', '/');
+        Path closed = Files.writeString(dir.resolve("closed.yaml"), "sources: []\n");
+        Path open = Files.writeString(dir.resolve("open.yaml"), "sources: []\nengine:\n  fileAccess: readWrite\n"
+                + "  allowedLocations: [data]\n  queryTimeout: 30s\n  maxQueryTimeout: 5m\n");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        PrintStream out = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+        try (FlightSqlServerMain.Running running = FlightSqlServerMain.start(new String[] {closed.toString(),
+                "--port", "0"}, out);
+                BufferAllocator allocator = new RootAllocator();
+                FlightSqlClient client = new FlightSqlClient(FlightClient.builder(allocator,
+                        Location.forGrpcInsecure("127.0.0.1", running.server().port())).build())) {
+            TestServer.fails(FlightStatusCode.UNAUTHORIZED, "Writing " + inside + " is not allowed: the engine"
+                    + " allows no access to files from SQL (fileAccess none)", () -> client.executeUpdate(
+                    "COPY (SELECT 1 AS k) TO '" + inside + "'"));
+        }
+        bytes.reset();
+        try (FlightSqlServerMain.Running running = FlightSqlServerMain.start(new String[] {open.toString(),
+                "--port", "0"}, out);
+                BufferAllocator allocator = new RootAllocator();
+                FlightSqlClient client = new FlightSqlClient(FlightClient.builder(allocator,
+                        Location.forGrpcInsecure("127.0.0.1", running.server().port())).build())) {
+            assertTrue(bytes.toString(StandardCharsets.UTF_8).endsWith("File access from SQL: readWrite under "
+                    + data.toRealPath() + "; query timeout: 30s, at most 5m" + System.lineSeparator()),
+                    bytes.toString(StandardCharsets.UTF_8));
+            TestServer.fails(FlightStatusCode.UNAUTHORIZED, "Writing " + outside + " is not allowed: it is not under"
+                    + " the allowed locations", () -> client.executeUpdate("COPY (SELECT 1 AS k) TO '" + outside
+                    + "'"));
+            TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "No source writes files of the format csv",
+                    () -> client.executeUpdate("COPY (SELECT 1 AS k) TO '" + inside + "'"));
+        }
+        Path locationsOnly = Files.writeString(dir.resolve("locations.yaml"), "sources: []\nengine:\n"
+                + "  allowedLocations: [data]\n");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> FlightSqlServerMain.start(
+                new String[] {locationsOnly.toString(), "--port", "0"}, System.out));
+        assertEquals(locationsOnly + ": Cannot build the engine: allowedLocations needs fileAccess read or readWrite,"
+                + " not none", e.getMessage());
     }
 
     @Test

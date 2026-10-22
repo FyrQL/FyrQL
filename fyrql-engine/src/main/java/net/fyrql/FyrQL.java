@@ -18,6 +18,8 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.ConnectorFactory;
+import net.fyrql.connector.FileAccess;
+import net.fyrql.connector.FileAccessPolicy;
 import net.fyrql.connector.FileReaderProvider;
 import net.fyrql.connector.FileStore;
 import net.fyrql.connector.FileStores;
@@ -56,6 +58,7 @@ import net.fyrql.sql.parse.SqlParser;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -70,6 +73,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.Set;
+import java.util.concurrent.ScheduledFuture;
 
 /**
  * The engine: registered connectors, a catalog over them, and the
@@ -99,7 +103,9 @@ import java.util.Set;
  * {@code fyrql-connector-csv}, {@code fyrql-connector-json} or
  * {@code fyrql-connector-parquet} on the class path, the engine reads and
  * writes the format without a registered source of it, see
- * {@link Builder#implicitSources(boolean)}.
+ * {@link Builder#implicitSources(boolean)}. Which files statements in SQL
+ * may read and write, see {@link Builder#fileAccess(FileAccess)}; how long
+ * a query may run, see {@link Builder#queryTimeout(Duration)}.
  *
  * <pre>{@code
  * try (FyrQL engine = FyrQL.builder().register(memory).register(csv).build()) {
@@ -122,16 +128,19 @@ public final class FyrQL implements AutoCloseable {
     private final Writes writes;
     /** The directory to which operators spill, {@code null} if they do not. */
     private final SpillDirectory spill;
+    /** The timeouts of the queries. */
+    private final Timeouts timeouts;
     /** The time zone the session starts with, to which {@code RESET TimeZone} returns. */
     private final ZoneId initialZone;
     private volatile ZoneId zone;
 
     private FyrQL(Map<String, Connector> connectors, SearchPath searchPath, FunctionRegistry functions,
             MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options, int threads,
-            boolean preserveOrder, SpillDirectory spill, ZoneId zone) {
+            boolean preserveOrder, SpillDirectory spill, ZoneId zone, FileAccessPolicy files, Timeouts timeouts) {
         this.connectors = Collections.unmodifiableMap(new LinkedHashMap<>(connectors));
         this.spill = spill;
-        this.catalog = new EngineCatalog(this.connectors, searchPath, this::timeZone);
+        this.timeouts = timeouts;
+        this.catalog = new EngineCatalog(this.connectors, searchPath, this::timeZone, files);
         this.catalogTables = new CatalogTables(this.connectors);
         this.functions = functions;
         this.initialZone = zone;
@@ -207,6 +216,35 @@ public final class FyrQL implements AutoCloseable {
      */
     public Optional<Path> spillDirectory() {
         return spill != null ? Optional.of(spill.parent()) : Optional.empty();
+    }
+
+    /** Returns what statements in SQL may do with files, see {@link Builder#fileAccess(FileAccess)}. */
+    public FileAccess fileAccess() {
+        return catalog.fileAccessPolicy().access();
+    }
+
+    /**
+     * Returns the locations under which statements in SQL may read and
+     * write files, resolved, or none for anywhere; see
+     * {@link Builder#allowedLocations(List)}.
+     */
+    public List<String> allowedLocations() {
+        return catalog.fileAccessPolicy().locations();
+    }
+
+    /** Returns the timeout of a query that asks for none, see {@link Builder#queryTimeout(Duration)}. */
+    public Optional<Duration> queryTimeout() {
+        return Optional.ofNullable(timeouts.queryTimeout());
+    }
+
+    /** Returns the upper bound of the timeouts of queries, see {@link Builder#maxQueryTimeout(Duration)}. */
+    public Optional<Duration> maxQueryTimeout() {
+        return Optional.ofNullable(timeouts.maxQueryTimeout());
+    }
+
+    /** Returns the timeouts of the queries, for the tests. */
+    Timeouts timeouts() {
+        return timeouts;
     }
 
     /** Tells whether scans are negotiated with their connectors, so that a source takes over what it can. */
@@ -581,7 +619,7 @@ public final class FyrQL implements AutoCloseable {
     /**
      * Runs a bound statement that writes, to its end, and returns the
      * number of rows written; a context of the caller cancels it, which
-     * abandons what was written.
+     * abandons what was written, and so does the timeout of the query.
      *
      * @throws SqlException if the statement is a query, or the write fails
      */
@@ -590,7 +628,12 @@ public final class FyrQL implements AutoCloseable {
             throw new SqlException("A query returns rows, not a number of rows written; run it with sql",
                     Position.UNKNOWN);
         }
-        return writes.run(statement, context);
+        ScheduledFuture<?> timeout = timeouts.start(context);
+        try {
+            return writes.run(statement, context);
+        } finally {
+            Timeouts.stop(timeout);
+        }
     }
 
     /**
@@ -604,9 +647,9 @@ public final class FyrQL implements AutoCloseable {
         if (statement instanceof BoundStatement.Query q) {
             return execute(q.plan(), context);
         }
-        long count = writes.run(statement, context);
-        return execute(new PlanNode.Values(BoundStatement.COUNT, List.<Object[]>of(new Object[] {count})),
-                context);
+        long count = update(statement, context);
+        return new QueryResult(open(new PlanNode.Values(BoundStatement.COUNT,
+                List.<Object[]>of(new Object[] {count})), context), context, null);
     }
 
     /**
@@ -686,10 +729,20 @@ public final class FyrQL implements AutoCloseable {
      * Runs a plan as {@link #execute(PlanNode)} does, for a query that a
      * context of the caller cancels, also before the result is there;
      * once the context is canceled, reading the result fails with a
-     * {@link net.fyrql.exec.QueryCancelledException}.
+     * {@link net.fyrql.exec.QueryCancelledException}. The timeout of the
+     * query, see {@link QueryContext#withTimeout} and
+     * {@link Builder#queryTimeout(Duration)}, counts from the creation of
+     * the context until the result is closed; once it has passed, the
+     * context is canceled with {@link QueryContext.Reason#TIMEOUT}.
      */
     public QueryResult execute(PlanNode plan, QueryContext context) {
-        return new QueryResult(open(plan, context), context);
+        ScheduledFuture<?> timeout = timeouts.start(context);
+        try {
+            return new QueryResult(open(plan, context), context, timeout);
+        } catch (RuntimeException | Error e) {
+            Timeouts.stop(timeout);
+            throw e;
+        }
     }
 
     /** Opens the operator of a plan, after {@link #optimize}. */
@@ -773,7 +826,10 @@ public final class FyrQL implements AutoCloseable {
         return connector.openRemote(plan);
     }
 
-    /** Closes the sources and deletes the directory to which operators spilled. */
+    /**
+     * Closes the sources, deletes the directory to which operators spilled
+     * and stops the thread of the timeouts.
+     */
     @Override
     public void close() {
         try {
@@ -781,8 +837,12 @@ public final class FyrQL implements AutoCloseable {
                 c.close();
             }
         } finally {
-            if (spill != null) {
-                spill.close();
+            try {
+                if (spill != null) {
+                    spill.close();
+                }
+            } finally {
+                timeouts.close();
             }
         }
     }
@@ -803,6 +863,10 @@ public final class FyrQL implements AutoCloseable {
         private boolean spill = true;
         private Path spillDirectory;
         private boolean implicitSources = true;
+        private FileAccess fileAccess = FileAccess.READ_WRITE;
+        private List<String> allowedLocations = List.of();
+        private Duration queryTimeout;
+        private Duration maxQueryTimeout;
         private ClassLoader classLoader;
         private ZoneId timeZone = ZoneId.systemDefault();
 
@@ -857,6 +921,75 @@ public final class FyrQL implements AutoCloseable {
             }
             this.spillDirectory = directory;
             return this;
+        }
+
+        /**
+         * Sets what statements in SQL may do with the files and objects they
+         * name: {@code FROM 'orders.csv'}, table functions such as
+         * {@code read_parquet} and {@code iceberg_scan}, {@code COPY ... TO}
+         * and {@code COPY ... FROM}; {@code READ_WRITE} by default, as for an
+         * application that runs its own statements. An engine that runs
+         * statements of others, such as behind a server, takes
+         * {@code NONE} or {@code READ} with {@link #allowedLocations}. The
+         * tables of the registered sources are not affected.
+         *
+         * @see FileAccessPolicy
+         */
+        public Builder fileAccess(FileAccess access) {
+            this.fileAccess = Objects.requireNonNull(access, "access");
+            return this;
+        }
+
+        /**
+         * Sets the directories and prefixes, such as {@code s3://lake/},
+         * under which statements in SQL may read and, with
+         * {@code READ_WRITE}, write files; none by default, which allows
+         * every location. A relative directory is resolved against the
+         * working directory, and symbolic links are followed; see
+         * {@link FileAccessPolicy}.
+         */
+        public Builder allowedLocations(List<String> locations) {
+            this.allowedLocations = List.copyOf(locations);
+            return this;
+        }
+
+        /**
+         * Sets how long a query that asks for no timeout of its own may run,
+         * from the creation of its {@link QueryContext} until its result is
+         * closed, so reading the result counts; none by default. A query
+         * asks for its own with {@link QueryContext#withTimeout(Duration)},
+         * as the JDBC driver does for {@code Statement.setQueryTimeout}.
+         * Once the timeout has passed, the query is canceled and fails with
+         * {@link QueryContext.Reason#TIMEOUT}.
+         *
+         * @param timeout the timeout, {@code null} or zero for none
+         * @throws IllegalArgumentException if the timeout is negative
+         */
+        public Builder queryTimeout(Duration timeout) {
+            this.queryTimeout = timeout(timeout, "queryTimeout");
+            return this;
+        }
+
+        /**
+         * Sets how long any query may run, also one that asks for a longer
+         * timeout of its own; none by default. A server that runs the
+         * queries of others sets it so that no client holds the engine
+         * without end.
+         *
+         * @param timeout the upper bound, {@code null} or zero for none
+         * @throws IllegalArgumentException if the timeout is negative
+         * @see #queryTimeout(Duration)
+         */
+        public Builder maxQueryTimeout(Duration timeout) {
+            this.maxQueryTimeout = timeout(timeout, "maxQueryTimeout");
+            return this;
+        }
+
+        private static Duration timeout(Duration timeout, String name) {
+            if (timeout != null && timeout.isNegative()) {
+                throw new IllegalArgumentException(name + ": " + timeout);
+            }
+            return timeout == null || timeout.isZero() ? null : timeout;
         }
 
         /** Sets the number of rows per batch. */
@@ -1009,7 +1142,9 @@ public final class FyrQL implements AutoCloseable {
         /**
          * Builds the engine.
          *
-         * @throws IllegalArgumentException if the default source is not registered, or the system property
+         * @throws IllegalArgumentException if the default source is not registered, there are allowed
+         *         locations with the file access {@code NONE} or one is invalid, the query timeout is above
+         *         its upper bound, or the system property
          *         {@value CodegenMode#PROPERTY}, {@value Optimizer.Options#PROPERTY} or
          *         {@value Executor#THREADS_PROPERTY} has an unknown value
          * @throws IllegalStateException    if code generation is {@code ALWAYS} without a compiler, or an
@@ -1022,13 +1157,15 @@ public final class FyrQL implements AutoCloseable {
             Optimizer.Options options = pushdown == null ? Optimizer.Options.fromSystemProperty()
                     : pushdown ? Optimizer.Options.DEFAULT : Optimizer.Options.NO_PUSHDOWN;
             int engineThreads = threads > 0 ? threads : Executor.threadsFromSystemProperty();
+            FileAccessPolicy files = FileAccessPolicy.of(fileAccess, allowedLocations, Path.of(""));
+            Timeouts timeouts = new Timeouts(queryTimeout, maxQueryTimeout);
             String source = defaultSource != null ? defaultSource
                     : connectors.size() == 1 ? connectors.keySet().iterator().next() : null;
             // A copy, so that the builder can build again with the sources registered so far.
             Map<String, Connector> sources = new LinkedHashMap<>(connectors);
             List<Connector> implicit = implicitSources ? addImplicitSources(sources) : List.of();
             try {
-                FileStores stores = fileStores(sources);
+                FileStores stores = fileStores(sources, files);
                 for (Connector c : sources.values()) {
                     c.fileStores(stores);
                 }
@@ -1037,7 +1174,7 @@ public final class FyrQL implements AutoCloseable {
                         new MemoryBudget(memoryBudget), batchSize, codegen, options, engineThreads, preserveOrder,
                         !spill ? null : spillDirectory != null ? new SpillDirectory(spillDirectory)
                                 : SpillDirectory.temporary(),
-                        timeZone);
+                        timeZone, files, timeouts);
             } catch (RuntimeException | Error e) {
                 close(implicit, e);
                 throw e;
@@ -1049,7 +1186,7 @@ public final class FyrQL implements AutoCloseable {
          *
          * @throws IllegalStateException if two sources offer a store of the same scheme
          */
-        private static FileStores fileStores(Map<String, Connector> sources) {
+        private static FileStores fileStores(Map<String, Connector> sources, FileAccessPolicy policy) {
             Map<String, FileStore> stores = new LinkedHashMap<>();
             Map<String, String> owners = new HashMap<>();
             for (Connector c : sources.values()) {
@@ -1064,7 +1201,7 @@ public final class FyrQL implements AutoCloseable {
                     stores.put(scheme, store.get());
                 }
             }
-            return new FileStores(stores, Path.of(""));
+            return new FileStores(stores, Path.of(""), policy);
         }
 
         /** Adds the implicit sources to the sources and returns them. */

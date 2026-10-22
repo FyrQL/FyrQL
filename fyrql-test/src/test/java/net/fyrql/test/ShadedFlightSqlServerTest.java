@@ -20,6 +20,8 @@ import net.fyrql.flight.FlightSqlServer;
 import org.apache.arrow.flight.FlightClient;
 import org.apache.arrow.flight.FlightEndpoint;
 import org.apache.arrow.flight.FlightInfo;
+import org.apache.arrow.flight.FlightRuntimeException;
+import org.apache.arrow.flight.FlightStatusCode;
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.Location;
 import org.apache.arrow.flight.sql.FlightSqlClient;
@@ -55,6 +57,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -64,9 +67,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * package of the JDK that Arrow needs, and with its class name and a JDBC
  * driver next to it on the class path. A client of Flight SQL reads the
  * catalog, a query over CSV, JSON and Parquet with compiled expressions, a
- * prepared statement, a cancelled stream and a query with H2; the JAR
- * carries the server, the libraries it renames, their licenses and no
- * native code.
+ * prepared statement, a cancelled stream and a query with H2; files that
+ * statements name only as the configuration allows; the JAR carries the
+ * server, the libraries it renames, their licenses and no native code.
  */
 class ShadedFlightSqlServerTest {
 
@@ -275,10 +278,51 @@ class ShadedFlightSqlServerTest {
             }
             assertEquals(List.of(100L), column(rows(client, client.execute("SELECT count(*) FROM numbers"))));
 
+            String file = path(data.resolve("orders.csv"));
+            FlightRuntimeException denied = assertThrows(FlightRuntimeException.class,
+                    () -> rows(client, client.execute("SELECT * FROM '" + file + "'")));
+            assertEquals(FlightStatusCode.UNAUTHORIZED, denied.status().code(), "without fileAccess in the file");
+
             String errors = server.errors();
             assertFalse(errors.contains("Stream Error"), "the warning of gRPC about a closed stream:\n" + errors);
             assertFalse(errors.contains(" INFO "), "only warnings and errors are logged:\n" + errors);
             assertFalse(errors.contains("Exception"), errors);
+        }
+    }
+
+    @Test
+    @SuppressWarnings("try") // FlightSqlClient.close() may throw InterruptedException.
+    void statementsReadOnlyTheFilesTheConfigurationAllows() throws Exception {
+        Path jar = jar();
+        Path data = Files.createDirectories(dir.resolve("data"));
+        Files.writeString(data.resolve("a.csv"), "k\n1\n2\n", StandardCharsets.UTF_8);
+        Files.writeString(dir.resolve("b.csv"), "k\n3\n", StandardCharsets.UTF_8);
+        Path config = Files.writeString(dir.resolve("fyrql.yaml"), """
+                sources:
+                  - name: files
+                    type: csv
+                    directory: data
+                engine:
+                  fileAccess: read
+                  allowedLocations: [data]
+                """, StandardCharsets.UTF_8);
+
+        try (Child server = Child.start(dir.resolve("server.log"), List.of(java(), "-jar", jar.toString(),
+                config.toString(), "--port", "0"));
+                BufferAllocator allocator = new RootAllocator();
+                FlightSqlClient client = client(allocator, server)) {
+            assertEquals(List.of(1L, 2L), column(rows(client, client.execute("SELECT k FROM '"
+                    + path(data.resolve("a.csv")) + "' ORDER BY k"))));
+            assertEquals(List.of(2L), column(rows(client, client.execute("SELECT count(*) FROM files.a"))));
+            FlightRuntimeException outside = assertThrows(FlightRuntimeException.class,
+                    () -> rows(client, client.execute("SELECT * FROM '" + path(dir.resolve("b.csv")) + "'")));
+            assertEquals(FlightStatusCode.UNAUTHORIZED, outside.status().code());
+            assertTrue(outside.status().description().contains("is not under the allowed locations"),
+                    outside.status().description());
+            FlightRuntimeException write = assertThrows(FlightRuntimeException.class, () -> client.executeUpdate(
+                    "COPY (SELECT 1 AS k) TO '" + path(data.resolve("c.csv")) + "'"));
+            assertEquals(FlightStatusCode.UNAUTHORIZED, write.status().code());
+            assertFalse(Files.exists(data.resolve("c.csv")));
         }
     }
 

@@ -59,6 +59,16 @@ public interface CatalogView {
         throw new SqlException("Not supported: writing tables", Position.UNKNOWN);
     }
 
+    /**
+     * Checks that a statement may write a file, for {@code COPY ... TO}.
+     * The default allows every file.
+     *
+     * @param path the path of the file as the statement names it
+     * @throws SqlException if the statement may not write it
+     */
+    default void checkFileWrite(String path) {
+    }
+
     /** Returns the columns of a resolved table. */
     Schema schema(TableRef table);
 

@@ -39,22 +39,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.9.0</version>
+    <version>0.10.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.9.0</version>
+    <version>0.10.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.9.0</version>
+    <version>0.10.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.9.0</version>
+    <version>0.10.0</version>
 </dependency>
 ```
 
@@ -320,6 +320,17 @@ engine:
   pushdown: true
 ```
 
+The section `engine` holds the settings of the builder. An engine that runs the
+statements of others, such as behind a server, limits which files they may read with
+`FROM 'file'` or `COPY`, and how long a query may run:
+
+```yaml
+engine:
+  fileAccess: read
+  allowedLocations: [data]
+  queryTimeout: 30s
+```
+
 The `type` of a source picks its connector: `csv`, `json`, `parquet`, `iceberg`, `http`,
 `odata`, `jdbc`, `memory` or `s3`. `${env:NAME}` and `${sys:name}` take a value from the
 environment or a system property, so that secrets need not be in the file, and relative
@@ -465,7 +476,10 @@ java -jar fyrql-flight-sql-all/target/fyrql-flight-sql-all-<version>.jar fyrql.y
 ```
 
 The server listens on `127.0.0.1:32010` and takes every client there; a section `server`
-in the file sets another address, users and passwords or a token, and TLS. With Python
+in the file sets another address, users and passwords or a token, and TLS. Statements of
+clients read no files of the machine of the server, as with `FROM 'data/orders.csv'`,
+unless the section `engine` allows it with `fileAccess: read` and `allowedLocations`; the
+tables of the sources stay readable (see [File access](manual.md#file-access)). With Python
 3.10 or later, `pip install adbc-driver-flightsql pyarrow pandas` installs a client,
 which runs the query of the JDBC driver:
 

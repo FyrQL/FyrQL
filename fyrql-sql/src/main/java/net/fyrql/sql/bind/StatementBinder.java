@@ -115,6 +115,10 @@ final class StatementBinder {
         PlanNode input = new QueryBinder(catalog, context).query(c.query());
         Map<String, String> options = new LinkedHashMap<>(c.options());
         String format = format(c.path(), options, c.position());
+        withPosition(() -> {
+            catalog.checkFileWrite(c.path());
+            return null;
+        }, c.position());
         return new BoundStatement.Copy(input, c.path(), format, options);
     }
 
@@ -329,7 +333,7 @@ final class StatementBinder {
         try {
             return lookup.get();
         } catch (SqlException e) {
-            throw new SqlException(e.reason(), position);
+            throw new SqlException(e.reason(), position, e.getCause());
         }
     }
 }

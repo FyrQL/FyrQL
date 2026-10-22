@@ -34,7 +34,9 @@ public interface TableFunctionProvider {
      *
      * @param name one of {@link #tableFunctions()}
      * @param arguments the positional arguments as Java values of their
-     *        types (see {@link net.fyrql.core.type.DataType})
+     *        types (see {@link net.fyrql.core.type.DataType}); a text as
+     *        the first one is the location the call reads, which the engine
+     *        has checked against its {@link FileAccessPolicy}
      * @param namedArguments the named arguments, with the names in lower
      *        case, in the order of the call, and
      *        {@link FileWriterProvider#TIME_ZONE} as a string at the end

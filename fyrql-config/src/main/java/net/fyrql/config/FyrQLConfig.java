@@ -15,6 +15,8 @@ import net.fyrql.FyrQL;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ConnectorFactory;
+import net.fyrql.connector.FileAccess;
+import net.fyrql.connector.FileStores;
 import net.fyrql.core.value.ZonedDates;
 import net.fyrql.exec.CodegenMode;
 
@@ -44,9 +46,13 @@ import java.util.Optional;
  * path, relative to the file), {@code codegen} ({@code off}, {@code auto} or {@code always}),
  * {@code codegenThreshold}, {@code pushdown} ({@code true} or
  * {@code false}), {@code threads}, {@code preserveOrder},
- * {@code implicitSources} and {@code timeZone} (a name such as
- * {@code Europe/Berlin}), as the methods of {@link FyrQL.Builder} of the
- * same names take them.
+ * {@code implicitSources}, {@code timeZone} (a name such as
+ * {@code Europe/Berlin}), {@code fileAccess} ({@code none}, {@code read} or
+ * {@code readWrite}), {@code allowedLocations} (a list of directories,
+ * relative to the file, and prefixes such as {@code s3://lake/}, or one
+ * text with commas between them), {@code queryTimeout} and
+ * {@code maxQueryTimeout} (durations such as {@code 30s} or {@code 5m}), as
+ * the methods of {@link FyrQL.Builder} of the same names take them.
  */
 public final class FyrQLConfig {
 
@@ -173,6 +179,11 @@ public final class FyrQLConfig {
         o.bool("preserveOrder").ifPresent(b::preserveOrder);
         o.bool("implicitSources").ifPresent(b::implicitSources);
         o.get("timeZone", "the name of a time zone", v -> ZonedDates.zone(v.strip())).ifPresent(b::timeZone);
+        o.get("fileAccess", "none, read or readWrite", FileAccess::parse).ifPresent(b::fileAccess);
+        o.get("allowedLocations", "a list of directories and prefixes", v -> locations(v, o))
+                .ifPresent(b::allowedLocations);
+        o.duration("queryTimeout").ifPresent(b::queryTimeout);
+        o.duration("maxQueryTimeout").ifPresent(b::maxQueryTimeout);
         o.rejectUnknown();
         if (defaultSource.isPresent()) {
             String name = defaultSource.get();
@@ -186,6 +197,17 @@ public final class FyrQLConfig {
             }
             b.defaultSource(name);
         }
+    }
+
+    /** Splits allowed locations at commas and resolves local paths against the directory of the file. */
+    private static List<String> locations(String value, ConfigOptions o) {
+        List<String> locations = new ArrayList<>();
+        for (String part : value.split(",", -1)) {
+            String l = part.strip();
+            boolean path = !l.isEmpty() && FileStores.isLocal(l) && !l.regionMatches(true, 0, "file:", 0, 5);
+            locations.add(path ? o.resolve(l).toString() : l);
+        }
+        return locations;
     }
 
     private static void close(List<Connector> connectors, RuntimeException failure) {

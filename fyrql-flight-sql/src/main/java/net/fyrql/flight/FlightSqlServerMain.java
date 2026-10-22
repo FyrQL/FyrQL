@@ -14,13 +14,17 @@ package net.fyrql.flight;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import net.fyrql.FyrQL;
+import net.fyrql.config.ConfigException;
 import net.fyrql.config.EngineConfig;
 import net.fyrql.config.FyrQLConfig;
+import net.fyrql.connector.FileAccess;
 
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Optional;
 import java.util.logging.Logger;
 
 /**
@@ -30,8 +34,12 @@ import java.util.logging.Logger;
  * <pre>
  * java -jar fyrql-flight-sql-all.jar fyrql.yaml [--host HOST] [--port PORT]
  * </pre>
- * The options override the host and port of the file. The server runs
- * until the JVM ends, and then closes the engine. The JDBC drivers of the
+ * The options override the host and port of the file. Unless the section
+ * {@code engine} sets {@code fileAccess}, statements of clients may read
+ * and write no files ({@code fileAccess: none}); the tables of the sources
+ * stay readable. The server prints its URI, what statements may do with
+ * files and the timeout of queries. It runs until the JVM ends, and then
+ * closes the engine. The JDBC drivers of the
  * databases of JDBC sources go on the class path next to the JAR, which
  * then starts with its class name and the option of Arrow the manifest of
  * the JAR otherwise sets:
@@ -44,6 +52,9 @@ public final class FlightSqlServerMain {
 
     static final String USAGE = "Usage: java -jar fyrql-flight-sql-all.jar <configuration file> [--host <host>]"
             + " [--port <port>]";
+
+    /** The setting of the engine that the server sets to {@code none} unless the file sets it. */
+    private static final String FILE_ACCESS = "fileAccess";
 
     /** The logger of gRPC that reports errors of single streams; kept, so that its filter stays. */
     private static final Logger STREAM_ERRORS = Logger.getLogger("io.grpc.netty.NettyServerHandler");
@@ -92,12 +103,13 @@ public final class FlightSqlServerMain {
     }
 
     /**
-     * Reads the configuration, opens the engine, starts the server and
-     * prints its URI.
+     * Reads the configuration, opens the engine, with the file access
+     * {@code none} unless the configuration sets one, starts the server and
+     * prints its URI, the file access and the timeout of queries.
      *
      * @throws UsageException if the arguments are wrong
-     * @throws net.fyrql.config.ConfigException if the configuration is no valid configuration
-     * @throws IllegalArgumentException if a setting of the server is invalid
+     * @throws ConfigException if the configuration is no valid configuration
+     * @throws IllegalArgumentException if a setting of the server is invalid, or the engine cannot be built
      * @throws IOException if the server cannot listen on its host and port
      */
     static Running start(String[] args, PrintStream out) throws IOException {
@@ -147,7 +159,15 @@ public final class FlightSqlServerMain {
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException(file + ": " + e.getMessage(), e);
         }
-        FyrQL engine = FyrQLConfig.open(file);
+        if (!config.settings().containsKey(FILE_ACCESS)) {
+            config = config.withSetting(FILE_ACCESS, FileAccess.NONE.toString());
+        }
+        FyrQL engine;
+        try {
+            engine = FyrQLConfig.open(config);
+        } catch (ConfigException e) {
+            throw new IllegalArgumentException(file + ": " + e.getMessage(), e);
+        }
         FlightSqlServer s = null;
         try {
             s = FlightSqlServer.builder(engine).config(server).build();
@@ -160,7 +180,36 @@ public final class FlightSqlServerMain {
             throw e;
         }
         out.println("FyrQL Flight SQL server " + FlightSqlServer.VERSION + " listening on " + s.uri());
+        out.println("File access from SQL: " + fileAccess(engine) + "; query timeout: " + timeout(engine));
         return new Running(s, engine);
+    }
+
+    /** Describes what statements may do with files, such as {@code read under /data, s3://lake/}. */
+    static String fileAccess(FyrQL engine) {
+        FileAccess access = engine.fileAccess();
+        if (access == FileAccess.NONE) {
+            return "none";
+        }
+        return access + (engine.allowedLocations().isEmpty() ? " anywhere"
+                : " under " + String.join(", ", engine.allowedLocations()));
+    }
+
+    /** Describes the timeout of queries, such as {@code 30s, at most 5m}. */
+    static String timeout(FyrQL engine) {
+        Optional<Duration> timeout = engine.queryTimeout();
+        Optional<Duration> max = engine.maxQueryTimeout();
+        String text = timeout.map(FlightSqlServerMain::text).orElse("none");
+        return max.isEmpty() ? text : text + ", at most " + text(max.get());
+    }
+
+    /** Returns a duration as the configuration takes it, such as {@code 30s}. */
+    private static String text(Duration d) {
+        if (d.getNano() % 1_000_000 != 0) {
+            return d.toString();
+        }
+        long ms = d.toMillis();
+        return ms % 3_600_000 == 0 ? ms / 3_600_000 + "h" : ms % 60_000 == 0 ? ms / 60_000 + "m"
+                : ms % 1000 == 0 ? ms / 1000 + "s" : ms + "ms";
     }
 
     /**
