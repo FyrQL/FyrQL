@@ -24,6 +24,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -32,6 +33,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -42,7 +44,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * the time zones UTC and Europe/Berlin of both engines, and in FyrQL with
  * and without code generation. The types of the columns and the rows must
  * agree; an interval compares by its text, so that equal intervals of
- * other components differ.
+ * other components differ. A second table holds random intervals of all
+ * three components with numbers of several types, for the fractions that
+ * multiplication, division and {@code avg} carry from one component to the
+ * next.
  */
 class TimeTypesDifferentialTest {
 
@@ -51,6 +56,11 @@ class TimeTypesDifferentialTest {
             new Schema.Field("tz", DataType.TIMESTAMPTZ), new Schema.Field("tm", DataType.TIME),
             new Schema.Field("iv", DataType.INTERVAL), new Schema.Field("n", DataType.INTEGER),
             new Schema.Field("s", DataType.VARCHAR));
+
+    private static final Schema U = Schema.of(new Schema.Field("id", DataType.INTEGER),
+            new Schema.Field("iv", DataType.INTERVAL), new Schema.Field("n", DataType.BIGINT),
+            new Schema.Field("t", DataType.TINYINT), new Schema.Field("x", DataType.DOUBLE),
+            new Schema.Field("m", DataType.decimal(10, 3)), new Schema.Field("g", DataType.INTEGER));
 
     private static final List<String> ZONES = List.of("UTC", "Europe/Berlin");
 
@@ -115,7 +125,12 @@ class TimeTypesDifferentialTest {
                     + " to_days(n), to_hours(n), to_months(n) FROM t",
             "SELECT id, INTERVAL '1 year 2 months -3 days 04:05:06', TIME '24:00:00' > tm,"
                     + " TIMESTAMPTZ '2024-10-27 02:30:00' FROM t",
-            "SELECT id, current_setting('TimeZone') FROM t");
+            "SELECT id, current_setting('TimeZone') FROM t",
+            "SELECT id, iv / n, iv * n, n * iv, iv / t, iv * t FROM u",
+            "SELECT id, iv / x, iv * x, x * iv, iv / m, iv * m FROM u",
+            "SELECT g, avg(iv), avg(-iv), avg(iv * 3) FROM u GROUP BY g",
+            "SELECT avg(iv), count(iv) FROM u",
+            "SELECT id, avg(iv) OVER (PARTITION BY g ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM u");
 
     private static final List<FyrQL> ENGINES = new ArrayList<>();
     private static DuckDbReference duck;
@@ -148,15 +163,44 @@ class TimeTypesDifferentialTest {
                 v[3] == null ? null : Conversions.parseTime(v[3]), v[4] == null ? null : Interval.parse(v[4]),
                 v[5] == null ? null : Integer.parseInt(v[5]), v[6]});
         }
+        List<Object[]> numbers = numbers();
         for (CodegenMode mode : List.of(CodegenMode.OFF, CodegenMode.ALWAYS)) {
             ENGINES.add(FyrQL.builder()
-                    .register(MemoryConnector.builder("mem").table("t", T, rows).batchSize(3).build())
+                    .register(MemoryConnector.builder("mem").table("t", T, rows).table("u", U, numbers)
+                            .batchSize(3).build())
                     .batchSize(3)
                     .codegen(mode)
                     .build());
         }
         duck = new DuckDbReference();
         duck.load("t", T, List.of(Batch.ofRows(T, rows)));
+        duck.load("u", U, List.of(Batch.ofRows(U, numbers)));
+    }
+
+    /**
+     * The rows of the second table: intervals whose months, days and
+     * microseconds are each zero or random, up to about 115 days of
+     * microseconds, and numbers without zero, so that no product leaves the
+     * range of an interval.
+     */
+    private static List<Object[]> numbers() {
+        Random random = new Random(20261022);
+        long[] integers = {1, -1, 2, 3, 7, 13, -24, 99, 187, -561, 592};
+        String[] decimals = {"1.500", "-0.370", "0.333", "7.000", "123.456", "-2.750", "0.001"};
+        List<Object[]> rows = new ArrayList<>();
+        for (int id = 0; id < 40; id++) {
+            Interval iv = Interval.of(random.nextInt(4) == 0 ? 0 : random.nextInt(-200, 201),
+                    random.nextInt(3) == 0 ? 0 : random.nextInt(-5000, 5001),
+                    random.nextInt(4) == 0 ? 0 : random.nextLong(-10_000_000_000_000L, 10_000_000_000_000L));
+            long n = integers[random.nextInt(integers.length)];
+            byte t = (byte) integers[random.nextInt(8)];
+            double x = random.nextInt(3) == 0 ? 1.0 / integers[random.nextInt(integers.length)]
+                    : random.nextDouble(0.01, 50) * (random.nextBoolean() ? 1 : -1);
+            rows.add(new Object[] {id, iv, n, t, x, new BigDecimal(decimals[random.nextInt(decimals.length)]),
+                id % 5});
+        }
+        rows.add(new Object[] {40, null, null, null, null, null, 0});
+        return rows;
     }
 
     @AfterAll

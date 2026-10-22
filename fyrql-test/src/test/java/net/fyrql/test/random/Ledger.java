@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -49,6 +50,21 @@ final class Ledger {
      * reads as an interval is normalized, as both engines compare intervals.
      */
     private static boolean sameUpToEqualIntervals(Outcome o) {
+        return sameRows(o, Ledger::normalized);
+    }
+
+    /**
+     * Tells whether the rows of a difference of a query with
+     * {@code string_agg} agree once the parts of each string are normalized
+     * as intervals, and each string has the same parts in both: equal
+     * intervals that the aggregate joined in another order.
+     */
+    private static boolean sameUpToJoinedTies(Outcome o) {
+        return STRING_AGG.matcher(o.sql()).matches() && sameRows(o, Ledger::joinedParts);
+    }
+
+    /** Tells whether the rows of a difference agree once each row is replaced by a key. */
+    private static boolean sameRows(Outcome o, UnaryOperator<String> key) {
         if (o.kind() != Outcome.Kind.ROWS_DIFFER) {
             return false;
         }
@@ -61,12 +77,12 @@ final class Ledger {
             int e = l.indexOf("expected [");
             int a = l.indexOf("], actual [");
             if (l.startsWith("row ") && e >= 0 && a > e) {
-                firstExpected.add(normalized(l.substring(e + 9, a + 1)));
-                firstActual.add(normalized(l.substring(a + 10)));
+                firstExpected.add(key.apply(l.substring(e + 9, a + 1)));
+                firstActual.add(key.apply(l.substring(a + 10)));
             } else if (l.startsWith("missing:")) {
-                expected.add(normalized(l.substring(8).strip()));
+                expected.add(key.apply(l.substring(8).strip()));
             } else if (l.startsWith("extra:")) {
-                actual.add(normalized(l.substring(6).strip()));
+                actual.add(key.apply(l.substring(6).strip()));
             }
         }
         if (expected.isEmpty() && actual.isEmpty()) {
@@ -100,6 +116,30 @@ final class Ledger {
                 out.append(token);
             }
         }
+        return out.toString();
+    }
+
+    /**
+     * A row of a report with each string as the parts that {@code string_agg}
+     * joined with {@code " | "} or {@code ","}, normalized as intervals in
+     * their order, and the parts as they are written, sorted.
+     */
+    private static String joinedParts(String row) {
+        Matcher m = QUOTED.matcher(row);
+        StringBuilder out = new StringBuilder();
+        while (m.find()) {
+            String text = m.group(1);
+            List<String> parts = List.of(text.split(text.contains(" | ") ? " \\| " : ","));
+            List<String> sorted = new java.util.ArrayList<>(parts);
+            java.util.Collections.sort(sorted);
+            StringBuilder key = new StringBuilder();
+            for (String part : parts) {
+                key.append(normalized(part)).append('|');
+            }
+            key.append('#').append(String.join("|", sorted));
+            m.appendReplacement(out, Matcher.quoteReplacement(key.toString()));
+        }
+        m.appendTail(out);
         return out.toString();
     }
 
@@ -223,9 +263,11 @@ final class Ledger {
                             && !RandomTables.ZONE.getId().equals("UTC")),
             new Entry("interval-ties", "Intervals that both engines compare as equal but write differently, as 30"
                     + " days, 720:00:00 and 1 month, keep the order of their input among equal sort keys, which"
-                    + " differs between the engines, and min, max and first may return either of them. Explained"
-                    + " where the rows agree with the intervals normalized.", "1.5.6", null,
-                    Ledger::sameUpToEqualIntervals),
+                    + " differs between the engines, also where string_agg joins them in the order of an ORDER BY,"
+                    + " and min, max and first may return either of them. Explained where the rows agree with the"
+                    + " intervals normalized, or the strings of string_agg have the same parts and agree with them"
+                    + " normalized.", "1.5.6", null,
+                    o -> sameUpToEqualIntervals(o) || sameUpToJoinedTies(o)),
             new Entry("round-decimal-negative", "DuckDB rounds a decimal to negative places to 0 where the rounded"
                     + " value needs one integral digit more than the decimal has, as in round(9.450, -1) = 0 while"
                     + " round(19.450, -1) = 20; FyrQL rounds to 10.", "1.5.6", null,
@@ -274,7 +316,8 @@ final class Ledger {
                                                     .anyMatch(r -> r instanceof PlanNode.Aggregate))),
             new Entry("join-empty-build", "FyrQL reads the right input of a join first and does not read the left"
                     + " input of an inner join or a semi join whose right input has no rows; DuckDB evaluates the"
-                    + " expressions of the left input, also without its optimizer, and may fail there.", "1.5.6",
+                    + " expressions and windows of the left input, also without its optimizer, and may fail there,"
+                    + " as on a count of ntile that is not positive.", "1.5.6",
                     null, Ledger::skipsTheLeftInput),
             new Entry("duckdb-join-skips-input", "DuckDB does not evaluate one input of an inner join or a"
                     + " semi join when its hash table, built from the other input, holds no key that is not NULL;"
@@ -313,11 +356,12 @@ final class Ledger {
                     + " which is empty, when the frame leaves out rows, as in GROUPS BETWEEN 0 PRECEDING AND 3"
                     + " PRECEDING EXCLUDE TIES, where it takes earlier groups; FyrQL keeps the frame empty.", "1.5.6",
                     null, Ledger::excludesFromAnEmptyFrame),
-            new Entry("lead-lag-default-without-cast", "DuckDB binds a default of lag or lead of a type that has no"
-                    + " cast to the type of the value, such as a BIGINT for a DATE, and fails only when a row takes a"
-                    + " default that is not NULL; FyrQL rejects it while binding.", "1.5.6", null,
+            new Entry("window-argument-without-cast", "DuckDB binds an argument of ntile, nth_value, lag or lead"
+                    + " of a type that has no cast to the type the function needs, such as a DATE for the count of"
+                    + " ntile or a BIGINT for the default of lag of a DATE, and fails only when a row takes a value"
+                    + " that is not NULL; FyrQL rejects it while binding.", "1.5.6", null,
                     o -> o.kind() == Outcome.Kind.FYRQL_FAILS && o.fyrqlError().matches(
-                            "(?s).*No function matches (lag|lead) with an argument of type.*")),
+                            "(?s).*No function matches (lag|lead|ntile|nth_value) with an argument of type.*")),
             new Entry("plan-without-sql", "A plan built in Java may combine types that a query cannot, such as"
                     + " BOOLEAN and DOUBLE results of a CASE; DuckDB rejects its rendering while binding, and so"
                     + " does FyrQL's binder.", "1.5.6", null,
@@ -333,6 +377,11 @@ final class Ledger {
                     + " had moved the filter on these keys that the join passes to its probe side below the LIMIT."
                     + " Seen rarely, in the build on Linux.", "1.5.6", null,
                     o -> o.kind() == Outcome.Kind.ROWS_DIFFER && o.unoptimized() == Outcome.Kind.SAME));
+
+    /** A string as a report writes it, in single quotes. */
+    private static final Pattern QUOTED = Pattern.compile("'((?:[^']|'')*)'");
+    /** A query with an aggregate that joins strings. */
+    private static final Pattern STRING_AGG = Pattern.compile("(?s).*\\b(string_agg|listagg)\\(.*");
 
     /** The two types of a set operation that FyrQL does not unite. */
     private static final Pattern SET_OPERATION_TYPES = Pattern.compile(
@@ -471,8 +520,8 @@ final class Ledger {
 
     /**
      * Tells whether DuckDB failed, also without its optimizer, and the plan
-     * FyrQL ran has an inner or a semi join that computes expressions in its
-     * left input.
+     * FyrQL ran has an inner or a semi join that computes expressions or
+     * windows in its left input.
      */
     private static boolean skipsTheLeftInput(Outcome o) {
         if (o.kind() != Outcome.Kind.DUCKDB_FAILS || o.unoptimized() != Outcome.Kind.DUCKDB_FAILS
@@ -482,7 +531,8 @@ final class Ledger {
         for (PlanNode node : Plans.nodes(o.optimized())) {
             if (node instanceof PlanNode.Join j && (j.type() == PlanNode.JoinType.INNER
                     || j.type() == PlanNode.JoinType.SEMI) && Plans.nodes(j.left()).stream().anyMatch(n ->
-                    Plans.expressions(n).stream().anyMatch(e -> !(e instanceof Expression.Column)))) {
+                    n instanceof PlanNode.Window
+                            || Plans.expressions(n).stream().anyMatch(e -> !(e instanceof Expression.Column)))) {
                 return true;
             }
         }

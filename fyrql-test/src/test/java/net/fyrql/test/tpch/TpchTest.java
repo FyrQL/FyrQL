@@ -63,6 +63,15 @@ class TpchTest {
     /** A budget in which Q1, Q13, Q17, Q18 and Q20 spill, but the hash tables of Q21 do not fit. */
     static final long SMALLER_BUDGET = 2L << 20;
 
+    /**
+     * The threads of the engine with the smaller budget. What its workers
+     * hold at the same time decides whether a query spills and whether the
+     * hash tables of Q20 fit beside it, so that the number must not follow
+     * the processors of the machine: on one thread, Q17 and Q20 do not spill,
+     * and on two, the hash table of Q20 does not fit.
+     */
+    static final int SMALLER_BUDGET_THREADS = 4;
+
     private static TpchEngine tpch;
     private static FyrQL engine;
     private static FyrQL off;
@@ -147,8 +156,8 @@ class TpchTest {
     @Test
     void aggregationsSortsAndWindowsSpillWithASmallerBudget() throws IOException {
         Path dir = Files.createTempDirectory("fyrql-tpch-");
-        try (FyrQL small = tpch.open(null, null, 0, List.of(), b -> b.memoryBudget(SMALLER_BUDGET)
-                .spillDirectory(dir))) {
+        try (FyrQL small = tpch.open(null, null, SMALLER_BUDGET_THREADS, List.of(),
+                b -> b.memoryBudget(SMALLER_BUDGET).spillDirectory(dir))) {
             for (String name : List.of("q01", "q13", "q17", "q18", "q20")) {
                 TpchQueries.Query q = queries().stream().filter(x -> x.name().equals(name)).findFirst().orElseThrow();
                 PlanNode plan = engine.plan(q.sql());

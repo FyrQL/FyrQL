@@ -259,6 +259,38 @@ class DuckDbTimeTypesTest {
         c.value("CAST('12:00:00+02' AS TIME)", "TIME", "12:00:00");
         c.value("CAST('2024-07-01 12:00:00' AS TIME)", "TIME", "12:00:00");
         c.error("CAST('24:00:01' AS TIME)");
+        // A division multiplies by the reciprocal; what the months and days leave of a day goes to the days.
+        c.value("INTERVAL '5 months 6 days' / 7", "INTERVAL", "22 days 06:51:25.677257");
+        c.value("INTERVAL '5 months 6 days' / CAST(7 AS BIGINT)", "INTERVAL", "22 days 06:51:25.677257");
+        c.value("INTERVAL '10 years 3 months 900 days 12345:06:07.891011' / -561", "INTERVAL",
+                "-8 days -26:22:08.988782");
+        c.value("INTERVAL '10 years 3 months 900 days 12345:06:07.891011' * 1.37", "INTERVAL",
+                "14 years 1248 days 16919:59:24.010685");
+        // The mean divides whole numbers and carries their remainders, without a carry to the days.
+        c.value("avg(x) FROM (VALUES (INTERVAL '5 months 6 days'), (INTERVAL '0 seconds'), (INTERVAL '0 seconds'),"
+                + " (INTERVAL '0 seconds'), (INTERVAL '0 seconds'), (INTERVAL '0 seconds'), (INTERVAL '0 seconds'))"
+                + " t(x)", "INTERVAL", "21 days 30:51:25.714285");
+        c.value("avg(x) FROM (VALUES (INTERVAL '1 month 1 day 1 second'), (INTERVAL '0 seconds'),"
+                + " (INTERVAL '0 seconds')) t(x)", "INTERVAL", "10 days 08:00:00.333334");
+        c.done();
+    }
+
+    /**
+     * DuckDB casts an argument of a window function that must be a
+     * {@code BIGINT} also from a type without such a cast, as a
+     * {@code DATE}, and fails only at a row whose value is not
+     * {@code NULL}; FyrQL rejects it while binding.
+     */
+    @Test
+    void windowArgumentsWithoutACast() throws SQLException {
+        Checks c = new Checks("UTC");
+        c.error("ntile(DATE '2024-01-01') OVER ()");
+        c.error("ntile(d) OVER () FROM (VALUES (DATE '2024-01-01')) t(d)");
+        c.error("lag(1, d) OVER () FROM (VALUES (DATE '2024-01-01')) t(d)");
+        c.error("nth_value(1, d) OVER () FROM (VALUES (DATE '2024-01-01')) t(d)");
+        c.rows("SELECT ntile(d) OVER () FROM (VALUES (CAST(NULL AS DATE))) t(d)", 1);
+        c.rows("SELECT ntile(d) OVER () FROM (VALUES (DATE '2024-01-01')) t(d) WHERE false", 0);
+        c.rows("SELECT nth_value(1, d) OVER () FROM (VALUES (CAST(NULL AS DATE))) t(d)", 1);
         c.done();
     }
 
@@ -498,6 +530,21 @@ class DuckDbTimeTypesTest {
                 mismatches.add(item + ": expected an error, DuckDB " + rs.getString(1));
             } catch (SQLException e) {
                 System.out.println("PROBE error " + item + " -> " + e.getMessage().split("\n")[0]);
+            }
+        }
+
+        /** Expects the query to run and to give a number of rows. */
+        void rows(String sql, int expected) {
+            try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery(sql)) {
+                int n = 0;
+                while (rs.next()) {
+                    n++;
+                }
+                if (n != expected) {
+                    mismatches.add(sql + ": expected " + expected + " rows, DuckDB " + n);
+                }
+            } catch (SQLException e) {
+                mismatches.add(sql + ": expected " + expected + " rows, DuckDB " + e.getMessage().split("\n")[0]);
             }
         }
 

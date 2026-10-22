@@ -13,6 +13,7 @@ package net.fyrql.core.value;
 
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Period;
 import java.util.Map;
@@ -161,6 +162,31 @@ class IntervalTest {
         assertThrows(ArithmeticException.class, () -> Interval.ofMicros(1_000_000).times(1e20));
         assertThrows(ArithmeticException.class, () -> day.times(Double.NaN));
         assertThrows(ArithmeticException.class, () -> day.dividedBy(0));
+    }
+
+    /**
+     * The values of DuckDB 1.5.6: a fraction of a day that the months and
+     * the days leave together goes to the days when it reaches a whole day,
+     * a division multiplies by the reciprocal, and the mean carries the
+     * remainders of whole numbers.
+     */
+    @Test
+    void fractionsCarryAsInDuckDb() {
+        Interval mixed = Interval.parse("10 years 3 months 900 days 12345:06:07.891011");
+        assertEquals("22 days 06:51:25.677257", Interval.parse("5 months 6 days").dividedBy(7).toString());
+        assertEquals("-22 days -06:51:25.677257", Interval.parse("-5 months -6 days").dividedBy(7).toString());
+        assertEquals("-8 days -26:22:08.988782", mixed.dividedBy(-561).toString());
+        assertEquals("7 days 38:56:03.449934", mixed.dividedBy(592).toString());
+        assertEquals("14 years 1248 days 16919:59:24.010685", mixed.times(1.37).toString());
+        assertEquals("-18 days -06:55:30.493394", Interval.parse("-7 years -900 days 01:00:00.5").dividedBy(187)
+                .toString());
+        assertEquals("-23:05:14.46213", Interval.parse("-161:36:41.234911").dividedBy(7).toString());
+        assertEquals("Overflow in INTERVAL division",
+                assertThrows(ArithmeticException.class, () -> Interval.ofDays(1).dividedBy(1e-10)).getMessage());
+        assertEquals("10 days 08:00:00.333334", Interval.mean(1, 1, BigInteger.valueOf(1_000_000), 3).toString());
+        assertEquals("21 days 30:51:25.714285", Interval.mean(5, 6, BigInteger.ZERO, 7).toString());
+        assertEquals("00:00:00.000002", Interval.mean(0, 0, BigInteger.TWO, 3).toString());
+        assertEquals("-15 days", Interval.mean(-1, 0, BigInteger.ZERO, 2).toString());
     }
 
     @Test

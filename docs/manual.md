@@ -1349,7 +1349,11 @@ A `TIME` is a time of day from `00:00:00` to `24:00:00` in microseconds, and ari
 with it wraps around midnight. An `INTERVAL` has months, days and microseconds, written
 as `1 year 2 months -3 days 04:05:06.5`. Two intervals compare as in DuckDB, with 24
 hours to a day and 30 days to a month, so that `INTERVAL '1 month' = INTERVAL '30 days'`,
-while arithmetic keeps the three parts apart. In Java, an `INTERVAL` is a
+while arithmetic keeps the three parts apart. A product with a number that has a fraction
+moves the fraction of the months to days, at 30 days to a month, and what is left of a
+day to the time, whole days of it to the days, as DuckDB and PostgreSQL do; a division
+multiplies by the reciprocal of the divisor, and `avg` divides the sums of the three
+parts and carries their remainders to the next smaller part. In Java, an `INTERVAL` is a
 `net.fyrql.core.value.Interval`, and a `TIME` and a `TIMESTAMPTZ` are `Long`s of
 microseconds since midnight and since 1970 in UTC; the memory connector takes
 `LocalTime`, `Instant`, `OffsetDateTime`, `ZonedDateTime`, `Duration` and `Period` as
@@ -1374,6 +1378,9 @@ here; the random tests explain such differences by a ledger of their own, see
   the expression, which is not always DuckDB's.
 - `list(x ORDER BY x)` orders intervals as `ORDER BY` does, by the value they compare
   by; DuckDB 1.5.6 orders them there by their months, days and microseconds as written.
+- Intervals that compare as equal but are written differently, such as `30 days`,
+  `720:00:00` and `1 month`, keep the order of their input under `ORDER BY` and in
+  `string_agg(x, ' | ' ORDER BY x)`; DuckDB may give them in another order.
 - An expression that fails for some values, such as a cast of a string or a division of
   integers by zero, may fail in one of the two engines and not in the other: each moves
   conditions to other places, such as below a join or into a source, and evaluates
@@ -1422,9 +1429,11 @@ here; the random tests explain such differences by a ledger of their own, see
 - A window function whose value is not used is not computed, and so does not fail, as it
   does in DuckDB on a negative offset of a `RANGE` frame.
 - `lag` and `lead` give their default where the offset reaches beyond the range of
-  `BIGINT`; DuckDB fails with an overflow. A default whose type does not cast to the
-  type of the value, such as a `BIGINT` for a `DATE`, is an error when the query is
-  bound; DuckDB fails only at a row that takes a default that is not `NULL`.
+  `BIGINT`; DuckDB fails with an overflow.
+- An argument whose type does not cast to the type the function needs is an error when
+  the query is bound: a `DATE` for the count of `ntile`, the position of `nth_value` or
+  the offset of `lag` and `lead`, or a `BIGINT` for the default of `lag` of a `DATE`.
+  DuckDB fails only at a row whose value is not `NULL`.
 - A `-0.0` by which a window partitions or orders keeps its sign; DuckDB passes such
   columns on as `0.0`.
 - DuckDB 1.5.6 takes rows into a frame whose start lies after its end when the frame has

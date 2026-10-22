@@ -309,7 +309,7 @@ final class ValueAccumulator {
                 }
                 if (type == DataType.INTERVAL) {
                     BigInteger micros = bigSum != null ? bigSum : BigInteger.valueOf(longSum);
-                    yield Interval.quotient(monthSum, daySum, HashAggregateOperator.toDouble(micros), count);
+                    yield Interval.mean(monthSum, daySum, micros, count);
                 }
                 // As DuckDB: the sum as a double, divided by the count and, for a decimal, its power of ten.
                 if (type instanceof Decimal d) {

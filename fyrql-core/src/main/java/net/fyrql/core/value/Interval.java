@@ -11,6 +11,7 @@
 
 package net.fyrql.core.value;
 
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Period;
 
@@ -45,6 +46,7 @@ public final class Interval implements Comparable<Interval> {
     private static final long MICROS_PER_HOUR = 3_600_000_000L;
     private static final long MICROS_PER_MINUTE = 60_000_000L;
     private static final long MICROS_PER_SECOND = 1_000_000L;
+    private static final long SECONDS_PER_DAY = 86_400L;
 
     /** The interval of length zero. */
     public static final Interval ZERO = new Interval(0, 0, 0);
@@ -225,21 +227,23 @@ public final class Interval implements Comparable<Interval> {
     }
 
     /**
-     * Multiplies by a number with a fraction, as DuckDB does: the fraction of
-     * the months goes to days at 30 days per month and on to the
-     * microseconds in millionths of a day, the fraction of the days to the
-     * microseconds, and the microseconds are rounded to the nearest, halves
-     * to the even neighbor.
+     * Multiplies by a number with a fraction, as DuckDB and PostgreSQL do.
+     * The months and the days are multiplied and cut toward zero; the
+     * fraction of the months goes to days at 30 days per month, rounded to
+     * millionths of a day, and its whole days to the days; what is left of a
+     * day, from both, goes to seconds, rounded to microseconds, and whole
+     * days of it to the days; the microseconds are multiplied and take these
+     * seconds, rounded to the nearest, halves to the even neighbor.
      *
      * @throws ArithmeticException if the result does not fit, or the factor is not finite
      */
     public Interval times(double factor) {
-        return scale(months * factor, days * factor, micros * factor);
+        return multiply(factor, "Overflow in multiplication of INTERVAL.");
     }
 
     /**
-     * Divides by a number as {@link #times(double)} multiplies, each component
-     * divided by the divisor.
+     * Divides by a number as DuckDB does: {@link #times(double)} with the
+     * reciprocal of the divisor.
      *
      * @throws ArithmeticException if the divisor is zero, or the result does not fit
      */
@@ -247,37 +251,69 @@ public final class Interval implements Comparable<Interval> {
         if (divisor == 0) {
             throw new ArithmeticException("Division of an INTERVAL by zero");
         }
-        return scale(months / divisor, days / divisor, micros / divisor);
+        return multiply(1.0 / divisor, "Overflow in INTERVAL division");
     }
 
     /**
-     * Returns the quotient of the components of an interval, given as sums
-     * that may exceed the range of an interval, by a divisor, as
-     * {@link #dividedBy} divides: the mean of intervals.
+     * Returns the mean of intervals, given by the sums of their components
+     * and their number, as DuckDB and PostgreSQL compute it: each sum is
+     * divided by the number, cut toward zero, and the remainders move on to
+     * the next smaller component, those of the months at 30 days per month
+     * and those of the days at 24 hours per day; the remainder of the
+     * microseconds is added as it is.
      *
      * @throws ArithmeticException if the result does not fit
      */
-    public static Interval quotient(double months, double days, double micros, double divisor) {
-        return scale(months / divisor, days / divisor, micros / divisor);
-    }
-
-    private static Interval scale(double m, double d, double u) {
-        double wholeMonths = truncate(m);
-        double monthDays = (m - wholeMonths) * DAYS_PER_MONTH;
-        double wholeMonthDays = truncate(monthDays);
-        double millionthsOfDays = Math.rint((monthDays - wholeMonthDays) * 1_000_000);
-        double wholeDays = truncate(d);
-        double resultDays = wholeDays + wholeMonthDays;
-        double resultMicros = Math.rint(u + (d - wholeDays) * MICROS_PER_DAY) + millionthsOfDays * 86_400;
-        if (!(Math.abs(wholeMonths) <= Integer.MAX_VALUE) || !(Math.abs(resultDays) <= Integer.MAX_VALUE)
-                || !(Math.abs(resultMicros) < 0x1p63)) {
-            throw new ArithmeticException("Overflow in multiplication of INTERVAL.");
+    public static Interval mean(long months, long days, BigInteger micros, long count) {
+        BigInteger n = BigInteger.valueOf(count);
+        BigInteger[] u = micros.divideAndRemainder(n);
+        long monthRemainder = Math.multiplyExact(months % count, (long) DAYS_PER_MONTH);
+        long resultDays = Math.addExact(days / count, monthRemainder / count);
+        long dayRemainder = days % count + monthRemainder % count;
+        BigInteger microRemainder = u[1].add(BigInteger.valueOf(dayRemainder)
+                .multiply(BigInteger.valueOf(MICROS_PER_DAY)).divide(n));
+        BigInteger resultMicros = u[0].add(microRemainder);
+        if (resultMicros.bitLength() > 63) {
+            throw new ArithmeticException("Overflow in the average of INTERVAL values");
         }
-        return of((int) wholeMonths, (int) resultDays, (long) resultMicros);
+        return of(Math.toIntExact(months / count), Math.toIntExact(resultDays), resultMicros.longValue());
     }
 
-    private static double truncate(double x) {
-        return x < 0 ? Math.ceil(x) : Math.floor(x);
+    /** {@link #times(double)}, in the order of operations of DuckDB, which decides the last microsecond. */
+    private Interval multiply(double f, String overflow) {
+        double m = months * f;
+        if (!(m >= Integer.MIN_VALUE && m <= Integer.MAX_VALUE)) {
+            throw new ArithmeticException(overflow);
+        }
+        int resultMonths = (int) m;
+        double d = days * f;
+        if (!(d >= Integer.MIN_VALUE && d <= Integer.MAX_VALUE)) {
+            throw new ArithmeticException(overflow);
+        }
+        int resultDays = (int) d;
+        double monthRemainder = toMicros((months * f - resultMonths) * DAYS_PER_MONTH);
+        int dayRemainder = (int) monthRemainder;
+        double secondRemainder = toMicros((days * f - resultDays + monthRemainder - dayRemainder) * SECONDS_PER_DAY);
+        try {
+            if (Math.abs(secondRemainder) >= SECONDS_PER_DAY) {
+                int extraDays = (int) (secondRemainder / SECONDS_PER_DAY);
+                resultDays = Math.addExact(resultDays, extraDays);
+                secondRemainder -= extraDays * SECONDS_PER_DAY;
+            }
+            resultDays = Math.addExact(resultDays, dayRemainder);
+        } catch (ArithmeticException e) {
+            throw new ArithmeticException(overflow);
+        }
+        double u = Math.rint((double) micros * f + secondRemainder * MICROS_PER_SECOND);
+        if (!(u >= -0x1p63 && u < 0x1p63)) {
+            throw new ArithmeticException(overflow);
+        }
+        return of(resultMonths, resultDays, (long) u);
+    }
+
+    /** Rounds a number of a unit to millionths of it, halves to the even neighbor. */
+    private static double toMicros(double x) {
+        return Math.rint(x * MICROS_PER_SECOND) / MICROS_PER_SECOND;
     }
 
     /**
