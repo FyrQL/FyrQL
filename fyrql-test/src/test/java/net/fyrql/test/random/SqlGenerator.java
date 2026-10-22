@@ -67,6 +67,13 @@ import java.util.SplittableRandom;
  * engines. A {@code LIMIT} follows an order of all columns only, and the
  * aggregates whose result depends on the order of their values are ordered
  * by them and leave out floating-point values.
+ * <p>
+ * The base tables are those of the random tables or, for another source,
+ * those it has, named without the source; a sample of their rows gives the
+ * literals of conditions some of the time, so that they select some rows of
+ * tables with values of their own. {@link #partition()} generates a query
+ * for the metamorphic checks: one without order, limit and windows, and a
+ * condition to partition it by.
  */
 final class SqlGenerator {
 
@@ -77,8 +84,15 @@ final class SqlGenerator {
         }
     }
 
-    /** A column in scope: the name that qualifies it, {@code null} if it has none, its name and its type. */
-    private record Column(String qualifier, String name, DataType type) {
+    /**
+     * A column in scope: the name that qualifies it, {@code null} if it has
+     * none, its name, its type, and values of it in its table, empty for a
+     * computed one.
+     */
+    private record Column(String qualifier, String name, DataType type, List<Object> sample) {
+        Column(String qualifier, String name, DataType type) {
+            this(qualifier, name, type, List.of());
+        }
     }
 
     /** An item of {@code FROM} with the columns it brings into scope. */
@@ -98,13 +112,51 @@ final class SqlGenerator {
 
     private final SplittableRandom random;
     private final FyrQL engine;
+    private final Map<String, Schema> tables;
+    private final Map<String, List<List<Object>>> samples = new LinkedHashMap<>();
     private final Map<String, List<Column>> ctes = new LinkedHashMap<>();
     private List<Query.CommonTable> with = List.of();
     private int names;
 
+    /** A generator over the random tables, without samples. */
     SqlGenerator(SplittableRandom random, FyrQL engine) {
+        this(random, engine, RandomTables.SCHEMAS, Map.of());
+    }
+
+    /**
+     * @param engine the engine that binds what is generated, whose default source has the tables
+     * @param tables the base tables by name
+     * @param rows rows of the tables by name, whose values the literals take some of the time
+     */
+    SqlGenerator(SplittableRandom random, FyrQL engine, Map<String, Schema> tables, Map<String, List<Object[]>> rows) {
         this.random = random;
         this.engine = engine;
+        this.tables = tables;
+        for (Map.Entry<String, List<Object[]>> table : rows.entrySet()) {
+            List<List<Object>> columns = new ArrayList<>();
+            for (int c = 0; c < tables.get(table.getKey()).size(); c++) {
+                Set<Object> values = new LinkedHashSet<>();
+                for (Object[] row : table.getValue()) {
+                    if (row[c] != null) {
+                        values.add(row[c]);
+                    }
+                }
+                columns.add(List.copyOf(values));
+            }
+            samples.put(table.getKey(), columns);
+        }
+    }
+
+    /** The sampled values of a column of a base table, empty for none. */
+    private List<Object> sample(String table, int column) {
+        List<List<Object>> columns = samples.get(table);
+        return columns == null ? List.of() : columns.get(column);
+    }
+
+    /** Generates expressions over columns in scope, with their samples. */
+    private ExpressionGenerator generator(List<Column> scope) {
+        return new ExpressionGenerator(random, scope.stream().map(Column::type).toList(),
+                scope.stream().map(Column::sample).toList());
     }
 
     private <T> T pick(List<T> list) {
@@ -117,33 +169,7 @@ final class SqlGenerator {
 
     /** Generates a query. */
     Generated generate() {
-        ctes.clear();
-        with = new ArrayList<>();
-        if (chance(20)) {
-            List<Query.CommonTable> tables = new ArrayList<>();
-            for (int i = random.nextInt(1, 3); i > 0; i--) {
-                String name = "w" + tables.size();
-                Query q = Query.of(select(1, true, false).body());
-                List<String> renamed = new ArrayList<>();
-                List<Column> columns = columns(q, null);
-                if (columns == null) {
-                    continue;
-                }
-                if (chance(30)) {
-                    for (int c = 0; c < columns.size() && c < 2; c++) {
-                        renamed.add("c" + c);
-                    }
-                }
-                List<Column> visible = new ArrayList<>();
-                for (int c = 0; c < columns.size(); c++) {
-                    visible.add(new Column(null, c < renamed.size() ? renamed.get(c) : columns.get(c).name(),
-                            columns.get(c).type()));
-                }
-                tables.add(new Query.CommonTable(name, renamed, q, P));
-                with = List.copyOf(tables);
-                ctes.put(name, visible);
-            }
-        }
+        commonTables();
         int kind = random.nextInt(100);
         QueryBody body;
         int width;
@@ -196,6 +222,37 @@ final class SqlGenerator {
         return new Generated(new Query(with, body, order, limit, offset), total);
     }
 
+    /** Draws the common tables of a query, sometimes none. */
+    private void commonTables() {
+        ctes.clear();
+        with = new ArrayList<>();
+        if (chance(20)) {
+            List<Query.CommonTable> tables = new ArrayList<>();
+            for (int i = random.nextInt(1, 3); i > 0; i--) {
+                String name = "w" + tables.size();
+                Query q = Query.of(select(1, true, false).body());
+                List<String> renamed = new ArrayList<>();
+                List<Column> columns = columns(q, null);
+                if (columns == null) {
+                    continue;
+                }
+                if (chance(30)) {
+                    for (int c = 0; c < columns.size() && c < 2; c++) {
+                        renamed.add("c" + c);
+                    }
+                }
+                List<Column> visible = new ArrayList<>();
+                for (int c = 0; c < columns.size(); c++) {
+                    visible.add(new Column(null, c < renamed.size() ? renamed.get(c) : columns.get(c).name(),
+                            columns.get(c).type()));
+                }
+                tables.add(new Query.CommonTable(name, renamed, q, P));
+                with = List.copyOf(tables);
+                ctes.put(name, visible);
+            }
+        }
+    }
+
     private static SqlExpr number(long n) {
         return new SqlExpr.Literal(LiteralKind.NUMBER, Long.toString(n), P);
     }
@@ -232,7 +289,7 @@ final class SqlGenerator {
             String alias = chance(50) ? "c" + names++ : null;
             List<Column> columns = new ArrayList<>();
             for (Column c : ctes.get(name)) {
-                columns.add(new Column(alias != null ? alias : name, c.name(), c.type()));
+                columns.add(new Column(alias != null ? alias : name, c.name(), c.type(), c.sample()));
             }
             return new Relation(new FromItem.TableName(List.of(name), alias(alias), P), columns);
         }
@@ -261,13 +318,15 @@ final class SqlGenerator {
                 return new Relation(new FromItem.Subquery(inner, new FromItem.Alias(alias, columnNames), P), renamed);
             }
         }
-        String table = pick(new ArrayList<>(RandomTables.SCHEMAS.keySet()));
+        String table = pick(new ArrayList<>(tables.keySet()));
         String alias = chance(50) ? (chance(20) ? "T" : "t") + names++ : null;
         String spelled = chance(15) ? table.toUpperCase(Locale.ROOT) : table;
         List<Column> columns = new ArrayList<>();
-        for (Schema.Field f : RandomTables.SCHEMAS.get(table).fields()) {
+        List<Schema.Field> fields = tables.get(table).fields();
+        for (int i = 0; i < fields.size(); i++) {
+            Schema.Field f = fields.get(i);
             String name = chance(10) ? f.name().toUpperCase(Locale.ROOT) : f.name();
-            columns.add(new Column(alias != null ? alias : spelled, name, f.type()));
+            columns.add(new Column(alias != null ? alias : spelled, name, f.type(), sample(table, i)));
         }
         return new Relation(new FromItem.TableName(List.of(spelled), alias(alias), P), columns);
     }
@@ -318,13 +377,13 @@ final class SqlGenerator {
             }
             List<Column> merged = new ArrayList<>();
             for (String name : using) {
-                DataType type = null;
+                Column same = null;
                 for (Column l : left.columns()) {
                     if (l.name().equalsIgnoreCase(name)) {
-                        type = l.type();
+                        same = l;
                     }
                 }
-                merged.add(new Column(null, name, type));
+                merged.add(new Column(null, name, same.type(), same.sample()));
             }
             merged.addAll(columns);
             return new Relation(new FromItem.Join(kind, left.item(), right.item(), null, natural ? List.of() : using,
@@ -340,7 +399,7 @@ final class SqlGenerator {
         if (chance(30)) {
             List<Column> side = kind == FromItem.JoinKind.INNER || chance(20) ? columns
                     : chance(50) ? left.columns() : right.columns();
-            ExpressionGenerator g = new ExpressionGenerator(random, side.stream().map(Column::type).toList());
+            ExpressionGenerator g = generator(side);
             SqlText text = new SqlText(random, references(side, columns));
             on = new SqlExpr.Binary(SqlExpr.BinaryOp.AND, on, text.of(g.condition(1)), P);
         }
@@ -387,7 +446,7 @@ final class SqlGenerator {
     private Select select(int depth, boolean named, boolean aggregates) {
         Relation from = chance(92) ? from(depth) : null;
         List<Column> scope = from == null ? List.of() : from.columns();
-        ExpressionGenerator g = new ExpressionGenerator(random, scope.stream().map(Column::type).toList());
+        ExpressionGenerator g = generator(scope);
         SqlText text = new SqlText(random, references(scope, scope));
         SqlExpr where = from != null && chance(45) ? text.of(g.condition(2)) : null;
         if (from != null && chance(20)) {
@@ -542,6 +601,195 @@ final class SqlGenerator {
         }
         QueryBody.Select body = new QueryBody.Select(chance(5), items, from.item(), where, groupBy, having, P);
         return new Select(body, items.size(), aliases);
+    }
+
+    // ------------------------------------------------------------ partitions
+
+    /** The forms of ternary logic partitioning, by the shape of the query that is partitioned. */
+    enum Kind {
+        /** A select list over rows, partitioned in {@code WHERE}. */
+        WHERE,
+        /** The same with {@code DISTINCT}, whose parts are united without duplicates. */
+        DISTINCT,
+        /** An aggregation, partitioned in {@code HAVING} by a condition over its groups and aggregates. */
+        HAVING,
+        /**
+         * An aggregation of aggregates that combine, partitioned in {@code WHERE}; the aggregates of the parts are
+         * aggregated again. Its groups are named {@code g0}, {@code g1}, its aggregates {@code a0}, {@code a1}.
+         */
+        AGGREGATE
+    }
+
+    /**
+     * A query to partition: its common tables, its {@code SELECT} without
+     * order, limit and windows, the condition that partitions it, and a
+     * condition over the rows of its {@code FROM} for NoREC, which is the
+     * partitioning one but where that is over groups.
+     */
+    record Partition(Kind kind, List<Query.CommonTable> with, QueryBody.Select base, SqlExpr predicate,
+            SqlExpr rows) {
+        Query query() {
+            return new Query(with, base, List.of(), null, null);
+        }
+    }
+
+    /**
+     * Generates a query to partition: in {@link Kind#WHERE} form 40 times in
+     * a hundred, {@link Kind#DISTINCT} 15, {@link Kind#HAVING} 20 and
+     * {@link Kind#AGGREGATE} 25. A query that does not bind is drawn again,
+     * up to five times.
+     */
+    Partition partition() {
+        Partition last = null;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            int k = random.nextInt(100);
+            Kind kind = k < 40 ? Kind.WHERE : k < 55 ? Kind.DISTINCT : k < 75 ? Kind.HAVING : Kind.AGGREGATE;
+            Partition p = partition(kind);
+            if (p != null) {
+                if (schema(p.query()) != null) {
+                    return p;
+                }
+                last = p;
+            }
+        }
+        return last != null ? last : partition(Kind.WHERE);
+    }
+
+    /** A query of a kind to partition, or {@code null} where an aggregation does not bind. */
+    private Partition partition(Kind kind) {
+        commonTables();
+        Relation from = from(2);
+        List<Column> scope = from.columns();
+        ExpressionGenerator g = generator(scope);
+        SqlText text = new SqlText(random, references(scope, scope));
+        SqlExpr where = chance(30) ? text.of(g.condition(2)) : null;
+        if (chance(15)) {
+            SqlExpr subquery = subqueryCondition(scope, g, text);
+            where = where == null ? subquery : new SqlExpr.Binary(chance(25) ? SqlExpr.BinaryOp.OR
+                    : SqlExpr.BinaryOp.AND, where, subquery, P);
+        }
+        SqlExpr rows = text.of(g.condition(2));
+        return switch (kind) {
+            case WHERE, DISTINCT -> {
+                List<SelectItem> items = new ArrayList<>();
+                if (chance(10)) {
+                    items.add(star(from));
+                }
+                for (int i = items.isEmpty() ? random.nextInt(1, 6) : random.nextInt(0, 3); i > 0; i--) {
+                    Expression e = chance(35) ? g.leaf() : g.any(3);
+                    items.add(new SelectItem.ExpressionItem(text.of(e), chance(30) ? pick(ALIASES) : null));
+                }
+                if (chance(10)) {
+                    Relation inner = inner();
+                    items.add(new SelectItem.ExpressionItem(new SqlExpr.ScalarSubquery(aggregating(inner,
+                            innerAggregate(inner), innerWhere(inner, scope, true)), P), null));
+                }
+                yield new Partition(kind, with, new QueryBody.Select(kind == Kind.DISTINCT, items, from.item(), where,
+                        null, null, P), rows, rows);
+            }
+            case HAVING -> having(from, g, text, where, rows);
+            case AGGREGATE -> combining(from, g, text, where, rows);
+        };
+    }
+
+    /** A grouping key: mostly a column, else a shallow expression. */
+    private SqlExpr groupKey(ExpressionGenerator g, SqlText text) {
+        return text.of(chance(70) ? g.leaf() : g.any(1));
+    }
+
+    /**
+     * An aggregation with up to two groups, one to three aggregates and
+     * sometimes a {@code HAVING} of its own, partitioned by a condition over
+     * its groups and aggregates, whose types are learned by binding it.
+     */
+    private Partition having(Relation from, ExpressionGenerator g, SqlText text, SqlExpr where, SqlExpr rows) {
+        List<SqlExpr> keys = new ArrayList<>();
+        int groups = random.nextInt(0, 3);
+        for (int i = groups; i > 0; i--) {
+            keys.add(groupKey(g, text));
+        }
+        for (int i = random.nextInt(1, 4); i > 0; i--) {
+            keys.add(aggregateCall(g, text));
+        }
+        List<SelectItem> items = new ArrayList<>();
+        for (SqlExpr key : keys) {
+            items.add(new SelectItem.ExpressionItem(key, null));
+        }
+        QueryBody.GroupBy groupBy = groups == 0 ? null : chance(30) ? new QueryBody.GroupBy(true, List.of())
+                : new QueryBody.GroupBy(false, keys.subList(0, groups));
+        Schema schema = schema(new Query(with, new QueryBody.Select(false, items, from.item(), where, groupBy, null,
+                P), List.of(), null, null));
+        if (schema == null) {
+            return null;
+        }
+        ExpressionGenerator over = new ExpressionGenerator(random, schema.types());
+        SqlExpr predicate = new SqlText(random, keys).of(over.condition(2));
+        SqlExpr having = chance(30) ? new SqlExpr.Binary(pick(List.of(SqlExpr.BinaryOp.GREATER,
+                SqlExpr.BinaryOp.LESS_EQUAL, SqlExpr.BinaryOp.NOT_EQUAL)), pick(keys.subList(groups, keys.size())),
+                number(random.nextInt(0, 4)), P) : null;
+        return new Partition(Kind.HAVING, with, new QueryBody.Select(false, items, from.item(), where, groupBy, having,
+                P), predicate, rows);
+    }
+
+    /**
+     * An aggregation with up to two groups {@code g0} and {@code g1} and one
+     * to four aggregates {@code a0} to {@code a3}, whose values over the
+     * parts of a partition combine into their value over all rows.
+     */
+    private Partition combining(Relation from, ExpressionGenerator g, SqlText text, SqlExpr where, SqlExpr predicate) {
+        List<SelectItem> items = new ArrayList<>();
+        List<SqlExpr> groups = new ArrayList<>();
+        for (int i = random.nextInt(0, 3); i > 0; i--) {
+            SqlExpr key = groupKey(g, text);
+            items.add(new SelectItem.ExpressionItem(key, "g" + groups.size()));
+            groups.add(key);
+        }
+        for (int i = 0, n = random.nextInt(1, 5); i < n; i++) {
+            items.add(new SelectItem.ExpressionItem(combinable(g, text), "a" + i));
+        }
+        QueryBody.GroupBy groupBy = groups.isEmpty() ? null : chance(30) ? new QueryBody.GroupBy(true, List.of())
+                : new QueryBody.GroupBy(false, groups);
+        return new Partition(Kind.AGGREGATE, with, new QueryBody.Select(false, items, from.item(), where, groupBy,
+                null, P), predicate, predicate);
+    }
+
+    /**
+     * An aggregate whose values over the parts of a partition combine into
+     * its value over all rows: a count or a sum of an exact type, which add
+     * up, {@code min}, {@code max}, {@code bool_and} or {@code bool_or}. No
+     * intervals for {@code min} and {@code max}, whose equal values differ
+     * in their parts, so that the one taken depends on the order of rows.
+     */
+    private SqlExpr combinable(ExpressionGenerator g, SqlText text) {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            Expression argument = chance(60) ? g.leaf() : g.any(2);
+            DataType t = argument.type();
+            SqlExpr x = text.of(argument);
+            switch (random.nextInt(6)) {
+                case 0 -> {
+                    return countStar();
+                }
+                case 1 -> {
+                    return call("count", List.of(x));
+                }
+                case 2 -> {
+                    if (t.isIntegral() || t instanceof DataType.Decimal) {
+                        return call("sum", List.of(x));
+                    }
+                }
+                case 3, 4 -> {
+                    if (ExpressionGenerator.plain(t) && t != DataType.INTERVAL) {
+                        return call(chance(50) ? "min" : "max", List.of(x));
+                    }
+                }
+                default -> {
+                    if (t == DataType.BOOLEAN) {
+                        return call(chance(50) ? "bool_and" : "bool_or", List.of(x));
+                    }
+                }
+            }
+        }
+        return countStar();
     }
 
     private static SqlExpr.FunctionCall countStar() {
@@ -867,11 +1115,12 @@ final class SqlGenerator {
 
     /** A table under a fresh alias, as the {@code FROM} of a subquery, with its columns qualified by the alias. */
     private Relation inner() {
-        String table = pick(new ArrayList<>(RandomTables.SCHEMAS.keySet()));
+        String table = pick(new ArrayList<>(tables.keySet()));
         String alias = "b" + names++;
         List<Column> columns = new ArrayList<>();
-        for (Schema.Field f : RandomTables.SCHEMAS.get(table).fields()) {
-            columns.add(new Column(alias, f.name(), f.type()));
+        List<Schema.Field> fields = tables.get(table).fields();
+        for (int i = 0; i < fields.size(); i++) {
+            columns.add(new Column(alias, fields.get(i).name(), fields.get(i).type(), sample(table, i)));
         }
         return new Relation(new FromItem.TableName(List.of(table), alias(alias), P), columns);
     }
@@ -913,8 +1162,7 @@ final class SqlGenerator {
             }
         }
         if (chance(40)) {
-            ExpressionGenerator g = new ExpressionGenerator(random, inner.columns().stream().map(Column::type)
-                    .toList());
+            ExpressionGenerator g = generator(inner.columns());
             SqlText text = new SqlText(random, inner.columns().stream().map(SqlGenerator::qualified).toList());
             conjuncts.add(text.of(g.condition(1)));
         }
@@ -1029,7 +1277,7 @@ final class SqlGenerator {
     private QueryBody branch(int width, List<DataType> like) {
         Relation from = from(1);
         List<Column> scope = from.columns();
-        ExpressionGenerator g = new ExpressionGenerator(random, scope.stream().map(Column::type).toList());
+        ExpressionGenerator g = generator(scope);
         SqlText text = new SqlText(random, references(scope, scope));
         List<SelectItem> items = new ArrayList<>();
         for (int i = 0; i < width; i++) {

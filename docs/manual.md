@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.11.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.11.5 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow
 and the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -376,6 +376,7 @@ database takes over depends on how it compares and orders values:
 | anything on `FLOAT`, `DOUBLE`, `HUGEINT`, `BLOB`, `UUID` or `INTERVAL` | no | no | no | no |
 | `AND`, `OR`, `NOT`, `IS NULL` over the above | yes | yes | yes | yes |
 | arithmetic, casts, `LIKE`, `CASE`, functions | no | no | no | no |
+| a comparison of a `BOOLEAN` with a number | no | no | no | no |
 | `ORDER BY` over the columns above, and `LIMIT` | yes | yes | yes | yes |
 | `GROUP BY` over the columns compared with `=` above | yes | yes | yes | yes |
 | `count(*)` and `count` of any column | yes | yes | yes | yes |
@@ -2346,6 +2347,23 @@ row on, which must give exactly the results of the interpreter, and on one threa
 must give the results of all threads over tables in splits of 16 rows, with the
 exceptions of [Parallel execution](#parallel-execution); the other tests of `fyrql-test`
 run a second time with `-Dfyrql.codegen=always`.
+
+Metamorphic checks after SQLancer need no second engine: FyrQL is its own oracle there.
+Ternary logic partitioning (TLP) splits a random query by a random condition `p` into the
+rows where `p` is true, where it is false and where it is `NULL`, which together must be
+the rows of the query: in `WHERE`, with `DISTINCT` and `UNION`, in `HAVING` over groups and
+aggregates, and in `WHERE` under counts, sums, `min`, `max`, `bool_and` and `bool_or`,
+which are aggregated again. NoREC counts the rows a condition selects twice: as a filter,
+which the optimizer pushes into the source, splits and compiles, and as a `CASE` over every
+row. The checks run over the memory source interpreted, with compiled code, on one thread
+and with a budget that spills, and over Parquet files with small row groups, CSV and JSON
+files in small splits, H2, SQLite and PostgreSQL in splits over ranges of a key, and the
+Iceberg tables of the tests; the queries use the tables of each source, and their literals
+come partly from its rows. A check where a query fails as a query may, such as a cast of a
+string that a part meets and the whole query does not, is skipped and counted; any other
+difference fails the test, shrunk to a small query in the report (`fyrql-test`,
+`net.fyrql.test.random.Metamorphic`). `-Dfyrql.random.queries` and `-Dfyrql.random.seed`
+apply to them as well.
 
 The JDBC connector is tested against H2, SQLite and PostgreSQL in every build, and through
 the generic dialect against H2 in its modes of compatibility with Oracle, SQL Server and

@@ -274,18 +274,28 @@ abstract class StandardDialect implements Dialect {
         return Expressions.allMatch(expression, this::supportsNode);
     }
 
+    /**
+     * Tells whether a value is a {@code BOOLEAN} as another is or is not:
+     * FyrQL compares a boolean with a number, as DuckDB does, but databases
+     * such as PostgreSQL have no such operator.
+     */
+    private static boolean sameKind(Expression a, Expression b) {
+        return (a.type() == Scalar.BOOLEAN) == (b.type() == Scalar.BOOLEAN);
+    }
+
     private boolean supportsNode(Expression e) {
         return switch (e) {
             case Expression.Column c -> storesExactly(c.type());
             case Expression.Literal l -> storesExactly(l.type());
-            case Expression.Comparison c -> switch (c.op()) {
+            case Expression.Comparison c -> sameKind(c.left(), c.right()) && switch (c.op()) {
                 case EQ, NE -> equatesExactly(c.left().type());
                 case LT, LE, GT, GE -> ordersExactly(c.left().type());
             };
-            case Expression.Between b -> ordersExactly(b.value().type());
+            case Expression.Between b -> ordersExactly(b.value().type()) && sameKind(b.value(), b.low())
+                    && sameKind(b.value(), b.high());
             case Expression.In in -> equatesExactly(in.value().type())
-                    && in.list().stream().allMatch(x -> x instanceof Expression.Literal);
-            case Expression.IsDistinct d -> equatesExactly(d.left().type());
+                    && in.list().stream().allMatch(x -> x instanceof Expression.Literal && sameKind(in.value(), x));
+            case Expression.IsDistinct d -> equatesExactly(d.left().type()) && sameKind(d.left(), d.right());
             case Expression.And a -> true;
             case Expression.Or o -> true;
             case Expression.Not n -> true;

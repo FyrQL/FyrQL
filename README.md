@@ -58,8 +58,11 @@ warehouse first.
   The same JARs run wherever Java 21 runs, also where native code is not allowed.
 - **Checked against DuckDB.** Every test compares the types and rows of a result with
   those of DuckDB over the same data; every build adds hundreds of random queries, each
-  also run on one thread and with compiled code, which must give the same results. See
-  [Differences from DuckDB](docs/manual.md#differences-from-duckdb).
+  also run on one thread and with compiled code, which must give the same results, and
+  metamorphic checks run random queries over Parquet, CSV, JSON, Iceberg, H2, SQLite and
+  PostgreSQL with FyrQL as its own oracle. See
+  [Differences from DuckDB](docs/manual.md#differences-from-duckdb) and
+  [Building and testing](docs/manual.md#building-and-testing).
 
 ## A first look
 

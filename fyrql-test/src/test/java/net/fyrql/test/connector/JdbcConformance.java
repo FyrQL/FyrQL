@@ -392,6 +392,8 @@ public final class JdbcConformance {
             "SELECT id FROM items WHERE b",
             "SELECT id FROM items WHERE NOT b",
             "SELECT id FROM items WHERE b = false OR b IS NULL",
+            // A boolean compared with a number, which PostgreSQL has no operator for, stays in the engine.
+            "SELECT id, i FROM items WHERE i = false OR i IN (true, 2) OR b = 1",
             "SELECT id, ti FROM items WHERE ti < 0",
             "SELECT id, si FROM items WHERE si BETWEEN -100 AND 100",
             "SELECT id, bi FROM items WHERE bi >= 0 AND bi < 1000000",

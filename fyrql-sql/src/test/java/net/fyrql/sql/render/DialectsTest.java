@@ -311,6 +311,10 @@ class DialectsTest {
         List<Expression> computed = List.of(gt(add(col(s, 0), lit(1)), lit(2)), eq(cast(col(s, 0), DataType.BIGINT),
                 lit(1L)), like(col(s, 2), lit("a%")), eq(call("upper", col(s, 2)), lit("A")),
                 in(col(s, 0), lit(1), col(s, 7)));
+        // A boolean compared with a number, which PostgreSQL has no operator for.
+        List<Expression> mixed = List.of(eq(col(s, 0), lit(false)), in(col(s, 0), lit(true), lit(2)),
+                eq(col(s, 3), lit(1)), lt(col(s, 0), lit(true)), between(col(s, 3), lit(0), lit(1)),
+                isDistinct(col(s, 3), lit(1)));
 
         for (Dialect d : ALL) {
             assertTrue(d.supports(integers), d.name());
@@ -320,6 +324,9 @@ class DialectsTest {
             assertTrue(d.supports(floating) == (d == DuckDbDialect.INSTANCE), d.name());
             assertTrue(d.supports(blob) == (d == DuckDbDialect.INSTANCE), d.name());
             for (Expression e : computed) {
+                assertTrue(d.supports(e) == (d == DuckDbDialect.INSTANCE), d.name() + ": " + e);
+            }
+            for (Expression e : mixed) {
                 assertTrue(d.supports(e) == (d == DuckDbDialect.INSTANCE), d.name() + ": " + e);
             }
             assertTrue(d.supports(stringEquality) == (d != MySqlDialect.INSTANCE), d.name());

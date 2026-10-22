@@ -69,14 +69,26 @@ final class ExpressionGenerator {
 
     private final SplittableRandom random;
     private final List<DataType> columns;
+    private final List<List<Object>> samples;
 
     /**
      * @param random the source of randomness
      * @param columns the types of the input columns, which {@link Expression.Column} refers to by position
      */
     ExpressionGenerator(SplittableRandom random, List<DataType> columns) {
+        this(random, columns, List.of());
+    }
+
+    /**
+     * @param random the source of randomness
+     * @param columns the types of the input columns, which {@link Expression.Column} refers to by position
+     * @param samples values of the input columns by position, of which a literal of the same type is drawn
+     *        some of the time, so that conditions select some rows of any table; empty for none
+     */
+    ExpressionGenerator(SplittableRandom random, List<DataType> columns, List<List<Object>> samples) {
         this.random = random;
         this.columns = List.copyOf(columns);
+        this.samples = List.copyOf(samples);
     }
 
     private static Map<String, List<List<DataType>>> probe() {
@@ -199,8 +211,20 @@ final class ExpressionGenerator {
         return literal(type());
     }
 
-    /** A literal of a scalar type: mostly a small value, sometimes {@code NULL} or an edge value. */
+    /**
+     * A literal of a scalar type: mostly a small value, sometimes {@code NULL}
+     * or an edge value, and, where there are samples of a column of the type,
+     * often one of them.
+     */
     Expression literal(DataType type) {
+        List<Object> sampled = sampled(type);
+        if (!sampled.isEmpty() && chance(40)) {
+            try {
+                return Expressions.lit(type, pick(sampled));
+            } catch (IllegalArgumentException e) {
+                // Not a value of the type after all; draw as without samples.
+            }
+        }
         for (int attempt = 0; attempt < 10; attempt++) {
             try {
                 if (chance(8)) {
@@ -215,6 +239,20 @@ final class ExpressionGenerator {
             }
         }
         return Expressions.nullOf(type);
+    }
+
+    /** The sampled values of the input columns of a type; none without samples, so that nothing is drawn. */
+    private List<Object> sampled(DataType type) {
+        if (samples.isEmpty()) {
+            return List.of();
+        }
+        List<Object> values = new ArrayList<>();
+        for (int i = 0; i < columns.size() && i < samples.size(); i++) {
+            if (columns.get(i).equals(type)) {
+                values.addAll(samples.get(i));
+            }
+        }
+        return values;
     }
 
     private Expression anyOnce(int depth) {
