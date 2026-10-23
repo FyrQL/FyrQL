@@ -170,11 +170,18 @@ about. A vulnerability goes not into a public issue but through private reportin
 
 ## Authors
 
-**Claude Opus 5.5** and **Claude Fable 5.1**: Implementation, Benchmarking, Testing & Doc-writing
-
 This repo was produced almost entirely with AI based on a human blueprint.
-I did not expect AI to help with the implementation of this design until I saw what Opus 4.8 could achieve a few months ago.
-So I thought I would give it a try and see whether the Fable & Opus team is up to the task.
+
+**Maintainer ([@stefan-zobel](https://github.com/stefan-zobel))**: architecture, design, milestone
+plans, and review of every plan and result.
+
+**Claude Opus 5.5** and **Claude Fable 5.1**: implementation, tests, benchmarks, and documentation.
+
+I did not expect AI to be able to implement a project like this until I saw what Opus 4.8 could
+achieve in July 2026, so I gave it a try to see whether the Fable & Opus team was up to the task.
+Whether it worked is for the code to show: every TPC-H result is checked against DuckDB, the
+interpreter and the generated code check each other, and metamorphic and random tests probe
+the optimizer and the executor (see [Building and testing](docs/manual.md#building-and-testing)).
 Personally, I feel they passed the test.
 
 ## License
