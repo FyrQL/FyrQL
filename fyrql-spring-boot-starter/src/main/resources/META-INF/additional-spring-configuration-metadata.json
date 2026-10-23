@@ -1,0 +1,46 @@
+{
+  "properties": [
+    {
+      "name": "management.health.fyrql.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether to check the health of the engine of FyrQL and of the sources of its configuration.",
+      "defaultValue": true
+    }
+  ],
+  "hints": [
+    {
+      "name": "fyrql.engine.codegen",
+      "values": [
+        {
+          "value": "off",
+          "description": "Never; everything runs in the interpreter."
+        },
+        {
+          "value": "auto",
+          "description": "When a compiler is on the class path and an operator has processed codegen-threshold rows; the default."
+        },
+        {
+          "value": "always",
+          "description": "Always, from the first batch on; a compiler must be on the class path."
+        }
+      ]
+    },
+    {
+      "name": "fyrql.engine.file-access",
+      "values": [
+        {
+          "value": "none",
+          "description": "SQL names no files or objects."
+        },
+        {
+          "value": "read",
+          "description": "SQL reads files and objects, such as with FROM 'data/orders.csv'."
+        },
+        {
+          "value": "readWrite",
+          "description": "SQL reads and writes files and objects, such as with COPY ... TO."
+        }
+      ]
+    }
+  ]
+}

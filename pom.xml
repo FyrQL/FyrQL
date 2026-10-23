@@ -16,7 +16,7 @@
 
 	<groupId>io.github.stefan-zobel</groupId>
 	<artifactId>fyrql</artifactId>
-	<version>0.12.5</version>
+	<version>0.13.0</version>
 	<packaging>pom</packaging>
 
 	<name>FyrQL</name>
@@ -53,6 +53,7 @@
 		<module>fyrql-arrow</module>
 		<module>fyrql-flight-sql</module>
 		<module>fyrql-flight-sql-all</module>
+		<module>fyrql-spring-boot-starter</module>
 		<module>fyrql-test</module>
 		<module>fyrql-bench</module>
 	</modules>
@@ -114,6 +115,14 @@
 		<guava.version>33.4.8-jre</guava.version>
 		<!-- The logging API that Arrow and gRPC use; the JAR of the Flight SQL server binds it to slf4j-simple. -->
 		<arrow.slf4j.version>2.0.17</arrow.slf4j.version>
+		<!--
+		  The starter for Spring Boot; only the artifacts it needs are managed here, not the BOM of Spring Boot, which
+		  would set the versions of Jackson, JUnit and H2 for all modules.
+		-->
+		<spring-boot.version>4.1.2</spring-boot.version>
+		<assertj.version>3.27.7</assertj.version>
+		<!-- Reads the YAML of Spring Boot in the tests of the starter. -->
+		<snakeyaml.version>2.5</snakeyaml.version>
 		<!--
 		  The memory module of Arrow reads the address of direct buffers, which the JDK opens only on request. The tests
 		  run on the class path, where ALL-UNNAMED is enough; on the module path it is org.apache.arrow.memory.core.
@@ -255,6 +264,11 @@
 			<dependency>
 				<groupId>io.github.stefan-zobel</groupId>
 				<artifactId>fyrql-flight-sql</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>io.github.stefan-zobel</groupId>
+				<artifactId>fyrql-spring-boot-starter</artifactId>
 				<version>${project.version}</version>
 			</dependency>
 			<dependency>
@@ -443,6 +457,41 @@
 				<groupId>io.trino.tpch</groupId>
 				<artifactId>tpch</artifactId>
 				<version>${tpch.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-autoconfigure</artifactId>
+				<version>${spring-boot.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-health</artifactId>
+				<version>${spring-boot.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-configuration-processor</artifactId>
+				<version>${spring-boot.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-test</artifactId>
+				<version>${spring-boot.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-jdbc</artifactId>
+				<version>${spring-boot.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.assertj</groupId>
+				<artifactId>assertj-core</artifactId>
+				<version>${assertj.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.yaml</groupId>
+				<artifactId>snakeyaml</artifactId>
+				<version>${snakeyaml.version}</version>
 			</dependency>
 			<dependency>
 				<groupId>org.junit</groupId>

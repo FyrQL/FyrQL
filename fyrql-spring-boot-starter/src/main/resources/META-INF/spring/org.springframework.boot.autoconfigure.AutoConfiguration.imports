@@ -1,0 +1,3 @@
+net.fyrql.spring.FyrQLAutoConfiguration
+net.fyrql.spring.FyrQLDataSourceConfiguration
+net.fyrql.spring.FyrQLHealthConfiguration

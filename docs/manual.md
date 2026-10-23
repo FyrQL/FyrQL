@@ -2,9 +2,9 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.12.5 in full: its Java API and settings, the connectors and
-what they push down, writing and loading, the configuration file, the JDBC driver, Arrow
-and the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it
+This manual describes FyrQL 0.13.0 in full: its Java API and settings, the connectors and
+what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
+the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
 and the [README](../README.md) an overview.
 
@@ -27,6 +27,7 @@ and the [README](../README.md) an overview.
 - [Flight SQL server](#flight-sql-server)
   - [Python](#python)
   - [JDBC tools](#jdbc-tools)
+- [Spring Boot](#spring-boot)
 - [Supported SQL](#supported-sql)
   - [Time zone](#time-zone)
 - [Differences from DuckDB](#differences-from-duckdb)
@@ -1334,6 +1335,131 @@ milliseconds and an `INTERVAL` a `PeriodDuration` of the driver; the types of Fy
 in the type
 names of `getColumns` of its `DatabaseMetaData`.
 
+## Spring Boot
+
+With the module `fyrql-spring-boot-starter`, an application of Spring Boot 4 gets an
+engine as a bean, configured in its `application.yml`. The application adds the starter
+and the connectors of its sources; Spring Boot it brings itself, in its own version of
+4.x (the starter is built and tested with 4.1.2):
+
+```xml
+<dependency>
+    <groupId>io.github.stefan-zobel</groupId>
+    <artifactId>fyrql-spring-boot-starter</artifactId>
+    <version>0.13.0</version>
+</dependency>
+<dependency>
+    <groupId>io.github.stefan-zobel</groupId>
+    <artifactId>fyrql-connector-jdbc</artifactId>
+    <version>0.13.0</version>
+</dependency>
+```
+
+The keys under `fyrql` take the form of the [configuration file](#configuration-file),
+with the settings under `engine` and the sources under `sources`:
+
+```yaml
+fyrql:
+  engine:
+    threads: 4
+    memory-budget: 2GiB
+    query-timeout: 30s
+  sources:
+    - name: sales
+      type: jdbc
+      url: jdbc:postgresql://db/sales
+      user: sales
+      password: ${DB_PASSWORD}
+    - name: files
+      type: csv
+      directory: data
+```
+
+```java
+@Service
+class Revenue {
+
+    private final FyrQL engine;
+
+    Revenue(FyrQL engine) {
+        this.engine = engine;
+    }
+
+    List<Object[]> byRegion() {
+        return engine.rows("SELECT r.region, sum(o.amount) FROM sales.orders AS o"
+                + " JOIN files.regions AS r ON o.region_id = r.id GROUP BY r.region");
+    }
+}
+```
+
+The settings under `fyrql.engine` are those of [Engine settings](#engine-settings), with
+the relaxed names of Spring: `memory-budget` and `memoryBudget` are the same key, and an
+IDE completes them from the metadata of the starter. `memory-budget` takes the units of
+FyrQL, so that `512MB` are 512,000,000 bytes and `512MiB` 536,870,912, not those of
+Spring; `query-timeout` and `max-query-timeout` are durations such as `30s` or `5m`.
+The sources under `fyrql.sources` are those of the file: a `name`, a `type` and the
+options of the type below them, with nested keys joined by dots and lists by commas.
+Unlike the settings, the options keep the names of their connector exactly, such as
+`recordStatements`, since Spring does not relax the keys of a map; for the same reason
+an option cannot come from an environment variable named after its key, which Spring
+reads in lower case, but from a placeholder in the YAML.
+
+Placeholders are those of Spring, such as `${DB_PASSWORD}`, which Spring resolves from
+environment variables, system properties and its other sources. The form
+`${env:NAME}` of the configuration file does not work in `application.yml`: Spring reads
+it as the property `env` with the default `NAME` and gives the text `NAME`, without an
+error.
+
+`fyrql.config` names a configuration file of FyrQL in addition. Its sources come first,
+with `${env:NAME}` as in any file and relative paths against its directory, then those
+under `fyrql.sources`; the settings under `fyrql.engine` replace those of the file.
+Relative paths under `fyrql.sources` and `fyrql.engine` are resolved against the working
+directory. Two sources with the same name, in any case, are an error.
+
+The engine closes with the application context. A bean of the type `FyrQL` of the
+application replaces it, and `fyrql.enabled: false` turns the starter off. Sources and
+functions of the application, such as tables in memory, join through beans of the type
+`FyrQLBuilderCustomizer`, which the starter applies in the order of their `@Order` before
+it builds the engine:
+
+```java
+@Bean
+FyrQLBuilderCustomizer products(ProductRepository repository) {
+    return builder -> builder.register(MemoryConnector.builder("app")
+            .table("products", Product.class, repository.findAll()).build());
+}
+```
+
+If the engine cannot be built, the application does not start, and the message names the
+setting or the source at fault; the connectors opened until then are closed.
+
+With `fyrql.datasource.enabled: true`, there is a `DataSource` of the engine, the bean
+`fyrqlDataSource`, for code that wants JDBC, such as a `JdbcTemplate`. Its connections
+share the engine and do not close it, each a [session](#sessions) of its own, as with
+`new FyrQLDataSource(engine)` of the [JDBC driver](#jdbc-driver). It is no default
+candidate: the `DataSource` of the application, which Spring Boot still creates from
+`spring.datasource`, stays the one that is injected by its type, and that of FyrQL is
+injected by its name:
+
+```java
+@Bean
+JdbcTemplate fyrqlTemplate(@Qualifier("fyrqlDataSource") DataSource dataSource) {
+    return new JdbcTemplate(dataSource);
+}
+```
+
+An application that wants FyrQL as its only `DataSource` defines the bean itself, as
+`new FyrQLDataSource(engine)`.
+
+With the health module of Spring Boot, which `spring-boot-starter-actuator` brings, the
+health indicator `fyrql` checks each source of the configuration by listing its schemas,
+which reaches the database or service behind it. It is up when all answer and down when
+one fails; its details give the status of each source and the error of one that failed,
+shown as Spring shows details (`management.endpoint.health.show-details`). Sources that
+a customizer registers, and those of the file formats, are not checked; without sources
+of the configuration, the indicator runs `SELECT 1`. `management.health.fyrql.enabled:
+false` turns it off.
+
 ## Supported SQL
 
 Queries, the statements of [Writing](#writing-and-loading), and `EXPLAIN` and `EXPLAIN ANALYZE`
@@ -2371,9 +2497,9 @@ covers
 
 - the API for applications and the SPI for connectors, the packages and classes the
   table below lists as such;
-- the keys of the [configuration file](#configuration-file) and of the URL of the
-  [JDBC driver](#jdbc-driver), and the command line of the
-  [Flight SQL server](#flight-sql-server);
+- the keys of the [configuration file](#configuration-file), of the URL of the
+  [JDBC driver](#jdbc-driver) and of the starter for [Spring Boot](#spring-boot), and the
+  command line of the [Flight SQL server](#flight-sql-server);
 - the behavior of SQL: the statements, functions and types FyrQL takes, the results it
   gives, the types it maps to JDBC and Arrow, and the SQLSTATEs of its errors;
 - the list of [Differences from DuckDB](#differences-from-duckdb): FyrQL behaves as it
@@ -2408,6 +2534,7 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | `net.fyrql.jdbc` | API | - |
 | `net.fyrql.arrow` | API | `ArrowTypes` (internal) |
 | `net.fyrql.flight` | API | - |
+| `net.fyrql.spring` | API | `FyrQLAutoConfiguration` (internal) |
 | `net.fyrql.sql` | API | - |
 | `net.fyrql.connector.memory` | API | `MemoryConnectorFactory` (internal) |
 | `net.fyrql.connector.csv` | API | `CsvConnectorFactory` (internal) |
@@ -2461,6 +2588,7 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | `fyrql-arrow` | results as Apache Arrow vectors through an `ArrowReader`, and Arrow vectors as batches |
 | `fyrql-flight-sql` | an Arrow Flight SQL server for an engine |
 | `fyrql-flight-sql-all` | the Flight SQL server with the engine, code generation and all connectors in one executable JAR; the drivers of the databases are not in it |
+| `fyrql-spring-boot-starter` | an engine as a bean of Spring Boot 4, configured in `application.yml`, with a health indicator and, on request, a `DataSource` |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
 | `fyrql-bench` | JMH benchmarks of the interpreter against compiled code, of the operators on one and on several threads, of the scans of CSV and Parquet files, and of the conversion to and from Arrow; not published |
 

@@ -25,7 +25,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * Builds an engine from a configuration file:
@@ -36,8 +38,9 @@ import java.util.Optional;
  * }</pre>
  * See {@link EngineConfig} for the form of the file. The connectors of the
  * types it names must be on the class path. An application that registers
- * sources of its own, such as tables in memory, takes the
- * {@link #builder(Path) builder} instead and adds them.
+ * sources of its own, such as tables in memory, adds them in a customizer
+ * of the builder, which {@link #open(EngineConfig, Consumer)} applies, or
+ * takes the {@link #builder(Path) builder} instead.
  * <p>
  * The settings of the engine, under {@code engine}, are:
  * {@code defaultSource}, {@code defaultSchema}, {@code batchSize},
@@ -66,7 +69,7 @@ public final class FyrQLConfig {
      *         source cannot be created; the sources created until then are closed
      */
     public static FyrQL open(Path file) {
-        return open(EngineConfig.read(file), Connectors.factories(), file.toString());
+        return open(EngineConfig.read(file), Connectors.factories(), NOTHING, file.toString());
     }
 
     /**
@@ -76,7 +79,7 @@ public final class FyrQLConfig {
      *         created; the sources created until then are closed
      */
     public static FyrQL open(EngineConfig config) {
-        return open(config, Connectors.factories(), null);
+        return open(config, Connectors.factories(), NOTHING, null);
     }
 
     /**
@@ -90,7 +93,36 @@ public final class FyrQLConfig {
      *         created until then are closed
      */
     public static FyrQL open(EngineConfig config, Map<String, ConnectorFactory> factories) {
-        return open(config, factories, null);
+        return open(config, factories, NOTHING, null);
+    }
+
+    /**
+     * Builds an engine from a configuration after a customizer has added to
+     * its builder, such as sources or functions of an application. Unlike
+     * with the {@link #builder(EngineConfig) builder}, the connectors of the
+     * configuration are closed if the customizer or the build fails; those
+     * that the customizer registers are its own to close.
+     *
+     * @throws ConfigException if a setting is invalid, a source cannot be
+     *         created, or the customizer or the build fails
+     */
+    public static FyrQL open(EngineConfig config, Consumer<FyrQL.Builder> customizer) {
+        return open(config, Connectors.factories(), customizer);
+    }
+
+    /**
+     * Builds an engine from a configuration with the given factories of
+     * connectors after a customizer has added to its builder.
+     *
+     * @throws ConfigException if a setting is invalid, no factory has the
+     *         type of a source, a source cannot be created, or the
+     *         customizer or the build fails
+     * @see #open(EngineConfig, Consumer)
+     * @see #open(EngineConfig, Map)
+     */
+    public static FyrQL open(EngineConfig config, Map<String, ConnectorFactory> factories,
+            Consumer<FyrQL.Builder> customizer) {
+        return open(config, factories, Objects.requireNonNull(customizer, "customizer"), null);
     }
 
     /**
@@ -128,9 +160,15 @@ public final class FyrQLConfig {
         return prepare(config, factories, null).builder();
     }
 
-    private static FyrQL open(EngineConfig config, Map<String, ConnectorFactory> factories, String origin) {
+    /** The customizer of {@code open} without one. */
+    private static final Consumer<FyrQL.Builder> NOTHING = b -> {
+    };
+
+    private static FyrQL open(EngineConfig config, Map<String, ConnectorFactory> factories,
+            Consumer<FyrQL.Builder> customizer, String origin) {
         Prepared prepared = prepare(config, factories, origin);
         try {
+            customizer.accept(prepared.builder());
             return prepared.builder().build();
         } catch (RuntimeException e) {
             close(prepared.connectors(), e);

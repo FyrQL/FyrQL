@@ -10,7 +10,7 @@ warehouse first.
 
 - [Getting started: FyrQL in 30 minutes](docs/getting-started.md): from an empty project
   to queries over files, Java objects and databases, writing results, a configuration
-  file, the JDBC driver and Python.
+  file, the JDBC driver, Python and Spring Boot.
 - [Manual](docs/manual.md): everything in full, from the API and its settings, every
   connector and the SQL with its differences from DuckDB to the optimizer, code
   generation, parallel execution, spilling and performance.
@@ -40,7 +40,8 @@ warehouse first.
   `CREATE TABLE ... AS` and `INSERT INTO` write into tables in memory and in databases.
   See [Writing and loading](docs/manual.md#writing-and-loading).
 - **Embedded, with clients.** The engine runs inside the application and is set up with
-  a builder or a YAML file. A JDBC driver, also as one JAR, opens it to tools such as
+  a builder, a YAML file or, with a starter, the `application.yml` of Spring Boot. A JDBC
+  driver, also as one JAR, opens it to tools such as
   DBeaver; results come as Apache Arrow vectors, in the process or from a Flight SQL
   server in one executable JAR, which Python reads through ADBC into pyarrow and pandas.
   Rules for the files that statements may read and write, which the server closes by
@@ -48,8 +49,8 @@ warehouse first.
   and timeout for each connection and client let others use an engine.
   See [JDBC driver](docs/manual.md#jdbc-driver),
   [Flight SQL server](docs/manual.md#flight-sql-server),
-  [File access](docs/manual.md#file-access), [Time limits](docs/manual.md#time-limits) and
-  [Sessions](docs/manual.md#sessions).
+  [File access](docs/manual.md#file-access), [Time limits](docs/manual.md#time-limits),
+  [Sessions](docs/manual.md#sessions) and [Spring Boot](docs/manual.md#spring-boot).
 - **Observable.** `EXPLAIN ANALYZE` runs a query and shows for each node of its plan the
   rows, batches, time and threads, and for each scan the splits, row groups, requests,
   bytes and statements of its source; queries, requests to sources, compiled code and
@@ -123,6 +124,7 @@ data, the plan of the query and what comes next.
 | A JDBC driver, also in one JAR for tools | `fyrql-jdbc`, `fyrql-jdbc-all` | [JDBC driver](docs/manual.md#jdbc-driver) |
 | Results as Apache Arrow vectors | `fyrql-arrow` | [Arrow](docs/manual.md#arrow) |
 | An Arrow Flight SQL server, also as one executable JAR | `fyrql-flight-sql`, `fyrql-flight-sql-all` | [Flight SQL server](docs/manual.md#flight-sql-server) |
+| An engine as a bean of Spring Boot 4, configured in `application.yml` | `fyrql-spring-boot-starter` | [Spring Boot](docs/manual.md#spring-boot) |
 
 ## Performance
 
@@ -135,11 +137,10 @@ against the interpreter, of one thread against twelve and of spilling are under
 ## Status
 
 FyrQL is young: version 0.x, not yet used in production, and its API may still change
-until 1.0.0; what 1.0.0 promises is under [Compatibility](docs/manual.md#compatibility).
-It writes results into files, tables in memory and databases, but does not update or
-delete rows; the hash tables of the joins of a query must fit into the memory budget,
-since only aggregations, sorts and windows spill to disk; and where native code is fine
-and the sources are ones DuckDB reads, DuckDB is faster. FyrQL is meant for Java
+until 1.0.0. It writes results into files, tables in memory and databases, but does not
+update or delete rows; the hash tables of the joins of a query must fit into the memory
+budget, since only aggregations, sorts and windows spill to disk; and where native code
+is fine and the sources are ones DuckDB reads, DuckDB is faster. FyrQL is meant for Java
 applications and JDBC tools that query data across databases, files and services in
 plain Java: any JDBC driver, connectors written in Java, and no native libraries or
 extensions to load.

@@ -12,6 +12,8 @@
 package net.fyrql.config;
 
 import net.fyrql.FyrQL;
+import net.fyrql.connector.Connector;
+import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.FileAccess;
 import net.fyrql.connector.FileAccessException;
 import net.fyrql.connector.jdbc.JdbcConnector;
@@ -21,6 +23,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,9 +33,12 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -170,6 +177,52 @@ class FyrQLConfigTest {
         try (FyrQL engine = FyrQLConfig.builder(config("{}")).defaultSource("docs").build()) {
             assertEquals(2, engine.rows("SELECT * FROM products").size());
         }
+    }
+
+    @Test
+    void aCustomizerAddsToTheBuilderAndItsFailureClosesTheConnectors() throws IOException {
+        EngineConfig config = EngineConfig.read(config("{}"));
+        try (FyrQL engine = FyrQLConfig.open(config, b -> b.defaultSource("docs"))) {
+            assertEquals(2, engine.rows("SELECT * FROM products").size());
+        }
+        List<String> closed = new ArrayList<>();
+        Map<String, ConnectorFactory> factories = new TreeMap<>();
+        Connectors.factories().forEach((type, f) -> factories.put(type, closing(f, closed)));
+        ConfigException e = assertThrows(ConfigException.class, () -> FyrQLConfig.open(config, factories, b -> {
+            throw new IllegalStateException("no functions");
+        }));
+        assertEquals("Cannot build the engine: no functions", e.getMessage());
+        assertEquals(List.of("shop", "files", "docs"), closed);
+        closed.clear();
+        FyrQLConfig.open(config, factories, b -> {
+        }).close();
+        assertEquals(List.of("docs", "files", "shop"), closed.stream().sorted().toList());
+    }
+
+    /** A factory whose connectors note their names when they close. */
+    private static ConnectorFactory closing(ConnectorFactory factory, List<String> closed) {
+        return new ConnectorFactory() {
+            @Override
+            public String type() {
+                return factory.type();
+            }
+
+            @Override
+            public Connector create(String name, Map<String, String> options, Path directory) {
+                Connector c = factory.create(name, options, directory);
+                return (Connector) Proxy.newProxyInstance(Connector.class.getClassLoader(),
+                        new Class<?>[] {Connector.class}, (proxy, method, args) -> {
+                            if (method.getName().equals("close")) {
+                                closed.add(name);
+                            }
+                            try {
+                                return method.invoke(c, args);
+                            } catch (InvocationTargetException failure) {
+                                throw failure.getCause();
+                            }
+                        });
+            }
+        };
     }
 
     @Test

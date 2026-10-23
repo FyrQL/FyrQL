@@ -4,9 +4,9 @@
 
 This tour takes you from an empty project to queries over files, Java objects and
 databases, results written into files and tables, a configuration file, the JDBC driver
-and Python. Each step builds on the one before and takes a few minutes. The
-[manual](manual.md) has the details of every step; the [README](../README.md) gives the
-overview.
+and Python, and at the end Spring Boot. Each step builds on the one before and takes a
+few minutes. The [manual](manual.md) has the details of every step; the
+[README](../README.md) gives the overview.
 
 ## Contents
 
@@ -20,6 +20,7 @@ overview.
 - [Threads, memory and code generation](#threads-memory-and-code-generation)
 - [The JDBC driver and DBeaver](#the-jdbc-driver-and-dbeaver)
 - [Arrow, Flight SQL and Python](#arrow-flight-sql-and-python)
+- [Spring Boot](#spring-boot)
 - [Where to go next](#where-to-go-next)
 
 ## What you need
@@ -39,22 +40,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.12.5</version>
+    <version>0.13.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.12.5</version>
+    <version>0.13.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.12.5</version>
+    <version>0.13.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.12.5</version>
+    <version>0.13.0</version>
 </dependency>
 ```
 
@@ -515,6 +516,57 @@ with flight_sql.connect("grpc://127.0.0.1:32010", autocommit=True) as conn, conn
 
 More: [Arrow](manual.md#arrow), [Flight SQL server](manual.md#flight-sql-server),
 [Python](manual.md#python).
+
+## Spring Boot
+
+*Optional, 3 minutes more.* In an application of Spring Boot 4, the starter makes the
+engine a bean, configured in `application.yml`. Besides the connectors of the sources,
+the application depends on
+
+```xml
+<dependency>
+    <groupId>io.github.stefan-zobel</groupId>
+    <artifactId>fyrql-spring-boot-starter</artifactId>
+    <version>0.13.0</version>
+</dependency>
+```
+
+and names the sources and settings under `fyrql`, as in a configuration file:
+
+```yaml
+fyrql:
+  engine:
+    threads: 4
+  sources:
+    - name: files
+      type: csv
+      directory: data
+```
+
+The engine is then a bean like any other, and it closes with the application:
+
+```java
+@RestController
+class Regions {
+
+    private final FyrQL engine;
+
+    Regions(FyrQL engine) {
+        this.engine = engine;
+    }
+
+    @GetMapping("/regions")
+    List<Object[]> regions() {
+        return engine.rows("SELECT region, count(*) FROM files.customers GROUP BY region");
+    }
+}
+```
+
+Placeholders in `application.yml` are those of Spring, such as `${DB_PASSWORD}`, not
+`${env:DB_PASSWORD}` as in a configuration file.
+
+More: [Spring Boot](manual.md#spring-boot), with sources of the application, a
+`DataSource` and the health indicator.
 
 ## Where to go next
 

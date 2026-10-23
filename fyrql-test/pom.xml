@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.12.5</version>
+		<version>0.13.0</version>
 	</parent>
 
 	<artifactId>fyrql-test</artifactId>
@@ -243,6 +243,12 @@
 		<dependency>
 			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-flight-sql</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- For the test of the API boundary; its public types name no type of Spring, which stays off the class path. -->
+		<dependency>
+			<groupId>io.github.stefan-zobel</groupId>
+			<artifactId>fyrql-spring-boot-starter</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<!-- The Flight SQL JDBC driver of Arrow as a client of the server; its libraries are renamed inside its JAR. -->
