@@ -144,6 +144,15 @@ public final class ConfigOptions {
     }
 
     /**
+     * Reads an option as a limit of time: a duration as {@link #duration}
+     * reads it, or {@code 0} for none, which is {@link Duration#ZERO}.
+     */
+    public Optional<Duration> timeLimit(String key) {
+        return get(key, "a duration such as 500ms, 30s, 2m or PT30S, or 0 for none",
+                v -> v.strip().equals("0") ? Duration.ZERO : parseDuration(v));
+    }
+
+    /**
      * Reads an option as a number of bytes: a number, optionally with the
      * unit {@code B}, {@code KB}, {@code MB}, {@code GB} or {@code TB} for
      * powers of 1000, or {@code KiB}, {@code MiB}, {@code GiB} or

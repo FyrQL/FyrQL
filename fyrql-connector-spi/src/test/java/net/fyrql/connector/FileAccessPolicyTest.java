@@ -131,6 +131,20 @@ class FileAccessPolicyTest {
     }
 
     @Test
+    void aShareIsDeniedWithoutAskingItsHost() throws IOException {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"), "shares are paths only on Windows");
+        Files.createDirectories(dir.resolve("data"));
+        FileAccessPolicy policy = FileAccessPolicy.of(FileAccess.READ, List.of("data"), dir);
+        long start = System.nanoTime();
+        for (String share : List.of("\\\\fyrql-test.invalid\\share\\x.csv", "//fyrql-test.invalid/share/x.csv")) {
+            FileAccessException e = assertThrows(FileAccessException.class, () -> policy.checkRead(share));
+            assertTrue(e.getMessage().contains("is not under the allowed locations"), e.getMessage());
+        }
+        // Asking a host that does not exist takes seconds; a check that does not ask takes none.
+        assertTrue(System.nanoTime() - start < 1_000_000_000L, "the host was asked");
+    }
+
+    @Test
     void remoteLocationsArePrefixesWithABoundary() {
         FileAccessPolicy policy = FileAccessPolicy.of(FileAccess.READ_WRITE, List.of("s3://lake", "S3://sales/2026/"),
                 dir);

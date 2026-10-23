@@ -83,6 +83,17 @@ class ServerConfigTest {
     }
 
     @Test
+    void signInWithoutTlsBeyondTheLoopbackAddressIsInPlainText() {
+        assertTrue(ServerConfig.read(Map.of("host", "0.0.0.0", "users.alice", "pw"), DIR)
+                .plainSignInBeyondLoopback());
+        assertTrue(ServerConfig.read(Map.of("host", "0.0.0.0", "token", "t"), DIR).plainSignInBeyondLoopback());
+        assertFalse(ServerConfig.read(Map.of("users.alice", "pw"), DIR).plainSignInBeyondLoopback());
+        assertFalse(ServerConfig.read(Map.of("host", "0.0.0.0", "token", "t", "tls.certificate", "c.pem", "tls.key",
+                "k.pem"), DIR).plainSignInBeyondLoopback());
+        assertFalse(ServerConfig.read(Map.of("host", "0.0.0.0"), DIR).plainSignInBeyondLoopback());
+    }
+
+    @Test
     void errorsNameTheSettingAndNeverItsValue() {
         assertEquals("The server has an unknown option prot; known are host, port, tls.certificate, tls.key,"
                 + " users.<name>, token, handleTimeout, sessionTimeout, maxQueries", failure(Map.of("prot", "1")));

@@ -224,6 +224,15 @@ public record ServerConfig(String host, int port, Path certificate, Path key, Ma
         }
     }
 
+    /**
+     * Tells whether clients would send their passwords or the token in
+     * plain text over a network: sign-in without TLS on an address other
+     * than a loopback address.
+     */
+    boolean plainSignInBeyondLoopback() {
+        return signIn() && !tls() && !isLoopback(host);
+    }
+
     /** Tells whether every address of a host is a loopback address. */
     private static boolean isLoopback(String host) {
         try {

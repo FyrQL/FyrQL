@@ -13,9 +13,12 @@ package net.fyrql.connector.iceberg;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The schema of an Avro file, as far as reading needs it, with the field
@@ -79,9 +82,15 @@ sealed interface AvroSchema {
         }
     }
 
-    /** Parses the tree of a schema, remembering named types by their full and their short name. */
+    /**
+     * Parses the tree of a schema, remembering named types by their full
+     * and their short name. A record that names itself in its fields is an
+     * error: Iceberg writes none, and reading one could nest without end.
+     */
     final class Parser {
         private final Map<String, AvroSchema> named = new HashMap<>();
+        /** The records whose fields are being parsed. */
+        private final Set<AvroSchema> open = Collections.newSetFromMap(new IdentityHashMap<>());
 
         private AvroSchema schema(Object node, String namespace) throws IOException {
             if (node instanceof String name) {
@@ -104,11 +113,13 @@ sealed interface AvroSchema {
                     List<Field> fields = new ArrayList<>();
                     Record record = new Record(name, fields);
                     name(name, ns, record);
+                    open.add(record);
                     for (Object f : (List<?>) map.get("fields")) {
                         Map<?, ?> field = (Map<?, ?>) f;
                         fields.add(new Field((String) field.get("name"), schema(field.get("type"), ns),
                                 id(field.get("field-id"))));
                     }
+                    open.remove(record);
                     yield record;
                 }
                 case "enum" -> {
@@ -169,6 +180,9 @@ sealed interface AvroSchema {
             }
             if (s == null) {
                 throw new IOException("Unknown Avro type " + name);
+            }
+            if (open.contains(s)) {
+                throw new IOException("The Avro record " + name + " contains itself, which is not supported");
             }
             return s;
         }

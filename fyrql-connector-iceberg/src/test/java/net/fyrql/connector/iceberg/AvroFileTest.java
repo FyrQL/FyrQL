@@ -187,6 +187,20 @@ class AvroFileTest {
         assertTrue(marker.getMessage().contains("sync marker"), marker.getMessage());
     }
 
+    @Test
+    void aRecordThatContainsItselfIsAnError() throws IOException {
+        for (String type : List.of("\"Node\"", "[\"null\", \"Node\"]", "{\"type\": \"array\", \"items\": \"Node\"}")) {
+            IOException e = assertThrows(IOException.class, () -> AvroSchema.parse("{\"type\": \"record\", \"name\":"
+                    + " \"Node\", \"fields\": [{\"name\": \"next\", \"type\": " + type + "}]}"), type);
+            assertEquals("The Avro record Node contains itself, which is not supported", e.getMessage());
+        }
+        // A record used again outside its own fields is no recursion.
+        AvroSchema twice = AvroSchema.parse("{\"type\": \"record\", \"name\": \"A\", \"fields\": [{\"name\": \"x\","
+                + " \"type\": {\"type\": \"record\", \"name\": \"B\", \"fields\": []}}, {\"name\": \"y\", \"type\":"
+                + " \"B\"}]}");
+        assertEquals(2, ((AvroSchema.Record) twice).fields().size());
+    }
+
     private static GenericRecord record(Schema schema, int k) {
         GenericRecord r = new GenericData.Record(schema);
         r.put("n", null);

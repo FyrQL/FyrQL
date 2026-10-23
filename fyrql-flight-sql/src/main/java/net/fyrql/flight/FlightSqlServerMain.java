@@ -37,9 +37,14 @@ import java.util.logging.Logger;
  * The options override the host and port of the file. Unless the section
  * {@code engine} sets {@code fileAccess}, statements of clients may read
  * and write no files ({@code fileAccess: none}); the tables of the sources
- * stay readable. The server prints its URI, what statements may do with
- * files and the timeout of queries. It runs until the JVM ends, and then
- * closes the engine. The JDBC drivers of the
+ * stay readable. Unless it sets {@code maxQueryTimeout} and
+ * {@code memoryBudget}, no query runs longer than an hour and the queries
+ * hold at most half the heap in joins, aggregations and sorts, above which
+ * they spill; {@code 0} lifts either limit. The server prints its URI, what
+ * statements may do with files, the timeout of queries and the memory
+ * budget, and warns on standard error if clients would sign in without TLS
+ * on an address other than a loopback address. It runs until the JVM ends,
+ * and then closes the engine. The JDBC drivers of the
  * databases of JDBC sources go on the class path next to the JAR, which
  * then starts with its class name and the option of Arrow the manifest of
  * the JAR otherwise sets:
@@ -55,6 +60,15 @@ public final class FlightSqlServerMain {
 
     /** The setting of the engine that the server sets to {@code none} unless the file sets it. */
     private static final String FILE_ACCESS = "fileAccess";
+
+    /** The setting of the engine that the server sets to {@link #DEFAULT_MAX_QUERY_TIMEOUT} unless the file sets it. */
+    private static final String MAX_QUERY_TIMEOUT = "maxQueryTimeout";
+
+    /** How long any query may run unless the file says otherwise. */
+    static final String DEFAULT_MAX_QUERY_TIMEOUT = "1h";
+
+    /** The setting of the engine that the server sets to half the heap unless the file sets it. */
+    private static final String MEMORY_BUDGET = "memoryBudget";
 
     /** The logger of gRPC that reports errors of single streams; kept, so that its filter stays. */
     private static final Logger STREAM_ERRORS = Logger.getLogger("io.grpc.netty.NettyServerHandler");
@@ -87,7 +101,7 @@ public final class FlightSqlServerMain {
         quietClosedStreams();
         Running running;
         try {
-            running = start(args, System.out);
+            running = start(args, System.out, System.err);
         } catch (UsageException e) {
             System.err.println(e.getMessage());
             System.err.println(USAGE);
@@ -102,17 +116,26 @@ public final class FlightSqlServerMain {
         running.server().awaitTermination();
     }
 
+    /** Starts the server as {@link #start(String[], PrintStream, PrintStream)} does, warning on standard error. */
+    static Running start(String[] args, PrintStream out) throws IOException {
+        return start(args, out, System.err);
+    }
+
     /**
      * Reads the configuration, opens the engine, with the file access
-     * {@code none} unless the configuration sets one, starts the server and
-     * prints its URI, the file access and the timeout of queries.
+     * {@code none}, the most time of a query and the memory budget of the
+     * server unless the configuration sets them, starts the server and
+     * prints its URI, the file access, the timeout of queries and the
+     * memory budget, after a warning about sign-in in plain text.
      *
+     * @param out where the server says where it listens and what it allows
+     * @param err where the server warns
      * @throws UsageException if the arguments are wrong
      * @throws ConfigException if the configuration is no valid configuration
      * @throws IllegalArgumentException if a setting of the server is invalid, or the engine cannot be built
      * @throws IOException if the server cannot listen on its host and port
      */
-    static Running start(String[] args, PrintStream out) throws IOException {
+    static Running start(String[] args, PrintStream out, PrintStream err) throws IOException {
         Path file = null;
         String host = null;
         Integer port = null;
@@ -159,9 +182,22 @@ public final class FlightSqlServerMain {
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException(file + ": " + e.getMessage(), e);
         }
+        if (server.plainSignInBeyondLoopback()) {
+            err.println("Warning: clients sign in to " + server.host() + " without TLS, so that their passwords"
+                    + " and tokens cross the network in plain text; set server.tls.certificate and server.tls.key,"
+                    + " or put a proxy with TLS in front of the server");
+        }
         if (!config.settings().containsKey(FILE_ACCESS)) {
             config = config.withSetting(FILE_ACCESS, FileAccess.NONE.toString());
         }
+        if (!config.settings().containsKey(MAX_QUERY_TIMEOUT)) {
+            config = config.withSetting(MAX_QUERY_TIMEOUT, DEFAULT_MAX_QUERY_TIMEOUT);
+        }
+        long heap = Runtime.getRuntime().maxMemory();
+        if (!config.settings().containsKey(MEMORY_BUDGET) && heap != Long.MAX_VALUE) {
+            config = config.withSetting(MEMORY_BUDGET, defaultMemoryBudget(heap));
+        }
+        String budget = config.settings().getOrDefault(MEMORY_BUDGET, "0").strip();
         FyrQL engine;
         try {
             engine = FyrQLConfig.open(config);
@@ -182,8 +218,13 @@ public final class FlightSqlServerMain {
         out.println("FyrQL Flight SQL server " + FlightSqlServer.VERSION + " listening on " + s.uri());
         out.println("File access from SQL: " + fileAccess(engine) + "; query timeout: " + timeout(engine)
                 + "; session timeout: " + (s.config().sessionTimeout().isZero() ? "none"
-                : text(s.config().sessionTimeout())));
+                : text(s.config().sessionTimeout())) + "; memory budget: " + (budget.equals("0") ? "none" : budget));
         return new Running(s, engine);
+    }
+
+    /** Returns half of a heap, in whole MiB, as the setting {@code memoryBudget} takes it. */
+    static String defaultMemoryBudget(long heap) {
+        return Math.max(1, heap / 2 / (1024 * 1024)) + "MiB";
     }
 
     /** Describes what statements may do with files, such as {@code read under /data, s3://lake/}. */

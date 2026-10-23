@@ -30,6 +30,7 @@ import net.fyrql.connector.FileReaderProvider;
 import net.fyrql.connector.FileStores;
 import net.fyrql.connector.FileWriterProvider;
 import net.fyrql.connector.Globs;
+import net.fyrql.connector.LocalFileStore;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.SourceCounters;
@@ -233,8 +234,15 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         this.stores = stores;
     }
 
-    /** Returns the path of a local location. */
+    /**
+     * Returns the path of a local location, a path or a URI of the scheme
+     * {@code file}, as {@link LocalFileStore#resolve} resolves it, so that
+     * the file read is the one the policy of the engine checked.
+     */
     private static Path local(String location) {
+        if (location.regionMatches(true, 0, "file:", 0, 5)) {
+            return LocalFileStore.resolve(location, Path.of(""));
+        }
         try {
             return Path.of(location);
         } catch (InvalidPathException e) {
@@ -331,8 +339,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         FileObject remote = null;
         if (FileStores.isLocal(path)) {
             try {
-                file = Path.of(path).toAbsolutePath().normalize();
-            } catch (InvalidPathException e) {
+                file = local(path).toAbsolutePath().normalize();
+            } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException("Invalid path " + path, e);
             }
             if (!Files.isRegularFile(file)) {

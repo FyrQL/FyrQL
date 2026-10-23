@@ -14,6 +14,7 @@ package net.fyrql.connector.parquet;
 import net.fyrql.connector.FileObject;
 import net.fyrql.connector.FileStores;
 import net.fyrql.connector.Globs;
+import net.fyrql.connector.LocalFileStore;
 import net.fyrql.core.type.Schema;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.filter2.compat.FilterCompat;
@@ -172,7 +173,10 @@ final class ParquetFiles {
     /**
      * Returns a location as an absolute one, relative local ones resolved
      * against a directory, leaving a pattern in the name of the file and a
-     * location with a scheme as they are.
+     * location with a scheme as they are. A local location is resolved as
+     * {@link LocalFileStore#resolve} resolves it, also a URI of the scheme
+     * {@code file}, so that the file read is the one the policy of the
+     * engine checked.
      */
     static String absolute(String location, Path directory) {
         Globs.checkPattern(location);
@@ -184,9 +188,10 @@ final class ParquetFiles {
         String parent = slash < 0 ? "" : location.substring(0, slash + 1);
         try {
             if (!Globs.isPattern(name)) {
-                return directory.resolve(location).toAbsolutePath().normalize().toString();
+                return LocalFileStore.resolve(location, directory).toAbsolutePath().normalize().toString();
             }
-            return directory.resolve(parent).toAbsolutePath().normalize() + java.io.File.separator + name;
+            return LocalFileStore.resolve(parent, directory).toAbsolutePath().normalize() + java.io.File.separator
+                    + name;
         } catch (InvalidPathException e) {
             throw new IllegalArgumentException("Invalid path " + location, e);
         }

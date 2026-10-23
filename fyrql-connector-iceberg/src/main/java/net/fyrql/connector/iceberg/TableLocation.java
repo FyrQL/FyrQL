@@ -95,17 +95,27 @@ record TableLocation(String root, FileObject metadataFile) {
         }
     }
 
-    /** Returns the metadata file that {@code version-hint.text} names, or {@code null}. */
+    /**
+     * Returns the metadata file that {@code version-hint.text} names, or
+     * {@code null}.
+     *
+     * @throws IllegalArgumentException if it names a file outside the
+     *         directory {@code metadata}, by a path rather than a name
+     */
     private static FileObject hinted(FileStores stores, String metadata) throws IOException {
         String hint;
+        String file = join(metadata, "version-hint.text");
         try {
-            hint = new String(bytes(stores.object(join(metadata, "version-hint.text"))), StandardCharsets.UTF_8)
-                    .trim();
+            hint = new String(bytes(stores.object(file)), StandardCharsets.UTF_8).trim();
         } catch (NoSuchFileException e) {
             return null;
         }
         if (hint.isEmpty()) {
             return null;
+        }
+        if (hint.indexOf('/') >= 0 || hint.indexOf('\\') >= 0 || hint.equals(".") || hint.equals("..")) {
+            throw new IllegalArgumentException("The file " + file + " must name a version or a file of its"
+                    + " directory, not a path");
         }
         List<String> names = hint.chars().allMatch(Character::isDigit)
                 ? List.of("v" + hint + SUFFIX, hint + SUFFIX) : List.of(hint, hint + SUFFIX);

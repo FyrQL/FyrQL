@@ -355,6 +355,20 @@ class EdmxParserTest {
     }
 
     @Test
+    void annotationsNestAtMost64Expressions() {
+        String type = "<EntityType Name='T'><Key><PropertyRef Name='a'/></Key><Property Name='a' Type='Edm.Int32'/>"
+                + "</EntityType>";
+        int allowed = EdmxParser.MAX_DEPTH;
+        ServiceMetadata m = parse(v4(type + "<Annotations Target='M.T'><Annotation Term='M.X'>"
+                + "<Collection>".repeat(allowed) + "</Collection>".repeat(allowed) + "</Annotation></Annotations>"));
+        assertEquals(1, m.entityTypes().size());
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> parse(v4(type
+                + "<Annotations Target='M.T'><Annotation Term='M.X'>" + "<Collection>".repeat(allowed + 1)
+                + "</Collection>".repeat(allowed + 1) + "</Annotation></Annotations>")));
+        assertTrue(e.getMessage().endsWith(": an annotation nests more than 64 expressions"), e.getMessage());
+    }
+
+    @Test
     void documentWithoutContainer() {
         ServiceMetadata m = parse(v4("<EntityType Name='T'><Key><PropertyRef Name='a'/></Key>"
                 + "<Property Name='a' Type='Edm.Int32'/></EntityType>"));

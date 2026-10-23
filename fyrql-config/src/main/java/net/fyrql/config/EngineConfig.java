@@ -105,6 +105,18 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
     }
 
     /**
+     * Names the sources as {@link SourceConfig#toString()} does, the
+     * settings of the engine, and the keys of the settings of the server,
+     * but not their values, which hold the passwords of its users and its
+     * token.
+     */
+    @Override
+    public String toString() {
+        return "EngineConfig[sources=" + sources + ", settings=" + settings + ", server=" + server.keySet()
+                + ", directory=" + directory + "]";
+    }
+
+    /**
      * Reads a configuration file, as YAML, or as JSON if its name ends in
      * {@code .json}.
      *

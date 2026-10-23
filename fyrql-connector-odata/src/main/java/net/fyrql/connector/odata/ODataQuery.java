@@ -11,6 +11,8 @@
 
 package net.fyrql.connector.odata;
 
+import net.fyrql.connector.http.HttpTransport;
+
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
@@ -152,15 +154,11 @@ final class ODataQuery {
     /**
      * Returns a URL for a message: without user information, query and
      * fragment, since the query may hold values that are not meant to be
-     * shown, such as a key in the URL of a service.
+     * shown, such as a key in the URL of a service; see
+     * {@link HttpTransport#shown(URI)}.
      */
     static String shown(URI uri) {
-        if (uri.getScheme() == null || uri.getHost() == null) {
-            return (uri.getScheme() == null ? "" : uri.getScheme() + ":") + (uri.getRawPath() == null ? ""
-                    : uri.getRawPath());
-        }
-        return uri.getScheme() + "://" + uri.getHost() + (uri.getPort() >= 0 ? ":" + uri.getPort() : "")
-                + (uri.getRawPath() == null ? "" : uri.getRawPath());
+        return HttpTransport.shown(uri);
     }
 
     private static String encode(String s, String keep) {

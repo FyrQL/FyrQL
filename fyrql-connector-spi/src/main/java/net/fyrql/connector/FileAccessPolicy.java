@@ -28,7 +28,9 @@ import java.util.Objects;
  * A local location is resolved as {@link LocalFileStore} resolves it,
  * made absolute and normalized, and symbolic links are followed as far as
  * the path exists; for a pattern such as {@code data/*.parquet}, the
- * directory before the pattern counts. A location in a store such as
+ * directory before the pattern counts. A local location on another drive
+ * or share than all allowed directories, such as {@code \\host\share\x},
+ * is denied before the file system is asked about it. A location in a store such as
  * {@code s3://lake/sales/} is compared as text, with the scheme in lower
  * case, and must not have the parts {@code .} or {@code ..}; an allowed
  * location {@code s3://lake} allows {@code s3://lake/x}, but not
@@ -162,6 +164,11 @@ public final class FileAccessPolicy {
                 return false;
             }
             Path path = absolute(withoutPattern(location), directory);
+            if (!sameRoot(path)) {
+                // A path on another drive or share is denied before it is touched, so that a share such as
+                // \\host\share is not asked for, which would send the credentials of the process to the host.
+                return false;
+            }
             // Readers normalize a path before they open it, the file system follows links before "..": both count.
             return under(real(path)) && under(real(path.normalize()));
         }
@@ -171,6 +178,16 @@ public final class FileAccessPolicy {
         }
         for (String prefix : prefixes) {
             if (text.startsWith(prefix) || (text + "/").equals(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Tells whether a path has the root of an allowed directory, such as {@code /} or {@code C:\}. */
+    private boolean sameRoot(Path path) {
+        for (Path d : directories) {
+            if (d.getRoot() != null && d.getRoot().equals(path.getRoot())) {
                 return true;
             }
         }

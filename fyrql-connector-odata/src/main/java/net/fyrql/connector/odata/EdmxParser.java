@@ -53,6 +53,9 @@ final class EdmxParser {
             "Duration", "EnumMember", "Float", "Guid", "Int", "String", "TimeOfDay", "AnnotationPath",
             "ModelElementPath", "NavigationPropertyPath", "Path", "PropertyPath");
 
+    /** The most expressions of an annotation one inside the other. */
+    static final int MAX_DEPTH = 64;
+
     private final XMLStreamReader reader;
     private final String source;
     private final Map<String, String> aliases = new HashMap<>();
@@ -62,6 +65,8 @@ final class EdmxParser {
     private final Map<String, TypeDefinition> typeDefinitions = new LinkedHashMap<>();
     private final List<Container> containers = new ArrayList<>();
     private final List<Targeted> targeted = new ArrayList<>();
+    /** The expressions of annotations being read, one inside the other. */
+    private int depth;
 
     /** An entity container as declared: its qualified name, whether it is the default, and its entity sets. */
     private record Container(String name, boolean isDefault, List<EntitySet> sets) {
@@ -349,8 +354,24 @@ final class EdmxParser {
         return null;
     }
 
-    /** Reads the expression at the current element, up to its end. */
+    /**
+     * Reads the expression at the current element, up to its end; one
+     * nested deeper than {@link #MAX_DEPTH} expressions is an error rather
+     * than a reason to run out of stack.
+     */
     private Annotation.Value expression() throws XMLStreamException {
+        if (depth == MAX_DEPTH) {
+            throw error("an annotation nests more than " + MAX_DEPTH + " expressions");
+        }
+        depth++;
+        try {
+            return nestedExpression();
+        } finally {
+            depth--;
+        }
+    }
+
+    private Annotation.Value nestedExpression() throws XMLStreamException {
         String kind = reader.getLocalName();
         if (CONSTANTS.contains(kind)) {
             String text = reader.getElementText();

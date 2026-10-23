@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The engine checks the locations that statements in SQL name against its
@@ -145,6 +146,43 @@ class FileAccessTest {
                     "is not under the allowed locations");
             assertFalse(Files.exists(secret.resolve("w.csv")));
             assertFalse(Files.exists(dir.resolve("w.csv")));
+        }
+    }
+
+    @Test
+    void aFileUriIsReadAsTheFileThatIsChecked() {
+        try (FyrQL engine = engine(FileAccess.READ, List.of(path(data)))) {
+            String allowed = data.resolve("a.csv").toUri().toString();
+            assertEquals(2, engine.rows("SELECT * FROM read_csv('" + allowed + "')").size());
+            assertEquals(1, engine.rows("SELECT * FROM read_parquet('" + data.resolve("parts").toUri() + "')")
+                    .size());
+            denied(() -> engine.rows("SELECT * FROM read_csv('" + secret.resolve("s.csv").toUri() + "')"),
+                    "is not under the allowed locations");
+            if (!System.getProperty("os.name").startsWith("Windows")) {
+                // Without "//", a path that climbs above the root stays at the root, for the check and the reader.
+                String climbing = "file:/.." + path(data.resolve("a.csv"));
+                assertEquals(2, engine.rows("SELECT * FROM read_csv('" + climbing + "')").size());
+                denied(() -> engine.rows("SELECT * FROM read_csv('file:/.." + path(secret.resolve("s.csv")) + "')"),
+                        "is not under the allowed locations");
+            }
+        }
+    }
+
+    @Test
+    void aLinkInAnAllowedDirectoryDoesNotLeadAReadElsewhere() throws IOException {
+        Path linked = Files.createDirectories(dir.resolve("linked"));
+        Files.copy(data.resolve("parts/p1.parquet"), linked.resolve("p1.parquet"));
+        Path outside = Files.copy(data.resolve("parts/p1.parquet"), secret.resolve("p2.parquet"));
+        try {
+            Files.createSymbolicLink(linked.resolve("p2.parquet"), outside);
+        } catch (IOException | UnsupportedOperationException e) {
+            assumeTrue(false, "symbolic links cannot be created here: " + e);
+        }
+        try (FyrQL engine = engine(FileAccess.READ, List.of(path(linked)))) {
+            String reading = "Reading " + linked.resolve("p2.parquet").toAbsolutePath() + " is not allowed";
+            denied(() -> engine.rows("SELECT * FROM read_parquet('" + path(linked) + "')"), reading);
+            denied(() -> engine.rows("SELECT * FROM read_parquet('" + path(linked) + "/*.parquet')"), reading);
+            assertEquals(1, engine.rows("SELECT * FROM read_parquet('" + path(linked) + "/p1.parquet')").size());
         }
     }
 

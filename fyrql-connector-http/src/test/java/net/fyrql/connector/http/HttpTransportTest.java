@@ -42,6 +42,8 @@ class HttpTransportTest {
     /** The headers and body of the last request, the header names in lower case. */
     private final Map<String, String> lastHeaders = new ConcurrentHashMap<>();
     private volatile String lastBody;
+    private volatile String lastMethod;
+    private volatile String lastPath;
 
     @BeforeEach
     void start() throws IOException {
@@ -50,7 +52,16 @@ class HttpTransportTest {
             lastHeaders.clear();
             exchange.getRequestHeaders().forEach((k, v) -> lastHeaders.put(k.toLowerCase(), String.join(",", v)));
             lastBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            lastMethod = exchange.getRequestMethod();
+            lastPath = exchange.getRequestURI().getPath();
             switch (exchange.getRequestURI().getPath()) {
+                case "/same" -> redirect(exchange, 302, "/ok");
+                case "/see" -> redirect(exchange, 303, "/ok");
+                case "/again" -> redirect(exchange, 307, "/token");
+                case "/loop" -> redirect(exchange, 302, "/loop");
+                // The same server under another name is another origin.
+                case "/away" -> redirect(exchange, 302, "http://" + (url("").getHost().equals("localhost")
+                        ? "127.0.0.1" : "localhost") + ":" + server.getAddress().getPort() + "/ok");
                 case "/ok" -> send(exchange, 200, "application/json; charset=utf-8", "{\"a\": 1}");
                 case "/missing" -> send(exchange, 404, "application/json", "{\"error\": {\"message\": \"gone\"}}");
                 case "/token" -> send(exchange, 200, "application/json", "{\"access_token\": \"t\"}");
@@ -74,6 +85,12 @@ class HttpTransportTest {
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
         }
+    }
+
+    private static void redirect(HttpExchange exchange, int status, String location) throws IOException {
+        exchange.getResponseHeaders().add("Location", location);
+        exchange.sendResponseHeaders(status, -1);
+        exchange.close();
     }
 
     private URI url(String path) {
@@ -156,10 +173,70 @@ class HttpTransportTest {
         HttpSourceException e = assertThrows(HttpSourceException.class, () -> transport.get(closed, Map.of()));
         assertEquals(-1, e.status());
         assertTrue(e.getMessage().startsWith("GET " + closed + " failed: "), e.getMessage());
+        URI withKey = URI.create(closed + "?apikey=secret#part");
+        e = assertThrows(HttpSourceException.class, () -> transport.get(withKey, Map.of()));
+        assertTrue(e.getMessage().startsWith("GET " + closed + " failed: "), e.getMessage());
+        assertFalse(e.getMessage().contains("secret"), e.getMessage());
+        assertEquals(withKey, e.uri());
+    }
+
+    @Test
+    void redirectsKeepTheHeadersOnlyOnTheOriginOfTheRequest() throws IOException {
+        try (HttpTransport t = HttpTransport.builder().header("Authorization", "Bearer secret")
+                .header("Accept-Language", "de").build()) {
+            t.get(url("/same"), Map.of("X-Key", "k")).close();
+            assertEquals("/ok", lastPath);
+            assertEquals("Bearer secret", lastHeaders.get("authorization"));
+            assertEquals("k", lastHeaders.get("x-key"));
+            t.get(url("/away"), Map.of("X-Key", "k")).close();
+            assertEquals("/ok", lastPath);
+            assertEquals(null, lastHeaders.get("authorization"));
+            assertEquals(null, lastHeaders.get("x-key"));
+            assertEquals("de", lastHeaders.get("accept-language"));
+            assertEquals("gzip", lastHeaders.get("accept-encoding"));
+            HttpSourceException e = assertThrows(HttpSourceException.class,
+                    () -> t.get(url("/loop?key=secret"), Map.of()));
+            assertEquals("GET " + url("/loop") + " was redirected more than 5 times", e.getMessage());
+            byte[] body = "body".getBytes(StandardCharsets.UTF_8);
+            try (HttpTransport.Response response = t.post(url("/again"), "text/plain", body, Map.of())) {
+                assertEquals(200, response.status());
+            }
+            assertEquals("POST /token body", lastMethod + " " + lastPath + " " + lastBody);
+            t.post(url("/see"), "text/plain", body, Map.of()).close();
+            assertEquals("GET /ok ", lastMethod + " " + lastPath + " " + lastBody);
+        }
+    }
+
+    @Test
+    void anErrorStatusNamesTheUrlWithoutItsQuery() {
+        HttpSourceException e = assertThrows(HttpSourceException.class,
+                () -> transport.get(url("/missing?apikey=secret"), Map.of()));
+        assertEquals("GET " + url("/missing") + " answered with the status 404: {\"error\": {\"message\": \"gone\"}}",
+                e.getMessage());
     }
 
     @Test
     void headersThatTheClientRefuses() {
         assertThrows(IllegalArgumentException.class, () -> HttpTransport.builder().header("Host", "x"));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> HttpTransport.builder().header("Authorization", "Bearer secret\r\nX-Other: y"));
+        assertEquals("The header Authorization has a value that a request cannot carry, such as one with a line break",
+                e.getMessage());
+        assertEquals(null, e.getCause());
+        e = assertThrows(IllegalArgumentException.class,
+                () -> transport.get(url("/ok"), Map.of("X-Key", "secret\nx")));
+        assertFalse(e.getMessage().contains("secret"), e.getMessage());
+        assertEquals(null, e.getCause());
+    }
+
+    @Test
+    void aUrlIsShownWithoutUserInformationQueryAndFragment() {
+        assertEquals("https://example.com:8443/a/b%20c",
+                HttpTransport.shown(URI.create("https://user:pw@example.com:8443/a/b%20c?key=secret#f")));
+        assertEquals("http://example.com", HttpTransport.shown(URI.create("http://example.com?key=secret")));
+        assertEquals("mailto:", HttpTransport.shown(URI.create("mailto:a@example.com")));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> HttpTransport.url("http://example.com/a b?key=secret", "The URL of the table t"));
+        assertEquals("The URL of the table t is not a URL: Illegal character in path at index 20", e.getMessage());
     }
 }

@@ -161,6 +161,12 @@ With `-Pexamples`, the build also builds and tests the [examples](examples/READM
 [Building and testing](docs/manual.md#building-and-testing) describes the tests against
 DuckDB, the random queries, the databases of the tests and the TPC-H runs.
 
+## Contributing and security
+
+Issues are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how a pull request comes
+about. A vulnerability goes not into a public issue but through private reporting, as
+[SECURITY.md](SECURITY.md) describes with what FyrQL counts as one.
+
 ## Authors
 
 **Claude Opus 5.5** and **Claude Fable 5.1**: Implementation, Benchmarking, Testing & Doc-writing

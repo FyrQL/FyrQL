@@ -14,14 +14,17 @@ package net.fyrql.connector.iceberg;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import net.fyrql.connector.FileAccess;
 import net.fyrql.connector.FileAccessException;
@@ -74,6 +77,34 @@ class IcebergFileAccessTest {
             assertEquals(IcebergRows.sorted(IcebergRows.of(tables.rows(name))),
                     IcebergRows.sorted(IcebergRows.read(connector, scan(connector, name))), name);
         }
+    }
+
+    @Test
+    void aVersionHintMustNameAFileOfItsDirectory(@TempDir Path dir) throws IOException {
+        Path metadata = Files.createDirectories(dir.resolve("t/metadata"));
+        Files.copy(tables.metadata("part"), dir.resolve("evil.metadata.json"));
+        for (String hint : List.of("../../evil.metadata.json", "..\\..\\evil", "..")) {
+            Files.writeString(metadata.resolve("version-hint.text"), hint);
+            IcebergConnector connector = connector(dir.toString());
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> connector.bind("iceberg_scan", List.of(dir.resolve("t").toString()), Map.of()), hint);
+            assertTrue(e.getMessage().endsWith("version-hint.text must name a version or a file of its directory,"
+                    + " not a path"), e.getMessage());
+        }
+    }
+
+    @Test
+    void aLinkToMetadataElsewhereIsNotFollowedForACall(@TempDir Path dir) throws IOException {
+        Path metadata = Files.createDirectories(dir.resolve("t/metadata"));
+        try {
+            Files.createSymbolicLink(metadata.resolve("v1.metadata.json"), tables.metadata("part"));
+        } catch (IOException | UnsupportedOperationException e) {
+            assumeTrue(false, "symbolic links cannot be created here: " + e);
+        }
+        IcebergConnector connector = connector(dir.toString());
+        FileAccessException e = assertThrows(FileAccessException.class,
+                () -> connector.bind("iceberg_scan", List.of(dir.resolve("t").toString()), Map.of()));
+        assertTrue(e.getMessage().contains("v1.metadata.json is not allowed"), e.getMessage());
     }
 
     @Test

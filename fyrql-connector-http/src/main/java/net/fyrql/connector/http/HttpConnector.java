@@ -30,7 +30,6 @@ import net.fyrql.core.vector.Batch;
 
 import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -63,8 +62,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * compressed with gzip, also a {@code .gz} file without
  * {@code Content-Encoding}, is uncompressed. A status other than 2xx, a
  * refused connection and a timeout are an {@link HttpSourceException} that
- * names the URL and the status; the values of the headers never appear in
- * messages.
+ * names the URL without user information and query, and the status; the
+ * values of the headers and the query never appear in messages.
  */
 public final class HttpConnector implements Connector {
 
@@ -139,7 +138,8 @@ public final class HttpConnector implements Connector {
         }
         return inferred.computeIfAbsent(ref.table(), n -> {
             try (HttpTransport.Response response = get(t.uri())) {
-                return JsonSchemaInference.infer(response.body(), options, t.pointer(), t.uri().toString());
+                return JsonSchemaInference.infer(response.body(), options, t.pointer(),
+                        HttpTransport.shown(t.uri()));
             }
         });
     }
@@ -176,7 +176,7 @@ public final class HttpConnector implements Connector {
         JsonLayout layout = layout(ref);
         HttpTransport.Response response = get(t.uri());
         JsonRecordReader records = JsonRecordReader.open(response.body(), layout, split.plan().columns(), options,
-                t.pointer(), batchSize, t.uri().toString());
+                t.pointer(), batchSize, HttpTransport.shown(t.uri()));
         return new BatchReader() {
             @Override
             public Batch next() {
@@ -231,7 +231,7 @@ public final class HttpConnector implements Connector {
             String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
             if (!scheme.equals("http") && !scheme.equals("https")) {
                 throw new IllegalArgumentException("The URL of the table " + table + " must be http or https: "
-                        + uri);
+                        + HttpTransport.shown(uri));
             }
             uris.put(Objects.requireNonNull(table, "table"), uri);
             return this;
@@ -243,7 +243,7 @@ public final class HttpConnector implements Connector {
          * @throws IllegalArgumentException if the URL is not one
          */
         public Builder table(String table, String uri) {
-            return table(table, URI.create(uri));
+            return table(table, HttpTransport.url(uri, "The URL of the table " + table));
         }
 
         /**
@@ -273,7 +273,7 @@ public final class HttpConnector implements Connector {
          *         request set the header, such as {@code Host}
          */
         public Builder header(String header, String value) {
-            HttpRequest.newBuilder().header(header, value);
+            HttpTransport.checkHeader(header, value);
             headers.put(header, value);
             return this;
         }
@@ -298,9 +298,11 @@ public final class HttpConnector implements Connector {
 
         /**
          * Sets the HTTP client, for a proxy, TLS or authentication of its
-         * own; the connector does not shut it down. By default the
-         * connector creates one that follows redirects except from https to
-         * http.
+         * own; the connector does not shut it down, and the client follows
+         * redirects by its own rule. By default the connector creates one
+         * and follows up to five redirects, except from https to http, with
+         * the headers only to the origin of the first request, see
+         * {@link HttpTransport.Builder#client}.
          */
         public Builder client(HttpClient client) {
             this.client = Objects.requireNonNull(client, "client");

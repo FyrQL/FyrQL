@@ -191,4 +191,13 @@ class EngineConfigTest {
         SourceConfig s = new SourceConfig("shop", "jdbc", Map.of("password", "s3cret"));
         assertEquals("SourceConfig[name=shop, type=jdbc, options=[password]]", s.toString());
     }
+
+    @Test
+    void theTextOfAConfigurationHoldsNoValueOfTheServer() {
+        EngineConfig config = new EngineConfig(List.of(new SourceConfig("shop", "jdbc", Map.of("password", "s3cret"))),
+                Map.of("batchSize", "64"), Map.of("users.alice", "s3cret", "token", "s3cret"), DIR);
+        String text = config.toString();
+        assertFalse(text.contains("s3cret"), text);
+        assertTrue(text.contains("users.alice") && text.contains("token") && text.contains("batchSize=64"), text);
+    }
 }

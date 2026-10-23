@@ -17,6 +17,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -95,6 +96,20 @@ class S3ClientTest {
         assertThrows(NoSuchFileException.class, () -> client.get(a, null));
         client.deleteBucket("lake");
         assertEquals(List.of(), server.keys("lake"));
+    }
+
+    @Test
+    void anAnswerWithMoreThan16MiBOfXmlIsNoAnswerOfS3() throws IOException {
+        InputStream endless = new InputStream() {
+            @Override
+            public int read() {
+                return ' ';
+            }
+        };
+        IOException e = assertThrows(IOException.class, () -> S3Client.xml(endless, "GET", "s3://lake/x/"));
+        assertEquals("S3 answered GET s3://lake/x/ with more than 16 MiB of XML", e.getMessage());
+        byte[] small = "<a/>".getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(small, S3Client.xml(new ByteArrayInputStream(small), "GET", "s3://lake/x/"));
     }
 
     @Test

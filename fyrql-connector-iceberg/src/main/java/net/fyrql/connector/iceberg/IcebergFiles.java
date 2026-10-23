@@ -11,9 +11,12 @@
 
 package net.fyrql.connector.iceberg;
 
+import net.fyrql.connector.FileAccessException;
+import net.fyrql.connector.FileAccessPolicy;
 import net.fyrql.connector.FileObject;
 import net.fyrql.connector.FileStores;
 import net.fyrql.connector.Globs;
+import net.fyrql.connector.LocalFileStore;
 import net.fyrql.connector.parquet.ParquetFile;
 import net.fyrql.core.type.Schema;
 
@@ -118,14 +121,17 @@ final class IcebergFiles {
 
     /**
      * Returns a location as an absolute one, a relative local one resolved
-     * against a directory, a location with a scheme as it is.
+     * against a directory, a location with a scheme as it is. A local
+     * location is resolved as {@link LocalFileStore#resolve} resolves it,
+     * also a URI of the scheme {@code file}, so that the table read is the
+     * one the policy of the engine checked.
      */
     static String absolute(String location, Path directory) {
         if (FileStores.scheme(location).isPresent()) {
             return location;
         }
         try {
-            return directory.resolve(location).toAbsolutePath().normalize().toString();
+            return LocalFileStore.resolve(location, directory).toAbsolutePath().normalize().toString();
         } catch (InvalidPathException e) {
             throw new IllegalArgumentException("Invalid path " + location, e);
         }
@@ -138,8 +144,22 @@ final class IcebergFiles {
      *         its metadata cannot be read or it has no such snapshot
      */
     Resolved resolve(TableSpec spec) {
+        return resolve(spec, FileAccessPolicy.ALL);
+    }
+
+    /**
+     * Finds a table and its snapshot, and checks that a policy allows to
+     * read its metadata file before it is read, such as one that a link
+     * in the directory of the table leads to.
+     *
+     * @throws IllegalArgumentException if there is no table at the location,
+     *         its metadata cannot be read or it has no such snapshot
+     * @throws FileAccessException if the policy does not allow to read the metadata file
+     */
+    Resolved resolve(TableSpec spec, FileAccessPolicy policy) {
         Globs.checkPattern(spec.location());
         TableLocation location = TableLocation.resolve(stores, spec.location());
+        policy.checkRead(location.metadataFile().location());
         TableMetadata m = metadata(location.metadataFile());
         TableMetadata.Snapshot snapshot;
         if (spec.snapshotId() != null) {

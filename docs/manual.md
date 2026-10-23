@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.13.2 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.13.5 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -156,7 +156,7 @@ take their default from a system property.
 | `defaultSchema(String)` | `defaultSchema` | `main` | The schema of the default source in which one-part names are looked up first, as every session starts |
 | `functions(FunctionRegistry)` | - | `FunctionRegistry.standard()` | The scalar functions of queries; an application adds its own to a registry of the built-in ones |
 | `batchSize(int)` | `batchSize` | 2048 | The rows of a batch |
-| `memoryBudget(long)` | `memoryBudget` | no limit | The bytes that the queries of the engine hold together; see [Memory budget and spilling](#memory-budget-and-spilling) |
+| `memoryBudget(long)` | `memoryBudget`, `0` for none | no limit; half the heap in the Flight SQL server | The bytes that the queries of the engine hold together; see [Memory budget and spilling](#memory-budget-and-spilling) |
 | `spill(boolean)` | `spill` | `true` | Whether aggregations, sorts and windows spill to disk above the budget, instead of failing |
 | `spillDirectory(Path)` | `spillDirectory` | the temporary directory of the JVM | The directory under which the engine creates its directory for spilling |
 | `codegen(CodegenMode)` | `codegen`: `off`, `auto` or `always` | the system property `fyrql.codegen`, or `AUTO` | When expressions, keys and pipelines are compiled; see [Code generation](#code-generation) |
@@ -168,8 +168,8 @@ take their default from a system property.
 | `timeZone(ZoneId)` | `timeZone` | the time zone of the JVM | The time zone with which every [session](#sessions) starts; see [Time zone](#time-zone) |
 | `fileAccess(FileAccess)` | `fileAccess`: `none`, `read` or `readWrite` | `READ_WRITE`; `none` in the Flight SQL server | What statements may do with the files and objects they name; see [File access](#file-access) |
 | `allowedLocations(List<String>)` | `allowedLocations` | anywhere | The directories and prefixes, such as `s3://lake/`, under which they may do it |
-| `queryTimeout(Duration)` | `queryTimeout`, such as `30s` | no limit | How long a query may run that asks for no timeout of its own, as every [session](#sessions) starts; see [Time limits](#time-limits) |
-| `maxQueryTimeout(Duration)` | `maxQueryTimeout` | no limit | How long any query may run, also one that asks for a longer timeout |
+| `queryTimeout(Duration)` | `queryTimeout`, such as `30s`, `0` for none | no limit | How long a query may run that asks for no timeout of its own, as every [session](#sessions) starts; see [Time limits](#time-limits) |
+| `maxQueryTimeout(Duration)` | `maxQueryTimeout`, `0` for none | no limit; an hour in the Flight SQL server | How long any query may run, also one that asks for a longer timeout |
 | `classLoader(ClassLoader)` | - | the loader of the engine | The class loader in which the engine looks for the factories of the implicit sources |
 
 ### Sessions
@@ -316,7 +316,11 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   connector sends its headers, such as `Authorization`, accepts gzip and infers the
   columns with a first request, which it keeps until `refresh()`. Every scan is a request
   of its own; nothing but the choice of columns and fields is pushed to the endpoint. A status other
-  than 2xx is an `HttpSourceException` with the URL and the status.
+  than 2xx is an `HttpSourceException` with the URL, without its query, and the status.
+  This connector and the one for OData follow up to five redirects, but not from https to
+  http, and send their headers, such as `Authorization`, only to the scheme, host and port
+  of the first request; with a client of its own, `client(HttpClient)`, the client
+  follows redirects by its own rule.
 - `fyrql-connector-odata`: the entity sets of OData services of versions 2 and 4, in
   JSON and read only. Each service is a schema and each entity set of it a table, with
   the columns of its `$metadata`, which the connector reads when the service is first
@@ -776,6 +780,17 @@ is opened; whoever may change an allowed directory, for example put a link in pl
 directory, can still lead a statement elsewhere, so that the allowed directories belong to
 the operator alone.
 
+The same holds for the files the engine finds itself: a link among the files of a
+directory or pattern of `read_parquet`, or the metadata file of a table of
+`iceberg_scan`, that points outside the allowed locations fails the statement with the
+file it names, and the file `metadata/version-hint.text` of a table must name a version
+or a file of its directory, not a path. A location such as `file:/srv/data/x.csv` or
+`file:///C:/data/x.csv` is a URI and read as the file it names, for the check and the
+read alike. On Windows, a path on another drive or share than all allowed directories,
+such as `\\host\share\x.csv`, is denied before the file system is asked about it, so
+that the process does not sign in to that host. [SECURITY.md](../SECURITY.md) says what
+FyrQL counts as a vulnerability and how to report one.
+
 A statement that may not read or write a location fails with a message such as
 `Reading data2/orders.csv is not allowed: it is not under the allowed locations
 /srv/data, s3://lake/ at line 1, column 15`, with the SQLState `42501` in the JDBC driver
@@ -951,7 +966,10 @@ the connection with `08001`, as does a file with an error. A relative path of th
 resolved against the working directory, and the paths in the file against its directory;
 so is a relative entry of `allowedLocations` in the URL, or against the working directory
 without a file. `jdbc:fyrql:?fileAccess=read&allowedLocations=data` lets statements read
-only the files under `data` (see [File access](#file-access)).
+only the files under `data` (see [File access](#file-access)). The settings of the URL and
+the properties win over those of the file, `fileAccess` and the time limits too, so that
+whoever chooses the URL chooses what the engine allows: a URL from others needs the
+trust a configuration file needs.
 Without `config`, the engine has the sources `csv`, `json`, `parquet` and `iceberg`
 without tables, so that file names and table functions can be queried, as in `SELECT *
 FROM 'data/orders.csv'`, `SELECT * FROM read_parquet('lake/events.parquet')` or `SELECT *
@@ -1181,7 +1199,10 @@ server:
   goes on with the bearer token the server gives it.
 - `token`: a bearer token that every client may send in the header `Authorization`.
   Without `users` and `token`, the server takes every client, and must then listen on a
-  loopback address: another host without them is an error at the start.
+  loopback address: another host without them is an error at the start. Users or a token
+  on another address without TLS send passwords and tokens over the network in plain
+  text; the server then warns on the standard error stream at the start, and runs, as
+  TLS may come from a proxy in front of it.
 - `tls.certificate` and `tls.key`: the certificate chain and its private key as PEM, the
   key in PKCS #8. TLS comes from the JDK, without native code; client certificates are
   not supported.
@@ -1200,7 +1221,13 @@ sources stay readable. `fileAccess: read` with `allowedLocations` opens director
 buckets to them; see [File access](#file-access). `queryTimeout` and `maxQueryTimeout`
 under `engine` limit how long the queries of clients run, see [Time limits](#time-limits);
 a client of Flight SQL asks for no timeout of its own, and a deadline of its call that
-passes ends the query as a cancel does.
+passes ends the query as a cancel does. Unless the section `engine` sets them, the server
+sets `maxQueryTimeout` to an hour and `memoryBudget` to half the heap of the JVM, above
+which aggregations, sorts and windows spill, so that no query holds the server without
+end or takes all of its memory; `0` lifts either limit. Every client that signs in may
+run every statement, also one that writes into the tables of a source of the type `jdbc`
+or creates tables in memory, as far as the source and its database user allow; a server
+for clients that only read has sources whose database users only read.
 
 ```yaml
 engine:
@@ -1212,7 +1239,8 @@ engine:
 
 The server prints the line `FyrQL Flight SQL server <version> listening on
 grpc+tcp://127.0.0.1:32010`, or with `grpc+tls`, and a line such as `File access from SQL:
-read under /srv/data, s3://lake/; query timeout: 30s, at most 5m; session timeout: 1h`,
+read under /srv/data, s3://lake/; query timeout: 30s, at most 5m; session timeout: 1h;
+memory budget: 2048MiB`,
 and runs until the JVM
 ends, as with Ctrl+C, and then closes the engine. It logs the warnings and errors of Arrow and gRPC to
 the standard error stream. The JAR has the same libraries renamed as the one of the
@@ -1355,12 +1383,12 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.2</version>
+    <version>0.13.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.13.2</version>
+    <version>0.13.5</version>
 </dependency>
 ```
 
@@ -1467,7 +1495,11 @@ one fails; its details give the status of each source and the error of one that 
 shown as Spring shows details (`management.endpoint.health.show-details`). Sources that
 a customizer registers, and those of the file formats, are not checked; without sources
 of the configuration, the indicator runs `SELECT 1`. `management.health.fyrql.enabled:
-false` turns it off.
+false` turns it off. The messages of the indicator hold no passwords, keys or tokens of
+the sources. The endpoints `env` and `configprops` of Actuator show the values of
+`fyrql.sources`, the passwords among them, only with `show-values` set to `always`, or to
+`when-authorized` for the users it authorizes; by default, `never`, Spring Boot masks
+them.
 
 ## Supported SQL
 
@@ -2164,7 +2196,8 @@ memory budget.
 
 A query, or a statement that writes, may run for a limited time: `queryTimeout` is the
 timeout of a query that asks for none of its own, and `maxQueryTimeout` the upper bound of
-every timeout, also of one that a query asks for. Both have no limit by default, and a
+every timeout, also of one that a query asks for. Both have no limit by default, but
+`maxQueryTimeout` is an hour in the [Flight SQL server](#flight-sql-server), and a
 `queryTimeout` above the `maxQueryTimeout` is an error when the engine is built.
 
 ```java
@@ -2184,7 +2217,8 @@ with the SQLState `HYT00` in the JDBC driver and the status `TIMED_OUT` in the
 [Flight SQL server](#flight-sql-server). One daemon thread of the engine, started with
 the first timeout, cancels the queries, and ends when the engine closes; a query with the
 context `QueryContext.NONE` has no timeout. In a configuration file and the URL of the
-JDBC driver, a timeout is a duration such as `500ms`, `30s`, `5m` or `PT30S`.
+JDBC driver, a timeout is a duration such as `500ms`, `30s`, `5m` or `PT30S`, and `0` is
+none.
 
 A [session](#sessions) has a timeout of its own, `statement_timeout`, which starts as the
 `queryTimeout` and takes its place for the statements of the session:
@@ -2195,7 +2229,9 @@ that a query asks for wins over it, and the `maxQueryTimeout` bounds it as every
 
 The builder setting `memoryBudget` limits the memory that the queries of an engine take
 together for what they hold: the hash tables of joins, the groups of aggregations, the rows
-of sorts, windows and set operations. Without it, the budget has no limit. When an
+of sorts, windows and set operations. Without it, the budget has no limit, but in the
+[Flight SQL server](#flight-sql-server) it is half the heap; in a configuration file and
+the URL of the JDBC driver, `0` is no limit. When an
 aggregation, a sort or a window does not fit, it spills to disk, unless the setting `spill`
 is `false`; then the query fails with `Memory budget of ... bytes exceeded`, as do the
 others when they do not fit, with the SQL state `53200` in the JDBC driver and

@@ -56,6 +56,8 @@ final class S3Client implements AutoCloseable {
 
     private static final long BACKOFF_MILLIS = 200;
     private static final int MAX_ERROR_BODY = 1 << 16;
+    /** The most bytes of XML an answer may have, such as a list of 1000 objects with long keys. */
+    static final int MAX_XML = 16 << 20;
 
     private final URI endpoint;
     private final String region;
@@ -198,7 +200,7 @@ final class S3Client implements AutoCloseable {
                 if (r.statusCode() != 200) {
                     throw error(r, "GET", S3Location.PREFIX + bucket + "/" + prefix);
                 }
-                result = Xml.parse(body.readAllBytes());
+                result = Xml.parse(xml(body, "GET", S3Location.PREFIX + bucket + "/" + prefix));
             }
             for (Xml.Element c : result.all("Contents")) {
                 String size = c.text("Size");
@@ -230,7 +232,7 @@ final class S3Client implements AutoCloseable {
             if (r.statusCode() != 200) {
                 throw error(r, "POST", location.toString());
             }
-            String id = Xml.parse(body.readAllBytes()).text("UploadId");
+            String id = Xml.parse(xml(body, "POST", location.toString())).text("UploadId");
             if (id == null || id.isEmpty()) {
                 throw new IOException("S3 started an upload of " + location + " without an id");
             }
@@ -267,7 +269,7 @@ final class S3Client implements AutoCloseable {
             if (r.statusCode() != 200) {
                 throw error(r, "POST", location.toString());
             }
-            answer = body.readAllBytes();
+            answer = xml(body, "POST", location.toString());
         }
         // S3 may report an error of the completion with the status 200.
         if (answer.length > 0) {
@@ -359,11 +361,11 @@ final class S3Client implements AutoCloseable {
                             : HttpRequest.BodyPublishers.ofByteArray(body, 0, length));
             signed.forEach((name, value) -> {
                 if (!name.equals("host")) {
-                    request.header(name, value);
+                    header(request, name, value);
                 }
             });
             if (credentials != null) {
-                request.header("authorization", SigV4.authorization(method, path, canonicalQuery, signed,
+                header(request, "authorization", SigV4.authorization(method, path, canonicalQuery, signed,
                         payloadHash, now, region, credentials.accessKey(), credentials.secretKey()));
             }
             HttpResponse<InputStream> response;
@@ -394,6 +396,35 @@ final class S3Client implements AutoCloseable {
             }
             return response;
         }
+    }
+
+    /**
+     * Sets a header of a request; the message of a value the HTTP client
+     * does not take names the header, never the value, which may hold the
+     * session token or the access key.
+     */
+    private static void header(HttpRequest.Builder request, String name, String value) {
+        try {
+            request.header(name, value);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("The header " + name
+                    + " of a request to S3 has a value that a request cannot carry, such as one with a line break");
+        }
+    }
+
+    /**
+     * Reads the XML of an answer, at most {@link #MAX_XML} bytes: an answer
+     * of S3 is small, a larger one is no answer of S3.
+     *
+     * @throws IOException if the answer is larger or cannot be read
+     */
+    static byte[] xml(InputStream body, String method, String what) throws IOException {
+        byte[] bytes = body.readNBytes(MAX_XML + 1);
+        if (bytes.length > MAX_XML) {
+            throw new IOException("S3 answered " + method + " " + what + " with more than " + (MAX_XML >> 20)
+                    + " MiB of XML");
+        }
+        return bytes;
     }
 
     private static void pause(int attempt) throws InterruptedIOException {

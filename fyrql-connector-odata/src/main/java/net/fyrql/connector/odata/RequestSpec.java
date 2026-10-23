@@ -11,9 +11,10 @@
 
 package net.fyrql.connector.odata;
 
+import net.fyrql.connector.http.HttpTransport;
+
 import java.net.URI;
 import java.net.URLDecoder;
-import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -125,7 +126,7 @@ public final class RequestSpec {
      *         request set the header, such as {@code Host}
      */
     public RequestSpec header(String name, String value) {
-        HttpRequest.newBuilder().header(name, value);
+        HttpTransport.checkHeader(name, value);
         headers.keySet().removeIf(name::equalsIgnoreCase);
         headers.put(name, value);
         return this;

@@ -263,6 +263,12 @@ class FyrQLConfigTest {
         Path zero = config("queryTimeout: 0s\n");
         assertTrue(assertThrows(ConfigException.class, () -> FyrQLConfig.open(zero)).getMessage().startsWith(
                 zero + ": The option queryTimeout of the engine must be a duration"));
+        // 0 is no limit, also for the memory budget.
+        try (FyrQL engine = FyrQLConfig.open(config("queryTimeout: 0\nmaxQueryTimeout: 0\nmemoryBudget: 0\n"))) {
+            assertEquals(Optional.empty(), engine.queryTimeout());
+            assertEquals(Optional.empty(), engine.maxQueryTimeout());
+            assertEquals(2L, engine.rows("SELECT count(*) FROM (VALUES (1), (2)) t (n)").get(0)[0]);
+        }
     }
 
     @Test

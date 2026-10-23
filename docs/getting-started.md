@@ -40,22 +40,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.13.2</version>
+    <version>0.13.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.13.2</version>
+    <version>0.13.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.13.2</version>
+    <version>0.13.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.13.2</version>
+    <version>0.13.5</version>
 </dependency>
 ```
 
@@ -491,9 +491,11 @@ The server listens on `127.0.0.1:32010` and takes every client there; a section 
 in the file sets another address, users and passwords or a token, and TLS. Statements of
 clients read no files of the machine of the server, as with `FROM 'data/orders.csv'`,
 unless the section `engine` allows it with `fileAccess: read` and `allowedLocations`; the
-tables of the sources stay readable (see [File access](manual.md#file-access)). With Python
-3.10 or later, `pip install adbc-driver-flightsql pyarrow pandas` installs a client,
-which runs the query of the JDBC driver:
+tables of the sources stay readable (see [File access](manual.md#file-access)). No query
+runs longer than an hour, and the queries hold at most half the heap, above which they
+spill, unless the section `engine` sets `maxQueryTimeout` and `memoryBudget`, with `0`
+for no limit. With Python 3.10 or later, `pip install adbc-driver-flightsql pyarrow
+pandas` installs a client, which runs the query of the JDBC driver:
 
 ```python
 import adbc_driver_flightsql.dbapi as flight_sql
@@ -528,7 +530,7 @@ the application depends on
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.2</version>
+    <version>0.13.5</version>
 </dependency>
 ```
 

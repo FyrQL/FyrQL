@@ -29,7 +29,6 @@ import net.fyrql.core.type.Schema;
 
 import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.time.Duration;
 import java.time.InstantSource;
 import java.util.ArrayList;
@@ -506,7 +505,8 @@ public final class ODataConnector implements Connector {
          * @throws IllegalArgumentException if the URL is not one
          */
         public Builder service(String schema, String root) {
-            return service(schema, URI.create(root));
+            return service(schema, HttpTransport.url(root, "The URL of the service " + schema + " of the OData source "
+                    + name));
         }
 
         /** Adds the one service of a source as the schema {@code main}. */
@@ -516,7 +516,7 @@ public final class ODataConnector implements Connector {
 
         /** Adds the one service of a source as the schema {@code main}. */
         public Builder url(String root) {
-            return url(URI.create(root));
+            return url(HttpTransport.url(root, "The URL of the OData source " + name));
         }
 
         /** Authenticates with HTTP Basic. */
@@ -530,7 +530,8 @@ public final class ODataConnector implements Connector {
         /** Authenticates with a fixed bearer token. */
         public Builder bearer(String token) {
             authentication("bearer");
-            this.token = Objects.requireNonNull(token, "token");
+            HttpTransport.checkHeader("Authorization", "Bearer " + Objects.requireNonNull(token, "token"));
+            this.token = token;
             return this;
         }
 
@@ -602,7 +603,7 @@ public final class ODataConnector implements Connector {
          *         request set the header, such as {@code Host}
          */
         public Builder header(String header, String value) {
-            HttpRequest.newBuilder().header(header, value);
+            HttpTransport.checkHeader(header, value);
             headers.put(header, value);
             return this;
         }
@@ -627,9 +628,11 @@ public final class ODataConnector implements Connector {
 
         /**
          * Sets the HTTP client, for a proxy, TLS or authentication of its
-         * own; the connector does not shut it down. By default the
-         * connector creates one that follows redirects except from https to
-         * http.
+         * own; the connector does not shut it down, and the client follows
+         * redirects by its own rule. By default the connector creates one
+         * and follows up to five redirects, except from https to http, with
+         * the headers only to the origin of the first request, see
+         * {@link HttpTransport.Builder#client}.
          */
         public Builder client(HttpClient client) {
             this.client = Objects.requireNonNull(client, "client");

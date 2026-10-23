@@ -441,6 +441,36 @@ class JdbcConnectorTest {
     }
 
     @Test
+    void theMessagesOfAUrlNoDriverAcceptsHoldNoCredentials() {
+        String url = "jdbc:nothing://user:secret1@host:1/db?password=secret2;other=secret3";
+        SQLException e = assertThrows(SQLException.class, () -> Connections.url(url, new Properties()).open());
+        assertEquals("08001", e.getSQLState());
+        assertEquals("No suitable driver found for jdbc:nothing://host:1/db", e.getMessage());
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            assertFalse(String.valueOf(t.getMessage()).contains("secret"), t.getMessage());
+        }
+        RuntimeException failed = assertThrows(RuntimeException.class,
+                () -> JdbcConnector.builder("db").url(url).build().catalog().schemas());
+        for (Throwable t = failed; t != null; t = t.getCause()) {
+            assertFalse(String.valueOf(t.getMessage()).contains("secret"), t.getMessage());
+        }
+    }
+
+    @Test
+    void theDescriptionOfAUrlHasNoCredentials() {
+        Map<String, String> described = Map.of(
+                "jdbc:mysql://user:pw@host:3306/db?password=pw", "jdbc:mysql://host:3306/db",
+                "jdbc:postgresql://host/db?user=u&password=pw", "jdbc:postgresql://host/db",
+                "jdbc:sqlserver://host:1433;user=u;password=pw", "jdbc:sqlserver://host:1433",
+                "jdbc:oracle:thin:scott/tiger@host:1521:orcl", "jdbc:oracle:thin:@host:1521:orcl",
+                "jdbc:oracle:thin:scott/tiger@//host:1521/service", "jdbc:oracle:thin:@//host:1521/service",
+                "jdbc:oracle:thin:@host:1521:orcl", "jdbc:oracle:thin:@host:1521:orcl",
+                "jdbc:h2:mem:test", "jdbc:h2:mem:test",
+                "jdbc:any://host/path@part", "jdbc:any://host/path@part");
+        described.forEach((url, shown) -> assertEquals(shown, Connections.url(url, new Properties()).describe(), url));
+    }
+
+    @Test
     void aSourceCannotBeFyrQLItself() {
         for (String url : List.of("jdbc:fyrql:", "JDBC:FyrQL:?config=engine.yaml", " jdbc:fyrql:?codegen=off")) {
             IllegalArgumentException e = assertThrows(IllegalArgumentException.class,

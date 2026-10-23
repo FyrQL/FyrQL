@@ -44,7 +44,7 @@ import java.util.function.Consumer;
  * <p>
  * The settings of the engine, under {@code engine}, are:
  * {@code defaultSource}, {@code defaultSchema}, {@code batchSize},
- * {@code memoryBudget} (bytes, such as {@code 512MB} or {@code 2GiB}),
+ * {@code memoryBudget} (bytes, such as {@code 512MB} or {@code 2GiB}, or {@code 0} for none),
  * {@code spill} ({@code true} or {@code false}), {@code spillDirectory} (a
  * path, relative to the file), {@code codegen} ({@code off}, {@code auto} or {@code always}),
  * {@code codegenThreshold}, {@code pushdown} ({@code true} or
@@ -54,7 +54,7 @@ import java.util.function.Consumer;
  * {@code readWrite}), {@code allowedLocations} (a list of directories,
  * relative to the file, and prefixes such as {@code s3://lake/}, or one
  * text with commas between them), {@code queryTimeout} and
- * {@code maxQueryTimeout} (durations such as {@code 30s} or {@code 5m}), as
+ * {@code maxQueryTimeout} (durations such as {@code 30s} or {@code 5m}, or {@code 0} for none), as
  * the methods of {@link FyrQL.Builder} of the same names take them.
  */
 public final class FyrQLConfig {
@@ -206,7 +206,8 @@ public final class FyrQLConfig {
         Optional<String> defaultSource = o.string("defaultSource");
         o.string("defaultSchema").ifPresent(b::defaultSchema);
         o.integer("batchSize").ifPresent(b::batchSize);
-        o.bytes("memoryBudget").ifPresent(b::memoryBudget);
+        // A budget of 0 is none, as for the time limits; the engine has no use for a budget of no bytes.
+        o.bytes("memoryBudget").map(bytes -> bytes == 0 ? Long.MAX_VALUE : bytes).ifPresent(b::memoryBudget);
         o.bool("spill").ifPresent(b::spill);
         o.path("spillDirectory").ifPresent(b::spillDirectory);
         o.get("codegen", "off, auto or always", v -> CodegenMode.valueOf(v.strip().toUpperCase(Locale.ROOT)))
@@ -220,8 +221,8 @@ public final class FyrQLConfig {
         o.get("fileAccess", "none, read or readWrite", FileAccess::parse).ifPresent(b::fileAccess);
         o.get("allowedLocations", "a list of directories and prefixes", v -> locations(v, o))
                 .ifPresent(b::allowedLocations);
-        o.duration("queryTimeout").ifPresent(b::queryTimeout);
-        o.duration("maxQueryTimeout").ifPresent(b::maxQueryTimeout);
+        o.timeLimit("queryTimeout").ifPresent(b::queryTimeout);
+        o.timeLimit("maxQueryTimeout").ifPresent(b::maxQueryTimeout);
         o.rejectUnknown();
         if (defaultSource.isPresent()) {
             String name = defaultSource.get();

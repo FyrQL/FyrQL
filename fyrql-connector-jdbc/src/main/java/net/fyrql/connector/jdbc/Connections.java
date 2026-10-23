@@ -76,6 +76,14 @@ abstract sealed class Connections {
          */
         @Override
         Connection open() throws SQLException {
+            try {
+                return connect();
+            } catch (SQLException e) {
+                throw withoutUrl(e);
+            }
+        }
+
+        private Connection connect() throws SQLException {
             Driver driver = unregistered;
             if (driver == null && !registered()) {
                 driver = unregisteredDriver();
@@ -90,6 +98,28 @@ abstract sealed class Connections {
                         + describe(), "08001");
             }
             return c;
+        }
+
+        /**
+         * Returns the exception, or a copy with the URL replaced by its
+         * description if the message of the exception or of one of its causes
+         * holds the URL, as that of the DriverManager does when no driver
+         * accepts it. The copy keeps the state, the code and the stack trace,
+         * but not the causes, whose messages may hold the credentials.
+         */
+        private SQLException withoutUrl(SQLException e) {
+            boolean shown = false;
+            Throwable t = e;
+            for (int depth = 0; t != null && depth < 32 && !shown; depth++, t = t.getCause()) {
+                shown = t.getMessage() != null && t.getMessage().contains(url);
+            }
+            if (!shown) {
+                return e;
+            }
+            String message = e.getMessage() == null ? null : e.getMessage().replace(url, describe());
+            SQLException copy = new SQLException(message, e.getSQLState(), e.getErrorCode());
+            copy.setStackTrace(e.getStackTrace());
+            return copy;
         }
 
         /** Tells whether a driver of the DriverManager accepts the URL. */
@@ -139,15 +169,35 @@ abstract sealed class Connections {
             return true;
         }
 
-        /** The URL without its parameters, which may hold credentials. */
+        /**
+         * The URL without its parameters and without a user and password
+         * before an {@code @}, as in {@code jdbc:mysql://user:password@host}
+         * or {@code jdbc:oracle:thin:user/password@host}.
+         */
         @Override
         String describe() {
+            return describe(url);
+        }
+
+        static String describe(String url) {
             int end = url.length();
             for (char c : new char[] {'?', ';'}) {
                 int i = url.indexOf(c);
                 end = i >= 0 ? Math.min(end, i) : end;
             }
-            return url.substring(0, end);
+            String shown = url.substring(0, end);
+            int at = shown.indexOf('@');
+            if (at < 0) {
+                return shown;
+            }
+            int slashes = shown.indexOf("//");
+            if (slashes >= 0 && slashes < at) {
+                int authority = slashes + 2;
+                int path = shown.indexOf('/', authority);
+                return path >= 0 && path < at ? shown : shown.substring(0, authority) + shown.substring(at + 1);
+            }
+            int colon = shown.lastIndexOf(':', at);
+            return colon < 0 ? shown : shown.substring(0, colon + 1) + shown.substring(at);
         }
     }
 

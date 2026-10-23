@@ -15,6 +15,8 @@ import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.FileAccessException;
+import net.fyrql.connector.FileAccessPolicy;
 import net.fyrql.connector.FileObject;
 import net.fyrql.connector.FileReaderProvider;
 import net.fyrql.connector.FileStores;
@@ -329,7 +331,12 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * a directory or a pattern with {@code *} and {@code ?} in the name of
      * the file, local or in a store of the engine such as
      * {@code s3://bucket/key}. The same call on unchanged files gives the same table; a
-     * changed, added or removed file gives a new one.
+     * changed, added or removed file gives a new one. Each file of a
+     * directory or pattern must be one the policy of the engine allows to
+     * read, see {@link FileStores#policy()}, so that a link in an allowed
+     * directory does not lead elsewhere.
+     *
+     * @throws FileAccessException if the policy does not allow to read a file of the path
      */
     @Override
     public TableRef bind(String function, List<Object> arguments, Map<String, Object> namedArguments) {
@@ -348,8 +355,10 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         }
         String location = ParquetFiles.absolute(path, Path.of(""));
         List<FileObject> found = files.resolve(location);
+        FileAccessPolicy policy = files.stores().policy();
         List<ParquetFiles.Version> versions = new ArrayList<>();
         for (FileObject file : found) {
+            policy.checkRead(file.location());
             versions.add(ParquetFiles.Version.of(file));
         }
         String table = calls.computeIfAbsent(versions, v -> {

@@ -294,7 +294,7 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
         }
         IcebergFiles.TableSpec spec = new IcebergFiles.TableSpec(IcebergFiles.absolute(location, Path.of("")),
                 snapshotId, asOf, ref);
-        IcebergFiles.Resolved resolved = files.resolve(spec);
+        IcebergFiles.Resolved resolved = files.resolve(spec, files.stores().policy());
         List<Object> key = List.of(snapshots, resolved.location().metadataFile().location(),
                 resolved.location().metadataFile().version(), resolved.location().metadataFile().size(),
                 resolved.snapshot() == null ? -1L : resolved.snapshot().id());

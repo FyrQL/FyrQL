@@ -13,8 +13,8 @@ package net.fyrql.connector.odata;
 
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.ConnectorFactory;
+import net.fyrql.connector.http.HttpTransport;
 
-import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -93,7 +93,8 @@ public final class ODataConnectorFactory implements ConnectorFactory {
         }
         url.ifPresent(b::url);
         services(name, services).forEach((schema, attributes) -> {
-            b.service(schema, URI.create(attributes.get("url")), version(name, schema, attributes.get("version")));
+            b.service(schema, HttpTransport.url(attributes.get("url"), "The URL of the service " + schema
+                    + " of the OData source " + name), version(name, schema, attributes.get("version")));
             String trust = attributes.get("trustFilters");
             if (trust != null) {
                 b.trustFilters(schema, bool(name, "services." + schema + ".trustFilters", trust));
@@ -128,8 +129,8 @@ public final class ODataConnectorFactory implements ConnectorFactory {
                 throw new IllegalArgumentException("The OData source " + name + " needs oauth.tokenUrl,"
                         + " oauth.clientId and oauth.clientSecret for OAuth 2.0");
             }
-            b.oauth2(URI.create(tokenUrl.get()), clientId.get(), clientSecret.get(), scope.orElse(null),
-                    post.orElse(false));
+            b.oauth2(HttpTransport.url(tokenUrl.get(), "The token URL of the OData source " + name), clientId.get(),
+                    clientSecret.get(), scope.orElse(null), post.orElse(false));
         }
         b.headers(headers);
         return b.build();
