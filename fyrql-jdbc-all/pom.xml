@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.0</version>
+		<version>0.13.1</version>
 	</parent>
 
 	<artifactId>fyrql-jdbc-all</artifactId>
@@ -169,6 +169,15 @@
 									<artifact>com.github.jsqlparser:jsqlparser</artifact>
 									<excludes>
 										<exclude>rr/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The list and the texts of this JAR name what the configuration carries as well. -->
+									<artifact>io.github.stefan-zobel:fyrql-config</artifact>
+									<excludes>
+										<exclude>META-INF/licenses/**</exclude>
+										<exclude>META-INF/FastDoubleParser-*</exclude>
+										<exclude>META-INF/Schubfach-*</exclude>
 									</excludes>
 								</filter>
 								<filter>

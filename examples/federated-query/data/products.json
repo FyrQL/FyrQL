@@ -1,0 +1,6 @@
+[
+  {"sku": "p1", "name": "Desk lamp", "price": 24.5},
+  {"sku": "p2", "name": "Office chair", "price": 149.0},
+  {"sku": "p3", "name": "Notebook", "price": 3.25},
+  {"sku": "p4", "name": "Monitor arm", "price": 89.0}
+]

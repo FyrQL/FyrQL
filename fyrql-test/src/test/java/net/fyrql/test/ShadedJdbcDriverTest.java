@@ -263,7 +263,9 @@ class ShadedJdbcDriverTest {
             assertTrue(names.stream().noneMatch(n -> n.startsWith("META-INF/versions/")), "classes for newer JDKs");
             assertTrue(names.stream().noneMatch(n -> n.endsWith("module-info.class")), "module descriptors");
             assertTrue(names.stream().noneMatch(n -> n.matches("META-INF/[^/]*\\.(SF|DSA|RSA)")), "signature files");
-            for (String renamed : List.of("jackson", "snakeyaml", "jsqlparser", "fastcsv", "janino", "parquet")) {
+            // The configuration carries its parser of YAML under names of its own.
+            for (String renamed : List.of("jackson", "config/jackson", "config/snakeyaml", "jsqlparser", "fastcsv",
+                    "janino", "parquet")) {
                 assertTrue(names.contains("net/fyrql/internal/" + renamed + "/"), renamed);
             }
             assertEquals(List.of("net.fyrql.jdbc.FyrQLDriver"), services(jar, "java.sql.Driver"));

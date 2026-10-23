@@ -1,0 +1,14 @@
+This JAR includes the following software, renamed into packages under
+net.fyrql.internal.config:
+
+- Jackson 2.22.3 (jackson-core, jackson-dataformat-yaml), the parser of the
+  configuration file
+  https://github.com/FasterXML/jackson
+  Apache License 2.0, see apache-2.0-LICENSE.txt and jackson-NOTICE.txt.
+  jackson-core includes FastDoubleParser and Schubfach, see
+  META-INF/FastDoubleParser-LICENSE, META-INF/FastDoubleParser-ThirdParty-LICENSE
+  and META-INF/Schubfach-LICENSE.
+
+- SnakeYAML 2.5, which Jackson reads YAML with
+  https://bitbucket.org/snakeyaml/snakeyaml
+  Apache License 2.0, see apache-2.0-LICENSE.txt.

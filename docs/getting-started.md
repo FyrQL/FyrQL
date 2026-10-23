@@ -40,22 +40,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.13.0</version>
+    <version>0.13.1</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.13.0</version>
+    <version>0.13.1</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.13.0</version>
+    <version>0.13.1</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.13.0</version>
+    <version>0.13.1</version>
 </dependency>
 ```
 
@@ -527,7 +527,7 @@ the application depends on
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.0</version>
+    <version>0.13.1</version>
 </dependency>
 ```
 
@@ -569,6 +569,11 @@ More: [Spring Boot](manual.md#spring-boot), with sources of the application, a
 `DataSource` and the health indicator.
 
 ## Where to go next
+
+The [examples](../examples/README.md) are small programs that run, each with a README
+and its output: a query over a database, a CSV and a JSON file with its plan, moving data
+with `COPY` and `CREATE TABLE ... AS`, plain JDBC with a configuration file, a connector
+of your own, and an application of Spring Boot.
 
 The [manual](manual.md) describes everything in full:
 

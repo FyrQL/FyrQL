@@ -25,6 +25,7 @@ import org.springframework.context.ApplicationContextInitializer;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.util.ClassUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -84,6 +85,19 @@ class FyrQLAutoConfigurationTest {
             assertThat(context).hasSingleBean(FyrQL.class);
             assertThat(context.getBean(FyrQL.class).rows("SELECT 1 + 1").get(0)[0]).isEqualTo(2);
         });
+    }
+
+    /**
+     * Spring Framework 7 converts YAML with Jackson 2 when it finds the YAMLFactory of Jackson 2, which then needs
+     * jackson-databind; the configuration keeps its parser of YAML under a name of its own, so that a web
+     * application without jackson-databind starts.
+     */
+    @Test
+    void theParserOfTheConfigurationFileIsNotThatOfJackson() {
+        ClassLoader loader = getClass().getClassLoader();
+        assertThat(ClassUtils.isPresent("com.fasterxml.jackson.dataformat.yaml.YAMLFactory", loader)).isFalse();
+        assertThat(ClassUtils.isPresent("net.fyrql.internal.config.jackson.dataformat.yaml.YAMLFactory", loader))
+                .isTrue();
     }
 
     @Test

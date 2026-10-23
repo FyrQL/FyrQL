@@ -27,7 +27,8 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The README and the documents in {@code docs}: every relative link and
+ * The README, the documents in {@code docs} and the READMEs of the
+ * examples in {@code examples}: every relative link and
  * image names a file that exists, every anchor a heading of its file, as
  * GitHub derives anchors from headings, and the text is ASCII with line
  * feeds only.
@@ -45,7 +46,12 @@ class DocumentationLinksTest {
         try (var files = Files.list(root.resolve("docs"))) {
             files.filter(p -> p.toString().endsWith(".md")).sorted().forEach(documents::add);
         }
-        assertTrue(documents.size() >= 3, documents.toString());
+        try (var files = Files.walk(root.resolve("examples"))) {
+            files.filter(p -> p.toString().endsWith(".md"))
+                    .filter(p -> !p.toString().replace('\\', '/').contains("/target/"))
+                    .sorted().forEach(documents::add);
+        }
+        assertTrue(documents.size() >= 9, documents.toString());
         Map<Path, List<String>> anchors = new HashMap<>();
         List<String> problems = new ArrayList<>();
         for (Path document : documents) {

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  This Source Code Form is "Incompatible With Secondary Licenses", as
+  defined by the Mozilla Public License, v. 2.0.
+-->
+<!--
+  The examples of FyrQL. Each one is a project of its own, without a parent, that can be copied out of this
+  directory; this POM only lists them, so that the build of FyrQL builds and tests them with its profile examples:
+
+    ./mvnw -Pexamples verify
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<groupId>net.fyrql.examples</groupId>
+	<artifactId>examples</artifactId>
+	<version>0</version>
+	<packaging>pom</packaging>
+	<name>FyrQL examples</name>
+
+	<modules>
+		<module>federated-query</module>
+		<module>move-data</module>
+		<module>config-and-jdbc</module>
+		<module>custom-connector</module>
+		<module>spring-boot</module>
+	</modules>
+</project>

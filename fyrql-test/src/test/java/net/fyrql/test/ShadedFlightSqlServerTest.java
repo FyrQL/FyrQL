@@ -379,7 +379,9 @@ class ShadedFlightSqlServerTest {
             assertTrue(names.stream().noneMatch(n -> n.matches("META-INF/[^/]*\\.(SF|DSA|RSA)")), "signature files");
             assertFalse(names.contains("META-INF/INDEX.LIST"), "an index of a single JAR");
             assertTrue(names.stream().noneMatch(n -> n.startsWith("javax/")), "annotations only for compilers");
-            for (String renamed : List.of("jackson", "snakeyaml", "jsqlparser", "fastcsv", "janino", "parquet")) {
+            // The configuration carries its parser of YAML under names of its own.
+            for (String renamed : List.of("jackson", "config/jackson", "config/snakeyaml", "jsqlparser", "fastcsv",
+                    "janino", "parquet")) {
                 assertTrue(names.contains("net/fyrql/internal/" + renamed + "/"), renamed);
             }
             for (String kept : List.of("org/apache/arrow/flight/sql/", "org/apache/arrow/memory/unsafe/",

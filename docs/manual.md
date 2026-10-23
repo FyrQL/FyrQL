@@ -2,11 +2,12 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.13.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.13.1 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
-and the [README](../README.md) an overview.
+and the [README](../README.md) an overview; the [examples](../examples/README.md) are programs that run, each
+with its output.
 
 ## Contents
 
@@ -1346,12 +1347,12 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.0</version>
+    <version>0.13.1</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.13.0</version>
+    <version>0.13.1</version>
 </dependency>
 ```
 
@@ -2582,7 +2583,7 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC, and of any other database through a generic dialect, read and written |
 | `fyrql-connector-s3` | the objects of S3 and MinIO as the files of the connectors of CSV, JSON and Parquet, over a client of its own with the signatures of AWS |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources and those of the file formats on the class path |
-| `fyrql-config` | the configuration file in YAML, and connectors found by their type |
+| `fyrql-config` | the configuration file in YAML, and connectors found by their type; its JAR carries Jackson and SnakeYAML renamed under `net.fyrql.internal.config`, so that an application keeps its own versions |
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application |
 | `fyrql-jdbc-all` | the JDBC driver with the engine, code generation and all connectors in one JAR, for tools such as DBeaver; the drivers of the databases are not in it |
 | `fyrql-arrow` | results as Apache Arrow vectors through an `ArrowReader`, and Arrow vectors as batches |
@@ -2599,6 +2600,10 @@ Java 21 or later is required; the Maven wrapper fetches Maven itself.
 ```
 ./mvnw -B -ntp verify
 ```
+
+With `-Pexamples`, the build also builds the [examples](../examples/README.md) against its
+modules, without installing them, and runs each, whose test checks that it prints what its
+README shows.
 
 The tests of `fyrql-test` run DuckDB through its JDBC driver, which is a test dependency only;
 `fyrql-bench` uses it to write its Parquet file.

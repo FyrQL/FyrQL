@@ -14,6 +14,10 @@ warehouse first.
 - [Manual](docs/manual.md): everything in full, from the API and its settings, every
   connector and the SQL with its differences from DuckDB to the optimizer, code
   generation, parallel execution, spilling and performance.
+- [Examples](examples/README.md): programs that run, each with a README and its output:
+  a query over a database, a CSV and a JSON file, moving data between databases and
+  files, plain JDBC with a configuration file, a connector of its own, and an
+  application of Spring Boot.
 
 ## What it can do
 
@@ -153,6 +157,7 @@ Java 21 or later is required; the Maven wrapper fetches Maven itself.
 ./mvnw -B -ntp verify
 ```
 
+With `-Pexamples`, the build also builds and tests the [examples](examples/README.md).
 [Building and testing](docs/manual.md#building-and-testing) describes the tests against
 DuckDB, the random queries, the databases of the tests and the TPC-H runs.
 

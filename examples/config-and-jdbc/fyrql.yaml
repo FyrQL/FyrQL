@@ -1,0 +1,22 @@
+# The sources and settings of the engine that the JDBC driver builds for each connection,
+# with the URL jdbc:fyrql:?config=fyrql.yaml
+
+sources:
+  # The orders in a database, here an H2 file under target/db, which the example creates.
+  # The password comes from the environment variable SALES_PASSWORD.
+  - name: sales
+    type: jdbc
+    url: jdbc:h2:./target/db/sales;DATABASE_TO_LOWER=TRUE
+    user: sales
+    password: ${env:SALES_PASSWORD}
+    # Only the tables of this schema; H2 would show its information_schema too.
+    schemas: public
+  # The customers in CSV files, in the directory that DATA_DIR names, or else in data.
+  # A relative directory is resolved against the directory of this file.
+  - name: files
+    type: csv
+    directory: ${env:DATA_DIR:-data}
+
+engine:
+  defaultSource: sales
+  threads: 2

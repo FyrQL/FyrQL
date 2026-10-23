@@ -1,0 +1,8 @@
+# The source seq of the type sequence, which SequenceConnectorFactory creates.
+sources:
+  - name: seq
+    type: sequence
+    max: 100000
+
+engine:
+  threads: 4

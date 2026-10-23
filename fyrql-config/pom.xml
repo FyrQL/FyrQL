@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.0</version>
+		<version>0.13.1</version>
 	</parent>
 
 	<artifactId>fyrql-config</artifactId>
@@ -37,10 +37,17 @@
 			<groupId>io.github.stefan-zobel</groupId>
 			<artifactId>fyrql-connector-spi</artifactId>
 		</dependency>
-		<!-- Only the streaming parser of YAML, without data binding; the connectors are found on the class path. -->
+		<!--
+		  Only the streaming parser of YAML, without data binding; the connectors are found on the class path. Jackson
+		  and SnakeYAML go into the JAR of this module under net.fyrql.internal.config, so that an application keeps
+		  its own versions of them: Spring Framework 7 takes the YAMLFactory of Jackson 2 on the class path as a
+		  reason to convert YAML with jackson-databind, and a web application without it would not start. Optional,
+		  so that modules that depend on this one do not get the original classes as well.
+		-->
 		<dependency>
 			<groupId>com.fasterxml.jackson.dataformat</groupId>
 			<artifactId>jackson-dataformat-yaml</artifactId>
+			<optional>true</optional>
 			<exclusions>
 				<exclusion>
 					<groupId>com.fasterxml.jackson.core</groupId>
@@ -105,4 +112,68 @@
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<!-- Without a clean the JAR of the last build would be the shaded one. -->
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-jar-plugin</artifactId>
+				<configuration>
+					<forceCreation>true</forceCreation>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-shade-plugin</artifactId>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<createDependencyReducedPom>false</createDependencyReducedPom>
+							<artifactSet>
+								<includes>
+									<include>com.fasterxml.jackson.dataformat:jackson-dataformat-yaml</include>
+									<include>com.fasterxml.jackson.core:jackson-core</include>
+									<include>org.yaml:snakeyaml</include>
+								</includes>
+							</artifactSet>
+							<relocations>
+								<relocation>
+									<pattern>com.fasterxml.jackson</pattern>
+									<shadedPattern>net.fyrql.internal.config.jackson</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.yaml.snakeyaml</pattern>
+									<shadedPattern>net.fyrql.internal.config.snakeyaml</shadedPattern>
+								</relocation>
+							</relocations>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+										<exclude>META-INF/maven/**</exclude>
+										<exclude>META-INF/LICENSE*</exclude>
+										<exclude>META-INF/NOTICE*</exclude>
+										<exclude>module-info.class</exclude>
+										<!-- Classes for newer JDKs, which the shade plugin would not rename; the JAR is no multi-release JAR. -->
+										<exclude>META-INF/versions/**</exclude>
+									</excludes>
+								</filter>
+							</filters>
+							<transformers>
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+							</transformers>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
 </project>
