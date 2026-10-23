@@ -40,22 +40,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.13.1</version>
+    <version>0.13.2</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.13.1</version>
+    <version>0.13.2</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.13.1</version>
+    <version>0.13.2</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.13.1</version>
+    <version>0.13.2</version>
 </dependency>
 ```
 
@@ -129,7 +129,8 @@ columns and types are inferred from the data, as DuckDB infers them. The plan is
 that runs: the scan of the orders reads only the two columns the query uses,
 `[codegen]` marks the nodes that are compiled to bytecode once enough rows pass, and
 `[parallel]` the chains that run on several threads. `engine.rows(sql)` returns all rows
-at once. A query that does not parse or bind throws an `SqlException` with the position
+at once, with a `DATE` as a `LocalDate` and the other dates and times as classes of
+`java.time` as well. A query that does not parse or bind throws an `SqlException` with the position
 in the text, such as `Referenced column "x" not found in FROM clause! at line 1, column 33`.
 
 `engine.explainAnalyze(sql)`, or `EXPLAIN ANALYZE` in SQL, runs the query and adds to
@@ -527,7 +528,7 @@ the application depends on
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.1</version>
+    <version>0.13.2</version>
 </dependency>
 ```
 

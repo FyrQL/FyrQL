@@ -99,6 +99,8 @@ A test of the example checks that it prints exactly this.
   database is `main`: `sales.main.orders` is the table `public.orders` of H2.
 - **The parameter** goes into the text as a literal of its value before the text is
   parsed, so that the database sees the filters that a parameter makes.
+- **The columns** come from `statement.getMetaData()` before the parameter has a value,
+  as the engine prepares the query without running it.
 - **The types** are those of FyrQL: `getColumnTypeName` gives `DECIMAL(38,2)` for the
   sum of a `DECIMAL(10,2)`, and `getBigDecimal` reads it.
 - **Each connection** builds an engine of its own and closes it with the connection. An
@@ -110,7 +112,7 @@ The same file works in DBeaver, by hand:
 
 1. Build the JAR with the driver, the engine and all connectors from the root of the
    repository: `./mvnw -B -ntp clean package -pl fyrql-jdbc-all -am -DskipTests`. It is
-   `fyrql-jdbc-all/target/fyrql-jdbc-all-0.13.1.jar`.
+   `fyrql-jdbc-all/target/fyrql-jdbc-all-0.13.2.jar`.
 2. Run the example once, so that the database exists.
 3. In DBeaver, create a driver in the Driver Manager with the class name
    `net.fyrql.jdbc.FyrQLDriver`, the URL template `jdbc:fyrql:?config={file}`, no user and

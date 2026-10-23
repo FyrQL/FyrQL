@@ -16,7 +16,7 @@ orders of a database, here H2 in memory, through four statements
 
    ```sql
    SELECT count(*) AS orders, sum(amount) AS total,
-          CAST(min(order_date) AS VARCHAR) AS first, CAST(max(order_date) AS VARCHAR) AS last
+          min(order_date) AS first, max(order_date) AS last
    FROM 'target/out/orders.parquet'
    ```
 

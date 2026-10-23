@@ -53,7 +53,7 @@ public final class MoveData {
                 // 2. The file is a table of its own; its name is enough, and it keeps the types.
                 print(engine, "The Parquet file", """
                         SELECT count(*) AS orders, sum(amount) AS total,
-                               CAST(min(order_date) AS VARCHAR) AS first, CAST(max(order_date) AS VARCHAR) AS last
+                               min(order_date) AS first, max(order_date) AS last
                         FROM 'target/out/orders.parquet'""");
 
                 // 3. The large orders of the file into a new table of the database.

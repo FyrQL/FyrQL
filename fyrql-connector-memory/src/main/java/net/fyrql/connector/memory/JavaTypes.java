@@ -297,20 +297,11 @@ final class JavaTypes {
             return values;
         }
         return switch ((DataType.Scalar) type) {
-            case DATE -> v instanceof LocalDate d ? Math.toIntExact(d.toEpochDay()) : v;
-            case TIME -> v instanceof LocalTime t ? t.toNanoOfDay() / 1000 : v;
-            case TIMESTAMP -> v instanceof LocalDateTime dt ? Conversions.toMicros(dt)
-                    : instant(v) instanceof Instant i ? Conversions.toMicros(LocalDateTime.ofInstant(i, ZoneOffset.UTC))
-                    : v;
-            case TIMESTAMPTZ -> instant(v) instanceof Instant i
-                    ? Conversions.toMicros(LocalDateTime.ofInstant(i, ZoneOffset.UTC)) : v;
-            case INTERVAL -> switch (v) {
-                case Duration d -> Interval.from(d);
-                case Period p -> Interval.from(p);
-                default -> v;
-            };
+            // An instant is also a timestamp, as its date and time in UTC.
+            case TIMESTAMP -> instant(v) instanceof Instant i
+                    ? Conversions.toMicros(LocalDateTime.ofInstant(i, ZoneOffset.UTC)) : Values.fromJava(v, type);
             case VARCHAR -> v instanceof String s ? s : v.toString();
-            default -> v;
+            default -> Values.fromJava(v, type);
         };
     }
 }

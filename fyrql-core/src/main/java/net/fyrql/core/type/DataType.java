@@ -38,6 +38,12 @@ import java.util.Objects;
  * {@code List} of its field values in order, a {@code LIST} a {@code List},
  * a {@code MAP} a {@code Map} that keeps its insertion order. {@code NULL} is
  * {@code null}.
+ * <p>
+ * This is the form of the values in vectors, batches, connectors and
+ * functions. The rows that {@code rows()} of the engine returns, and the
+ * values of parameters, have the dates and times of {@code java.time}
+ * instead; {@link Values#toJava} and {@link Values#fromJava} convert between
+ * the two.
  */
 public sealed interface DataType permits DataType.Scalar, DataType.Decimal, DataType.Struct, DataType.ListType,
         DataType.MapType {

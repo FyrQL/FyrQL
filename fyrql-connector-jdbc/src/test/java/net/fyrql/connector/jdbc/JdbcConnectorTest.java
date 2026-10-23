@@ -22,7 +22,6 @@ import net.fyrql.connector.Split;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
-import net.fyrql.core.value.Conversions;
 import net.fyrql.core.vector.Batch;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -32,8 +31,9 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -707,15 +707,15 @@ class JdbcConnectorTest {
         assertEquals(DataType.TIMESTAMPTZ, connector.catalog().schema(TableRef.of("db", "ZONED")).type(1));
         // The generic dialect leaves every instant to the engine, as a database may compare it in its session.
         boolean pushed = dialect == JdbcDialect.H2;
-        long ten = Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 10, 0));
+        Instant ten = Instant.parse("2020-01-01T10:00:00Z");
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
             List<Object[]> rows = engine.rows("SELECT \"ID\", \"TZ\" FROM zoned"
                     + " WHERE \"TZ\" >= TIMESTAMPTZ '2020-01-01 10:00:00+00'");
             assertEquals(1, rows.size());
             assertEquals(1, rows.get(0)[0]);
-            assertEquals(ten, rows.get(0)[1]);
+            assertEquals(ten, ((OffsetDateTime) rows.get(0)[1]).toInstant());
             assertEquals(pushed, connector.statements().get(0).contains("WHERE"), connector.statements().get(0));
-            assertEquals(ten, engine.rows("SELECT max(\"TZ\") FROM zoned").get(0)[0]);
+            assertEquals(ten, ((OffsetDateTime) engine.rows("SELECT max(\"TZ\") FROM zoned").get(0)[0]).toInstant());
             assertEquals(pushed, connector.statements().get(1).contains("max("), connector.statements().get(1));
             assertEquals(2, engine.rows("SELECT \"TZ\", count(*) FROM zoned GROUP BY \"TZ\"").size());
             assertEquals(pushed, connector.statements().get(2).contains("GROUP BY"), connector.statements().get(2));

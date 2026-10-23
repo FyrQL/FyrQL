@@ -93,7 +93,8 @@ class ArrowReaderTest {
         try (FyrQLArrowReader reader = ArrowResults.reader(engine, sql, allocator)) {
             assertEquals(ArrowTypes.toArrow(plan.schema()), reader.getVectorSchemaRoot().getSchema());
             List<Batch> batches = readAll(reader);
-            assertEquals(TestRows.comparableRows(engine.rows(plan)), TestRows.comparable(batches));
+            // The batches of the engine, whose values are in the form of vectors, as those read from Arrow.
+            assertEquals(TestRows.comparable(engine.batches(plan)), TestRows.comparable(batches));
             assertEquals(plan.schema(), batches.get(0).schema());
             assertEquals(3, reader.rowCount());
             assertTrue(reader.bytesRead() > 0);

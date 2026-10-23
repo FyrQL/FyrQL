@@ -11,12 +11,30 @@
 
 package net.fyrql.core.type;
 
+import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.Period;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Helpers for the Java values of the types: ranges of the integral types,
- * narrowing with a range check, and the check of a value against its type.
+ * narrowing with a range check, the check of a value against its type, and
+ * the conversion between the values in vectors and those of
+ * {@code java.time}.
  */
 public final class Values {
 
@@ -25,6 +43,9 @@ public final class Values {
 
     /** The largest {@code HUGEINT}, {@code 2^127 - 1}. */
     public static final BigInteger HUGEINT_MAX = BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE);
+
+    private static final long MICROS_PER_SECOND = 1_000_000L;
+    private static final long MICROS_PER_DAY = 86_400L * MICROS_PER_SECOND;
 
     private Values() {
     }
@@ -150,6 +171,165 @@ public final class Values {
             return "byte[" + bytes.length + "]";
         }
         return value.getClass().getSimpleName() + " " + value;
+    }
+
+    /**
+     * Tells whether {@link #toJava} changes the values of a type: a date or
+     * time type, or a nested type with one inside.
+     */
+    public static boolean hasJavaTime(DataType type) {
+        return hasTime(type, false);
+    }
+
+    /**
+     * Converts a value of a type, as it is in a vector, to the value of
+     * {@code java.time} that {@code rows()} returns: a {@code DATE} becomes a
+     * {@link LocalDate}, a {@code TIME} a {@link LocalTime} ({@code 24:00:00}
+     * becomes {@link LocalTime#MAX}), a {@code TIMESTAMP} a
+     * {@link LocalDateTime} and a {@code TIMESTAMP WITH TIME ZONE} an
+     * {@link OffsetDateTime} in the given time zone. The elements of a
+     * {@code LIST}, the fields of a {@code STRUCT} and the keys and values of a
+     * {@code MAP} are converted the same way, into a new {@code List} or
+     * {@code Map}. The values of all other types, {@code INTERVAL} among them,
+     * are returned unchanged.
+     *
+     * @param zone the time zone of a {@code TIMESTAMP WITH TIME ZONE}
+     */
+    public static Object toJava(Object value, DataType type, ZoneId zone) {
+        if (value == null || !hasJavaTime(type)) {
+            return value;
+        }
+        return switch (type) {
+            case DataType.ListType l -> {
+                List<Object> result = new ArrayList<>();
+                for (Object element : (List<?>) value) {
+                    result.add(toJava(element, l.element(), zone));
+                }
+                yield result;
+            }
+            case DataType.Struct s -> {
+                List<?> fields = (List<?>) value;
+                List<Object> result = new ArrayList<>(fields.size());
+                for (int i = 0; i < fields.size(); i++) {
+                    result.add(toJava(fields.get(i), s.fields().get(i).type(), zone));
+                }
+                yield result;
+            }
+            case DataType.MapType m -> {
+                Map<Object, Object> result = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
+                    result.put(toJava(e.getKey(), m.key(), zone), toJava(e.getValue(), m.value(), zone));
+                }
+                yield result;
+            }
+            case DataType.Scalar s -> switch (s) {
+                case DATE -> LocalDate.ofEpochDay((Integer) value);
+                case TIME -> {
+                    long micros = (Long) value;
+                    yield micros >= MICROS_PER_DAY ? LocalTime.MAX : LocalTime.ofNanoOfDay(micros * 1000);
+                }
+                case TIMESTAMP -> Conversions.toLocalDateTime((Long) value);
+                case TIMESTAMPTZ -> {
+                    long micros = (Long) value;
+                    Instant instant = Instant.ofEpochSecond(Math.floorDiv(micros, MICROS_PER_SECOND),
+                            Math.floorMod(micros, MICROS_PER_SECOND) * 1000);
+                    yield instant.atZone(zone).toOffsetDateTime();
+                }
+                default -> value;
+            };
+            case DataType.Decimal d -> value;
+        };
+    }
+
+    /**
+     * Converts a value of {@code java.time} to the value of a type as it is in
+     * a vector, the reverse of {@link #toJava}: a {@link LocalDate} for a
+     * {@code DATE}, a {@link LocalTime} for a {@code TIME}, a
+     * {@link LocalDateTime} for a {@code TIMESTAMP}, an {@link Instant},
+     * {@link OffsetDateTime} or {@link ZonedDateTime} for a
+     * {@code TIMESTAMP WITH TIME ZONE}, and a {@link Duration} or
+     * {@link Period} for an {@code INTERVAL}, also inside a {@code LIST},
+     * {@code STRUCT} or {@code MAP}. Digits below a microsecond are cut off.
+     * Every other value, the form in a vector among them, is returned
+     * unchanged, so that {@link #require} names a value of the wrong class.
+     *
+     * @throws ArithmeticException if a value is out of the range of its type
+     */
+    public static Object fromJava(Object value, DataType type) {
+        if (value == null || !hasTime(type, true)) {
+            return value;
+        }
+        return switch (type) {
+            case DataType.ListType l -> {
+                if (!(value instanceof List<?> elements)) {
+                    yield value;
+                }
+                List<Object> result = new ArrayList<>(elements.size());
+                for (Object element : elements) {
+                    result.add(fromJava(element, l.element()));
+                }
+                yield result;
+            }
+            case DataType.Struct s -> {
+                if (!(value instanceof List<?> fields) || fields.size() != s.fields().size()) {
+                    yield value;
+                }
+                List<Object> result = new ArrayList<>(fields.size());
+                for (int i = 0; i < fields.size(); i++) {
+                    result.add(fromJava(fields.get(i), s.fields().get(i).type()));
+                }
+                yield result;
+            }
+            case DataType.MapType m -> {
+                if (!(value instanceof Map<?, ?> entries)) {
+                    yield value;
+                }
+                Map<Object, Object> result = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> e : entries.entrySet()) {
+                    result.put(fromJava(e.getKey(), m.key()), fromJava(e.getValue(), m.value()));
+                }
+                yield result;
+            }
+            case DataType.Scalar s -> switch (s) {
+                case DATE -> value instanceof LocalDate d ? Math.toIntExact(d.toEpochDay()) : value;
+                case TIME -> value instanceof LocalTime t ? t.toNanoOfDay() / 1000 : value;
+                case TIMESTAMP -> value instanceof LocalDateTime dt ? Conversions.toMicros(dt) : value;
+                case TIMESTAMPTZ -> switch (value) {
+                    case Instant i -> micros(i);
+                    case OffsetDateTime o -> micros(o.toInstant());
+                    case ZonedDateTime z -> micros(z.toInstant());
+                    default -> value;
+                };
+                case INTERVAL -> switch (value) {
+                    case Duration d -> Interval.from(d);
+                    case Period p -> Interval.from(p);
+                    default -> value;
+                };
+                default -> value;
+            };
+            case DataType.Decimal d -> value;
+        };
+    }
+
+    /** The microseconds since 1970-01-01 00:00:00 UTC of an instant. */
+    private static long micros(Instant instant) {
+        return Math.addExact(Math.multiplyExact(instant.getEpochSecond(), MICROS_PER_SECOND),
+                instant.getNano() / 1000);
+    }
+
+    /** Tells whether a type is a date or time type, or with {@code interval} also {@code INTERVAL}, or has one. */
+    private static boolean hasTime(DataType type, boolean interval) {
+        return switch (type) {
+            case DataType.Scalar s -> switch (s) {
+                case DATE, TIME, TIMESTAMP, TIMESTAMPTZ -> true;
+                case INTERVAL -> interval;
+                default -> false;
+            };
+            case DataType.Decimal d -> false;
+            case DataType.ListType l -> hasTime(l.element(), interval);
+            case DataType.MapType m -> hasTime(m.key(), interval) || hasTime(m.value(), interval);
+            case DataType.Struct s -> s.fields().stream().anyMatch(f -> hasTime(f.type(), interval));
+        };
     }
 
     private static DataType.Scalar scalar(DataType type) {

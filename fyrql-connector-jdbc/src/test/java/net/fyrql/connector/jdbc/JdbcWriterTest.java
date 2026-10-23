@@ -12,12 +12,14 @@
 package net.fyrql.connector.jdbc;
 
 import net.fyrql.FyrQL;
+import net.fyrql.QueryResult;
 import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Writer;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Conversions;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.sql.SqlException;
@@ -88,10 +90,18 @@ class JdbcWriterTest {
         return without;
     }
 
-    /** The rows of a table, read through an engine and ordered by the first column. */
+    /** The rows of a table, read through an engine and ordered by the first column, in the form of vectors. */
     private static List<Object[]> read(JdbcConnector connector, String table) {
-        try (FyrQL engine = FyrQL.builder().register(connector).build()) {
-            return engine.rows("SELECT * FROM db." + table + " ORDER BY 1");
+        try (FyrQL engine = FyrQL.builder().register(connector).build();
+                QueryResult result = engine.sql("SELECT * FROM db." + table + " ORDER BY 1")) {
+            List<DataType> types = result.schema().types();
+            List<Object[]> rows = result.rows();
+            for (Object[] row : rows) {
+                for (int c = 0; c < row.length; c++) {
+                    row[c] = Values.fromJava(row[c], types.get(c));
+                }
+            }
+            return rows;
         }
     }
 
@@ -273,7 +283,7 @@ class JdbcWriterTest {
             assertEquals(List.of(1, 2, 3, 4, 5, 11, 12, 13), rows.stream().map(r -> r[0]).toList());
             assertEquals(Arrays.asList("a", null, "c", "d", "it's", "a", null, "c"),
                     rows.stream().map(r -> r[1]).toList());
-            assertEquals(Math.toIntExact(LocalDate.of(1, 1, 1).toEpochDay()), rows.get(7)[2]);
+            assertEquals(LocalDate.of(1, 1, 1), rows.get(7)[2]);
             assertEquals("Table with name items already exists", assertThrows(SqlException.class,
                     () -> engine.update("CREATE TABLE db.items (a INTEGER)")).getMessage().split(" at line")[0]);
             assertEquals(0, engine.update("DROP TABLE db.items"));

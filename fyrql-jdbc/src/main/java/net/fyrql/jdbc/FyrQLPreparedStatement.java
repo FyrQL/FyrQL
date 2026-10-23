@@ -173,20 +173,21 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
     }
 
     /**
-     * Returns the columns of the result when every parameter has a value:
-     * the engine plans the query without running it. Before that it is
-     * {@code null}, since the types of the columns may depend on the
-     * values, as it is for a statement that writes.
+     * Returns the columns of the result without running the query: those
+     * the engine gives the query when it prepares it, while a parameter has
+     * no value, and once every parameter has one, those of the query with
+     * the literals of the values. It is {@code null} for a statement that
+     * writes, and while a parameter has no value if the engine cannot
+     * prepare the query, as for {@code SELECT ?}.
      */
     @Override
     public ResultSetMetaData getMetaData() throws SQLException {
         checkOpen();
+        boolean values = true;
         for (String literal : literals) {
-            if (literal == null) {
-                return null;
-            }
+            values &= literal != null;
         }
-        Schema columns = connection.describe(rendered());
+        Schema columns = values ? connection.describe(rendered()) : connection.preparedColumns(sql.sql());
         return columns == null ? null : new FyrQLResultSetMetaData(columns);
     }
 

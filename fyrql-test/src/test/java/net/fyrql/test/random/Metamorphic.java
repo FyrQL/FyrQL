@@ -26,6 +26,7 @@ import net.fyrql.sql.ast.SelectItem;
 import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlPrinter;
 import net.fyrql.test.ResultComparison;
+import net.fyrql.test.Rows;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -111,11 +112,15 @@ final class Metamorphic {
         this.engine = engine;
     }
 
-    /** The first 50 rows of each table, for the samples of the {@link SqlGenerator}. */
+    /**
+     * The first 50 rows of each table, for the samples of the {@link SqlGenerator}, in the form of vectors, of
+     * which it writes literals.
+     */
     static Map<String, List<Object[]>> samples(FyrQL engine, Map<String, Schema> tables) {
         Map<String, List<Object[]>> rows = new LinkedHashMap<>();
-        for (String table : tables.keySet()) {
-            rows.put(table, engine.rows("SELECT * FROM " + table + " LIMIT 50"));
+        for (Map.Entry<String, Schema> table : tables.entrySet()) {
+            rows.put(table.getKey(), Rows.internal(table.getValue(),
+                    engine.rows("SELECT * FROM " + table.getKey() + " LIMIT 50")));
         }
         return rows;
     }

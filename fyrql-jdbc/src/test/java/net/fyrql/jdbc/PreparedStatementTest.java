@@ -359,7 +359,7 @@ class PreparedStatementTest {
     void aParameterNeedsAValueAndAnIndexInRange() throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("SELECT ? AS a, ? AS b")) {
             ps.setInt(1, 1);
-            assertNull(ps.getMetaData(), "the columns are unknown while a parameter has no value");
+            assertNull(ps.getMetaData(), "the columns are unknown while a parameter has no value and no type");
             SQLException e = assertThrows(SQLException.class, ps::executeQuery);
             assertEquals("07001", e.getSQLState());
             assertEquals("No value is set for parameter 2", e.getMessage());
@@ -560,6 +560,22 @@ class PreparedStatementTest {
                 ps::executeQuery, ps::clearParameters, ps::getMetaData, ps::getParameterMetaData,
                 () -> ps.executeQuery("SELECT 1"))) {
             assertEquals("HY010", assertThrows(SQLException.class, call::run).getSQLState());
+        }
+    }
+
+    @Test
+    void theColumnsAreKnownBeforeTheParametersHaveValues() throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT i, v, i + ? AS n FROM t WHERE v <> ?")) {
+            ResultSetMetaData md = ps.getMetaData();
+            assertEquals(List.of("i", "v", "n"), labels(md));
+            assertEquals(List.of("INTEGER", "VARCHAR", "INTEGER"), types(md));
+            ps.setInt(1, 1);
+            assertEquals(types(md), types(ps.getMetaData()), "with a value for one parameter of two");
+            ps.setString(2, "x");
+            assertEquals(types(md), types(ps.getMetaData()), "with values for both");
+        }
+        try (PreparedStatement ps = c.prepareStatement("EXPLAIN SELECT i FROM t WHERE i = ?")) {
+            assertEquals(List.of("plan"), labels(ps.getMetaData()));
         }
     }
 

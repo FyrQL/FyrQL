@@ -20,7 +20,6 @@ import net.fyrql.connector.jdbc.JdbcConnector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
-import net.fyrql.core.value.Conversions;
 import net.fyrql.core.value.Interval;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.test.db.TestDatabase;
@@ -31,8 +30,10 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -87,12 +88,12 @@ class PostgresConnectorTest {
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
             List<Object[]> rows = engine.rows("SELECT * FROM odd ORDER BY id");
             Object[] expected = {1, 1.5, new BigDecimal("3.14"), "1234567890123456789012345678901234567890",
-                    Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 10, 0)), Conversions.parseTime("13:45:00"),
+                    Instant.parse("2020-01-01T10:00:00Z").atZone(engine.timeZone()).toOffsetDateTime(),
+                    LocalTime.of(13, 45),
                     Interval.parse("1 day 02:00:00"),
                     "{\"a\": 1}", "{1,2,3}", "ab ", "xyz", "text", 1L, 0.5f, 0.25, true, new byte[] {1, 2},
                     UUID.fromString("123e4567-e89b-12d3-a456-426614174000"),
-                    Math.toIntExact(LocalDate.of(2020, 2, 29).toEpochDay()),
-                    Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 0, 0, 0, 123_000_000))};
+                    LocalDate.of(2020, 2, 29), LocalDateTime.of(2020, 1, 1, 0, 0, 0, 123_000_000)};
             assertTrue(Arrays.deepEquals(expected, rows.get(0)), Arrays.deepToString(rows.get(0)));
             Object[] nulls = rows.get(1);
             for (int c = 1; c < nulls.length; c++) {
@@ -101,7 +102,7 @@ class PostgresConnectorTest {
                 }
             }
             // The text of an interval in the style of PostgreSQL, with a sign before each part.
-            assertEquals(Conversions.parseTime("24:00:00"), rows.get(2)[5]);
+            assertEquals(LocalTime.MAX, rows.get(2)[5]);
             assertEquals(Interval.parse("-1 year -2 months 3 days -04:05:06.789"), rows.get(2)[6]);
         }
     }

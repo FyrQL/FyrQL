@@ -30,12 +30,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import net.fyrql.FyrQL;
+import net.fyrql.QueryResult;
 import net.fyrql.connector.FileOutput;
 import net.fyrql.connector.FileStore;
 import net.fyrql.connector.iceberg.IcebergConnector;
 import net.fyrql.connector.iceberg.IcebergRows;
 import net.fyrql.connector.iceberg.IcebergTestTables;
 import net.fyrql.connector.s3.S3Connector;
+import net.fyrql.test.Rows;
 
 /**
  * Iceberg tables in a bucket, uploaded from where Iceberg Java wrote them,
@@ -106,10 +108,13 @@ abstract class IcebergS3 {
         }
     }
 
+    /** The rows of a query in the form of vectors, as {@link IcebergRows} gives the values of Iceberg Java. */
     private List<List<Object>> rows(String sql) {
         List<List<Object>> rows = new ArrayList<>();
-        for (Object[] r : engine.rows(sql)) {
-            rows.add(Arrays.asList(r));
+        try (QueryResult result = engine.sql(sql)) {
+            for (Object[] r : Rows.internal(result.schema(), result.rows())) {
+                rows.add(Arrays.asList(r));
+            }
         }
         return rows;
     }

@@ -13,8 +13,9 @@ package net.fyrql;
 
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Casts;
-import net.fyrql.core.value.Conversions;
+import net.fyrql.core.value.Interval;
 import net.fyrql.exec.QueryContext;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.parse.Parameters;
@@ -26,6 +27,9 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -71,8 +75,11 @@ class PreparedQueryTest {
             new Value(DataType.decimal(38, 10), new BigDecimal("1234567890123456789012345678.0123456789")),
             new Value(DataType.VARCHAR, "it's ? -- not a comment"),
             new Value(DataType.BLOB, new byte[] {0, (byte) 0xff, 39}),
-            new Value(DataType.DATE, (int) LocalDate.of(2024, 2, 29).toEpochDay()),
-            new Value(DataType.TIMESTAMP, Conversions.toMicros(LocalDateTime.of(1999, 12, 31, 23, 59, 58, 123_456_000))),
+            new Value(DataType.DATE, LocalDate.of(2024, 2, 29)),
+            new Value(DataType.TIMESTAMP, LocalDateTime.of(1999, 12, 31, 23, 59, 58, 123_456_000)),
+            new Value(DataType.TIME, LocalTime.of(23, 59, 58, 123_456_000)),
+            new Value(DataType.TIMESTAMPTZ, OffsetDateTime.of(2024, 2, 29, 12, 0, 0, 1000, ZoneOffset.ofHours(-5))),
+            new Value(DataType.INTERVAL, Interval.of(14, -3, 5_000_001L)),
             new Value(DataType.UUID, UUID.fromString("0f8fad5b-d9cb-469f-a165-70867728950e")),
             new Value(DataType.listOf(DataType.INTEGER), Arrays.asList(1, null, 3)),
             new Value(DataType.listOf(DataType.VARCHAR), List.of("a", "'b'")),
@@ -81,6 +88,11 @@ class PreparedQueryTest {
     /** Returns the literal of a value, as the text of a query with literals has it. */
     private static String literal(Value v) {
         return Parameters.literal(v.value(), v.type());
+    }
+
+    /** Formats a value of {@code rows()} or a parameter as a value of its type in a vector. */
+    private static String format(Object value, DataType type) {
+        return Casts.format(Values.fromJava(value, type), type);
     }
 
     @Test
@@ -95,13 +107,11 @@ class PreparedQueryTest {
             List<Object[]> rows = engine.rows(query, List.of(v.value(), v.value(), v.value()));
             assertEquals(1, rows.size(), what);
             assertEquals(true, rows.get(0)[0], what);
-            assertEquals(Casts.format(v.value(), v.type()), Casts.format(rows.get(0)[1], v.type()),
-                    what);
+            assertEquals(format(v.value(), v.type()), format(rows.get(0)[1], v.type()), what);
             assertEquals(true, rows.get(0)[2], what);
             Object[] nulls = engine.rows(query, Arrays.asList(null, null, null)).get(0);
             assertEquals(null, nulls[0], what);
-            assertEquals(Casts.format(v.value(), v.type()), Casts.format(nulls[1], v.type()),
-                    what);
+            assertEquals(format(v.value(), v.type()), format(nulls[1], v.type()), what);
             assertEquals(false, nulls[2], what);
         }
     }

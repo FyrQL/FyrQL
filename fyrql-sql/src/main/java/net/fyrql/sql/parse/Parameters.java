@@ -158,15 +158,23 @@ public final class Parameters {
      * {@code FALSE}, never a bare string, number or {@code NULL}, whose
      * types adapt to their context.
      *
-     * @param value the value as {@link Values} holds it, or {@code null}
+     * @param value the value as {@link Values} holds it, or one of
+     *        {@code java.time} that {@link Values#fromJava} converts, or
+     *        {@code null}
      * @throws IllegalArgumentException if the value is none of the type, or
-     *         the type has a {@code MAP} in it: the parser of FyrQL reads
-     *         no cast to a map type, so there is no literal of one
+     *         out of its range, or the type has a {@code MAP} in it: the
+     *         parser of FyrQL reads no cast to a map type, so there is no
+     *         literal of one
      */
     public static String literal(Object value, DataType type) {
         if (hasMap(type)) {
             throw new IllegalArgumentException("There is no literal of the type " + type.sqlName()
                     + ": FyrQL parses no cast to a MAP");
+        }
+        try {
+            value = Values.fromJava(value, type);
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("Out of range for " + type + ": " + Values.describe(value), e);
         }
         Values.require(type, value);
         String literal = DuckDbDialect.INSTANCE.literal(value, type);

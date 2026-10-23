@@ -18,7 +18,6 @@ import net.fyrql.connector.jdbc.JdbcConnector.Trust;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
-import net.fyrql.core.value.Conversions;
 import net.fyrql.sql.render.GenericDialect;
 import org.junit.jupiter.api.Test;
 
@@ -197,12 +196,12 @@ class GenericDialectConnectorTest {
                 JdbcConnector connector = db.builder("db").trust(Set.of(Trust.TIMESTAMP)).build();
                 try (FyrQL engine = FyrQL.builder().register(connector).build()) {
                     List<Object[]> rows = engine.rows("SELECT id, d, ts FROM items ORDER BY id");
-                    assertEquals(day(2026, 3, 29), rows.get(0)[1], zone);
-                    assertEquals(micros(LocalDateTime.of(2026, 3, 29, 2, 30, 0, 123_456_000)), rows.get(0)[2], zone);
-                    assertEquals(day(1, 1, 1), rows.get(1)[1], zone);
-                    assertEquals(-1L, rows.get(1)[2], zone);
-                    assertEquals(day(1582, 10, 10), rows.get(2)[1], zone);
-                    assertEquals(micros(LocalDateTime.of(1582, 10, 10, 12, 0)), rows.get(2)[2], zone);
+                    assertEquals(LocalDate.of(2026, 3, 29), rows.get(0)[1], zone);
+                    assertEquals(LocalDateTime.of(2026, 3, 29, 2, 30, 0, 123_456_000), rows.get(0)[2], zone);
+                    assertEquals(LocalDate.of(1, 1, 1), rows.get(1)[1], zone);
+                    assertEquals(LocalDateTime.of(1969, 12, 31, 23, 59, 59, 999_999_000), rows.get(1)[2], zone);
+                    assertEquals(LocalDate.of(1582, 10, 10), rows.get(2)[1], zone);
+                    assertEquals(LocalDateTime.of(1582, 10, 10, 12, 0), rows.get(2)[2], zone);
                     // The database compares the values bound as parameters as it stores them.
                     assertEquals(List.of(3), ids(engine, "SELECT id FROM items WHERE d = DATE '1582-10-10'"));
                     assertEquals(List.of(2), ids(engine, "SELECT id FROM items WHERE d < DATE '1000-01-01'"));
@@ -218,14 +217,6 @@ class GenericDialectConnectorTest {
         } finally {
             TimeZone.setDefault(before);
         }
-    }
-
-    private static int day(int year, int month, int day) {
-        return Math.toIntExact(LocalDate.of(year, month, day).toEpochDay());
-    }
-
-    private static long micros(LocalDateTime t) {
-        return Conversions.toMicros(t);
     }
 
     @Test

@@ -64,16 +64,17 @@ public final class ConfigAndJdbc {
                     GROUP BY c.name
                     ORDER BY revenue DESC""";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                // The columns of the result are known before the parameter has a value.
+                ResultSetMetaData columns = statement.getMetaData();
                 for (String region : List.of("north", "south")) {
                     System.out.println("== Region " + region);
+                    if (region.equals("north")) {
+                        for (int i = 1; i <= columns.getColumnCount(); i++) {
+                            System.out.println(columns.getColumnLabel(i) + " " + columns.getColumnTypeName(i));
+                        }
+                    }
                     statement.setString(1, region);
                     try (ResultSet rows = statement.executeQuery()) {
-                        if (region.equals("north")) {
-                            ResultSetMetaData columns = rows.getMetaData();
-                            for (int i = 1; i <= columns.getColumnCount(); i++) {
-                                System.out.println(columns.getColumnLabel(i) + " " + columns.getColumnTypeName(i));
-                            }
-                        }
                         while (rows.next()) {
                             System.out.println(rows.getString("name") + " " + rows.getLong("orders") + " "
                                     + rows.getBigDecimal("revenue"));

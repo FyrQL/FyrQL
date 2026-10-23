@@ -439,7 +439,12 @@ public final class FyrQL implements AutoCloseable {
      * {@code NULL} of another type.
      *
      * @param values one value per parameter, a Java value of its type as
-     *        {@link QueryResult#rows()} gives them, {@code null} for {@code NULL}
+     *        {@link QueryResult#rows()} gives them, {@code null} for {@code NULL};
+     *        a {@code TIMESTAMP WITH TIME ZONE} may also be an
+     *        {@link java.time.Instant} or {@link java.time.ZonedDateTime}, an
+     *        {@code INTERVAL} a {@link Duration} or {@link java.time.Period},
+     *        and every value may be in the form of a vector, see
+     *        {@link net.fyrql.core.type.Values#fromJava}
      * @throws IllegalArgumentException if the number of values differs from
      *         that of the parameters, or a value is none of its type
      * @throws SqlException if the query does not bind any more, e.g. after
@@ -658,15 +663,16 @@ public final class FyrQL implements AutoCloseable {
             for (String line : plan.split("\n")) {
                 lines.add(new Object[] {line});
             }
-            return result(new PlanNode.Values(BoundStatement.PLAN, lines), context);
+            return result(new PlanNode.Values(BoundStatement.PLAN, lines), context, session);
         }
         long count = update(statement, context, sql, session);
-        return result(new PlanNode.Values(BoundStatement.COUNT, List.<Object[]>of(new Object[] {count})), context);
+        return result(new PlanNode.Values(BoundStatement.COUNT, List.<Object[]>of(new Object[] {count})), context,
+                session);
     }
 
     /** The result of a statement that has run, whose operators count nothing for the context of the statement. */
-    private QueryResult result(PlanNode.Values rows, QueryContext context) {
-        return new QueryResult(open(rows, QueryContext.NONE), context, null);
+    private QueryResult result(PlanNode.Values rows, QueryContext context, Session session) {
+        return new QueryResult(open(rows, QueryContext.NONE), context, null, session.timeZone());
     }
 
     /**
@@ -842,7 +848,7 @@ public final class FyrQL implements AutoCloseable {
         QueryEvent event = RECORDABLE ? QueryEvent.start() : null;
         ScheduledFuture<?> timeout = timeouts.start(context, session.timeout());
         try {
-            return new QueryResult(open(plan, context), context, timeout, event, sql);
+            return new QueryResult(open(plan, context), context, timeout, session.timeZone(), event, sql);
         } catch (RuntimeException | Error e) {
             Timeouts.stop(timeout);
             if (event != null) {

@@ -18,6 +18,7 @@ import net.fyrql.core.type.DataType.MapType;
 import net.fyrql.core.type.DataType.Scalar;
 import net.fyrql.core.type.DataType.Struct;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Casts;
 
 import java.math.BigDecimal;
@@ -162,7 +163,7 @@ public final class ResultComparison {
         return result;
     }
 
-    /** The canonical text of one value. */
+    /** The canonical text of one value, the same for the value of a vector and that of {@code rows()}. */
     public static String canonical(Object v, DataType type) {
         if (v == null) {
             return "NULL";
@@ -210,7 +211,8 @@ public final class ResultComparison {
             }
             case VARCHAR -> "'" + v + "'";
             case BLOB -> "x" + HexFormat.of().formatHex((byte[]) v);
-            default -> Casts.format(v, type);
+            // A value of rows() has the dates and times of java.time, a value of a batch those of its vector.
+            default -> Casts.format(Values.fromJava(v, type), type);
         };
     }
 }

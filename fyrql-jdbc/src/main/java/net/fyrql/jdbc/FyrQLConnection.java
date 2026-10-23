@@ -12,6 +12,7 @@
 package net.fyrql.jdbc;
 
 import net.fyrql.FyrQL;
+import net.fyrql.PreparedQuery;
 import net.fyrql.Session;
 import net.fyrql.SqlStatement;
 import net.fyrql.catalog.SearchPath;
@@ -224,6 +225,27 @@ final class FyrQLConnection implements Connection {
         try {
             checkOpen();
             return session.prepare(sql).parameterTypes();
+        } catch (SqlException e) {
+            return null;
+        } catch (RuntimeException e) {
+            throw SqlStates.map(e);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Prepares a query with parameters without running it and returns the
+     * columns of its result, or {@code null} for a statement that writes and
+     * if the engine cannot prepare it, e.g. for {@code SELECT ?};
+     * {@code EXPLAIN} has the column {@code plan}.
+     */
+    Schema preparedColumns(String sql) throws SQLException {
+        lock.lock();
+        try {
+            checkOpen();
+            PreparedQuery query = session.prepare(sql);
+            return query.writes() ? null : query.schema();
         } catch (SqlException e) {
             return null;
         } catch (RuntimeException e) {

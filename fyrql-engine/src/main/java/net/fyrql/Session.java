@@ -66,6 +66,7 @@ import java.util.Optional;
  * Session session = engine.newSession();
  * session.update("SET TimeZone = 'Europe/Berlin'");
  * List<Object[]> rows = session.rows("SELECT now()");
+ * OffsetDateTime now = (OffsetDateTime) rows.get(0)[0]; // with the offset of Berlin
  * }</pre>
  */
 public final class Session {

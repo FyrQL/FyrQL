@@ -14,7 +14,9 @@ package net.fyrql.test.tpch;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.SortKey;
+import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.type.Values;
 import net.fyrql.core.value.Order;
 import net.fyrql.test.ResultComparison;
 
@@ -99,13 +101,15 @@ final class TpchQueries {
 
     private static int compare(Schema schema, List<SortKey> keys, Object[] a, Object[] b) {
         for (SortKey k : keys) {
-            Object x = a[k.column()];
-            Object y = b[k.column()];
+            // The rows of rows() have the dates and times of java.time, those of a batch the form of its vectors.
+            DataType type = schema.type(k.column());
+            Object x = Values.fromJava(a[k.column()], type);
+            Object y = Values.fromJava(b[k.column()], type);
             int c;
             if (x == null || y == null) {
                 c = x == null ? y == null ? 0 : k.nullsFirst() ? -1 : 1 : k.nullsFirst() ? 1 : -1;
             } else {
-                c = Order.compare(x, y, schema.type(k.column()));
+                c = Order.compare(x, y, type);
                 c = k.ascending() ? c : -c;
             }
             if (c != 0) {

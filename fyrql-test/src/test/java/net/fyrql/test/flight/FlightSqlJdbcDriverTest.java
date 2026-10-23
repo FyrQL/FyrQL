@@ -20,6 +20,7 @@ import net.fyrql.core.value.Conversions;
 import net.fyrql.flight.FlightSqlServer;
 import net.fyrql.flight.ServerConfig;
 import net.fyrql.jdbc.AllTypesTable;
+import net.fyrql.test.Rows;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -109,7 +110,7 @@ class FlightSqlJdbcDriverTest {
     @Test
     void everyTypeComesThroughTheDriverOfArrow() throws SQLException {
         Schema schema = AllTypesTable.SCHEMA;
-        List<Object[]> expected = engine.rows("SELECT * FROM mem.t");
+        List<Object[]> expected = Rows.internal(schema, engine.rows("SELECT * FROM mem.t"));
         // The driver gives a TIME as a java.sql.Time, of milliseconds.
         int tm = schema.indexOf("tm");
         for (Object[] row : expected) {

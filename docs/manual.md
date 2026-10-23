@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.13.1 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.13.2 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -109,7 +109,8 @@ on several threads when its source has several parts; see
 [Parallel execution](#parallel-execution). `EXPLAIN ANALYZE`, or
 `engine.explainAnalyze(sql)`, runs the query and shows what each node did; see
 [Observing queries](#observing-queries). `engine.plan(sql)` returns the plan itself,
-`engine.rows(sql)` all rows at once. A query
+`engine.rows(sql)` all rows at once, with the dates and times as classes of `java.time`
+(see [Time zone](#time-zone)). A query
 that does not parse or bind throws an `SqlException` with the position in the text, for
 example `Referenced column "x" not found in FROM clause! at line 1, column 33`.
 
@@ -123,7 +124,9 @@ other side of a comparison or of arithmetic, of the other values of `IN`, `BETWE
 argument of a function, the first type the function takes of `BIGINT`, `DOUBLE`,
 `INTEGER` and so on, `VARCHAR` last. A parameter without such a context, as in
 `SELECT ?`, is an error that asks for `CAST(? AS type)`, as is one where a constant is
-needed, such as in `LIMIT`, and one of a type with a `MAP`, which has no literal.
+needed, such as in `LIMIT`, and one of a type with a `MAP`, which has no literal. A value
+is of the class that `rows()` gives for the type of its parameter, such as a `LocalDate`
+for a `DATE`, and `null` is `NULL`.
 
 Plans can also be built in Java from the nodes of `PlanNode`, starting with
 `engine.scan(TableRef.of("mem", "orders"))`, and run with `engine.execute(plan)`. The
@@ -975,6 +978,10 @@ and a read-only connection refuses it with `25006`; `executeUpdate` refuses any
 `EXPLAIN` with `42809`. The parameters
 `?` of a `PreparedStatement` go into the text as literals of the values they are set to,
 before the text is parsed; a parameter of a `MAP` type is not supported.
+`getMetaData` gives the columns of the result before the parameters have values, as the
+engine prepares the query, and once all have values those of the query with their
+literals; it is `null` for a statement that writes and where the engine cannot prepare
+the query, as for `SELECT ?`.
 `getParameterMetaData` gives the types the engine infers for the parameters (see
 [Using the engine](#using-the-engine)), and `OTHER` where it infers none, as in
 `SELECT ?` or `LIMIT ?`, which the driver still runs with the literal of the value. A query runs
@@ -1347,12 +1354,12 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.1</version>
+    <version>0.13.2</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.13.1</version>
+    <version>0.13.2</version>
 </dependency>
 ```
 
@@ -1656,11 +1663,19 @@ while arithmetic keeps the three parts apart. A product with a number that has a
 moves the fraction of the months to days, at 30 days to a month, and what is left of a
 day to the time, whole days of it to the days, as DuckDB and PostgreSQL do; a division
 multiplies by the reciprocal of the divisor, and `avg` divides the sums of the three
-parts and carries their remainders to the next smaller part. In Java, an `INTERVAL` is a
-`net.fyrql.core.value.Interval`, and a `TIME` and a `TIMESTAMPTZ` are `Long`s of
-microseconds since midnight and since 1970 in UTC; the memory connector takes
-`LocalTime`, `Instant`, `OffsetDateTime`, `ZonedDateTime`, `Duration` and `Period` as
-well. A plan built in Java from the nodes of `PlanNode` has no time zone: only the binder
+parts and carries their remainders to the next smaller part.
+
+In the rows of `rows()`, a `DATE` is a `LocalDate`, a `TIME` a `LocalTime` (`24:00:00` is
+`LocalTime.MAX`), a `TIMESTAMP` a `LocalDateTime` and a `TIMESTAMPTZ` an `OffsetDateTime`
+in the zone of the session, also inside a `LIST`, `STRUCT` or `MAP`; an `INTERVAL` is a
+`net.fyrql.core.value.Interval`. The values of parameters take the same classes, and an
+`Instant` or `ZonedDateTime` for a `TIMESTAMPTZ` and a `Duration` or `Period` for an
+`INTERVAL` as well; digits below a microsecond are cut off. The batches of
+`QueryResult.nextBatch()` and of connectors hold the values as the vectors do: a `DATE`
+is an `Integer` of days since 1970-01-01, a `TIMESTAMP` a `Long` of microseconds since
+1970-01-01 00:00:00, a `TIME` one since midnight, and a `TIMESTAMPTZ` one since 1970 in
+UTC; `Values.toJava` and `Values.fromJava` in `net.fyrql.core.type` convert between the
+two. The memory connector takes the classes of `java.time` as well. A plan built in Java from the nodes of `PlanNode` has no time zone: only the binder
 gives the casts and functions of a query the zone of the session, and such a plan
 computes in UTC.
 

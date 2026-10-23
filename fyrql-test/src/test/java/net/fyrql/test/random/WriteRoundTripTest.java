@@ -30,6 +30,7 @@ import net.fyrql.sql.render.DuckDbDialect;
 import net.fyrql.sql.render.SqlRenderer;
 import net.fyrql.test.DuckDbReference;
 import net.fyrql.test.ResultComparison;
+import net.fyrql.test.Rows;
 import net.fyrql.test.WrittenFiles;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -91,7 +92,8 @@ class WriteRoundTripTest {
                 List<Object[]> rows;
                 try (QueryResult r = engine.sql(sql)) {
                     schema = r.schema();
-                    rows = r.rows();
+                    // In the form of vectors, which asWritten and the readers take.
+                    rows = Rows.internal(schema, r.rows());
                 } catch (RuntimeException | StackOverflowError e) {
                     failed++;
                     continue;

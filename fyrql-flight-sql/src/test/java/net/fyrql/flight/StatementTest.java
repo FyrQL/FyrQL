@@ -64,8 +64,9 @@ class StatementTest {
         assertTrue(info.getEndpoints().get(0).getLocations().isEmpty(), "the endpoint is on this server");
         List<Batch> batches = TestServer.batches(client, info);
         assertEquals(plan.schema(), batches.get(0).schema());
-        assertEquals(TestServer.comparable(server.engine.rows(plan)), TestServer.comparable(batches.stream()
-                .flatMap(b -> b.rows().stream()).toList()));
+        // The batches of the engine, whose values are in the form of vectors, as those of the server.
+        assertEquals(TestServer.comparable(server.engine.batches(plan).stream().flatMap(b -> b.rows().stream())
+                .toList()), TestServer.comparable(batches.stream().flatMap(b -> b.rows().stream()).toList()));
         assertEquals(0, server.server.handles(), "the ticket is redeemed once");
     }
 

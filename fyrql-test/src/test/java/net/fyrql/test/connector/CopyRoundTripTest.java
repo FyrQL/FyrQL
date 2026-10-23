@@ -32,6 +32,7 @@ import net.fyrql.sql.SqlException;
 import net.fyrql.test.CorpusTables;
 import net.fyrql.test.DuckDbReference;
 import net.fyrql.test.ResultComparison;
+import net.fyrql.test.Rows;
 import net.fyrql.test.WrittenFiles;
 import net.fyrql.test.random.RandomTables;
 import org.junit.jupiter.api.AfterAll;
@@ -132,7 +133,8 @@ class CopyRoundTripTest {
         List<Object[]> rows;
         try (QueryResult r = engine.sql(query)) {
             schema = r.schema();
-            rows = r.rows();
+            // In the form of vectors, as the readers below give them.
+            rows = Rows.internal(schema, r.rows());
         }
         assertEquals(rows.size(), engine.update("COPY (" + query + ") TO '" + path(file) + "'"));
 

@@ -16,7 +16,6 @@ import net.fyrql.connector.jdbc.JdbcConnector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
-import net.fyrql.core.value.Conversions;
 import net.fyrql.test.db.TestDatabase;
 import net.fyrql.test.db.TestDatabases;
 import org.junit.jupiter.api.BeforeAll;
@@ -81,9 +80,8 @@ class MySqlConnectorTest {
             Object[] first = rows.get(0);
             Object[] expected = {1, true, true, new byte[] {5}, (short) 255, 4294967295L,
                     new BigInteger("18446744073709551615"), -8388608, new BigDecimal("12.34"), 0.5f, 0.25, "abc",
-                    "text", "y", first[14], new byte[] {1, 2}, Math.toIntExact(LocalDate.of(2020, 2, 29).toEpochDay()),
-                    Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 0, 0, 0, 123_456_000)),
-                    Conversions.toMicros(LocalDateTime.of(2020, 1, 1, 10, 0)), "13:45:00"};
+                    "text", "y", first[14], new byte[] {1, 2}, LocalDate.of(2020, 2, 29),
+                    LocalDateTime.of(2020, 1, 1, 0, 0, 0, 123_456_000), LocalDateTime.of(2020, 1, 1, 10, 0), "13:45:00"};
             assertTrue(Arrays.deepEquals(expected, first), Arrays.deepToString(first));
             assertTrue(((String) first[14]).contains("\"a\""), (String) first[14]);
             Object[] nulls = rows.get(1);
