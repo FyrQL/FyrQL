@@ -1043,8 +1043,8 @@ takes effect at once. The methods of transactions are accepted, since tools call
 they connect, and do nothing: after `setAutoCommit(false)`, `getAutoCommit()` is still
 `true`, `commit()` does nothing, and `rollback()` after a statement that wrote undoes
 nothing. Savepoints fail with `0A000`. `setReadOnly(true)` makes a statement that writes
-fail with `25006`. Results are read forward only, a call runs one statement and not a script, and
-there are no stored procedures and no generated keys.
+fail with `25006`. Results are read forward only, a call runs one statement and not a script,
+and there are no stored procedures and no generated keys.
 
 ### DBeaver
 
@@ -1236,26 +1236,27 @@ server leaves the engine open. That engine keeps the file access it was built wi
 The server runs queries as the JDBC driver does: a `SELECT`, `WITH`, `VALUES` or set
 operation, or `EXPLAIN` or `EXPLAIN ANALYZE` followed by a statement, which gives the
 plan as rows of one column `plan`; `EXPLAIN ANALYZE` runs when the client reads its
-stream, and an update with `EXPLAIN` fails with `INVALID_ARGUMENT`. A query is bound when the client asks for it, and its batches go out as the
-engine gives them, as fast as the client takes them; a client that cancels the query, or
-closes its stream before the end, stops it. A prepared statement tells the types of its
-parameters as their schema and takes one row of values. The calls for metadata give the
-sources as catalogs with their schemas, tables and columns, the table type `TABLE`, the
-name `FyrQL` and the version of the server, and the types. A statement that
-[writes](#writing-and-loading) runs as an update, whose answer is the number of rows written, or,
-sent as a query, when the client asks for its flight info, which then gives the row of
-`Count`. A prepared statement that writes has a result without columns, as the Flight SQL
-JDBC driver of Arrow expects, and runs once for each row of values the client sends; at
-a row that fails, the rows before it stay written. `COPY` reads and writes files on the
-machine of the server, with paths relative to its working directory, as far as the
-[file access](#file-access) of the engine allows. Each statement is a
-transaction of its own, and there is no bulk ingestion. An error has the message of
-FyrQL, with the position in the text, and the status `INVALID_ARGUMENT` for a statement that does not
-parse or bind, values out of range, a failed cast and a write the target refuses,
-`UNAUTHORIZED`, `PERMISSION_DENIED` in gRPC, for a file the engine does not allow,
-`RESOURCE_EXHAUSTED` for the memory budget and `maxQueries`, which counts statements that
-write too, `CANCELLED` for a cancelled query, `TIMED_OUT` for one past its timeout, and
-`INTERNAL` for an error of a source. All clients share the engine, with its threads and its memory budget.
+stream, and an update with `EXPLAIN` fails with `INVALID_ARGUMENT`. A query is bound when
+the client asks for it, and its batches go out as the engine gives them, as fast as the
+client takes them; a client that cancels the query, or closes its stream before the end,
+stops it. A prepared statement tells the types of its parameters as their schema and takes
+one row of values. The calls for metadata give the sources as catalogs with their schemas,
+tables and columns, the table type `TABLE`, the name `FyrQL` and the version of the server,
+and the types. A statement that [writes](#writing-and-loading) runs as an update, whose
+answer is the number of rows written, or, sent as a query, when the client asks for its
+flight info, which then gives the row of `Count`. A prepared statement that writes has a
+result without columns, as the Flight SQL JDBC driver of Arrow expects, and runs once for
+each row of values the client sends; at a row that fails, the rows before it stay written.
+`COPY` reads and writes files on the machine of the server, with paths relative to its
+working directory, as far as the [file access](#file-access) of the engine allows. Each
+statement is a transaction of its own, and there is no bulk ingestion. An error has the
+message of FyrQL, with the position in the text, and the status `INVALID_ARGUMENT` for
+a statement that does not parse or bind, values out of range, a failed cast and a write
+the target refuses, `UNAUTHORIZED`, `PERMISSION_DENIED` in gRPC, for a file the engine does
+not allow, `RESOURCE_EXHAUSTED` for the memory budget and `maxQueries`, which counts statements
+that write too, `CANCELLED` for a cancelled query, `TIMED_OUT` for one past its timeout, and
+`INTERNAL` for an error of a source. All clients share the engine, with its threads and its
+memory budget.
 
 Every client is a [session](#sessions). The server sets the cookie
 `arrow_flight_session_id`, the one the clients of Arrow keep, finds the session of a
@@ -1675,9 +1676,9 @@ in the zone of the session, also inside a `LIST`, `STRUCT` or `MAP`; an `INTERVA
 is an `Integer` of days since 1970-01-01, a `TIMESTAMP` a `Long` of microseconds since
 1970-01-01 00:00:00, a `TIME` one since midnight, and a `TIMESTAMPTZ` one since 1970 in
 UTC; `Values.toJava` and `Values.fromJava` in `net.fyrql.core.type` convert between the
-two. The memory connector takes the classes of `java.time` as well. A plan built in Java from the nodes of `PlanNode` has no time zone: only the binder
-gives the casts and functions of a query the zone of the session, and such a plan
-computes in UTC.
+two. The memory connector takes the classes of `java.time` as well. A plan built in Java
+from the nodes of `PlanNode` has no time zone: only the binder gives the casts and functions
+of a query the zone of the session, and such a plan computes in UTC.
 
 ## Differences from DuckDB
 
@@ -2672,9 +2673,10 @@ apply to them as well.
 
 The JDBC connector is tested against H2, SQLite and PostgreSQL in every build, and through
 the generic dialect against H2 in its modes of compatibility with Oracle, SQL Server and
-MySQL, Derby and HSQLDB, all in memory; PostgreSQL comes as binaries that the build unpacks and starts in a temporary directory, without
-Docker (`-Dfyrql.test.postgres=off` leaves it out). MySQL runs in Docker through
-Testcontainers, in the profile `containers`; without Docker its tests are skipped:
+MySQL, Derby and HSQLDB, all in memory; PostgreSQL comes as binaries that the build unpacks
+and starts in a temporary directory, without Docker (`-Dfyrql.test.postgres=off` leaves it out).
+MySQL runs in Docker through Testcontainers, in the profile `containers`, which the build on
+GitHub turns on; without Docker its tests are skipped:
 
 ```
 ./mvnw -B -ntp verify -P containers

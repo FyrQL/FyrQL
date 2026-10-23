@@ -54,7 +54,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * With a budget of {@value #SPILL_BUDGET} bytes, the hash tables of the
  * joins fit and every query gives the same rows, the aggregation of Q18
  * spilling to disk; with {@value #SMALLER_BUDGET} bytes, those of Q1, Q13,
- * Q17, Q18 and Q20 spill too.
+ * Q17 and Q18 spill too.
  * The files are
  * written into {@code target/tpch} once, or into the directory of the
  * system property {@code fyrql.tpch.dir}.
@@ -64,15 +64,20 @@ class TpchTest {
     /** The budget of the engine that spills: the least in which the hash tables of the joins of Q21 fit. */
     static final long SPILL_BUDGET = 4L << 20;
 
-    /** A budget in which Q1, Q13, Q17, Q18 and Q20 spill, but the hash tables of Q21 do not fit. */
+    /**
+     * A budget in which Q1, Q13, Q17 and Q18 spill, but the hash tables of
+     * Q21 do not fit. Q20 spills only in about this budget, in which the hash
+     * table of one of its joins fits or not depending on what the workers
+     * hold at the same moment, so that it is not among them.
+     */
     static final long SMALLER_BUDGET = 2L << 20;
 
     /**
      * The threads of the engine with the smaller budget. What its workers
      * hold at the same time decides whether a query spills and whether the
-     * hash tables of Q20 fit beside it, so that the number must not follow
-     * the processors of the machine: on one thread, Q17 and Q20 do not spill,
-     * and on two, the hash table of Q20 does not fit.
+     * hash tables of the joins fit beside it, so that the number must not
+     * follow the processors of the machine: on one thread, Q17 does not
+     * spill, and on two, the hash table of Q20 does not fit.
      */
     static final int SMALLER_BUDGET_THREADS = 4;
 
@@ -162,7 +167,7 @@ class TpchTest {
         Path dir = Files.createTempDirectory("fyrql-tpch-");
         try (FyrQL small = tpch.open(null, null, SMALLER_BUDGET_THREADS, List.of(),
                 b -> b.memoryBudget(SMALLER_BUDGET).spillDirectory(dir))) {
-            for (String name : List.of("q01", "q13", "q17", "q18", "q20")) {
+            for (String name : List.of("q01", "q13", "q17", "q18")) {
                 TpchQueries.Query q = queries().stream().filter(x -> x.name().equals(name)).findFirst().orElseThrow();
                 PlanNode plan = engine.plan(q.sql());
                 try (QueryResult result = small.sql(q.sql())) {

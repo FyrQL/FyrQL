@@ -23,10 +23,11 @@ jobs:
           key: maven-${{ runner.os }}-${{ hashFiles('**/pom.xml', '.mvn/wrapper/maven-wrapper.properties') }}
           restore-keys: maven-${{ runner.os }}-
       # Maven retries only 429 and 503 by default; Maven Central sometimes answers 502 or 504. The
-      # profile examples builds and tests the examples against the modules of this build.
+      # profile examples builds and tests the examples against the modules of this build; the
+      # profile containers runs the tests against MySQL in the Docker of the runner as well.
       - run: >-
           ./mvnw -B -ntp
           -Daether.connector.http.retryHandler.count=5
           -Daether.connector.http.retryHandler.serviceUnavailable=429,502,503,504
-          -Pexamples
+          -Pexamples,containers
           verify
