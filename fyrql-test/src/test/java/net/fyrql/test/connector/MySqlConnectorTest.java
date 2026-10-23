@@ -23,8 +23,10 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.List;
 
@@ -73,15 +75,18 @@ class MySqlConnectorTest {
         assertEquals(List.of(DataType.INTEGER, DataType.BOOLEAN, DataType.BOOLEAN, DataType.BLOB, DataType.SMALLINT,
                 DataType.BIGINT, DataType.HUGEINT, DataType.INTEGER, DataType.decimal(10, 2), DataType.FLOAT,
                 DataType.DOUBLE, DataType.VARCHAR, DataType.VARCHAR, DataType.VARCHAR, DataType.VARCHAR, DataType.BLOB,
-                DataType.DATE, DataType.TIMESTAMP, DataType.TIMESTAMP, DataType.VARCHAR), schema.types());
+                DataType.DATE, DataType.TIMESTAMP, DataType.TIMESTAMPTZ, DataType.TIME), schema.types());
         assertFalse(schema.fields().get(0).nullable());
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
             List<Object[]> rows = engine.rows("SELECT * FROM odd ORDER BY id");
             Object[] first = rows.get(0);
+            // A TIMESTAMP of MySQL is an instant: 12:00 at +02 is 10:00 in UTC.
             Object[] expected = {1, true, true, new byte[] {5}, (short) 255, 4294967295L,
                     new BigInteger("18446744073709551615"), -8388608, new BigDecimal("12.34"), 0.5f, 0.25, "abc",
                     "text", "y", first[14], new byte[] {1, 2}, LocalDate.of(2020, 2, 29),
-                    LocalDateTime.of(2020, 1, 1, 0, 0, 0, 123_456_000), LocalDateTime.of(2020, 1, 1, 10, 0), "13:45:00"};
+                    LocalDateTime.of(2020, 1, 1, 0, 0, 0, 123_456_000),
+                    Instant.parse("2020-01-01T10:00:00Z").atZone(engine.timeZone()).toOffsetDateTime(),
+                    LocalTime.of(13, 45)};
             assertTrue(Arrays.deepEquals(expected, first), Arrays.deepToString(first));
             assertTrue(((String) first[14]).contains("\"a\""), (String) first[14]);
             Object[] nulls = rows.get(1);
@@ -97,8 +102,9 @@ class MySqlConnectorTest {
     void aTimestampIsItsInstantInUtcAndFilteredByTheEngine() {
         JdbcConnector connector = db.connector("my");
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
-            // 12:00 at +02 is 10:00 in UTC, after 09:59:59 in UTC.
-            List<Object[]> rows = engine.rows("SELECT id FROM odd WHERE tz >= TIMESTAMP '2020-01-01 10:00:00'");
+            // 12:00 at +02 is 10:00 in UTC, after 09:59:59 in UTC; the literal has its offset, whatever the zone of
+            // the session. MySQL would read it in the zone of its own session, so the engine filters.
+            List<Object[]> rows = engine.rows("SELECT id FROM odd WHERE tz >= TIMESTAMPTZ '2020-01-01 12:00:00+02'");
             assertEquals(1, rows.size());
             assertEquals(1, rows.get(0)[0]);
             String sent = connector.statements().get(connector.statements().size() - 1);
@@ -126,7 +132,9 @@ class MySqlConnectorTest {
     void aLargeResultIsStreamed() {
         JdbcConnector connector = JdbcConnector.builder("my").url(db.url()).user(db.user()).password(db.password())
                 .batchSize(1000).recordStatements(true).build();
+        boolean pushdown;
         try (FyrQL engine = FyrQL.builder().register(connector).build()) {
+            pushdown = engine.pushdown();
             Object[] row = engine.rows("SELECT count(*), sum(n), min(n), max(n) FROM big").get(0);
             assertEquals(100_000L, row[0]);
             assertEquals(5_000_050_000L, ((Number) row[1]).longValue());
@@ -137,6 +145,6 @@ class MySqlConnectorTest {
                     engine.rows("SELECT n FROM big WHERE n > 99990 ORDER BY n DESC LIMIT 2").stream()
                             .map(r -> r[0]).toList());
         }
-        assertTrue(connector.statements().get(1).endsWith(" LIMIT 2"), connector.statements().get(1));
+        assertEquals(pushdown, connector.statements().get(1).endsWith(" LIMIT 2"), connector.statements().get(1));
     }
 }

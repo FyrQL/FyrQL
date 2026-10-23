@@ -602,9 +602,10 @@ public final class JdbcConformance {
         // The generic dialect binds the literals.
         assertEquals(on && generic, filtered.endsWith(" -- parameters: 0, 100"), filtered);
 
-        // The generic dialect orders nothing, so the limit above the order stays with the engine as well.
+        // The generic dialect orders nothing, so the limit above the order stays with the engine as well; MySQL
+        // writes the place of the nulls as a key (t.i IS NULL) in front of each column.
         String limited = sent(engine, connector, "SELECT id, i FROM items ORDER BY i, id LIMIT 5 OFFSET 3");
-        assertEquals(on && !generic, limited.contains(" ORDER BY t.") && limited.endsWith(" LIMIT 8"), limited);
+        assertEquals(on && !generic, limited.contains(" ORDER BY ") && limited.endsWith(" LIMIT 8"), limited);
 
         // Strings are ordered by their bytes only in SQLite.
         String strings = sent(engine, connector, "SELECT id, s FROM items ORDER BY s, id LIMIT 7");
