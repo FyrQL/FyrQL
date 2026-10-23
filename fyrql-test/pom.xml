@@ -478,5 +478,37 @@
 				</plugins>
 			</build>
 		</profile>
+		<profile>
+			<id>tpch-compare</id>
+			<properties>
+				<fyrql.tpch.compare.sf>1</fyrql.tpch.compare.sf>
+			</properties>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>tpch-compare</id>
+								<goals>
+									<goal>test</goal>
+								</goals>
+								<configuration>
+									<argLine>-Xmx8g ${arrow.add-opens} -Duser.timezone=UTC</argLine>
+									<systemPropertyVariables>
+										<fyrql.tpch.compare>${fyrql.tpch.compare.sf}</fyrql.tpch.compare>
+									</systemPropertyVariables>
+									<includes>
+										<include>net/fyrql/test/tpch/TpchComparisonTest.java</include>
+									</includes>
+									<reportNameSuffix>compare</reportNameSuffix>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
 	</profiles>
 </project>

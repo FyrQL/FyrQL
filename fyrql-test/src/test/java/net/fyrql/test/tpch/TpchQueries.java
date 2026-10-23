@@ -50,6 +50,13 @@ final class TpchQueries {
     /** The queries, in the order of their numbers. */
     static final List<Query> ALL = load();
 
+    /**
+     * Not a query of the benchmark: one scan of {@code lineitem} that reads
+     * two columns of every row, as a reference for the cost of reading the
+     * largest file.
+     */
+    static final Query SCAN = new Query("scan", "SELECT sum(l_quantity), max(l_shipdate) FROM lineitem");
+
     private TpchQueries() {
     }
 

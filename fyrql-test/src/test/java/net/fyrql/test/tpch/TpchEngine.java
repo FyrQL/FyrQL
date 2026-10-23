@@ -14,6 +14,7 @@ package net.fyrql.test.tpch;
 import net.fyrql.FyrQL;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.csv.CsvConnector;
+import net.fyrql.connector.jdbc.JdbcDialect;
 import net.fyrql.connector.json.JsonConnector;
 import net.fyrql.connector.json.JsonFormat;
 import net.fyrql.connector.memory.MemoryConnector;
@@ -25,9 +26,13 @@ import net.fyrql.test.DuckDbReference;
 import net.fyrql.test.db.TestDatabase;
 import net.fyrql.test.db.TestDatabases;
 
+import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -45,7 +50,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * {@code json}), and {@code nation} and {@code region} in the memory
  * connector (source {@code mem}). The queries name the tables without a
  * source; each name is found in exactly one. DuckDB reads the same files
- * through views. At the small scale factor, the CSV and the JSON files are
+ * through views, and the tables of the database from their CSV files or,
+ * with {@link #postgresViews(DuckDbReference)}, from the same PostgreSQL
+ * database. At the small scale factor, the CSV and the JSON files are
  * read in parts of 64 KiB. In the database, {@code orders} and
  * {@code customer} have their primary keys, by whose ranges the source
  * reads them in parts: of 250,000 rows, or of 1,000 at the small scale
@@ -90,7 +97,10 @@ final class TpchEngine {
      * Writes the files of a scale factor into a directory unless they are
      * there, and loads the tables of the database into a new database.
      * Above the small scale factor the database must be PostgreSQL; without
-     * it, the test is skipped.
+     * it, the test is skipped. PostgreSQL gathers the statistics of the
+     * tables after loading them, as a database in use has them; without
+     * them, it guesses how many rows a range of keys holds and may scan a
+     * whole table for each part the source reads.
      */
     static TpchEngine load(double scaleFactor, Path dir) {
         TpchData.generate(scaleFactor, dir);
@@ -102,6 +112,7 @@ final class TpchEngine {
                 if (table.store() == TpchTable.Store.DATABASE) {
                     database.copy(table.tableName(), table.schema(), TpchData.file(dir, table), TpchData.DELIMITER);
                     primaryKey(database, table);
+                    database.execute("ANALYZE \"" + table.tableName() + "\"");
                 }
             }
         } else {
@@ -213,11 +224,78 @@ final class TpchEngine {
 
     /** Creates the tables in DuckDB: views over the files, and copies of the tables of the memory connector. */
     void views(DuckDbReference duck) {
+        views(duck, false);
+    }
+
+    /**
+     * Creates the tables in DuckDB as {@link #views(DuckDbReference)} does,
+     * but over the same sources as the engine: {@code orders} and
+     * {@code customer} are views over the tables of the PostgreSQL database,
+     * which DuckDB reads through its extension {@code postgres}. The
+     * extension is installed from the network on first use.
+     */
+    void postgresViews(DuckDbReference duck) {
+        if (database.dialect() != JdbcDialect.POSTGRESQL) {
+            throw new IllegalStateException("The tables of the database are not in PostgreSQL");
+        }
+        try {
+            duck.execute("INSTALL postgres");
+            duck.execute("LOAD postgres");
+        } catch (IllegalStateException e) {
+            throw new IllegalStateException("DuckDB cannot install or load its extension postgres;"
+                    + " installing it needs the network once", e);
+        }
+        duck.execute("ATTACH '" + libpq(database).replace("'", "''") + "' AS pg (TYPE postgres, READ_ONLY)");
+        views(duck, true);
+    }
+
+    /**
+     * The connection string of libpq for a PostgreSQL database: host, port
+     * and database from the JDBC URL, user and password from the database or
+     * else from the parameters of the URL.
+     */
+    private static String libpq(TestDatabase database) {
+        URI uri = URI.create(database.url().substring("jdbc:".length()));
+        Map<String, String> parameters = new HashMap<>();
+        if (uri.getRawQuery() != null) {
+            for (String parameter : uri.getRawQuery().split("&")) {
+                int eq = parameter.indexOf('=');
+                if (eq > 0) {
+                    parameters.put(parameter.substring(0, eq),
+                            URLDecoder.decode(parameter.substring(eq + 1), StandardCharsets.UTF_8));
+                }
+            }
+        }
+        if (database.user() != null) {
+            parameters.put("user", database.user());
+        }
+        if (database.password() != null) {
+            parameters.put("password", database.password());
+        }
+        StringBuilder b = new StringBuilder("host=").append(libpqValue(uri.getHost()))
+                .append(" port=").append(uri.getPort() < 0 ? 5432 : uri.getPort())
+                .append(" dbname=").append(libpqValue(uri.getPath().substring(1)));
+        for (String key : List.of("user", "password")) {
+            if (parameters.containsKey(key)) {
+                b.append(' ').append(key).append('=').append(libpqValue(parameters.get(key)));
+            }
+        }
+        return b.toString();
+    }
+
+    /** A value of a connection string of libpq, in quotes. */
+    private static String libpqValue(String value) {
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
+
+    private void views(DuckDbReference duck, boolean postgres) {
         for (TpchTable table : TpchTable.values()) {
             String name = table.tableName();
             Path file = TpchData.file(dir, table);
             switch (table.store()) {
-                case CSV, DATABASE -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM "
+                case DATABASE -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM "
+                        + (postgres ? "pg.public." + name : TpchData.readCsv(table, file)));
+                case CSV -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM "
                         + TpchData.readCsv(table, file));
                 case JSON -> duck.execute("CREATE OR REPLACE VIEW " + name + " AS SELECT * FROM read_json('"
                         + TpchData.path(file) + "', format = 'newline_delimited', columns = "

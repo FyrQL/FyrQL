@@ -73,8 +73,7 @@ class TpchScale1Test {
     private static final String DUCKDB_MEMORY = "2GB";
 
     /** The reference: one scan of {@code lineitem} that reads two columns of every row. */
-    private static final TpchQueries.Query SCAN = new TpchQueries.Query("scan",
-            "SELECT sum(l_quantity), max(l_shipdate) FROM lineitem");
+    private static final TpchQueries.Query SCAN = TpchQueries.SCAN;
 
     /** The engines in the order of the columns of the report. */
     private static final String[] ENGINES = {"interpreter on one thread", "interpreter on all threads",

@@ -2378,59 +2378,66 @@ with each other.
 
 The 22 TPC-H queries, in the text of the specification with its parameters of validation,
 run over the tables of TPC-H spread across the connectors: `lineitem` as a Parquet file,
-`partsupp` as a CSV file, `orders` and `customer` in PostgreSQL with their primary keys,
-read in parts of 250,000 rows (`splitRows`), `part` and `supplier` as JSON lines, `nation`
-and `region` as Java collections. The data comes from `io.trino.tpch`, a Java port of the
-TPC-H generator, and DuckDB reads the same files for the comparison; it also writes the
-Parquet file from a CSV file of the generator, in row groups of 122,880 rows. The profile
-`tpch` runs them at scale factor 1, see [Building and testing](#building-and-testing).
+`partsupp` as a CSV file, `orders` and `customer` in PostgreSQL with their primary keys
+and statistics, read in parts of 250,000 rows (`splitRows`), `part` and `supplier` as
+JSON lines, `nation` and `region` as Java collections. The data comes from
+`io.trino.tpch`, a Java port of the TPC-H generator; DuckDB writes the Parquet file from a
+CSV file of the generator, in row groups of 122,880 rows. For the comparison, DuckDB reads
+the same sources: the same files, and `orders` and `customer` from the same PostgreSQL
+database through its extension `postgres`. The profile `tpch-compare` runs them at scale
+factor 1, see [Building and testing](#building-and-testing).
 
 The files take about 0.6 GB in `fyrql-test/target/tpch` and are written once; loading
-PostgreSQL takes about 30 s. On the laptop, all 22 queries give the rows of DuckDB in all
-four ways, with a peak of the heap between 0.4 and 1.9 GB; in seconds, the fastest of
-three runs, with version 0.5.5, which read the tables of PostgreSQL in one part:
+PostgreSQL takes 15 to 30 s. FyrQL runs with pushdown and code generation; both engines
+run on one thread and on twelve, DuckDB with a memory limit of 4 GB beside a heap of
+8 GB. Each run is timed from the text of the query to the last row as Java objects,
+parsing and planning included, after a collection of the heap that is not timed. Every
+query runs in each of the four ways once to warm up and then five times in a row, the
+four ways in the order of the columns and in the opposite order for every other query,
+so that a slower processor hits all four alike. In seconds, the median of the five runs,
+with version 0.13.5:
 
-| Query | Interpreted, 1 thread | Interpreted, 12 threads | Compiled, 1 thread | Compiled, 12 threads | DuckDB |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Scan of `lineitem` | 0.17 | 0.04 | 0.17 | 0.04 | 0.01 |
-| Q1 | 2.41 | 0.57 | 1.38 | 0.31 | 0.09 |
-| Q2 | 0.56 | 0.19 | 0.55 | 0.20 | 0.25 |
-| Q3 | 1.10 | 0.51 | 0.95 | 0.49 | 0.25 |
-| Q4 | 0.67 | 0.34 | 0.59 | 0.32 | 0.19 |
-| Q5 | 1.15 | 0.59 | 1.07 | 0.58 | 1.16 |
-| Q6 | 0.77 | 0.17 | 0.59 | 0.14 | 0.03 |
-| Q7 | 2.79 | 1.58 | 2.10 | 1.44 | 0.26 |
-| Q8 | 1.58 | 0.82 | 1.49 | 0.80 | 0.28 |
-| Q9 | 2.25 | 1.02 | 2.02 | 1.06 | 0.45 |
-| Q10 | 1.42 | 0.61 | 1.16 | 0.53 | 0.31 |
-| Q11 | 0.43 | 0.14 | 0.40 | 0.16 | 0.23 |
-| Q12 | 1.94 | 1.04 | 1.78 | 0.95 | 0.25 |
-| Q13 | 2.26 | 2.25 | 1.90 | 1.89 | 0.34 |
-| Q14 | 0.89 | 0.40 | 0.80 | 0.33 | 0.15 |
-| Q15 | 1.47 | 0.71 | 1.29 | 0.61 | 0.09 |
-| Q16 | 0.48 | 0.28 | 0.42 | 0.26 | 0.30 |
-| Q17 | 1.57 | 1.07 | 1.50 | 0.98 | 0.20 |
-| Q18 | 2.33 | 2.04 | 2.24 | 2.00 | 0.61 |
-| Q19 | 1.94 | 0.93 | 1.76 | 0.83 | 0.21 |
-| Q20 | 1.42 | 0.82 | 1.12 | 0.68 | 0.29 |
-| Q21 | 3.91 | 2.39 | 2.07 | 1.41 | 0.60 |
-| Q22 | 1.03 | 0.93 | 0.93 | 0.92 | 0.37 |
-| All 22 queries | 34.4 | 19.4 | 28.1 | 16.9 | 6.9 |
+| Query | FyrQL, 1 thread | DuckDB, 1 thread | FyrQL, 12 threads | DuckDB, 12 threads |
+| --- | ---: | ---: | ---: | ---: |
+| Scan of `lineitem` | 0.21 | 0.03 | 0.05 | 0.01 |
+| Q1 | 1.46 | 0.33 | 0.34 | 0.09 |
+| Q2 | 0.55 | 0.61 | 0.25 | 0.24 |
+| Q3 | 0.98 | 0.55 | 0.54 | 0.22 |
+| Q4 | 0.61 | 0.26 | 0.36 | 0.13 |
+| Q5 | 1.02 | 2.90 | 0.54 | 1.19 |
+| Q6 | 0.60 | 0.15 | 0.15 | 0.04 |
+| Q7 | 2.04 | 0.60 | 1.31 | 0.26 |
+| Q8 | 1.46 | 0.57 | 0.85 | 0.26 |
+| Q9 | 1.97 | 0.96 | 1.07 | 0.49 |
+| Q10 | 1.17 | 0.48 | 0.80 | 0.36 |
+| Q11 | 0.47 | 0.64 | 0.23 | 0.32 |
+| Q12 | 2.17 | 0.60 | 1.44 | 0.44 |
+| Q13 | 1.90 | 0.74 | 1.34 | 0.64 |
+| Q14 | 0.90 | 0.28 | 0.39 | 0.13 |
+| Q15 | 1.33 | 0.14 | 0.65 | 0.07 |
+| Q16 | 0.50 | 0.46 | 0.28 | 0.29 |
+| Q17 | 1.22 | 0.26 | 0.72 | 0.15 |
+| Q18 | 1.98 | 1.15 | 1.71 | 0.73 |
+| Q19 | 1.69 | 0.37 | 0.85 | 0.18 |
+| Q20 | 1.15 | 0.46 | 0.58 | 0.30 |
+| Q21 | 1.87 | 0.76 | 1.28 | 0.55 |
+| Q22 | 0.93 | 0.45 | 0.89 | 0.34 |
+| All 22 queries | 28.0 | 13.7 | 16.5 | 7.4 |
 
-On twelve threads, Q1 and
-Q6, which read `lineitem` and aggregate it into few groups, take less than a quarter of
-the time of one thread, and most other queries a third to two thirds. Q13 and Q22 read
-only the orders and customers of PostgreSQL and gained nothing in one part. Read in parts,
-in runs without and with them in turn, compiled on twelve threads, Q13 takes 1.2 to 1.3 s
-instead of 1.7 to 2.0 s, Q18 1.2 to 1.3 s instead of 1.7 s, and all 22 queries 16.0 s
-instead of 17.2 s; Q22 still gains little, since PostgreSQL runs its `NOT EXISTS` over
-the customers and orders on one core. Run once
-and cold on one thread, before queries ran on several threads, the 22 queries took 47.7 s
-in the interpreter and 41.4 s compiled; with `lineitem` as a CSV file, 79.4 s, 74.7 s and
-45.4 s in DuckDB, and before the CSV files were read into typed columns, joins and
-aggregations kept their values in primitive arrays and pipelines were compiled, the
-interpreter took 287 s. Q15, Q17 and Q18 read `lineitem` twice, once for the subquery,
-and Q21 three times.
+All 22 queries take FyrQL 2.0 times as long as DuckDB on one thread and 2.2 times as long
+on twelve. FyrQL is faster in Q5, in which, as in Q3, Q7, Q8 and Q10, PostgreSQL joins
+the customers and orders for FyrQL, and in Q11, and as fast in Q2 and Q16; these three
+read only the smaller tables. DuckDB is furthest ahead where a query reads much of
+`lineitem`, such as Q1, Q6, Q15, Q17 and Q19: in Q6, nine tenths of the time of FyrQL
+on one thread go to reading the Parquet file. Q15, Q17 and Q18 read `lineitem` twice,
+once for the subquery, and Q21 three times. On twelve threads, Q1 and Q6 take FyrQL a
+quarter of the time of one thread or less, and most other queries two fifths to three
+quarters; Q18 gains little, and Q22 nothing, since PostgreSQL runs its `NOT EXISTS` over
+the customers and orders on one core. The profile `tpch` checks that all 22 queries give
+the rows of DuckDB, in the interpreter and compiled, on one thread and on all. With
+version 0.5.5, timed from the plan and with DuckDB reading `orders` and `customer` from
+CSV files, the 22 queries took 34.4 s in the interpreter on one thread and 19.4 s on
+twelve.
 
 ### Compiled code and scans
 
@@ -2747,3 +2754,13 @@ the profile runs the queries with code generation on all threads without a limit
 within the budget instead, and writes the times and what each query spilled into
 `fyrql-test/target/tpch-spill-report.md`; see
 [Performance](#spilling) for the figures.
+
+The profile `tpch-compare` times the queries in FyrQL and DuckDB over the same sources,
+as [Performance](#tpc-h-at-scale-factor-1) describes, and writes the median and the
+fastest of five runs of every query into `fyrql-test/target/tpch-compare-report.md`;
+DuckDB installs its extension `postgres` from the network on the first run, and
+`-Dfyrql.tpch.compare.sf=0.01` runs the comparison at a small scale factor:
+
+```
+./mvnw -B -ntp verify -P tpch-compare -Dtest=TpchComparisonTest -Dsurefire.failIfNoSpecifiedTests=false
+```
