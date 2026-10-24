@@ -185,6 +185,41 @@ class ParallelSortWindowTest {
         assertEquals(0, source.open.get(), "every reader is closed");
     }
 
+    @Test
+    void resultsOverTheBudgetFailAfterSpilling() {
+        SplittableRandom random = new SplittableRandom(20261025);
+        int n = 6000;
+        List<Object[]> rows = rows(random, n, false);
+        for (Object[] row : rows) {
+            // Partitions of about 60 rows, whose rows fit in the budget but not the lists of their frames.
+            row[MANY] = (long) random.nextInt(n / 60);
+        }
+        PlanNode.Scan scan = source.table("lists", SCHEMA, rows, splits(random, n));
+        long total = Batches.estimateBytes(Batch.ofRows(SCHEMA, rows));
+        Frame growing = new Frame(FrameUnit.ROWS, FrameBound.of(BoundKind.UNBOUNDED_PRECEDING),
+                FrameBound.of(BoundKind.CURRENT_ROW), FrameExclusion.NO_OTHERS);
+        PlanNode.Window counts = new PlanNode.Window(scan, List.of(MANY), List.of(SortKey.asc(ID)),
+                List.of(WindowCall.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "count_star"),
+                        growing)));
+        PlanNode.Window window = new PlanNode.Window(scan, List.of(MANY), List.of(SortKey.asc(ID)),
+                List.of(WindowCall.of(new AggregateCall(AggregateFunction.LIST, S, false, "list", null,
+                        List.of(SortKey.asc(S))), growing)));
+        assertTrue(run(window, 1, true) instanceof List<?>, "the window runs in memory");
+        try (SpillDirectory spill = new SpillDirectory(temp)) {
+            for (int threads : new int[] {1, 4}) {
+                long parts = spill.statistics().parts();
+                Object counted = run(counts, threads, true, total / 8, spill);
+                assertTrue(counted instanceof List<?>, "the counts of the frames fit: " + counted);
+                assertTrue(spill.statistics().parts() > parts, "the input went to disk");
+                Object failed = run(window, threads, true, total / 8, spill);
+                assertTrue(failed instanceof QueryException e && e.getMessage().matches("Memory budget of \\d+"
+                        + " bytes exceeded: \\d+ bytes needed after spilling \\d+ bytes in Window#0"),
+                        String.valueOf(failed));
+            }
+        }
+        assertEquals(0, source.open.get(), "every reader is closed");
+    }
+
     private static void assertSame(Object expected, Object actual, String what) {
         if (expected instanceof RuntimeException e) {
             if (!(actual instanceof RuntimeException a)) {

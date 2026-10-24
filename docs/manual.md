@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.15.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.15.1 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -1427,12 +1427,12 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.15.0</version>
+    <version>0.15.1</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.15.0</version>
+    <version>0.15.1</version>
 </dependency>
 ```
 
@@ -2305,7 +2305,11 @@ others when they do not fit, with the SQL state `53200` in the JDBC driver and
   `DISTINCT` and `ORDER BY`. An aggregation without keys does not spill; its one group
   must fit.
 - A **window** sorts its rows as a sort does and computes whole partitions as they come;
-  a partition must fit, so that a window without `PARTITION BY` does not spill.
+  a partition must fit with the results of its calls, so that a window without
+  `PARTITION BY` does not spill. An aggregate over the frame of each row holds a result
+  for each row: a `list` or `string_agg` over frames that grow with the rows holds
+  n * (n + 1) / 2 values for a partition of n rows, and fails with `Memory budget of ...
+  bytes exceeded` when they do not fit.
 - Joins, `EXCEPT` and `INTERSECT` do not spill.
 
 The files go to a directory of the engine under the setting `spillDirectory`, by default

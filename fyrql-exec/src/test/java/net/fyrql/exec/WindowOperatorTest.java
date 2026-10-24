@@ -891,14 +891,61 @@ class WindowOperatorTest {
         for (int i = 0; i < 2000; i++) {
             data.add(new Object[] {i % 10});
         }
-        // Two million values over all frames, two thousand at a time.
+        // Two million values over all frames, two thousand at a time; the strings of the results take 4 MB.
         PlanNode.Window w = new PlanNode.Window(new PlanNode.Values(s, data), List.of(), List.of(SortKey.asc(0)),
                 List.of(aggregate(AggregateFunction.STRING_AGG, 0, rows(bound(BoundKind.UNBOUNDED_PRECEDING),
                         bound(BoundKind.CURRENT_ROW)), "s"), aggregate(AggregateFunction.SUM, 0,
                         rows(bound(BoundKind.PRECEDING, 5), bound(BoundKind.FOLLOWING, 5)), "sum")));
-        MemoryBudget budget = new MemoryBudget(2 << 20);
+        MemoryBudget budget = new MemoryBudget(8 << 20);
         List<Batch> out = executor(budget, 1024).execute(w);
         assertEquals(2000, out.stream().mapToInt(Batch::rowCount).sum());
         assertEquals(0, budget.used());
+        MemoryBudget small = new MemoryBudget(2 << 20);
+        QueryException e = assertThrows(QueryException.class, () -> executor(small, 1024).execute(w));
+        assertTrue(e.getMessage().startsWith("Memory budget of 2097152 bytes exceeded"), e.getMessage());
+        assertEquals(0, small.used());
+    }
+
+    @Test
+    void theResultsOfTheFramesTakeTheBudget() {
+        Schema s = Schema.of(new Schema.Field("v", DataType.VARCHAR), new Schema.Field("w", DataType.VARCHAR));
+        List<Object[]> data = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            data.add(new Object[] {"v" + i % 10, String.format("%04d", i).repeat(250)});
+        }
+        PlanNode.Values values = new PlanNode.Values(s, data);
+        Frame growing = rows(bound(BoundKind.UNBOUNDED_PRECEDING), bound(BoundKind.CURRENT_ROW));
+        // A list of half a million strings over all frames, about 25 MB, and a string of 1000 characters for
+        // each row, about 1 MB, while the frames themselves keep at most a thousand values.
+        List<Map.Entry<WindowCall, Long>> calls = List.of(
+                Map.entry(WindowCall.of(new AggregateCall(AggregateFunction.LIST, 0, false, "list", null,
+                        List.of(SortKey.desc(0))), growing), 4L << 20),
+                Map.entry(aggregate(AggregateFunction.MAX, 1, growing, "max"), 1536L << 10));
+        for (Map.Entry<WindowCall, Long> c : calls) {
+            PlanNode.Window w = new PlanNode.Window(values, List.of(), List.of(SortKey.asc(1)),
+                    List.of(c.getKey()));
+            MemoryBudget budget = new MemoryBudget(64 << 20);
+            List<Batch> out = executor(budget, 1024).execute(w);
+            assertEquals(1000, out.stream().mapToInt(Batch::rowCount).sum());
+            assertEquals(0, budget.used());
+            MemoryBudget small = new MemoryBudget(c.getValue());
+            QueryException e = assertThrows(QueryException.class, () -> executor(small, 1024).execute(w),
+                    c.getKey().name());
+            assertTrue(e.getMessage().startsWith("Memory budget of " + c.getValue() + " bytes exceeded"),
+                    e.getMessage());
+            assertEquals(0, small.used());
+        }
+    }
+
+    @Test
+    void theBytesOfAResultGrowWithWhatItHolds() {
+        assertEquals(0, ValueAccumulator.resultBytes(null));
+        assertEquals(0, ValueAccumulator.resultBytes(42L));
+        assertEquals(0, ValueAccumulator.resultBytes(new BigDecimal("1.5")));
+        assertEquals(43, ValueAccumulator.resultBytes("abc"));
+        assertEquals(20, ValueAccumulator.resultBytes(new byte[4]));
+        assertEquals(16 + 3 * 8 + 41 + 42, ValueAccumulator.resultBytes(Arrays.asList("a", null, "bc")));
+        assertEquals(16 + 8 + 16 + 8 + 41, ValueAccumulator.resultBytes(List.of(List.of("a"))));
+        assertEquals(32 + 32 + 41, ValueAccumulator.resultBytes(Map.of("a", 1)));
     }
 }

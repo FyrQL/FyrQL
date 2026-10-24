@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.LongConsumer;
 
@@ -97,6 +98,34 @@ final class ValueAccumulator {
     static boolean mergeable(AggregateCall call) {
         return !call.distinct() && call.orderBy().isEmpty() && call.function() != AggregateFunction.STRING_AGG
                 && call.function() != AggregateFunction.LIST;
+    }
+
+    /**
+     * Estimates the bytes a result takes on the heap beyond a value of a
+     * fixed size: strings, blobs, lists, structs and maps with what they
+     * hold, as {@code Batches.estimateBytes} counts vectors; 0 for numbers
+     * and the other values of a fixed size.
+     */
+    static long resultBytes(Object value) {
+        return switch (value) {
+            case String s -> 40 + s.length();
+            case byte[] b -> 16 + b.length;
+            case List<?> l -> {
+                long sum = 16 + 8L * l.size();
+                for (Object e : l) {
+                    sum += resultBytes(e);
+                }
+                yield sum;
+            }
+            case Map<?, ?> m -> {
+                long sum = 32 + 32L * m.size();
+                for (Map.Entry<?, ?> e : m.entrySet()) {
+                    sum += resultBytes(e.getKey()) + resultBytes(e.getValue());
+                }
+                yield sum;
+            }
+            case null, default -> 0;
+        };
     }
 
     /**

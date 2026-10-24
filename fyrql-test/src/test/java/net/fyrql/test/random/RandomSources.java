@@ -69,6 +69,13 @@ final class RandomSources {
     static final List<String> ICEBERG = List.of("part", "pos_v2", "eq_v2", "dv_v3", "evo", "v1");
 
     /**
+     * The memory budget of the engines, large enough that the queries
+     * rarely spill, so that the checks test the sources: a query whose
+     * result does not fit counts as out of the budget.
+     */
+    static final long BUDGET = 256L << 20;
+
+    /**
      * A source of tables: its name, an engine over it, the tables with
      * their columns as the engine reads them, and the check that it did its
      * part of the work, to run after the queries.
@@ -83,11 +90,14 @@ final class RandomSources {
     private RandomSources() {
     }
 
-    /** An engine over a source as the random queries run: batches of 16 rows, the time zone of the tables. */
+    /**
+     * An engine over a source as the random queries run: batches of 16
+     * rows, the time zone of the tables, the {@linkplain #BUDGET budget}.
+     */
     private static Source source(String name, Connector connector, List<String> names,
             Function<FyrQL, Runnable> check) {
         FyrQL engine = FyrQL.builder().register(connector).defaultSource(connector.name()).batchSize(16)
-                .timeZone(RandomTables.ZONE).build();
+                .timeZone(RandomTables.ZONE).memoryBudget(BUDGET).build();
         Map<String, Schema> tables = new LinkedHashMap<>();
         for (String table : names) {
             tables.put(table, engine.plan("SELECT * FROM " + table).schema());

@@ -89,8 +89,7 @@ public final class Order {
             case HUGEINT -> ((BigInteger) a).compareTo((BigInteger) b);
             case FLOAT -> compare(((Float) a).floatValue(), ((Float) b).floatValue());
             case DOUBLE -> compare(((Double) a).doubleValue(), ((Double) b).doubleValue());
-            case VARCHAR -> Arrays.compareUnsigned(((String) a).getBytes(StandardCharsets.UTF_8),
-                    ((String) b).getBytes(StandardCharsets.UTF_8));
+            case VARCHAR -> compare((String) a, (String) b);
             case BLOB -> Arrays.compareUnsigned((byte[]) a, (byte[]) b);
             case UUID -> {
                 UUID x = (UUID) a;
@@ -100,6 +99,33 @@ public final class Order {
             }
             case INTERVAL -> ((Interval) a).compareTo((Interval) b);
         };
+    }
+
+    /**
+     * Compares two strings by their UTF-8 bytes, mostly without them. The
+     * chars before the first that differ are the same bytes in both
+     * strings, and those two decide as code points do, which UTF-8 keeps
+     * in order; only a surrogate there takes the bytes, since a surrogate
+     * without its other half is a {@code ?} in UTF-8 and a pair is one code
+     * point. A string that begins the other sorts first: its bytes begin
+     * those of the other, or end in a {@code ?} for a high surrogate where
+     * the other has the greater first byte of a pair.
+     */
+    private static int compare(String a, String b) {
+        int n = Math.min(a.length(), b.length());
+        for (int i = 0; i < n; i++) {
+            char x = a.charAt(i);
+            char y = b.charAt(i);
+            if (x != y) {
+                return Character.isSurrogate(x) || Character.isSurrogate(y) ? compareBytes(a, b)
+                        : Character.compare(x, y);
+            }
+        }
+        return Integer.compare(a.length(), b.length());
+    }
+
+    private static int compareBytes(String a, String b) {
+        return Arrays.compareUnsigned(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
     }
 
     /** Compares two values where either may be {@code null}, which sorts last. */

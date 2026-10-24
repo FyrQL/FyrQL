@@ -87,6 +87,8 @@ final class WindowOperator extends AbstractOperator {
     private static final long BYTES_PER_KEY = 32;
     private static final long BYTES_PER_INDEX = 8;
     private static final long BYTES_PER_NODE = 128;
+    /** The bytes of the results of an aggregate a thread collects before it reserves them. */
+    private static final long RESULT_STEP = 64 * 1024;
     /** The fewest rows of a range of partitions of its own, see {@link #ranges}. */
     private static final int MIN_RANGE_ROWS = 4096;
 
@@ -857,7 +859,11 @@ final class WindowOperator extends AbstractOperator {
         }
     }
 
-    /** An aggregate over the frame of each row. */
+    /**
+     * An aggregate over the frame of each row. The results stay in the
+     * budget as long as the rows, since a string or a list of the frame
+     * of each row may grow with the frame.
+     */
     private final class Aggregates extends Result {
         private final Object[] values;
         private final boolean mergeable;
@@ -880,6 +886,9 @@ final class WindowOperator extends AbstractOperator {
             long treeBytes = 0;
             f.lastCount = -1;
             Object last = null;
+            // The bytes of the last result, which each of its rows takes again in the vector of the results.
+            long lastBytes = 0;
+            long unreserved = 0;
             for (int i = start; i < end; i++) {
                 step(f);
                 frame(f, i);
@@ -912,8 +921,17 @@ final class WindowOperator extends AbstractOperator {
                         last = acc.result();
                         f.release(f.held - held);
                     }
+                    lastBytes = ValueAccumulator.resultBytes(last);
                 }
                 values[i] = last;
+                unreserved += lastBytes;
+                if (unreserved >= RESULT_STEP) {
+                    f.reserve(unreserved);
+                    unreserved = 0;
+                }
+            }
+            if (unreserved > 0) {
+                f.reserve(unreserved);
             }
             f.release(treeBytes);
         }
