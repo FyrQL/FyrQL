@@ -15,9 +15,9 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<parent>
-		<groupId>io.github.stefan-zobel</groupId>
+		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.7</version>
+		<version>0.13.8</version>
 	</parent>
 
 	<artifactId>fyrql-config</artifactId>
@@ -30,11 +30,11 @@
 
 	<dependencies>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-engine</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-spi</artifactId>
 		</dependency>
 		<!--
@@ -56,52 +56,52 @@
 			</exclusions>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-csv</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-json</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-http</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-odata</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-parquet</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-jdbc</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-memory</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-s3</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-iceberg</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-s3</artifactId>
 			<type>test-jar</type>
 			<scope>test</scope>

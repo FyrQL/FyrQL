@@ -15,9 +15,9 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<parent>
-		<groupId>io.github.stefan-zobel</groupId>
+		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.7</version>
+		<version>0.13.8</version>
 	</parent>
 
 	<artifactId>fyrql-flight-sql-all</artifactId>
@@ -37,11 +37,11 @@
 	-->
 	<dependencies>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-flight-sql</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-codegen</artifactId>
 			<!-- In the reactor the dependencies the module renames into its own JAR would come along. -->
 			<exclusions>
@@ -52,19 +52,19 @@
 			</exclusions>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-memory</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-csv</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-json</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-parquet</artifactId>
 			<exclusions>
 				<exclusion>
@@ -74,28 +74,28 @@
 			</exclusions>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-http</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-odata</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-jdbc</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-s3</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-iceberg</artifactId>
 			<!-- The Parquet connector it reads its data files with is above, with what it renamed into its JAR. -->
 			<exclusions>
 				<exclusion>
-					<groupId>io.github.stefan-zobel</groupId>
+					<groupId>io.github.fyrql</groupId>
 					<artifactId>fyrql-connector-parquet</artifactId>
 				</exclusion>
 			</exclusions>
@@ -137,7 +137,7 @@
 						</goals>
 						<configuration>
 							<includeScope>runtime</includeScope>
-							<excludeGroupIds>io.github.stefan-zobel</excludeGroupIds>
+							<excludeGroupIds>io.github.fyrql</excludeGroupIds>
 							<excludeArtifactIds>
 								jsr305, error_prone_annotations, j2objc-annotations, annotations, animal-sniffer-annotations,
 								jspecify, javax.annotation-api, listenablefuture
@@ -229,7 +229,7 @@
 								</filter>
 								<filter>
 									<!-- The list and the texts of this JAR name what the configuration carries as well. -->
-									<artifact>io.github.stefan-zobel:fyrql-config</artifact>
+									<artifact>io.github.fyrql:fyrql-config</artifact>
 									<excludes>
 										<exclude>META-INF/licenses/**</exclude>
 										<exclude>META-INF/FastDoubleParser-*</exclude>
@@ -238,7 +238,7 @@
 								</filter>
 								<filter>
 									<!-- The list of this JAR names what the connector carries as well, and the license of SLF4J is the same. -->
-									<artifact>io.github.stefan-zobel:fyrql-connector-parquet</artifact>
+									<artifact>io.github.fyrql:fyrql-connector-parquet</artifact>
 									<excludes>
 										<exclude>META-INF/licenses/THIRD-PARTY.txt</exclude>
 										<exclude>META-INF/licenses/slf4j-LICENSE.txt</exclude>

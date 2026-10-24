@@ -15,9 +15,9 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<parent>
-		<groupId>io.github.stefan-zobel</groupId>
+		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.7</version>
+		<version>0.13.8</version>
 	</parent>
 
 	<artifactId>fyrql-connector-iceberg</artifactId>
@@ -30,12 +30,12 @@
 
 	<dependencies>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-spi</artifactId>
 		</dependency>
 		<!-- The data files, through the public classes of the Parquet connector. -->
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-parquet</artifactId>
 		</dependency>
 		<!-- The metadata files and the schemas inside the manifests. -->

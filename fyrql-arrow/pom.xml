@@ -15,9 +15,9 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<parent>
-		<groupId>io.github.stefan-zobel</groupId>
+		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.7</version>
+		<version>0.13.8</version>
 	</parent>
 
 	<artifactId>fyrql-arrow</artifactId>
@@ -31,7 +31,7 @@
 
 	<dependencies>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-engine</artifactId>
 		</dependency>
 		<dependency>
@@ -49,13 +49,13 @@
 			<scope>runtime</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-jdbc</artifactId>
 			<type>test-jar</type>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-memory</artifactId>
 			<scope>test</scope>
 		</dependency>

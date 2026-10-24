@@ -22,24 +22,24 @@
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<maven.compiler.release>21</maven.compiler.release>
-		<fyrql.version>0.13.7</fyrql.version>
+		<fyrql.version>0.13.8</fyrql.version>
 		<h2.version>2.5.252</h2.version>
 		<junit.version>6.1.3</junit.version>
 	</properties>
 
 	<dependencies>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-jdbc</artifactId>
 			<version>${fyrql.version}</version>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-jdbc</artifactId>
 			<version>${fyrql.version}</version>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-csv</artifactId>
 			<version>${fyrql.version}</version>
 		</dependency>

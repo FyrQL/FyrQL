@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.13.7 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.13.8 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -1419,14 +1419,14 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 
 ```xml
 <dependency>
-    <groupId>io.github.stefan-zobel</groupId>
+    <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.7</version>
+    <version>0.13.8</version>
 </dependency>
 <dependency>
-    <groupId>io.github.stefan-zobel</groupId>
+    <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.13.7</version>
+    <version>0.13.8</version>
 </dependency>
 ```
 

@@ -9,7 +9,7 @@ newest one.
 ## Reporting a vulnerability
 
 Please report a vulnerability privately, through
-[Private vulnerability reporting](https://github.com/stefan-zobel/fyrql/security/advisories/new)
+[Private vulnerability reporting](https://github.com/FyrQL/FyrQL/security/advisories/new)
 of GitHub, and not in a public issue. A report that names the version, the setting, the
 statement or file that shows the problem and what it lets an attacker do helps most.
 

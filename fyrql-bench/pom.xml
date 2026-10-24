@@ -15,9 +15,9 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<parent>
-		<groupId>io.github.stefan-zobel</groupId>
+		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.7</version>
+		<version>0.13.8</version>
 	</parent>
 
 	<artifactId>fyrql-bench</artifactId>
@@ -32,19 +32,19 @@
 
 	<dependencies>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-exec</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-codegen</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-csv</artifactId>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-parquet</artifactId>
 			<!-- In the reactor the dependencies the connector renames into its own JAR would come along. -->
 			<exclusions>
@@ -55,7 +55,7 @@
 			</exclusions>
 		</dependency>
 		<dependency>
-			<groupId>io.github.stefan-zobel</groupId>
+			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-arrow</artifactId>
 		</dependency>
 		<!-- Writes the Parquet file of ParquetScanBenchmark, as it writes the files of the TPC-H tests. -->

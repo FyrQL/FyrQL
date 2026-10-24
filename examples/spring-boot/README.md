@@ -14,17 +14,17 @@ sources:
 
 ```xml
 <dependency>
-    <groupId>io.github.stefan-zobel</groupId>
+    <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
     <version>${fyrql.version}</version>
 </dependency>
 <dependency>
-    <groupId>io.github.stefan-zobel</groupId>
+    <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
     <version>${fyrql.version}</version>
 </dependency>
 <dependency>
-    <groupId>io.github.stefan-zobel</groupId>
+    <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
     <version>${fyrql.version}</version>
 </dependency>
