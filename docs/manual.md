@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.13.8 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.14.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -262,18 +262,23 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   `STRUCT`, `LIST` and `MAP` to any depth, and the number of rows comes from the footers.
   A scan reads each row group on its own, and only the columns and the fields of structs
   in use; it takes over a limit without filters, reading only the row groups the limit
-  needs, and `count(*)` without groups and filters, which the footers answer. It takes over
-  no filter, but uses the filters to skip the row groups in which no row can pass, by their
-  statistics, dictionaries and Bloom filters, and the pages of a row group, by its column
-  index: comparisons, `BETWEEN`, `IN` and `IS NULL` on integers, decimals, dates,
-  times of day, timestamps with and without a time zone, strings and booleans, also on fields of structs, under `AND`, `OR` and
-  `NOT`. `explain` does not show these filters; `recordReads(true)` keeps the row groups
-  and columns each scan read. parquet-java holds the column chunks of a row group in
-  memory, compressed, outside the memory budget of the engine. A file in S3 is read in
-  ranges, see `fyrql-connector-s3`; the option `readAhead` (`1MB`) is the size of the
-  reads of the headers of pages, of dictionaries and of indexes there. `read_parquet`
-  takes the named argument `timezone`, as the table functions of CSV and JSON do, but a
-  Parquet file holds its instants in UTC and needs none.
+  needs, and `count(*)` without groups and filters, which the footers answer. It takes
+  over no filter, but uses the filters to skip the row groups in which no row can pass, by
+  their statistics, dictionaries and Bloom filters, and the pages of a row group, by its
+  column index: comparisons, `BETWEEN`, `IN` and `IS NULL` on integers, decimals, dates,
+  times of day, timestamps with and without a time zone, strings and booleans, also on
+  fields of structs, under `AND`, `OR` and `NOT`. `explain` does not show these filters;
+  `recordReads(true)` keeps the row groups and columns each scan read. parquet-java holds
+  the column chunks of a row group in memory, compressed, outside the memory budget of the
+  engine. The connector decodes the pages of primitive columns and of fields of structs
+  outside of lists itself, a page at a time straight into vectors, if their values are in
+  `PLAIN` or in a dictionary; it reads the other encodings, such as the `DELTA` encodings
+  and `BYTE_STREAM_SPLIT`, pages skipped by a column index, lists and maps value by value
+  through parquet-java. A file in S3 is read in ranges, see `fyrql-connector-s3`; the
+  option `readAhead` (`1MB`) is the size of the reads of the headers of pages, of
+  dictionaries and of indexes there. `read_parquet` takes the named argument `timezone`,
+  as the table functions of CSV and JSON do, but a Parquet file holds its instants in UTC
+  and needs none.
 - `fyrql-connector-iceberg`: Apache Iceberg tables, read in pure Java without Hadoop
   and without a catalog: a table is its directory, the one with `metadata/`, or one of its
   metadata files, local or in S3. In a directory, `metadata/version-hint.text` names the
@@ -1421,12 +1426,12 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.8</version>
+    <version>0.14.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.13.8</version>
+    <version>0.14.0</version>
 </dependency>
 ```
 
@@ -2438,49 +2443,50 @@ parsing and planning included, after a collection of the heap that is not timed.
 query runs in each of the four ways once to warm up and then five times in a row, the
 four ways in the order of the columns and in the opposite order for every other query,
 so that a slower processor hits all four alike. In seconds, the median of the five runs,
-with version 0.13.5:
+with version 0.14.0:
 
 | Query | FyrQL, 1 thread | DuckDB, 1 thread | FyrQL, 12 threads | DuckDB, 12 threads |
 | --- | ---: | ---: | ---: | ---: |
-| Scan of `lineitem` | 0.21 | 0.03 | 0.05 | 0.01 |
-| Q1 | 1.46 | 0.33 | 0.34 | 0.09 |
-| Q2 | 0.55 | 0.61 | 0.25 | 0.24 |
-| Q3 | 0.98 | 0.55 | 0.54 | 0.22 |
-| Q4 | 0.61 | 0.26 | 0.36 | 0.13 |
-| Q5 | 1.02 | 2.90 | 0.54 | 1.19 |
-| Q6 | 0.60 | 0.15 | 0.15 | 0.04 |
-| Q7 | 2.04 | 0.60 | 1.31 | 0.26 |
-| Q8 | 1.46 | 0.57 | 0.85 | 0.26 |
-| Q9 | 1.97 | 0.96 | 1.07 | 0.49 |
-| Q10 | 1.17 | 0.48 | 0.80 | 0.36 |
-| Q11 | 0.47 | 0.64 | 0.23 | 0.32 |
-| Q12 | 2.17 | 0.60 | 1.44 | 0.44 |
-| Q13 | 1.90 | 0.74 | 1.34 | 0.64 |
-| Q14 | 0.90 | 0.28 | 0.39 | 0.13 |
-| Q15 | 1.33 | 0.14 | 0.65 | 0.07 |
-| Q16 | 0.50 | 0.46 | 0.28 | 0.29 |
-| Q17 | 1.22 | 0.26 | 0.72 | 0.15 |
-| Q18 | 1.98 | 1.15 | 1.71 | 0.73 |
-| Q19 | 1.69 | 0.37 | 0.85 | 0.18 |
-| Q20 | 1.15 | 0.46 | 0.58 | 0.30 |
-| Q21 | 1.87 | 0.76 | 1.28 | 0.55 |
-| Q22 | 0.93 | 0.45 | 0.89 | 0.34 |
-| All 22 queries | 28.0 | 13.7 | 16.5 | 7.4 |
+| Scan of `lineitem` | 0.13 | 0.04 | 0.07 | 0.03 |
+| Q1 | 0.98 | 0.39 | 0.59 | 0.20 |
+| Q2 | 0.65 | 0.73 | 0.47 | 0.40 |
+| Q3 | 0.78 | 0.62 | 0.60 | 0.44 |
+| Q4 | 0.49 | 0.30 | 0.55 | 0.19 |
+| Q5 | 0.78 | 3.19 | 0.59 | 1.89 |
+| Q6 | 0.38 | 0.18 | 0.16 | 0.06 |
+| Q7 | 1.69 | 0.71 | 1.52 | 0.50 |
+| Q8 | 1.16 | 0.65 | 0.90 | 0.43 |
+| Q9 | 1.63 | 1.10 | 1.26 | 0.71 |
+| Q10 | 0.97 | 0.49 | 0.58 | 0.37 |
+| Q11 | 0.44 | 0.58 | 0.29 | 0.32 |
+| Q12 | 1.64 | 0.61 | 1.19 | 0.44 |
+| Q13 | 2.10 | 0.72 | 1.36 | 0.63 |
+| Q14 | 0.50 | 0.26 | 0.26 | 0.13 |
+| Q15 | 0.68 | 0.13 | 0.37 | 0.07 |
+| Q16 | 0.52 | 0.42 | 0.28 | 0.30 |
+| Q17 | 0.81 | 0.25 | 0.54 | 0.15 |
+| Q18 | 1.68 | 1.10 | 1.58 | 0.72 |
+| Q19 | 1.09 | 0.39 | 0.69 | 0.18 |
+| Q20 | 0.82 | 0.49 | 0.45 | 0.29 |
+| Q21 | 1.25 | 0.76 | 0.98 | 0.55 |
+| Q22 | 0.91 | 0.43 | 0.88 | 0.34 |
+| All 22 queries | 21.9 | 14.5 | 16.1 | 9.3 |
 
-All 22 queries take FyrQL 2.0 times as long as DuckDB on one thread and 2.2 times as long
-on twelve. FyrQL is faster in Q5, in which, as in Q3, Q7, Q8 and Q10, PostgreSQL joins
-the customers and orders for FyrQL, and in Q11, and as fast in Q2 and Q16; these three
-read only the smaller tables. DuckDB is furthest ahead where a query reads much of
-`lineitem`, such as Q1, Q6, Q15, Q17 and Q19: in Q6, nine tenths of the time of FyrQL
-on one thread go to reading the Parquet file. Q15, Q17 and Q18 read `lineitem` twice,
-once for the subquery, and Q21 three times. On twelve threads, Q1 and Q6 take FyrQL a
-quarter of the time of one thread or less, and most other queries two fifths to three
-quarters; Q18 gains little, and Q22 nothing, since PostgreSQL runs its `NOT EXISTS` over
-the customers and orders on one core. The profile `tpch` checks that all 22 queries give
-the rows of DuckDB, in the interpreter and compiled, on one thread and on all. With
-version 0.5.5, timed from the plan and with DuckDB reading `orders` and `customer` from
-CSV files, the 22 queries took 34.4 s in the interpreter on one thread and 19.4 s on
-twelve.
+All 22 queries take FyrQL 1.5 times as long as DuckDB on one thread and 1.7 times as long
+on twelve. FyrQL is faster in Q5, in which, as in Q3, Q7, Q8 and Q10, PostgreSQL joins the
+customers and orders for FyrQL, and on one thread in Q2 and Q11, and close in Q16; these
+three read only the smaller tables. DuckDB is furthest ahead where a query reads much of
+`lineitem`, such as Q1, Q12, Q15, Q17 and Q19: in Q6, about three quarters of the time of
+FyrQL on one thread go to reading the Parquet file. Since version 0.14.0, the connector
+decodes the pages of the file itself; on the same day, with the column readers of
+parquet-java, Q6 took 0.61 s on one thread and Q1 1.61 s. Q15, Q17 and Q18 read `lineitem`
+twice, once for the subquery, and Q21 three times. On twelve threads, Q6 takes FyrQL less
+than half the time of one thread, and most other queries half to four fifths; Q7 and Q18
+gain little, Q4 and Q22 nothing, Q22 since PostgreSQL runs its `NOT EXISTS` over the
+customers and orders on one core. The profile `tpch` checks that all 22 queries give the
+rows of DuckDB, in the interpreter and compiled, on one thread and on all. With version
+0.5.5, timed from the plan and with DuckDB reading `orders` and `customer` from CSV files,
+the 22 queries took 34.4 s in the interpreter on one thread and 19.4 s on twelve.
 
 ### Compiled code and scans
 
@@ -2512,16 +2518,17 @@ pipeline of a filter, a projection and a join about 3.3 ms; with the class in th
 generating the source and creating an instance takes about 12 and 24 microseconds.
 A scan of one million rows in the shape of `lineitem` reads a file into batches, from a
 CSV file and from a Parquet file that DuckDB writes with its defaults (Snappy, row groups
-of 122,880 rows), in milliseconds per run:
+of 122,880 rows), in milliseconds per run with version 0.14.0:
 
 | Scan | CSV | Parquet |
 | --- | ---: | ---: |
-| The four columns of TPC-H Q6 | 339 | 75 |
-| All 16 columns | 598 | 570 |
+| The four columns of TPC-H Q6 | 345 | 41 |
+| All 16 columns | 555 | 227 |
 
-parquet-java decodes a Parquet file value by value, with several calls for each value
-of each column; over all columns of a file, that takes about as long as reading the CSV
-file.
+The connector decodes the pages of the Parquet file a page at a time. Through the column
+readers of parquet-java, value by value with several calls for each value of each column,
+as up to version 0.13.8, the four columns took 75 ms and all 16 columns 570 ms, about as
+long as the CSV file.
 
 ### Threads
 

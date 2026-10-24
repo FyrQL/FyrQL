@@ -29,9 +29,11 @@ import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.ColumnReader;
 import org.apache.parquet.column.impl.ColumnReadStoreImpl;
 import org.apache.parquet.column.page.PageReadStore;
+import org.apache.parquet.column.page.PageReader;
 import org.apache.parquet.filter2.compat.FilterCompat;
 import org.apache.parquet.filter2.predicate.FilterPredicate;
 import org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.io.InputFile;
 import org.apache.parquet.io.RecordReader;
@@ -46,6 +48,7 @@ import org.apache.parquet.schema.Type;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -54,13 +57,18 @@ import java.util.function.Consumer;
 /**
  * Reads the rows of one row group in batches. A column whose paths all end
  * at primitive fields outside of lists, a whole primitive column or fields
- * of a {@code STRUCT} column, is read a field at a time through a
- * {@link ColumnReader} of parquet-java straight into a vector, without
- * objects per row; a {@code NULL} on the way to the field is a
- * {@code NULL} field. Any other column is read through the record API into
- * vectors of its type, see {@link VectorMaterializer}, of a
+ * of a {@code STRUCT} column, is read a field at a time straight into a
+ * vector, without objects per row; a {@code NULL} on the way to the field
+ * is a {@code NULL} field. The pages of such a field are decoded a page at
+ * a time by a {@link ColumnDecoder} if it reads all encodings the column
+ * chunk names and no pages are skipped; otherwise, or from the first
+ * page in another encoding on, the field is read a value at a time through
+ * a {@link ColumnReader} of parquet-java. When all fields read go through
+ * decoders, the decompressors reuse their arrays, see
+ * {@link PureJavaCodecs}. Any other column is read through the record
+ * API into vectors of its type, see {@link VectorMaterializer}, of a
  * {@code STRUCT} only the fields the paths name, and the fields of the
- * paths are the children of those vectors. Both read the same number of
+ * paths are the children of those vectors. All read the same number of
  * rows for each batch.
  * <p>
  * A batch never spans two row groups; the last one of a row group is
@@ -84,6 +92,8 @@ final class RowGroupReader implements BatchReader {
     private final List<ColumnPath> paths = new ArrayList<>();
     private final List<String> names = new ArrayList<>();
     private final List<ParquetLeaf> leaves = new ArrayList<>();
+    /** For each primitive field its decoder, or {@code null} if it is read through a column reader. */
+    private final List<ColumnDecoder> decoders = new ArrayList<>();
     private final List<ColumnReader> readers = new ArrayList<>();
     /** The names of the columns read through records. */
     private final List<String> nested = new ArrayList<>();
@@ -112,6 +122,18 @@ final class RowGroupReader implements BatchReader {
      */
     RowGroupReader(ParquetFiles files, ParquetFiles.Footer footer, int block, long rows, FilterPredicate predicate,
             Schema output, List<ColumnPath> columns, int batchSize, Consumer<ParquetConnector.Read> reads) {
+        this(files, footer, block, rows, predicate, output, columns, batchSize, reads, true);
+    }
+
+    /**
+     * Opens a row group of a file as {@link #RowGroupReader(ParquetFiles,
+     * ParquetFiles.Footer, int, long, FilterPredicate, Schema, List, int,
+     * Consumer)} does; without {@code decodePages}, every primitive field is
+     * read through a column reader of parquet-java.
+     */
+    RowGroupReader(ParquetFiles files, ParquetFiles.Footer footer, int block, long rows, FilterPredicate predicate,
+            Schema output, List<ColumnPath> columns, int batchSize, Consumer<ParquetConnector.Read> reads,
+            boolean decodePages) {
         this.file = footer.version().location();
         this.block = block;
         this.rows = rows;
@@ -161,8 +183,9 @@ final class RowGroupReader implements BatchReader {
         }
         read = requested.getColumns().stream().map(d -> String.join(".", d.getPath())).toList();
         InputFile input = files.input(footer.version().file());
+        PureJavaCodecs codecs = new PureJavaCodecs();
         try (ParquetFileReader reader = new ParquetFileReader(input, footer.metadata(), predicate == null
-                ? ParquetFiles.options() : ParquetFiles.options(FilterCompat.get(predicate), false),
+                ? ParquetFiles.options(codecs) : ParquetFiles.options(FilterCompat.get(predicate), false, codecs),
                 input.newStream())) {
             reader.setRequestedSchema(requested);
             pages = predicate == null ? reader.readRowGroup(block) : reader.readFilteredRowGroup(block);
@@ -174,12 +197,33 @@ final class RowGroupReader implements BatchReader {
             return;
         }
         this.rows = Math.min(rows, pages.getRowCount());
+        // Without a column index, or if no page can be skipped, the pages of all rows were read.
+        boolean allRows = pages.getRowIndexes().isEmpty();
+        List<ColumnChunkMetaData> chunks = footer.metadata().getBlocks().get(block).getColumns();
+        boolean[] decode = new boolean[paths.size()];
+        boolean all = recordFields.isEmpty();
+        for (int k = 0; k < paths.size(); k++) {
+            String[] path = ParquetSchemas.path(schema, paths.get(k));
+            ParquetLeaf leaf = leaves.get(k);
+            decode[k] = decodePages && allRows && chunks.stream().anyMatch(c ->
+                    Arrays.equals(c.getPath().toArray(), path) && ColumnDecoder.supports(c, leaf));
+            all &= decode[k];
+        }
+        codecs.reuseBuffers(all);
         String createdBy = footer.metadata().getFileMetaData().getCreatedBy();
         ColumnReadStoreImpl store = new ColumnReadStoreImpl(pages, new NoConverters(requested), requested, createdBy);
+        long rowCount = pages.getRowCount();
         for (int k = 0; k < paths.size(); k++) {
             ColumnDescriptor descriptor = requested.getColumnDescription(ParquetSchemas.path(schema, paths.get(k)));
             try {
-                readers.add(store.getColumnReader(descriptor));
+                if (decode[k]) {
+                    decoders.add(new ColumnDecoder(pages.getPageReader(descriptor), descriptor, leaves.get(k),
+                            rest -> columnReader(rest, rowCount, requested, descriptor, createdBy)));
+                    readers.add(null);
+                } else {
+                    decoders.add(null);
+                    readers.add(store.getColumnReader(descriptor));
+                }
             } catch (RuntimeException e) {
                 throw error(where() + ", column " + names.get(k), e);
             }
@@ -218,6 +262,41 @@ final class RowGroupReader implements BatchReader {
         return children;
     }
 
+    /**
+     * Returns a column reader of parquet-java over pages of a column, as
+     * the readers of the fields read value by value are made.
+     */
+    static ColumnReader columnReader(PageReader pages, long rows, MessageType schema, ColumnDescriptor column,
+            String createdBy) {
+        PageReadStore store = new PageReadStore() {
+            @Override
+            public PageReader getPageReader(ColumnDescriptor descriptor) {
+                return pages;
+            }
+
+            @Override
+            public long getRowCount() {
+                return rows;
+            }
+        };
+        return new ColumnReadStoreImpl(store, new NoConverters(schema), schema, createdBy).getColumnReader(column);
+    }
+
+    /**
+     * Returns the paths of the primitive fields whose pages a
+     * {@link ColumnDecoder} decodes, so far without handing the rest of the
+     * chunk to a column reader.
+     */
+    List<String> decodedLeaves() {
+        List<String> decoded = new ArrayList<>();
+        for (int k = 0; k < decoders.size(); k++) {
+            if (decoders.get(k) != null && !decoders.get(k).fellBack()) {
+                decoded.add(names.get(k));
+            }
+        }
+        return decoded;
+    }
+
     private String nestedColumns() {
         return (nested.size() == 1 ? ", column " : ", columns ") + String.join(", ", nested);
     }
@@ -241,13 +320,18 @@ final class RowGroupReader implements BatchReader {
         Vector[] built = new Vector[leaves.size()];
         for (int k = 0; k < built.length; k++) {
             ParquetLeaf leaf = leaves.get(k);
-            Vector.Builder b = Vectors.builder(leaf.type(), n);
             try {
-                read(readers.get(k), leaf, b, n);
+                ColumnDecoder decoder = decoders.get(k);
+                if (decoder != null) {
+                    built[k] = decoder.read(n);
+                } else {
+                    Vector.Builder b = Vectors.builder(leaf.type(), n);
+                    read(readers.get(k), leaf, b, n);
+                    built[k] = b.build();
+                }
             } catch (RuntimeException e) {
                 throw error(where() + ", column " + names.get(k), e);
             }
-            built[k] = b.build();
         }
         Vector[] assembled = null;
         if (records != null) {

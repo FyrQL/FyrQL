@@ -171,6 +171,33 @@ class VectorsTest {
     }
 
     @Test
+    void wrapTakesBytesAndUuidsWithoutCopying() {
+        byte[] data = "abcde".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        BytesVector v = BytesVector.wrap(DataType.VARCHAR, data, new int[] {0, 2, 2, 5},
+                new boolean[] {false, true, false});
+        assertTrue(data == v.data());
+        assertEquals(3, v.size());
+        assertEquals("ab", v.getString(0));
+        assertTrue(v.isNull(1));
+        assertEquals("cde", v.getString(2));
+        assertFalse(BytesVector.wrap(DataType.BLOB, data, new int[] {1, 4}, new boolean[1]).hasNulls());
+        assertEquals(0, BytesVector.wrap(DataType.VARCHAR, new byte[0], new int[] {0}, null).size());
+        assertEquals("Offsets outside of 5 bytes", assertThrows(IllegalArgumentException.class,
+                () -> BytesVector.wrap(DataType.VARCHAR, data, new int[] {0, 6}, null)).getMessage());
+        assertEquals("The offset of row 2 is before that of row 1", assertThrows(IllegalArgumentException.class,
+                () -> BytesVector.wrap(DataType.VARCHAR, data, new int[] {0, 3, 2}, null)).getMessage());
+        assertThrows(IllegalArgumentException.class, () -> BytesVector.wrap(DataType.VARCHAR, data, new int[0], null));
+        assertThrows(IllegalArgumentException.class,
+                () -> BytesVector.wrap(DataType.VARCHAR, data, new int[] {0, 1}, new boolean[2]));
+        assertThrows(IllegalArgumentException.class, () -> BytesVector.wrap(DataType.BIGINT, data, new int[] {0},
+                null));
+        UuidVector u = UuidVector.wrap(new long[] {1, 0}, new long[] {2, 0}, new boolean[] {false, true});
+        assertEquals(new java.util.UUID(1, 2), u.getUuid(0));
+        assertTrue(u.isNull(1));
+        assertThrows(IllegalArgumentException.class, () -> UuidVector.wrap(new long[1], new long[2], null));
+    }
+
+    @Test
     void decimalHashWithoutBigIntegerAgrees() {
         java.util.SplittableRandom random = new java.util.SplittableRandom(7);
         List<Long> values = new ArrayList<>(List.of(0L, 1L, -1L, 10L, -10L, 100L, 999_999_999_999_999_999L,

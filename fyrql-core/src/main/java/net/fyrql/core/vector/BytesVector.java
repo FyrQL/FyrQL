@@ -40,6 +40,26 @@ public final class BytesVector implements Vector {
         this.nulls = nulls;
     }
 
+    /**
+     * Creates a {@code VARCHAR} or {@code BLOB} vector over arrays, which are not copied: the bytes of the values,
+     * an offset per row and one more, the value of row {@code i} being the bytes from {@code offsets[i]} to
+     * {@code offsets[i + 1]}, and a mask with {@code true} where the value is {@code NULL}, or {@code null} if none
+     * is; a {@code NULL} should have no bytes. The caller must not change the arrays afterwards.
+     *
+     * @throws IllegalArgumentException if the offsets decrease or lie outside the bytes
+     */
+    public static BytesVector wrap(DataType type, byte[] data, int[] offsets, boolean[] nulls) {
+        if (offsets.length == 0 || offsets[0] < 0 || offsets[offsets.length - 1] > data.length) {
+            throw new IllegalArgumentException("Offsets outside of " + data.length + " bytes");
+        }
+        for (int i = 1; i < offsets.length; i++) {
+            if (offsets[i] < offsets[i - 1]) {
+                throw new IllegalArgumentException("The offset of row " + i + " is before that of row " + (i - 1));
+            }
+        }
+        return new BytesVector(type, data, offsets, Nulls.wrap(nulls, offsets.length - 1));
+    }
+
     /** Creates a {@code VARCHAR} vector without {@code NULL}s. */
     public static BytesVector ofStrings(String... values) {
         Builder b = new Builder(DataType.VARCHAR, values.length);

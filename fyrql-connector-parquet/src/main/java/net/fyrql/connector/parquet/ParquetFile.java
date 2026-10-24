@@ -180,6 +180,16 @@ public final class ParquetFile {
      */
     public BatchReader read(int rowGroup, long rows, Schema output, List<ColumnPath> columns,
             List<Expression> pageFilters, int batchSize, Consumer<ParquetConnector.Read> reads) {
+        return read(rowGroup, rows, output, columns, pageFilters, batchSize, reads, true);
+    }
+
+    /**
+     * Reads the rows of a row group as {@link #read(int, long, Schema, List,
+     * List, int, Consumer)} does; without {@code decodePages}, every
+     * primitive field is read through a column reader of parquet-java.
+     */
+    RowGroupReader read(int rowGroup, long rows, Schema output, List<ColumnPath> columns,
+            List<Expression> pageFilters, int batchSize, Consumer<ParquetConnector.Read> reads, boolean decodePages) {
         if (output.size() != columns.size()) {
             throw new IllegalArgumentException(output.size() + " output columns for " + columns.size() + " paths");
         }
@@ -204,7 +214,8 @@ public final class ParquetFile {
         }
         FilterPredicate predicate = pageFilters.isEmpty() ? null
                 : FilterTranslation.translate(pageFilters, message, columns);
-        return new RowGroupReader(files, footer, rowGroup, rows, predicate, output, columns, batchSize, reads);
+        return new RowGroupReader(files, footer, rowGroup, rows, predicate, output, columns, batchSize, reads,
+                decodePages);
     }
 
     /** Returns the type of the column or field a path ends at. */

@@ -20,10 +20,12 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -52,6 +54,39 @@ class PureJavaCodecsTest {
             byte[] direct = new byte[page.length];
             out.get(direct);
             assertArrayEquals(page, direct, codec.name());
+        }
+    }
+
+    @Test
+    void reusedBuffersHoldOnePageAtATime() throws Exception {
+        byte[] first = "the first page, the first page".repeat(50).getBytes(StandardCharsets.UTF_8);
+        byte[] second = "the second, longer page".repeat(120).getBytes(StandardCharsets.UTF_8);
+        for (CompressionCodecName codec : PureJavaCodecs.SUPPORTED) {
+            CompressionCodecFactory.BytesInputCompressor compressor = new PureJavaCodecs().getCompressor(codec);
+            byte[] a = PureJavaCodecs.bytes(compressor.compress(BytesInput.from(first)));
+            byte[] b = PureJavaCodecs.bytes(compressor.compress(BytesInput.from(second)));
+            for (boolean reuse : new boolean[] {false, true}) {
+                PureJavaCodecs codecs = new PureJavaCodecs();
+                CompressionCodecFactory.BytesInputDecompressor d = codecs.getDecompressor(codec);
+                codecs.reuseBuffers(reuse);
+                PlainDecoder.Slice x = PlainDecoder.slice(d.decompress(BytesInput.from(a), first.length));
+                assertArrayEquals(first, Arrays.copyOfRange(x.array(), x.from(), x.to()), codec.name());
+                PlainDecoder.Slice y = PlainDecoder.slice(d.decompress(BytesInput.from(b), second.length));
+                assertArrayEquals(second, Arrays.copyOfRange(y.array(), y.from(), y.to()), codec.name());
+                PlainDecoder.Slice z = PlainDecoder.slice(d.decompress(BytesInput.from(a), first.length));
+                assertArrayEquals(first, Arrays.copyOfRange(z.array(), z.from(), z.to()), codec.name());
+                // An uncompressed page stays where it is; the others go into one array only if it is reused.
+                assertEquals(codec != CompressionCodecName.UNCOMPRESSED && reuse, y.array() == z.array(),
+                        codec + ", reuse " + reuse);
+                if (codec == CompressionCodecName.UNCOMPRESSED) {
+                    assertSame(a, z.array());
+                } else {
+                    assertEquals("Decompressed " + first.length + " bytes, expected " + (first.length + 1),
+                            assertThrows(java.io.IOException.class,
+                                    () -> d.decompress(BytesInput.from(a), first.length + 1)).getMessage(),
+                            codec.name());
+                }
+            }
         }
     }
 

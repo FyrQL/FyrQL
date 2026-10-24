@@ -29,6 +29,18 @@ public final class UuidVector implements Vector {
         this.nulls = nulls;
     }
 
+    /**
+     * Creates a vector over arrays, the most and the least significant 64 bits of the values, which are not copied:
+     * the values and a mask with {@code true} where the value is {@code NULL}, or {@code null} if none is. The
+     * caller must not change the arrays afterwards.
+     */
+    public static UuidVector wrap(long[] most, long[] least, boolean[] nulls) {
+        if (most.length != least.length) {
+            throw new IllegalArgumentException("Halves of different lengths: " + most.length + " and " + least.length);
+        }
+        return new UuidVector(most, least, Nulls.wrap(nulls, most.length));
+    }
+
     @Override
     public DataType type() {
         return DataType.UUID;

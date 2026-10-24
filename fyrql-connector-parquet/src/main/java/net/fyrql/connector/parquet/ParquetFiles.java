@@ -130,8 +130,13 @@ final class ParquetFiles {
 
     /** Returns the options with which every file is read: the codecs in pure Java. */
     static ParquetReadOptions options() {
+        return options(new PureJavaCodecs());
+    }
+
+    /** Returns the options with which a file is read through codecs in pure Java. */
+    static ParquetReadOptions options(PureJavaCodecs codecs) {
         return ParquetReadOptions.builder(new PlainParquetConfiguration())
-                .withCodecFactory(new PureJavaCodecs())
+                .withCodecFactory(codecs)
                 .build();
     }
 
@@ -143,8 +148,13 @@ final class ParquetFiles {
      * only those in which a row can pass, by the column index.
      */
     static ParquetReadOptions options(FilterCompat.Filter filter, boolean rowGroups) {
+        return options(filter, rowGroups, new PureJavaCodecs());
+    }
+
+    /** Returns the options with which a file is read under a filter, as the other form does, through codecs. */
+    static ParquetReadOptions options(FilterCompat.Filter filter, boolean rowGroups, PureJavaCodecs codecs) {
         return ParquetReadOptions.builder(new PlainParquetConfiguration())
-                .withCodecFactory(new PureJavaCodecs())
+                .withCodecFactory(codecs)
                 .withRecordFilter(filter)
                 .useStatsFilter(rowGroups)
                 .useDictionaryFilter(rowGroups)

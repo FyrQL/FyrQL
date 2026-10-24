@@ -70,7 +70,7 @@ class ParquetReadTest {
     Path dir;
 
     /** A table of random values of every primitive type DuckDB writes, a tenth of them {@code NULL}. */
-    private static final String RANDOM = """
+    static final String RANDOM = """
             CREATE TABLE t AS SELECT range AS id,
               CASE WHEN random() < 0.1 THEN NULL ELSE random() < 0.5 END AS b,
               CASE WHEN random() < 0.1 THEN NULL ELSE (floor(random() * 256) - 128)::TINYINT END AS i8,
@@ -133,7 +133,7 @@ class ParquetReadTest {
     }
 
     /** The columns of {@link #fill}. */
-    private static final String SCHEMA = """
+    static final String SCHEMA = """
             message m {
               required int64 id;
               optional boolean b;
@@ -173,14 +173,22 @@ class ParquetReadTest {
 
     /** Fills the columns of {@link #SCHEMA} with random values, a tenth of them {@code NULL}. */
     private static void fill(org.apache.parquet.example.data.Group g, SplittableRandom r, long id) {
+        fill(g, r, id, 1, 1);
+    }
+
+    /**
+     * Fills the columns of {@link #SCHEMA} with random values: all optional
+     * columns are {@code NULL} in {@code rowNulls} tenths of the rows, and
+     * each of them in {@code nulls} tenths of the others.
+     */
+    static void fill(org.apache.parquet.example.data.Group g, SplittableRandom r, long id, int rowNulls, int nulls) {
         g.add("id", id);
         g.add("r", r.nextInt());
-        if (r.nextInt(10) == 0) {
+        if (r.nextInt(10) < rowNulls) {
             return;
         }
-        // Each optional column is NULL in a tenth of the rows, and all of them in another tenth.
         Consumer<Runnable> maybe = add -> {
-            if (r.nextInt(10) != 0) {
+            if (r.nextInt(10) >= nulls) {
                 add.run();
             }
         };

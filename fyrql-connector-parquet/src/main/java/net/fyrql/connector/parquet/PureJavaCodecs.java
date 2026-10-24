@@ -39,6 +39,12 @@ import java.util.zip.GZIPOutputStream;
  * parquet-java needs snappy-java and zstd-jni, both native, and the codecs
  * of Hadoop for the rest. {@code LZ4} in the framing of Hadoop,
  * {@code BROTLI} and {@code LZO} are not supported.
+ * <p>
+ * A decompressor reads a page from its heap buffer without a copy. After
+ * {@link #reuseBuffers}, each decompressor decompresses every page into the
+ * same array, as the contract of {@link BytesInputDecompressor} allows: a
+ * page must then be consumed before the next one is decompressed, which
+ * {@link ColumnDecoder} does and the dictionaries of parquet-java do not.
  */
 final class PureJavaCodecs implements CompressionCodecFactory {
 
@@ -58,6 +64,18 @@ final class PureJavaCodecs implements CompressionCodecFactory {
                 + String.join(", ", SUPPORTED.stream().map(Enum::name).toList());
     }
 
+    private boolean reuseBuffers;
+
+    /**
+     * Sets whether the decompressors of these codecs decompress every page
+     * into the same array, from the next page on; at first they do not. A
+     * reader sets it after it has read the column chunks, before the first
+     * page is decompressed.
+     */
+    void reuseBuffers(boolean reuse) {
+        this.reuseBuffers = reuse;
+    }
+
     @Override
     public BytesInputCompressor getCompressor(CompressionCodecName name) {
         return switch (name) {
@@ -73,11 +91,11 @@ final class PureJavaCodecs implements CompressionCodecFactory {
     @Override
     public BytesInputDecompressor getDecompressor(CompressionCodecName name) {
         return switch (name) {
-            case UNCOMPRESSED -> new Unblock(null);
-            case SNAPPY -> new Unblock(new SnappyDecompressor());
-            case ZSTD -> new Unblock(new ZstdDecompressor());
-            case LZ4_RAW -> new Unblock(new Lz4Decompressor());
-            case GZIP -> new Gunzip();
+            case UNCOMPRESSED -> new Unblock(null, new Output());
+            case SNAPPY -> new Unblock(new SnappyDecompressor(), new Output());
+            case ZSTD -> new Unblock(new ZstdDecompressor(), new Output());
+            case LZ4_RAW -> new Unblock(new Lz4Decompressor(), new Output());
+            case GZIP -> new Gunzip(new Output());
             default -> throw new UnsupportedOperationException(unsupported(name));
         };
     }
@@ -129,29 +147,54 @@ final class PureJavaCodecs implements CompressionCodecFactory {
         }
     }
 
-    /** Decompresses a page that was compressed as one block. */
-    private record Unblock(Decompressor decompressor) implements BytesInputDecompressor {
+    /** The arrays a decompressor decompresses into: a new one for each page, or always the same. */
+    private final class Output {
+        private byte[] buffer = new byte[0];
+
+        /** Returns an array of at least a size. */
+        byte[] get(int size) {
+            if (!reuseBuffers) {
+                return new byte[size];
+            }
+            if (buffer.length < size) {
+                buffer = new byte[Math.max(size, buffer.length + (buffer.length >> 1))];
+            }
+            return buffer;
+        }
+    }
+
+    /** Decompresses a page that was compressed as one block; an uncompressed page stays as it is. */
+    private record Unblock(Decompressor decompressor, Output arrays) implements BytesInputDecompressor {
         @Override
         public BytesInput decompress(BytesInput bytes, int uncompressedSize) throws IOException {
-            return BytesInput.from(decompress(bytes(bytes), uncompressedSize));
+            if (decompressor == null) {
+                return bytes;
+            }
+            PlainDecoder.Slice in = PlainDecoder.slice(bytes);
+            byte[] out = arrays.get(uncompressedSize);
+            decompress(in.array(), in.from(), in.to() - in.from(), out, uncompressedSize);
+            return BytesInput.from(out, 0, uncompressedSize);
         }
 
         @Override
         public void decompress(ByteBuffer input, int compressedSize, ByteBuffer output, int uncompressedSize)
                 throws IOException {
-            put(decompress(bytes(input, compressedSize), uncompressedSize), output);
-        }
-
-        private byte[] decompress(byte[] in, int uncompressedSize) throws IOException {
+            byte[] in = bytes(input, compressedSize);
             if (decompressor == null) {
-                return in;
+                put(in, output);
+                return;
             }
             byte[] out = new byte[uncompressedSize];
-            int n = decompressor.decompress(in, 0, in.length, out, 0, out.length);
+            decompress(in, 0, in.length, out, uncompressedSize);
+            put(out, output);
+        }
+
+        private void decompress(byte[] in, int from, int length, byte[] out, int uncompressedSize)
+                throws IOException {
+            int n = decompressor.decompress(in, from, length, out, 0, uncompressedSize);
             if (n != uncompressedSize) {
                 throw new IOException("Decompressed " + n + " bytes, expected " + uncompressedSize);
             }
-            return out;
         }
 
         @Override
@@ -179,25 +222,28 @@ final class PureJavaCodecs implements CompressionCodecFactory {
         }
     }
 
-    private static final class Gunzip implements BytesInputDecompressor {
+    private record Gunzip(Output arrays) implements BytesInputDecompressor {
         @Override
         public BytesInput decompress(BytesInput bytes, int uncompressedSize) throws IOException {
-            return BytesInput.from(decompress(bytes.toInputStream(), uncompressedSize));
+            byte[] out = arrays.get(uncompressedSize);
+            decompress(bytes.toInputStream(), out, uncompressedSize);
+            return BytesInput.from(out, 0, uncompressedSize);
         }
 
         @Override
         public void decompress(ByteBuffer input, int compressedSize, ByteBuffer output, int uncompressedSize)
                 throws IOException {
-            put(decompress(new ByteArrayInputStream(bytes(input, compressedSize)), uncompressedSize), output);
+            byte[] out = new byte[uncompressedSize];
+            decompress(new ByteArrayInputStream(bytes(input, compressedSize)), out, uncompressedSize);
+            put(out, output);
         }
 
-        private static byte[] decompress(InputStream in, int uncompressedSize) throws IOException {
+        private static void decompress(InputStream in, byte[] out, int uncompressedSize) throws IOException {
             try (GZIPInputStream gz = new GZIPInputStream(in)) {
-                byte[] out = gz.readNBytes(uncompressedSize);
-                if (out.length != uncompressedSize) {
-                    throw new IOException("Decompressed " + out.length + " bytes, expected " + uncompressedSize);
+                int n = gz.readNBytes(out, 0, uncompressedSize);
+                if (n != uncompressedSize) {
+                    throw new IOException("Decompressed " + n + " bytes, expected " + uncompressedSize);
                 }
-                return out;
             }
         }
 

@@ -181,7 +181,7 @@ final class ParquetLeaf {
 
     /** Appends a value of an {@code INT64} column, or of an {@code INT32} column widened. */
     void addLong(Vector.Builder b, long value) {
-        long v = mask == -1 ? value : value & mask;
+        long v = unsigned(value);
         switch (target) {
             case TINYINT -> ((TinyIntVector.Builder) b).appendByte((byte) v);
             case SMALLINT -> ((SmallIntVector.Builder) b).appendShort((short) v);
@@ -195,83 +195,97 @@ final class ParquetLeaf {
         }
     }
 
-    private long micros(long v) {
+    /** Returns a value of an integer column, without its sign if the column is unsigned and narrower than 64 bits. */
+    long unsigned(long value) {
+        return mask == -1 ? value : value & mask;
+    }
+
+    /** Returns a value of a {@code TIMESTAMP} or {@code TIME} column in microseconds. */
+    long micros(long v) {
         if (nanos == 1_000L) {
             return v;
         }
         return nanos == 1L ? v / 1000 : Math.multiplyExact(v, nanos / 1000);
     }
 
+    /** Tells whether the column is a {@code DECIMAL} of at most 18 digits. */
+    boolean fitsLong() {
+        return maxUnscaled != 0;
+    }
+
+    /**
+     * Returns an unscaled value of a {@code DECIMAL} of at most 18 digits.
+     *
+     * @throws ArithmeticException if the value is beyond the precision
+     */
+    long unscaled(long unscaled) {
+        if (unscaled > maxUnscaled || unscaled < -maxUnscaled) {
+            throw tooWide(BigInteger.valueOf(unscaled));
+        }
+        return unscaled;
+    }
+
     /** Appends a value of a {@code BINARY}, {@code FIXED_LEN_BYTE_ARRAY} or {@code INT96} column. */
     void addBinary(Vector.Builder b, Binary value) {
+        ByteBuffer bytes = value.toByteBuffer();
+        if (bytes.hasArray()) {
+            addBinary(b, bytes.array(), bytes.arrayOffset() + bytes.position(), bytes.remaining());
+        } else {
+            byte[] copy = value.getBytesUnsafe();
+            addBinary(b, copy, 0, copy.length);
+        }
+    }
+
+    /** Appends a value of a {@code BINARY}, {@code FIXED_LEN_BYTE_ARRAY} or {@code INT96} column. */
+    void addBinary(Vector.Builder b, byte[] bytes, int from, int length) {
         switch (target) {
-            case BYTES -> {
-                ByteBuffer bytes = value.toByteBuffer();
-                if (bytes.hasArray()) {
-                    ((BytesVector.Builder) b).appendBytes(bytes.array(), bytes.arrayOffset() + bytes.position(),
-                            bytes.remaining());
-                } else {
-                    ((BytesVector.Builder) b).appendBytes(value.getBytesUnsafe());
-                }
-            }
+            case BYTES -> ((BytesVector.Builder) b).appendBytes(bytes, from, length);
             case DECIMAL -> {
-                ByteBuffer bytes = value.toByteBuffer();
                 if (maxUnscaled != 0) {
-                    addUnscaled(b, unscaledLong(bytes));
+                    addUnscaled(b, unscaledLong(bytes, from, length));
                 } else {
-                    BigInteger unscaled = new BigInteger(value.getBytesUnsafe());
+                    BigInteger unscaled = new BigInteger(bytes, from, length);
                     if (unscaled.abs().compareTo(((DataType.Decimal) type).maxUnscaled()) > 0) {
                         throw tooWide(unscaled);
                     }
                     ((DecimalVector.Builder) b).appendUnscaled(unscaled);
                 }
             }
-            case UUID -> {
-                ByteBuffer bytes = value.toByteBuffer();
-                ((UuidVector.Builder) b).appendUuid(new UUID(bytes.getLong(bytes.position()),
-                        bytes.getLong(bytes.position() + 8)));
-            }
+            case UUID -> ((UuidVector.Builder) b).appendUuid(new UUID((long) PlainDecoder.BIG_LONG.get(bytes, from),
+                    (long) PlainDecoder.BIG_LONG.get(bytes, from + 8)));
             case FLOAT16 -> {
-                ByteBuffer bytes = value.toByteBuffer();
-                int p = bytes.position();
-                short bits = (short) ((bytes.get(p) & 0xff) | (bytes.get(p + 1) & 0xff) << 8);
+                short bits = (short) ((bytes[from] & 0xff) | (bytes[from + 1] & 0xff) << 8);
                 ((FloatVector.Builder) b).appendFloat(Float.float16ToFloat(bits));
             }
-            case INTERVAL -> {
-                // Months, days and milliseconds as three little-endian integers, the milliseconds unsigned.
-                ByteBuffer bytes = value.toByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                int p = bytes.position();
-                ((IntervalVector.Builder) b).appendInterval(bytes.getInt(p), bytes.getInt(p + 4),
-                        Integer.toUnsignedLong(bytes.getInt(p + 8)) * 1_000L);
-            }
-            case INT96 -> {
-                ByteBuffer bytes = value.toByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                int p = bytes.position();
-                long nanosOfDay = bytes.getLong(p);
-                long julianDay = bytes.getInt(p + 8);
-                ((BigIntVector.Builder) b).appendLong(Math.addExact(
-                        Math.multiplyExact(julianDay - JULIAN_EPOCH_DAY, MICROS_PER_DAY), nanosOfDay / 1000));
-            }
+            // Months, days and milliseconds as three little-endian integers, the milliseconds unsigned.
+            case INTERVAL -> ((IntervalVector.Builder) b).appendInterval((int) PlainDecoder.INT.get(bytes, from),
+                    (int) PlainDecoder.INT.get(bytes, from + 4),
+                    Integer.toUnsignedLong((int) PlainDecoder.INT.get(bytes, from + 8)) * 1_000L);
+            case INT96 -> ((BigIntVector.Builder) b).appendLong(int96(bytes, from));
             default -> throw new IllegalStateException(target + " from a byte array");
         }
     }
 
+    /** Returns an {@code INT96} timestamp in microseconds: the nanoseconds of the day, then the Julian day. */
+    static long int96(byte[] bytes, int from) {
+        long nanosOfDay = (long) PlainDecoder.LONG.get(bytes, from);
+        long julianDay = (int) PlainDecoder.INT.get(bytes, from + 8);
+        return Math.addExact(Math.multiplyExact(julianDay - JULIAN_EPOCH_DAY, MICROS_PER_DAY), nanosOfDay / 1000);
+    }
+
     /** Returns the unscaled value of a {@code DECIMAL} of at most 18 digits in two's complement, big-endian. */
-    private static long unscaledLong(ByteBuffer bytes) {
-        int from = bytes.position();
-        int to = bytes.limit();
-        long v = from < to && bytes.get(from) < 0 ? -1 : 0;
+    static long unscaledLong(byte[] bytes, int from, int length) {
+        int to = from + length;
+        long v = length > 0 && bytes[from] < 0 ? -1 : 0;
         for (int i = from; i < to; i++) {
-            v = v << 8 | (bytes.get(i) & 0xff);
+            v = v << 8 | (bytes[i] & 0xff);
         }
         return v;
     }
 
     private void addUnscaled(Vector.Builder b, long unscaled) {
         if (maxUnscaled != 0) {
-            if (unscaled > maxUnscaled || unscaled < -maxUnscaled) {
-                throw tooWide(BigInteger.valueOf(unscaled));
-            }
+            unscaled(unscaled);
         } else if (BigInteger.valueOf(unscaled).abs().compareTo(((DataType.Decimal) type).maxUnscaled()) > 0) {
             throw tooWide(BigInteger.valueOf(unscaled));
         }
