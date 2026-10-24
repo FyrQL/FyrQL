@@ -16,7 +16,7 @@
 
 	<groupId>io.github.stefan-zobel</groupId>
 	<artifactId>fyrql</artifactId>
-	<version>0.13.5</version>
+	<version>0.13.6</version>
 	<packaging>pom</packaging>
 
 	<name>FyrQL</name>

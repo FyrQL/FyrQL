@@ -13,6 +13,7 @@ package net.fyrql.test.db;
 
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import net.fyrql.connector.jdbc.JdbcDialect;
+import net.fyrql.core.type.DataType;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.mysql.MySQLContainer;
 
@@ -79,6 +80,53 @@ public final class TestDatabases {
     public static TestDatabase hsqldb() {
         return new TestDatabase(JdbcDialect.GENERIC, "jdbc:hsqldb:mem:fyrqltest" + COUNT.incrementAndGet(), "SA",
                 "");
+    }
+
+    /**
+     * The name of a type in Derby, for {@link TestDatabase#load(String,
+     * net.fyrql.core.type.Schema, java.util.function.Function, java.util.List)}:
+     * a {@code TINYINT} is a {@code SMALLINT}, a {@code UUID} a
+     * {@code CHAR(36)} and a timestamp with a time zone one without;
+     * {@code null} for a {@code HUGEINT}, since no decimal of Derby is as wide.
+     */
+    public static String derbyTypeName(DataType type) {
+        return type == DataType.HUGEINT ? null : sql92(type, "SMALLINT", "BLOB", "TIMESTAMP", "CHAR(36)");
+    }
+
+    /**
+     * The name of a type in HSQLDB, for {@link TestDatabase#load(String,
+     * net.fyrql.core.type.Schema, java.util.function.Function, java.util.List)}:
+     * a {@code HUGEINT} is a {@code DECIMAL(39,0)} and a timestamp with a
+     * time zone one without.
+     */
+    public static String hsqldbTypeName(DataType type) {
+        return type == DataType.HUGEINT ? "DECIMAL(39,0)"
+                : sql92(type, "TINYINT", "VARBINARY(100)", "TIMESTAMP(6)", "UUID");
+    }
+
+    /** The name of a type in SQL-92, with the names of a database for the types that differ. */
+    private static String sql92(DataType type, String tinyint, String blob, String timestamp, String uuid) {
+        if (type instanceof DataType.Decimal d) {
+            return "DECIMAL(" + d.precision() + "," + d.scale() + ")";
+        }
+        return switch ((DataType.Scalar) type) {
+            case BOOLEAN -> "BOOLEAN";
+            case TINYINT -> tinyint;
+            case SMALLINT -> "SMALLINT";
+            case INTEGER -> "INTEGER";
+            case BIGINT -> "BIGINT";
+            case FLOAT -> "REAL";
+            case DOUBLE -> "DOUBLE";
+            case VARCHAR -> "VARCHAR(100)";
+            case BLOB -> blob;
+            case DATE -> "DATE";
+            case TIMESTAMP -> timestamp;
+            case UUID -> uuid;
+            case TIME -> "TIME";
+            case TIMESTAMPTZ -> timestamp;
+            case INTERVAL -> "VARCHAR(64)";
+            case HUGEINT -> throw new IllegalArgumentException("No type for HUGEINT");
+        };
     }
 
     /** A new SQLite database in a file that is deleted when the tests end. */

@@ -11,6 +11,7 @@
 
 package net.fyrql.test.random;
 
+import net.fyrql.connector.jdbc.JdbcConnector;
 import net.fyrql.test.db.TestDatabase;
 import net.fyrql.test.db.TestDatabases;
 import org.junit.jupiter.api.Test;
@@ -27,7 +28,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * The {@linkplain Metamorphic metamorphic checks} over the
  * {@linkplain RandomSources other sources}: Parquet, CSV and JSON files,
- * H2, SQLite and PostgreSQL, and Iceberg. The queries are generated over
+ * H2, SQLite and PostgreSQL, Derby and HSQLDB through the generic
+ * dialect, and Iceberg. The queries are generated over
  * the tables as each source gives them, with literals from samples of their
  * rows; a difference that is not known fails the test, and the source must
  * have done its part of the work.
@@ -78,6 +80,18 @@ class MetamorphicSourcesTest {
         Optional<TestDatabase> postgres = TestDatabases.postgres();
         assumeTrue(postgres.isPresent(), "PostgreSQL is off");
         check(RandomSources.database("PostgreSQL", postgres.get()));
+    }
+
+    @Test
+    void derby() {
+        check(RandomSources.database("Derby", TestDatabases.derby(), TestDatabases::derbyTypeName,
+                b -> b.limitStyle(JdbcConnector.LimitStyle.FETCH_FIRST)));
+    }
+
+    @Test
+    void hsqldb() {
+        check(RandomSources.database("HSQLDB", TestDatabases.hsqldb(), TestDatabases::hsqldbTypeName, b -> {
+        }));
     }
 
     @Test

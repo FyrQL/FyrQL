@@ -173,8 +173,8 @@ public final class JdbcConformance {
      * timestamp with a time zone, which is one in UTC.
      */
     public static Target derby() {
-        return new Target(TestDatabases.derby(), "Derby", items(false), t -> sql92(t, "SMALLINT", "BLOB", "TIMESTAMP",
-                "CHAR(36)"), t -> t == DataType.TINYINT ? DataType.SMALLINT
+        return new Target(TestDatabases.derby(), "Derby", items(false), TestDatabases::derbyTypeName,
+                t -> t == DataType.TINYINT ? DataType.SMALLINT
                         : t == DataType.UUID || t == DataType.INTERVAL ? DataType.VARCHAR
                         : t == DataType.TIMESTAMPTZ ? DataType.TIMESTAMP : t,
                 (t, v) -> v instanceof Byte b ? (Object) (short) b : v instanceof UUID || v instanceof Interval
@@ -187,38 +187,12 @@ public final class JdbcConformance {
      * {@code DOUBLE}, with a timestamp in UTC for one with a time zone.
      */
     public static Target hsqldb() {
-        return new Target(TestDatabases.hsqldb(), "HSQLDB", items(true),
-                t -> t == DataType.HUGEINT ? "DECIMAL(39,0)" : sql92(t, "TINYINT", "VARBINARY(100)", "TIMESTAMP(6)",
-                        "UUID"), t -> t == DataType.FLOAT ? DataType.DOUBLE : t == DataType.INTERVAL ? DataType.VARCHAR
+        return new Target(TestDatabases.hsqldb(), "HSQLDB", items(true), TestDatabases::hsqldbTypeName,
+                t -> t == DataType.FLOAT ? DataType.DOUBLE : t == DataType.INTERVAL ? DataType.VARCHAR
                         : t == DataType.TIMESTAMPTZ ? DataType.TIMESTAMP : t,
                 (t, v) -> v instanceof Float f ? (Object) (double) f : v instanceof Interval i ? i.toString() : v,
                 GENERIC_PUSHED, b -> {
                 });
-    }
-
-    /** The name of a type in SQL-92, with the names of a database for the types that differ. */
-    private static String sql92(DataType type, String tinyint, String blob, String timestamp, String uuid) {
-        if (type instanceof DataType.Decimal d) {
-            return "DECIMAL(" + d.precision() + "," + d.scale() + ")";
-        }
-        return switch ((DataType.Scalar) type) {
-            case BOOLEAN -> "BOOLEAN";
-            case TINYINT -> tinyint;
-            case SMALLINT -> "SMALLINT";
-            case INTEGER -> "INTEGER";
-            case BIGINT -> "BIGINT";
-            case FLOAT -> "REAL";
-            case DOUBLE -> "DOUBLE";
-            case VARCHAR -> "VARCHAR(100)";
-            case BLOB -> blob;
-            case DATE -> "DATE";
-            case TIMESTAMP -> timestamp;
-            case UUID -> uuid;
-            case TIME -> "TIME";
-            case TIMESTAMPTZ -> timestamp;
-            case INTERVAL -> "VARCHAR(64)";
-            case HUGEINT -> throw new IllegalArgumentException("No type for HUGEINT");
-        };
     }
 
     /** The table {@code items} with a column of every type the database stores. */

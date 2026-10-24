@@ -15,6 +15,7 @@ import net.fyrql.codegen.JaninoCompiler;
 import net.fyrql.core.expr.Evaluator;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.ConversionException;
 import net.fyrql.core.value.Keys;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.Vector;
@@ -40,7 +41,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * bit for bit, and where the interpreter fails, the compiled code must fail
  * with the same kind of error. The messages may differ, since the
  * interpreter goes operand by operand and the compiled code row by row, so
- * that another row may fail first; the test counts those cases.
+ * that another row may fail first; for the same reason, an arithmetic error
+ * on one side may meet a failed conversion on the other. The test counts
+ * those cases.
  * <p>
  * An expression the compiler does not take on by its kind, such as one with
  * a value of a nested type like {@code map()}, is left to the interpreter
@@ -57,7 +60,7 @@ class CodegenEquivalenceTest {
         Map<String, List<Object[]>> tables = RandomTables.rows(RandomRun.SEED);
         JaninoCompiler compiler = new JaninoCompiler();
         List<String> failures = new ArrayList<>();
-        int[] messages = {0};
+        int[] messages = {0, 0};
         int[] checked = {0};
         int skipped = 0;
         for (int q = 0; q < RandomRun.QUERIES; q++) {
@@ -91,7 +94,8 @@ class CodegenEquivalenceTest {
         }
         CodegenStatistics s = compiler.statistics();
         System.out.println("CodegenEquivalenceTest: " + RandomRun.QUERIES + " expressions and conditions, "
-                + checked[0] + " batches checked, " + skipped + " skipped as not supported, " + messages[0] + " errors with another message; " + s);
+                + checked[0] + " batches checked, " + skipped + " skipped as not supported, " + messages[0]
+                + " errors with another message, " + messages[1] + " with another error of a value; " + s);
         assertEquals(0, s.failures(), "compilations failed");
         assertTrue(failures.isEmpty(), () -> failures.size() + " differences, the first:\n"
                 + String.join("\n\n", failures.subList(0, Math.min(3, failures.size()))));
@@ -136,12 +140,19 @@ class CodegenEquivalenceTest {
             actualError = e;
             actual = "error " + e.getClass().getName();
         }
-        if (!expected.equals(actual)) {
+        if (!expected.equals(actual) && valueError(expectedError) && valueError(actualError)) {
+            messages[1]++;
+        } else if (!expected.equals(actual)) {
             failures.add(what + "\n  interpreted: " + (expectedError != null ? expectedError : expected)
                     + "\n  compiled:    " + (actualError != null ? actualError : actual) + "\n" + source.get());
         } else if (expectedError != null && !String.valueOf(expectedError.getMessage())
                 .equals(String.valueOf(actualError.getMessage()))) {
             messages[0]++;
         }
+    }
+
+    /** Tells whether an error is one of a value: an arithmetic error or a failed conversion. */
+    private static boolean valueError(RuntimeException e) {
+        return e instanceof ArithmeticException || e instanceof ConversionException;
     }
 }

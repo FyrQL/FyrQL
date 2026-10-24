@@ -151,6 +151,14 @@ public class SqlCorpusTest {
                     + " substring('abc', -5)",
             "SELECT * FROM (VALUES (CAST(0 AS TINYINT)), (-3)) v(a)",
             "SELECT * FROM (VALUES (-3), (CAST(0 AS TINYINT))) v(a)",
+            // -2147483648 is a BIGINT literal that an INTEGER column before it takes.
+            "SELECT * FROM (VALUES (22), (-2147483648), (CAST(0.440 AS DECIMAL(10,3)))) v(a)",
+            "SELECT * FROM (VALUES (22), ((-2147483648)), (CAST(0.440 AS DECIMAL(10,3)))) v(a)",
+            "VALUES (0, 22), (CAST((-7) AS TINYINT), (-2147483648)), (CAST((-1) AS TINYINT),"
+                    + " CAST(0.440 AS DECIMAL(10,3)))",
+            "SELECT * FROM (VALUES (22), (-2147483648), (1.5)) v(a)",
+            "SELECT * FROM (VALUES (CAST(1 AS SMALLINT)), (-2147483648), (1.5)) v(a)",
+            "SELECT * FROM (VALUES (CAST(1 AS TINYINT)), (100), (1.5)) v(a)",
             // The merged column of USING comes before other columns of its name.
             "SELECT a FROM t JOIN u USING (a) JOIN t AS t3 ON true",
             // A bare NULL of a subquery keeps its open type.

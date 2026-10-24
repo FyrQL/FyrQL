@@ -63,6 +63,16 @@ final class Ledger {
         return STRING_AGG.matcher(o.sql()).matches() && sameRows(o, Ledger::joinedParts);
     }
 
+    /**
+     * Tells whether the rows of a difference of a query with
+     * {@code string_agg(DISTINCT ...)} agree once the parts of each string
+     * are taken as a set and the intervals are normalized: equal intervals
+     * of different forms that one engine kept apart.
+     */
+    private static boolean sameUpToDistinctParts(Outcome o) {
+        return DISTINCT_STRING_AGG.matcher(o.sql()).matches() && sameRows(o, Ledger::distinctParts);
+    }
+
     /** Tells whether the rows of a difference agree once each row is replaced by a key. */
     private static boolean sameRows(Outcome o, UnaryOperator<String> key) {
         if (o.kind() != Outcome.Kind.ROWS_DIFFER) {
@@ -141,6 +151,26 @@ final class Ledger {
         }
         m.appendTail(out);
         return out.toString();
+    }
+
+    /**
+     * A row of a report with each string as the set of the parts that
+     * {@code string_agg} joined, normalized as intervals, and the other
+     * values that read as intervals normalized.
+     */
+    private static String distinctParts(String row) {
+        Matcher m = QUOTED.matcher(row);
+        StringBuilder out = new StringBuilder();
+        while (m.find()) {
+            String text = m.group(1);
+            java.util.TreeSet<String> parts = new java.util.TreeSet<>();
+            for (String part : text.split(text.contains(" | ") ? " \\| " : ",")) {
+                parts.add(normalized(part));
+            }
+            m.appendReplacement(out, Matcher.quoteReplacement("{" + String.join("|", parts) + "}"));
+        }
+        m.appendTail(out);
+        return normalized(out.toString());
     }
 
     static final List<Entry> ENTRIES = List.of(
@@ -268,6 +298,12 @@ final class Ledger {
                     + " intervals normalized, or the strings of string_agg have the same parts and agree with them"
                     + " normalized.", "1.5.6", null,
                     o -> sameUpToEqualIntervals(o) || sameUpToJoinedTies(o)),
+            new Entry("distinct-aggregate-interval-forms", "DuckDB keeps intervals that it compares as equal but"
+                    + " writes differently, as 30 days, 720:00:00 and 1 month, apart in string_agg(DISTINCT ...),"
+                    + " while it takes them as one value in GROUP BY and SELECT DISTINCT; FyrQL takes them as one"
+                    + " value in all three. Explained where the rows agree with the intervals normalized and the"
+                    + " parts of each string as a set.", "1.5.6", null,
+                    Ledger::sameUpToDistinctParts),
             new Entry("round-decimal-negative", "DuckDB rounds a decimal to negative places to 0 where the rounded"
                     + " value needs one integral digit more than the decimal has, as in round(9.450, -1) = 0 while"
                     + " round(19.450, -1) = 20; FyrQL rounds to 10.", "1.5.6", null,
@@ -382,6 +418,8 @@ final class Ledger {
     private static final Pattern QUOTED = Pattern.compile("'((?:[^']|'')*)'");
     /** A query with an aggregate that joins strings. */
     private static final Pattern STRING_AGG = Pattern.compile("(?s).*\\b(string_agg|listagg)\\(.*");
+    /** A query with an aggregate that joins distinct strings. */
+    private static final Pattern DISTINCT_STRING_AGG = Pattern.compile("(?s).*\\b(string_agg|listagg)\\(DISTINCT .*");
 
     /** The two types of a set operation that FyrQL does not unite. */
     private static final Pattern SET_OPERATION_TYPES = Pattern.compile(

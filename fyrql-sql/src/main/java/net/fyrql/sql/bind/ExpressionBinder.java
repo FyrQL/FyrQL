@@ -1073,11 +1073,16 @@ final class ExpressionBinder {
      * type, a string literal as {@code VARCHAR} and an integer literal as its
      * own type; a later string literal takes the type, a later integer
      * literal keeps an integral type that holds it, and other values unite
-     * with it, except that nothing but text unites with {@code VARCHAR}.
+     * with it, except that nothing but text unites with {@code VARCHAR}. An
+     * integer literal that an integral type took keeps that type when a later
+     * value widens the column to another kind, so that {@code VALUES (22),
+     * (-2147483648), (1.5)} is a {@code DECIMAL(11,1)} as in DuckDB.
      */
     List<Bound> unifyRows(List<Bound> values, Position position) {
         DataType target = null;
-        for (Bound b : values) {
+        Map<Integer, DataType> taken = new HashMap<>();
+        for (int i = 0; i < values.size(); i++) {
+            Bound b = values.get(i);
             if (b.isNull()) {
                 continue;
             }
@@ -1089,7 +1094,9 @@ final class ExpressionBinder {
                 throw new SqlException("Cannot combine types VARCHAR and "
                         + (b.kind() == Kind.INTEGER ? "INTEGER_LITERAL" : b.type().sqlName())
                         + " - an explicit cast is required", position);
-            } else if (b.kind() != Kind.INTEGER || !target.isIntegral() || !Literals.fits(b.literal(), target)) {
+            } else if (b.kind() == Kind.INTEGER && target.isIntegral() && Literals.fits(b.literal(), target)) {
+                taken.put(i, target);
+            } else {
                 target = mix(target, b.type(), "VALUES list", position);
             }
         }
@@ -1097,12 +1104,15 @@ final class ExpressionBinder {
             return values;
         }
         List<Bound> result = new ArrayList<>();
-        for (Bound b : values) {
+        for (int i = 0; i < values.size(); i++) {
+            Bound b = values.get(i);
             if (b.isNull()) {
                 result.add(typed(b, target));
             } else if (b.kind() == Kind.STRING && target != DataType.VARCHAR
                     || b.kind() == Kind.INTEGER && target.isIntegral() && !b.type().equals(target)) {
                 result.add(Bound.typed(Literals.convert(b.literal(), target, position, context.zone())));
+            } else if (b.kind() == Kind.INTEGER && taken.containsKey(i) && !b.type().equals(taken.get(i))) {
+                result.add(Bound.typed(Literals.convert(b.literal(), taken.get(i), position, context.zone())));
             } else {
                 result.add(b);
             }

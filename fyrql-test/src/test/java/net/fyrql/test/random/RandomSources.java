@@ -43,6 +43,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Logger;
 
@@ -202,12 +203,32 @@ final class RandomSources {
      * {@code NULL}. The check looks for filters in the statements sent.
      */
     static Source database(String name, TestDatabase db) {
+        return database(name, db, null, b -> {
+        });
+    }
+
+    /**
+     * The random tables in a database without a dialect of its own, such as
+     * Derby or HSQLDB, as {@link #database(String, TestDatabase)} does, but
+     * created with the names of its types and filled through a prepared
+     * statement; a type without a name stays out, and a string may be
+     * longer than the {@code VARCHAR} of the names.
+     *
+     * @param typeNames the names of the types, or {@code null} for those the dialect writes
+     * @param settings further settings of the connector, such as the style of its limits
+     */
+    static Source database(String name, TestDatabase db, Function<DataType, String> typeNames,
+            Consumer<JdbcConnector.Builder> settings) {
+        Function<DataType, String> names = typeNames == null ? null
+                : t -> t == DataType.VARCHAR ? "VARCHAR(4000)" : typeNames.apply(t);
         Map<String, List<Object[]>> rows = RandomTables.rows(RandomRun.SEED);
         for (String table : RandomTables.SCHEMAS.keySet()) {
             Schema schema = RandomTables.SCHEMAS.get(table);
             List<Integer> kept = new ArrayList<>();
             for (int c = 0; c < schema.size(); c++) {
-                if (db.dialect() != JdbcDialect.SQLITE || schema.type(c) != DataType.HUGEINT) {
+                DataType type = schema.type(c);
+                if (names != null ? names.apply(type) != null
+                        : db.dialect() != JdbcDialect.SQLITE || type != DataType.HUGEINT) {
                     kept.add(c);
                 }
             }
@@ -224,13 +245,19 @@ final class RandomSources {
                 }
                 loaded.add(values);
             }
-            db.load(table, new Schema(kept.stream().map(schema.fields()::get).toList()), loaded);
+            Schema loadedSchema = new Schema(kept.stream().map(schema.fields()::get).toList());
+            if (names == null) {
+                db.load(table, loadedSchema, loaded);
+            } else {
+                db.load(table, loadedSchema, names, loaded);
+            }
         }
         JdbcConnector.Builder b = JdbcConnector.builder("db").dataSource(new Pool(db)).dialect(db.dialect())
                 .recordStatements(true).splitRows(8);
         for (String table : RandomTables.SCHEMAS.keySet()) {
             b.splitColumn(table, "k");
         }
+        settings.accept(b);
         JdbcConnector jdbc = b.build();
         return source(name, jdbc, List.copyOf(RandomTables.SCHEMAS.keySet()), engine -> () -> {
             if (jdbc.statements().stream().noneMatch(s -> s.contains(" WHERE "))) {

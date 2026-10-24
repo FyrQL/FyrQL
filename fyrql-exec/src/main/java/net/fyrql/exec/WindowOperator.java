@@ -777,12 +777,10 @@ final class WindowOperator extends AbstractOperator {
                         yield last(p);
                     }
                     default -> {
-                        long position = second.isNull(i) ? 0 : ((Number) second.get(i)).longValue();
-                        if (position < 1) {
-                            yield NONE;
-                        }
+                        // The frame first, as in DuckDB: a bound out of range fails whatever the position.
                         frame(p, i);
-                        yield nth(p, position);
+                        long position = second.isNull(i) ? 0 : ((Number) second.get(i)).longValue();
+                        yield position < 1 ? NONE : nth(p, position);
                     }
                 };
             }

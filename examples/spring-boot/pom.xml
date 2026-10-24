@@ -29,7 +29,7 @@
 
 	<properties>
 		<java.version>21</java.version>
-		<fyrql.version>0.13.5</fyrql.version>
+		<fyrql.version>0.13.6</fyrql.version>
 	</properties>
 
 	<dependencies>

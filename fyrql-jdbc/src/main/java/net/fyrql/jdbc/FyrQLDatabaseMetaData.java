@@ -481,9 +481,15 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
         return "";
     }
 
+    /**
+     * The words that the parser does not take as names beyond those that SQL:2003 reserves, so that tools put them
+     * in quotes where they are names, as a source called {@code csv}.
+     */
     @Override
     public String getSQLKeywords() {
-        return "";
+        return "ABSENT,CONNECT_BY_ROOT,CSV,DISTINCTROW,ERRORS,EXCLUDES,EXTEND,FBV,FINAL,FORCE,ILIKE,IMPORT,INCLUDES,"
+                + "MINUS,NOCYCLE,OUTPUT,PIVOT,PREFERRING,PREWHERE,PRIOR,RETURNING,SAMPLE,SCRIPT,SEMI,SETTINGS,"
+                + "SQL_CACHE,SQL_CALC_FOUND_ROWS,SQL_NO_CACHE,STATEMENT,UNBOUNDED,UNPIVOT,USE,VERIFY,XMLSERIALIZE,XOR";
     }
 
     @Override

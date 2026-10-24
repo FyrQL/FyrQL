@@ -656,6 +656,14 @@ class WindowOperatorTest {
                 aggregate(AggregateFunction.SUM, X, groups(current, bound(BoundKind.FOLLOWING, -1)), "s")));
         QueryException e = assertThrows(QueryException.class, () -> run(negative));
         assertTrue(e.getMessage().contains("Invalid GROUPS FOLLOWING value"), e.getMessage());
+        // nth_value checks the frame also where no position reaches it, as DuckDB does.
+        for (int position : List.of(ZERO, MINUS)) {
+            PlanNode.Window nth = new PlanNode.Window(MORE, List.of(P), List.of(SortKey.asc(O)), List.of(
+                    value(WindowFunction.NTH_VALUE, List.of(X, position), groups(bound(BoundKind.FOLLOWING, 0),
+                            bound(BoundKind.FOLLOWING, -1)))));
+            QueryException n = assertThrows(QueryException.class, () -> run(nth));
+            assertTrue(n.getMessage().contains("Invalid GROUPS FOLLOWING value"), n.getMessage());
+        }
     }
 
     @Test

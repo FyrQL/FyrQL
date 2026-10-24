@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.13.5 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.13.6 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -1174,6 +1174,11 @@ and this starts it:
 java -jar fyrql-flight-sql-all-<version>.jar fyrql.yaml [--host HOST] [--port PORT]
 ```
 
+On Java 24 and later, the JVM warns once at the start that Arrow's `MemoryUtil` calls
+methods of `sun.misc.Unsafe` that are to be removed; the server and `fyrql-arrow` work
+anyway. `java --sun-misc-unsafe-memory-access=allow -jar ...` silences the warning; Java
+21 does not know the option and does not start with it.
+
 The sources and the section `engine` of the file build the engine, as for the
 [configuration file](#configuration-file), and its section `server` holds the settings
 of the server, all of them optional; `--host` and `--port` win over those of the file:
@@ -1383,12 +1388,12 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.5</version>
+    <version>0.13.6</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.13.5</version>
+    <version>0.13.6</version>
 </dependency>
 ```
 
@@ -1722,6 +1727,10 @@ here; the random tests explain such differences by a ledger of their own, see
 
 ### Queries and functions
 
+- The parser takes some words for keywords that SQL:2003 does not reserve, such as
+  `csv`, `import`, `sample`, `settings` and `use`. As a name, such a word needs double
+  quotes, as in `SELECT * FROM "csv".customer`. The JDBC driver lists these words in
+  `getSQLKeywords()`, from which tools such as DBeaver know to quote them.
 - `SELECT DISTINCT` cannot be ordered by a column that is not selected.
 - A string literal is not converted to the type of a function argument, as in
   `sqrt('4')`.
@@ -2706,13 +2715,29 @@ which are aggregated again. NoREC counts the rows a condition selects twice: as 
 which the optimizer pushes into the source, splits and compiles, and as a `CASE` over every
 row. The checks run over the memory source interpreted, with compiled code, on one thread
 and with a budget that spills, and over Parquet files with small row groups, CSV and JSON
-files in small splits, H2, SQLite and PostgreSQL in splits over ranges of a key, and the
-Iceberg tables of the tests; the queries use the tables of each source, and their literals
-come partly from its rows. A check where a query fails as a query may, such as a cast of a
-string that a part meets and the whole query does not, is skipped and counted; any other
-difference fails the test, shrunk to a small query in the report (`fyrql-test`,
-`net.fyrql.test.random.Metamorphic`). `-Dfyrql.random.queries` and `-Dfyrql.random.seed`
-apply to them as well.
+files in small splits, H2, SQLite and PostgreSQL in splits over ranges of a key, Derby
+and HSQLDB through the generic dialect, and the Iceberg tables of the tests; the queries
+use the tables of each source, and their literals come partly from its rows. A check
+where a query fails as a query may, such as a cast of a string that a part meets and the
+whole query does not, is skipped and counted; any other difference fails the test, shrunk
+to a small query in the report (`fyrql-test`, `net.fyrql.test.random.Metamorphic`).
+`-Dfyrql.random.queries` and `-Dfyrql.random.seed` apply to them as well.
+
+Before a release, all random tests run longer, with new seeds and in variants: one
+thread, no pushdown into the sources, compiled code only, and another time zone. Each
+line below is one run of the package `net.fyrql.test.random` alone:
+
+```
+./mvnw -B -ntp verify -pl fyrql-test -am -Dtest='net.fyrql.test.random.*Test' \
+    -Dsurefire.failIfNoSpecifiedTests=false -Dfyrql.test.extra.skip=true \
+    -Dfyrql.random.queries=1000 -Dfyrql.random.seed=4711
+... -Dfyrql.random.queries=500 -Dfyrql.threads=1
+... -Dfyrql.random.queries=500 -Dfyrql.pushdown=off
+... -Dfyrql.random.queries=500 -Dfyrql.codegen=always
+... -Dfyrql.random.queries=500 -Dfyrql.random.timeZone=Europe/Berlin
+```
+
+A run of 1000 queries takes about nine minutes on a laptop with 12 threads.
 
 The JDBC connector is tested against H2, SQLite and PostgreSQL in every build, and through
 the generic dialect against H2 in its modes of compatibility with Oracle, SQL Server and
