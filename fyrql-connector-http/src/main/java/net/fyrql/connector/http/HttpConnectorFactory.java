@@ -26,6 +26,9 @@ import java.util.Map;
  * {@code sampleSize}, {@code ignoreErrors} and {@code batchSize} as for
  * JSON files.
  * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
+ * <p>
  * Internal; not covered by the compatibility promise.
  */
 public final class HttpConnectorFactory implements ConnectorFactory {

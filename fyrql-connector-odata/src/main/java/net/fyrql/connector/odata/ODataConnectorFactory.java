@@ -50,6 +50,9 @@ import java.util.Optional;
  * the pages of services of version 4, and {@code batchSize}.</li>
  * </ul>
  * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
+ * <p>
  * Internal; not covered by the compatibility promise.
  */
 public final class ODataConnectorFactory implements ConnectorFactory {

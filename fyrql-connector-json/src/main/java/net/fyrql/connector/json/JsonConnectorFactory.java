@@ -33,6 +33,9 @@ import java.util.Optional;
  * (a number of bytes, such as {@code 4MiB}). A source without files serves
  * only the table functions.
  * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
+ * <p>
  * Internal; not covered by the compatibility promise.
  */
 public final class JsonConnectorFactory implements ConnectorFactory {

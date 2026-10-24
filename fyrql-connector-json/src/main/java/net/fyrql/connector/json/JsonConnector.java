@@ -355,7 +355,8 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
                         string(function, key, value)));
                 default -> throw new IllegalArgumentException("Invalid named parameter \"" + key
                         + "\" for function " + function + "; supported are format, sample_size, ignore_errors,"
-                        + " map_inference_threshold, field_appearance_threshold, dateformat, timestampformat");
+                        + " map_inference_threshold, field_appearance_threshold, dateformat, timestampformat,"
+                        + " timezone");
             };
         }
         Call call;

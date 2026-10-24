@@ -36,7 +36,7 @@ import java.util.logging.Logger;
  * <li>{@code config} names a configuration file of {@code fyrql-config},
  * relative to the working directory; its sources become the catalogs of
  * the connection. Without it, the engine has the sources {@code csv},
- * {@code json}, {@code parquet} and {@code memory} without tables, as far
+ * {@code json}, {@code parquet}, {@code iceberg} and {@code memory} without tables, as far
  * as their connectors are on the class path, so that table functions such
  * as {@code read_csv} and file names in {@code FROM} work, and
  * {@code CREATE TABLE memory.t AS ...} keeps a table for as long as the

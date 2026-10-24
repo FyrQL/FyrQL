@@ -5,7 +5,7 @@ https://github.com/stefan-zobel/fyrql.
 This JAR includes the following software, renamed into packages under
 net.fyrql.internal:
 
-- Jackson 2.22.3 (jackson-core, jackson-dataformat-yaml), the parser of JSON
+- Jackson 2.22.4 (jackson-core, jackson-dataformat-yaml), the parser of JSON
   files and of the configuration file
   https://github.com/FasterXML/jackson
   Apache License 2.0, see apache-2.0-LICENSE.txt and jackson-NOTICE.txt.

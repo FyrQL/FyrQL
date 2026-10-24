@@ -28,6 +28,9 @@ import java.util.Optional;
  * the environment, see {@link S3Connector.Builder}. No message names the
  * value of an option.
  * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
+ * <p>
  * Internal; not covered by the compatibility promise.
  */
 public final class S3ConnectorFactory implements ConnectorFactory {

@@ -163,7 +163,7 @@ class ParquetConnectorTest {
 
         Map<String, Object> named = new LinkedHashMap<>();
         named.put("binary_as_string", true);
-        assertEquals("Invalid named parameter \"binary_as_string\" for function read_parquet; it has none",
+        assertEquals("Invalid named parameter \"binary_as_string\" for function read_parquet; it has only timezone",
                 assertThrows(IllegalArgumentException.class, () -> c.bind("read_parquet", List.of(file.toString()),
                         named)).getMessage());
         assertEquals("read_parquet takes the path of a file, a directory or a pattern as its argument",

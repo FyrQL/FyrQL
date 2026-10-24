@@ -170,6 +170,18 @@ class FyrQLAutoConfigurationTest {
     }
 
     @Test
+    void aTimeLimitOfZeroIsNone() {
+        runner.withPropertyValues("fyrql.sources[0].name=p", "fyrql.sources[0].type=probe",
+                "fyrql.engine.query-timeout=0", "fyrql.engine.max-query-timeout=0").run(context -> {
+                    assertThat(EngineConfigs.of(context.getBean(FyrQLProperties.class)).settings()).containsExactly(
+                            Map.entry("queryTimeout", "0"), Map.entry("maxQueryTimeout", "0"));
+                    FyrQL engine = context.getBean(FyrQL.class);
+                    assertThat(engine.queryTimeout()).isEmpty();
+                    assertThat(engine.maxQueryTimeout()).isEmpty();
+                });
+    }
+
+    @Test
     void anInvalidKeyStopsTheContextAndSaysWhatIsWrong() {
         runner.withPropertyValues("fyrql.engine.memory-budget=lots").run(context -> assertThat(context)
                 .getFailure().hasStackTraceContaining("The option memoryBudget of the engine must be a"

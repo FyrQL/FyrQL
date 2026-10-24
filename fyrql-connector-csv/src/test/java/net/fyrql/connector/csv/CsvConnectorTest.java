@@ -87,9 +87,9 @@ class CsvConnectorTest {
         Files.writeString(dir.resolve("t.csv"), csv.toString(), StandardCharsets.UTF_8);
         CsvConnector all = CsvConnector.builder("csv").file("t", dir.resolve("t.csv")).build();
         assertEquals(OptionalLong.of(50), all.catalog().rowCount(TableRef.of("csv", "t")));
-        CsvConnector sampled = CsvConnector.builder("csv").sampleRows(10).file("t", dir.resolve("t.csv")).build();
+        CsvConnector sampled = CsvConnector.builder("csv").sampleSize(10).file("t", dir.resolve("t.csv")).build();
         assertEquals(OptionalLong.of(50), sampled.catalog().rowCount(TableRef.of("csv", "t")));
-        assertEquals(OptionalLong.of(50), CsvConnector.builder("csv").sampleRows(10).file("t", dir.resolve("t.csv"))
+        assertEquals(OptionalLong.of(50), CsvConnector.builder("csv").sampleSize(10).file("t", dir.resolve("t.csv"))
                 .schema("t", Schema.of(new Schema.Field("n", DataType.INTEGER), new Schema.Field("s", DataType.VARCHAR)))
                 .build().catalog().rowCount(TableRef.of("csv", "t")));
     }
@@ -281,7 +281,7 @@ class CsvConnectorTest {
         errors.add(Map.entry("Patterns of file names are not supported yet: *.csv",
                 () -> c.bind("read_csv", List.of("*.csv"), Map.of())));
         errors.add(Map.entry("Invalid named parameter \"foo\" for function read_csv; supported are header, delim, sep, quote,"
-                + " nullstr, dateformat, timestampformat", () -> c.bind("read_csv", List.of(tsv.toString()),
+                + " nullstr, dateformat, timestampformat, timezone", () -> c.bind("read_csv", List.of(tsv.toString()),
                         Map.of("foo", 1L))));
         errors.add(Map.entry("The argument delim of read_csv must be one character",
                 () -> c.bind("read_csv", List.of(tsv.toString()), Map.of("delim", ";;"))));
@@ -302,7 +302,7 @@ class CsvConnectorTest {
         ConnectorFactory factory = ServiceLoader.load(ConnectorFactory.class).stream()
                 .map(ServiceLoader.Provider::get).filter(f -> f.type().equals("csv")).findFirst().orElseThrow();
         CsvConnector c = (CsvConnector) factory.create("files", Map.of("directory", "data", "tables.b", "b.txt",
-                "tables.c.file", "c.txt", "delimiter", ";", "nullString", "n/a", "sampleRows", "10", "batchSize", "1",
+                "tables.c.file", "c.txt", "delimiter", ";", "nullString", "n/a", "sampleSize", "10", "batchSize", "1",
                 "splitSize", "4B"), dir);
         assertEquals(List.of("a", "b", "c"), c.catalog().tables("main"));
         assertEquals(2, c.splits(plan(c, "b", 0, 1)).size());
@@ -406,9 +406,9 @@ class CsvConnectorTest {
             Path file = dir.resolve("bad.csv");
             Files.writeString(file, csv, StandardCharsets.UTF_8);
             Schema schema = Schema.of(new Schema.Field("a", DataType.INTEGER), new Schema.Field("b", DataType.VARCHAR));
-            CsvConnector whole = CsvConnector.builder("csv").file("t", file).schema("t", schema).sampleRows(10)
+            CsvConnector whole = CsvConnector.builder("csv").file("t", file).schema("t", schema).sampleSize(10)
                     .splitSize(0).build();
-            CsvConnector parts = CsvConnector.builder("csv").file("t", file).schema("t", schema).sampleRows(10)
+            CsvConnector parts = CsvConnector.builder("csv").file("t", file).schema("t", schema).sampleSize(10)
                     .splitSize(256).batchSize(8).build();
             assertTrue(parts.splits(plan(parts, "t", 0, 1)).size() > 1);
             String expected = assertThrows(RuntimeException.class, () -> rowsOfSplits(whole, "t", 0, 1)).getMessage();

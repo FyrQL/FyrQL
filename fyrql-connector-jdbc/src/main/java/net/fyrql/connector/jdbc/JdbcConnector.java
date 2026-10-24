@@ -900,8 +900,8 @@ public final class JdbcConnector implements Connector {
             if (d != JdbcDialect.GENERIC) {
                 if (generic) {
                     throw new IllegalArgumentException("The JDBC source " + name + " has the dialect "
-                            + d.sql().name() + "; pushdown, quote, limit and trust are options of the generic "
-                            + "dialect only");
+                            + d.sql().name() + "; pushdownFilters, quote, limitStyle and trust are options of the "
+                            + "generic dialect only");
                 }
                 return new JdbcConnector(this, connections, d, d.sql());
             }

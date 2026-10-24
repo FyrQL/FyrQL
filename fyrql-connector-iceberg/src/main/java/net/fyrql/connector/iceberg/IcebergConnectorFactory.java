@@ -41,6 +41,9 @@ import java.util.Optional;
  * The engine creates a source of this type without options when the
  * factory is on the class path, for the table functions.
  * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
+ * <p>
  * Internal; not covered by the compatibility promise.
  */
 public final class IcebergConnectorFactory implements ConnectorFactory {

@@ -313,8 +313,8 @@ public class FyrQLProperties {
             put(s, "timeZone", timeZone);
             put(s, "fileAccess", fileAccess);
             put(s, "allowedLocations", allowedLocations == null ? null : String.join(",", allowedLocations));
-            put(s, "queryTimeout", queryTimeout);
-            put(s, "maxQueryTimeout", maxQueryTimeout);
+            put(s, "queryTimeout", timeLimit(queryTimeout));
+            put(s, "maxQueryTimeout", timeLimit(maxQueryTimeout));
             return s;
         }
 
@@ -322,6 +322,11 @@ public class FyrQLProperties {
             if (value != null) {
                 settings.put(key, value.toString());
             }
+        }
+
+        /** A limit of time as the configuration file takes it: {@code 0} for none, which Spring binds as zero. */
+        private static String timeLimit(Duration limit) {
+            return limit == null ? null : limit.isZero() ? "0" : limit.toString();
         }
     }
 

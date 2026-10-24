@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.13.6 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.13.7 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server and the starter for Spring Boot, the SQL it takes and where it differs from DuckDB, how it
 runs queries and how to observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
@@ -159,14 +159,14 @@ take their default from a system property.
 | `memoryBudget(long)` | `memoryBudget`, `0` for none | no limit; half the heap in the Flight SQL server | The bytes that the queries of the engine hold together; see [Memory budget and spilling](#memory-budget-and-spilling) |
 | `spill(boolean)` | `spill` | `true` | Whether aggregations, sorts and windows spill to disk above the budget, instead of failing |
 | `spillDirectory(Path)` | `spillDirectory` | the temporary directory of the JVM | The directory under which the engine creates its directory for spilling |
-| `codegen(CodegenMode)` | `codegen`: `off`, `auto` or `always` | the system property `fyrql.codegen`, or `AUTO` | When expressions, keys and pipelines are compiled; see [Code generation](#code-generation) |
-| `codegenThreshold(long)` | `codegenThreshold` | 10,000 | The rows after which an operator compiles in `AUTO`, and the estimated rows from which a chain runs as a compiled pipeline |
+| `codegen(CodegenMode)` | `codegen`: `off`, `auto` or `always` | the system property `fyrql.codegen`, or `auto` | When expressions, keys and pipelines are compiled; see [Code generation](#code-generation) |
+| `codegenThreshold(long)` | `codegenThreshold` | 10,000 | The rows after which an operator compiles in `auto`, and the estimated rows from which a chain runs as a compiled pipeline |
 | `pushdown(boolean)` | `pushdown` | the system property `fyrql.pushdown` (`on` or `off`), or on | Whether sources take over filters, aggregations, sorts and limits, and a database the joins of its own tables |
 | `threads(int)` | `threads` | the system property `fyrql.threads`, or the number of processors | The most threads on which one query runs at a time; see [Parallel execution](#parallel-execution) |
 | `preserveOrder(boolean)` | `preserveOrder` | `true` | Whether rows that no `ORDER BY` orders come in the order of their sources, as on one thread |
-| `implicitSources(boolean)` | `implicitSources`, in a file only | `true` | Whether the engine adds a source for each format of files on the class path; see [Formats](#formats) |
+| `implicitSources(boolean)` | `implicitSources`, not in the URL | `true` | Whether the engine adds a source for each format of files on the class path; see [Formats](#formats) |
 | `timeZone(ZoneId)` | `timeZone` | the time zone of the JVM | The time zone with which every [session](#sessions) starts; see [Time zone](#time-zone) |
-| `fileAccess(FileAccess)` | `fileAccess`: `none`, `read` or `readWrite` | `READ_WRITE`; `none` in the Flight SQL server | What statements may do with the files and objects they name; see [File access](#file-access) |
+| `fileAccess(FileAccess)` | `fileAccess`: `none`, `read` or `readWrite` | `readWrite`; `none` in the Flight SQL server | What statements may do with the files and objects they name; see [File access](#file-access) |
 | `allowedLocations(List<String>)` | `allowedLocations` | anywhere | The directories and prefixes, such as `s3://lake/`, under which they may do it |
 | `queryTimeout(Duration)` | `queryTimeout`, such as `30s`, `0` for none | no limit | How long a query may run that asks for no timeout of its own, as every [session](#sessions) starts; see [Time limits](#time-limits) |
 | `maxQueryTimeout(Duration)` | `maxQueryTimeout`, `0` for none | no limit; an hour in the Flight SQL server | How long any query may run, also one that asks for a longer timeout |
@@ -241,7 +241,9 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   `+1`, `1e3` or ` 1`, is read as a string is cast, with the same value and error. A file
   whose name ends in `.gz` is read through gzip, in one part, and so is a file in S3. The
   table functions take `header`, `delim` or `sep`, `quote`, `nullstr`, `dateformat` and
-  `timestampformat`.
+  `timestampformat`, also as `date_format` and `timestamp_format`, and `timezone`, the
+  time zone in which a timestamp without an offset is read as a `TIMESTAMPTZ`, by default
+  that of the session.
 - `fyrql-connector-json`: JSON files (`.json`, `.jsonl`, `.ndjson`, also with `.gz`) that
   hold an array of records or a sequence of them. The columns are inferred from a sample
   as DuckDB's `read_json` infers them, a time of day as a `TIME`; objects and arrays become `STRUCT`, `MAP` and `LIST`
@@ -249,7 +251,8 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   streams the file and skips the values of the columns, and of the fields of structs,
   that it does not need; a file in S3 is read in one part. The table
   functions take `format`, `sample_size`, `ignore_errors`, `map_inference_threshold`,
-  `field_appearance_threshold`, `dateformat` and `timestampformat`.
+  `field_appearance_threshold`, `dateformat` and `timestampformat`, also as `date_format`
+  and `timestamp_format`, and `timezone` as for CSV.
 - `fyrql-connector-parquet`: Parquet files, read in pure Java with parquet-java without
   Hadoop and with codecs in pure Java (`SNAPPY`, `GZIP`, `ZSTD`, `LZ4_RAW` and none); the
   JAR of the module carries parquet-java renamed to `net.fyrql.internal`, so that an
@@ -268,7 +271,9 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   and columns each scan read. parquet-java holds the column chunks of a row group in
   memory, compressed, outside the memory budget of the engine. A file in S3 is read in
   ranges, see `fyrql-connector-s3`; the option `readAhead` (`1MB`) is the size of the
-  reads of the headers of pages, of dictionaries and of indexes there.
+  reads of the headers of pages, of dictionaries and of indexes there. `read_parquet`
+  takes the named argument `timezone`, as the table functions of CSV and JSON do, but a
+  Parquet file holds its instants in UTC and needs none.
 - `fyrql-connector-iceberg`: Apache Iceberg tables, read in pure Java without Hadoop
   and without a catalog: a table is its directory, the one with `metadata/`, or one of its
   metadata files, local or in S3. In a directory, `metadata/version-hint.text` names the
@@ -294,9 +299,9 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   keeps the row groups each scan read. The table functions `iceberg_scan` and
   `read_iceberg` take the location and, to read another snapshot, `snapshot_from_id`,
   `snapshot_from_timestamp`, a `TIMESTAMP` in UTC, a `TIMESTAMPTZ` or text, or `ref`, the
-  name of a branch or tag; `iceberg_snapshots` lists the snapshots of a table, as in
-  DuckDB. A table that was moved or copied, also into S3, is read where it is now: a path
-  of its metadata that starts with the location the metadata gives is taken relative to
+  name of a branch or tag, and `timezone`, which changes nothing; `iceberg_snapshots`
+  lists the snapshots of a table, as in DuckDB. A table that was moved or copied, also
+  into S3, is read where it is now: a path of its metadata that starts with the location the metadata gives is taken relative to
   the directory of the table. The source of the type `iceberg` takes `tables.<name>` or
   `tables.<name>.path` with at most one of `.snapshot_from_id`,
   `.snapshot_from_timestamp` and `.ref`, `directory`, whose subdirectories with a
@@ -489,9 +494,10 @@ the database itself (`INFORMATION_SCHEMA` and those starting with `SYS`), and
 `schemas` and `defaultSchema` set them where the metadata does not tell. The builder and
 the configuration set the rest:
 
-- `pushdownFilters(false)`, `pushdown: none`: the database evaluates no filter at all;
+- `pushdownFilters(false)`, `pushdownFilters: false`: the database evaluates no filter
+  at all;
 - `quote(...)`, `quote`: `"`, `` ` ``, `[` for `[name]`, or `none`;
-- `limitStyle(...)`, `limit`: `maxRows` (the default), `fetchFirst` for
+- `limitStyle(...)`, `limitStyle`: `maxRows` (the default), `fetchFirst` for
   `FETCH FIRST n ROWS ONLY`, `limit` for `LIMIT n`, or `top` for `SELECT TOP n`;
 - `trust(...)`, `trust`: `decimal`, `double`, `timestamp` and `boolean`, a promise that
   the database compares these types as FyrQL does, which a query with `pushdown(false)`
@@ -614,16 +620,17 @@ options, all optional, with their defaults:
 
 | Format | Options |
 | --- | --- |
-| CSV | `header` (`true`), `delimiter`, `delim` or `sep` (`,`, or a tab for `.tsv`), `quote` (`"`), `escape` (the quote), `nullstr` or `null` (empty), `dateformat` and `timestampformat` (as in `strftime`), `compression` (`gzip` or `none`, by default from the name) |
-| JSON | `array` (`false`: one record per line, `true`: one array of records), `dateformat`, `timestampformat`, `compression` |
-| Parquet | `compression` or `codec` (`zstd`, `snappy`, `gzip`, `lz4_raw` or `uncompressed`; `zstd`), `row_group_size` (122,880 rows), `row_group_size_bytes` (128 MB), `parquet_version` (`v1` or `v2`; `v1`) |
+| CSV | `header` (`true`), `delimiter`, `delim` or `sep` (`,`, or a tab for `.tsv`), `quote` (`"`), `escape` (the quote), `nullstr` or `null` (empty), `dateformat` and `timestampformat` (as in `strftime`), `timezone` (the time zone of a `TIMESTAMPTZ`; that of the session), `compression` (`gzip` or `none`, by default from the name) |
+| JSON | `array` (`false`: one record per line, `true`: one array of records), `dateformat`, `timestampformat`, `timezone`, `compression` |
+| Parquet | `compression` or `codec` (`zstd`, `snappy`, `gzip`, `lz4_raw` or `lz4`, `uncompressed` or `none`; `zstd`), `row_group_size` (122,880 rows), `row_group_size_bytes` (128 MB), `parquet_version` (`v1` or `v2`; `v1`), `timezone`, which changes nothing |
 
 An unknown option fails with a message that lists the known ones. A CSV file is written
 as DuckDB writes it, byte for byte: in UTF-8 with line feeds, a field in quotes only
 where it holds the delimiter, the quote or a line break or equals the null string, so
 that an empty string is `""` and a `NULL` is nothing, and a nested value as its text,
-such as `[1, NULL]`; a `TIMESTAMPTZ` is written in the time zone of the session, such
-as `2024-07-01 14:00:00+02`, in both formats. A JSON file holds numbers as numbers, `NaN`
+such as `[1, NULL]`; a `TIMESTAMPTZ` is written in the time zone of the session, or of
+the option `timezone`, such as `2024-07-01 14:00:00+02`, in both formats. A JSON file
+holds numbers as numbers, `NaN`
 and `Infinity` as DuckDB writes them, dates, times, timestamps and intervals as strings, a `BLOB` as a string with `\x`
 escapes, structs and maps as objects and lists as arrays. Neither keeps the types: read
 back, the types are inferred anew, so that a `TINYINT` comes back as a `BIGINT` and a
@@ -685,9 +692,9 @@ The options of reading, all optional, with their defaults:
 
 | Format | Options |
 | --- | --- |
-| CSV | `header` (`true`), `delimiter`, `delim` or `sep` (`,`, or a tab for `.tsv`), `quote` (`"`), `escape` (only the quote), `nullstr` or `null` (empty), `dateformat` and `timestampformat` (as in `strptime`; a value must have that form), `compression` (`gzip`, `none` or `auto`: by the name) |
-| JSON | `format` (`auto`, `array` or `newline_delimited`; `auto`) or `array` (`true` or `false`), `dateformat`, `timestampformat`, `ignore_errors` (`false`; with `true`, a value that does not fit is `NULL`), `compression` |
-| Parquet | none |
+| CSV | `header` (`true`), `delimiter`, `delim` or `sep` (`,`, or a tab for `.tsv`), `quote` (`"`), `escape` (only the quote), `nullstr` or `null` (empty), `dateformat` and `timestampformat` (as in `strptime`; a value must have that form), `timezone` (the time zone in which a timestamp without an offset is read into a `TIMESTAMPTZ` column; that of the session), `compression` (`gzip`, `none` or `auto`: by the name) |
+| JSON | `format` (`auto`, `array` or `newline_delimited`; `auto`) or `array` (`true` or `false`), `dateformat`, `timestampformat`, `ignore_errors` (`false`; with `true`, a value that does not fit is `NULL`), `timezone`, `compression` |
+| Parquet | `timezone`, which changes nothing |
 
 A CSV file holds no nested values: a column of the type `STRUCT`, `LIST` or `MAP` in the
 list fails the statement. In a CSV file of one column whose null string is empty, an
@@ -851,9 +858,35 @@ builder instead, so that an application can add sources of its own, such as tabl
 memory. A third section, `server`, holds the settings of the [Flight SQL
 server](#flight-sql-server), which the engine leaves aside.
 
+A source of the type `csv` takes `directory`, whose `.csv` and `.tsv` files become tables,
+and `tables.<name>` or `tables.<name>.file` for single files, also in S3; and, for every
+file, `delimiter` (a comma, or a tab for `.tsv`), `quote` (`"`), `header` (detected as
+DuckDB detects it), `nullString` (empty), `charset` (`UTF-8`), `sampleSize` (the rows the
+types are inferred from, `1000`), `batchSize` (`2048`) and `splitSize` (the size of the
+parts in which a large file is read on several threads, `4MiB`, `0` for one part).
+
+A source of the type `json` takes `directory`, whose `.json`, `.jsonl` and `.ndjson` files
+become tables, and `tables.<name>` or `tables.<name>.file`; and, for every file, `format`
+(`auto`, `array` or `newline_delimited`; `auto`), `sampleSize` (the records the columns
+are inferred from, `20480`, `-1` for all), `mapInferenceThreshold` (`200`),
+`fieldAppearanceThreshold` (`0.1`), `ignoreErrors` (`false`), `dateFormat` and
+`timestampFormat` (as in `strptime`), which mean what the arguments of the table functions
+with these names in snake case mean, and `batchSize` and `splitSize` as for CSV.
+
+A source of the type `parquet` takes `directory`, whose `.parquet` files and
+subdirectories of them become tables, and `tables.<name>` or `tables.<name>.path` for a
+file, a directory or a pattern such as `lake/events/*.parquet`; and `batchSize` and
+`readAhead` (`1MB`, see [Connectors](#connectors)).
+
+A source of the type `http` takes `tables.<name>` or `tables.<name>.url` for the endpoint
+of a table and `tables.<name>.pointer` for a JSON pointer to its records, `headers.<name>`
+for a header of every request, `timeout` (`30s`), and `format`, `sampleSize`,
+`ignoreErrors` and `batchSize` as a source of the type `json`.
+
 A source of the type `odata` names one service with `url`, whose schema is `main`, or
 several under `services`, each with its `url` and, if need be, `version` (`v2` or `v4`,
-which otherwise comes from its `$metadata`) and `trustFilters`. It logs in with `user`
+also as `2`, `2.0`, `4` or `4.0`, which otherwise comes from its `$metadata`) and
+`trustFilters`. It logs in with `user`
 and `password`, with `token`, or with `oauth.tokenUrl`, `oauth.clientId`,
 `oauth.clientSecret` and optionally `oauth.scope` and `oauth.clientAuthentication`
 (`basic`, the default, or `post`). Its other options are `headers`, `timeout`, `pageSize`
@@ -865,9 +898,9 @@ entity set.
 
 A source of the type `jdbc` takes `url`, `user`, `password`, `dialect` (`h2`, `sqlite`,
 `postgresql`, `mysql` or `generic`, by default from the URL or else the database, and
-`generic` for any other), for the generic dialect `pushdown`, `quote`, `limit` and
-`trust` (see [Connectors](#connectors)), `schemas` (a comma-separated list),
-`defaultSchema`, `fetchSize`, `batchSize`, `batchRows` (the rows of a batch of
+`generic` for any other), for the generic dialect `pushdownFilters`, `quote`,
+`limitStyle` and `trust` (see [Connectors](#connectors)), `schemas` (a comma-separated
+list), `defaultSchema`, `fetchSize`, `batchSize`, `batchRows` (the rows of a batch of
 [`INSERT`](#writing-and-loading)), `recordStatements`, `splitRows` and `splitColumn.<table>` (see
 [Parallel execution](#parallel-execution)), and `properties.<key>` for any property of
 the driver.
@@ -1388,12 +1421,12 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.6</version>
+    <version>0.13.7</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.13.6</version>
+    <version>0.13.7</version>
 </dependency>
 ```
 
@@ -1438,7 +1471,8 @@ The settings under `fyrql.engine` are those of [Engine settings](#engine-setting
 the relaxed names of Spring: `memory-budget` and `memoryBudget` are the same key, and an
 IDE completes them from the metadata of the starter. `memory-budget` takes the units of
 FyrQL, so that `512MB` are 512,000,000 bytes and `512MiB` 536,870,912, not those of
-Spring; `query-timeout` and `max-query-timeout` are durations such as `30s` or `5m`.
+Spring; `query-timeout` and `max-query-timeout` are durations such as `30s` or `5m`, or
+`0` for none.
 The sources under `fyrql.sources` are those of the file: a `name`, a `type` and the
 options of the type below them, with nested keys joined by dots and lists by commas.
 Unlike the settings, the options keep the names of their connector exactly, such as
@@ -2570,7 +2604,9 @@ covers
   [JDBC driver](#jdbc-driver) and of the starter for [Spring Boot](#spring-boot), and the
   command line of the [Flight SQL server](#flight-sql-server);
 - the behavior of SQL: the statements, functions and types FyrQL takes, the results it
-  gives, the types it maps to JDBC and Arrow, and the SQLSTATEs of its errors;
+  gives, the types it maps to JDBC and Arrow, and the SQLSTATEs of its errors. A minor
+  version may reserve more words, as the parser reserves `csv` today: a name in double
+  quotes stays valid, and `getSQLKeywords()` of the JDBC driver lists the words;
 - the list of [Differences from DuckDB](#differences-from-duckdb): FyrQL behaves as it
   says, and an entry goes in a minor version only when FyrQL then behaves as DuckDB.
 

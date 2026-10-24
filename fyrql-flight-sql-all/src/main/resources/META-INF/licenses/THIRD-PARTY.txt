@@ -5,7 +5,7 @@ https://github.com/stefan-zobel/fyrql.
 This JAR includes the following software, renamed into packages under
 net.fyrql.internal:
 
-- Jackson 2.22.3 (jackson-core, jackson-databind, jackson-annotations,
+- Jackson 2.22.4 (jackson-core, jackson-databind, jackson-annotations,
   jackson-datatype-jsr310, jackson-dataformat-yaml), the parser of JSON files
   and of the configuration file, and of the schemas of Arrow
   https://github.com/FasterXML/jackson
@@ -69,7 +69,7 @@ server speaks to its clients with:
   https://grpc.io/
   Apache License 2.0, see apache-2.0-LICENSE.txt and grpc-NOTICE.txt.
 
-- Netty 4.2.9.Final (netty-buffer, netty-codec-base, netty-codec-compression,
+- Netty 4.2.19.Final (netty-buffer, netty-codec-base, netty-codec-compression,
   netty-codec-http, netty-codec-http2, netty-codec-socks, netty-common,
   netty-handler, netty-handler-proxy, netty-resolver, netty-transport,
   netty-transport-native-unix-common without native code)
@@ -104,7 +104,7 @@ server speaks to its clients with:
   https://commons.apache.org/proper/commons-codec/
   Apache License 2.0, see apache-2.0-LICENSE.txt and commons-codec-NOTICE.txt.
 
-- SLF4J API and SLF4J Simple binding 2.0.17, which Arrow and Netty log with
+- SLF4J API and SLF4J Simple binding 2.0.20, which Arrow and Netty log with
   https://www.slf4j.org/
   MIT License, see slf4j-LICENSE.txt.
 

@@ -225,7 +225,7 @@ class GenericDialectConnectorTest {
                 .filter(f -> f.type().equals("jdbc")).findFirst().orElseThrow();
         TestDatabase db = items(TestDatabase.h2Mode("MSSQLServer"));
         JdbcConnector connector = (JdbcConnector) factory.create("db", Map.of("url", db.url(), "dialect", "generic",
-                "pushdown", "none", "quote", "[", "limit", "top", "trust", "decimal, Double"));
+                "pushdownFilters", "false", "quote", "[", "limitStyle", "top", "trust", "decimal, Double"));
         assertEquals(new GenericDialect.Settings("[", GenericDialect.LimitStyle.TOP,
                 Set.of(GenericDialect.Trust.DECIMAL, GenericDialect.Trust.DOUBLE), false),
                 ((GenericDialect) connector.sql()).settings());
@@ -234,17 +234,25 @@ class GenericDialectConnectorTest {
                     .map(r -> r[0]).toList());
         }
         JdbcConnector defaults = (JdbcConnector) factory.create("db", Map.of("url", db.url(), "dialect", "generic",
-                "quote", "none", "limit", "fetchFirst"));
+                "quote", "none", "limitStyle", "fetchFirst"));
         assertEquals(new GenericDialect.Settings("", GenericDialect.LimitStyle.FETCH_FIRST, Set.of(), true),
                 ((GenericDialect) defaults.sql()).settings());
-        for (Map.Entry<String, String> bad : Map.of("pushdown", "all", "limit", "rownum", "trust", "uuid", "quote",
-                "'").entrySet()) {
+        for (Map.Entry<String, String> bad : Map.of("pushdownFilters", "all", "limitStyle", "rownum", "trust", "uuid",
+                "quote", "'").entrySet()) {
             IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> factory.create("db",
                     Map.of("url", db.url(), "dialect", "generic", bad.getKey(), bad.getValue())));
             assertTrue(e.getMessage().contains(bad.getKey()) || e.getMessage().contains("quote"), e.getMessage());
         }
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> factory.create("db", Map.of("url", db.url(), "dialect", "h2", "limit", "top")));
+                () -> factory.create("db", Map.of("url", db.url(), "dialect", "h2", "limitStyle", "top")));
         assertTrue(e.getMessage().contains("options of the generic dialect only"), e.getMessage());
+        // The names before 0.13.7 are unknown options, and the message names the known ones.
+        for (String old : List.of("pushdown", "limit")) {
+            IllegalArgumentException unknown = assertThrows(IllegalArgumentException.class, () -> factory.create("db",
+                    Map.of("url", db.url(), "dialect", "generic", old, "top")));
+            assertTrue(unknown.getMessage().contains("unknown option " + old + ";")
+                    && unknown.getMessage().contains("pushdownFilters") && unknown.getMessage().contains("limitStyle"),
+                    unknown.getMessage());
+        }
     }
 }

@@ -40,22 +40,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.13.6</version>
+    <version>0.13.7</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.13.6</version>
+    <version>0.13.7</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.13.6</version>
+    <version>0.13.7</version>
 </dependency>
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.13.6</version>
+    <version>0.13.7</version>
 </dependency>
 ```
 
@@ -530,7 +530,7 @@ the application depends on
 <dependency>
     <groupId>io.github.stefan-zobel</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.13.6</version>
+    <version>0.13.7</version>
 </dependency>
 ```
 

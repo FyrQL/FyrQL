@@ -23,6 +23,9 @@ import java.util.Map;
  * tables; SQL creates them with {@code CREATE TABLE}, and they live as long
  * as the engine.
  * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
+ * <p>
  * Internal; not covered by the compatibility promise.
  */
 public final class MemoryConnectorFactory implements ConnectorFactory {

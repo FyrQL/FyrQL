@@ -27,9 +27,12 @@ import java.util.Optional;
  * files, both resolved against the directory of the configuration, or a
  * file in a store of the engine such as {@code s3://bucket/key}; and
  * {@code delimiter}, {@code quote}, {@code header}, {@code nullString},
- * {@code charset}, {@code sampleRows}, {@code batchSize} and
+ * {@code charset}, {@code sampleSize}, {@code batchSize} and
  * {@code splitSize} (a number of bytes, such as {@code 4MiB}), which apply to
  * every file. A source without files serves only the table functions.
+ * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
  * <p>
  * Internal; not covered by the compatibility promise.
  */
@@ -54,7 +57,7 @@ public final class CsvConnectorFactory implements ConnectorFactory {
         o.bool("header").ifPresent(b::header);
         o.string("nullString").ifPresent(b::nullString);
         o.get("charset", "a charset such as UTF-8", Charset::forName).ifPresent(b::charset);
-        o.integer("sampleRows").ifPresent(b::sampleRows);
+        o.integer("sampleSize").ifPresent(b::sampleSize);
         o.integer("batchSize").ifPresent(b::batchSize);
         o.bytes("splitSize").ifPresent(b::splitSize);
         Optional<Path> files = o.path("directory");

@@ -308,8 +308,8 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
 
     private static <T> T unknown(String function, String parameter) {
         throw new IllegalArgumentException("Invalid named parameter \"" + parameter + "\" for function " + function
-                + "; it has " + (function.equals(SNAPSHOTS) ? "none"
-                        : "snapshot_from_id, snapshot_from_timestamp and ref"));
+                + "; it has " + (function.equals(SNAPSHOTS) ? "only timezone"
+                        : "snapshot_from_id, snapshot_from_timestamp, ref and timezone"));
     }
 
     private static Long id(Object v) {

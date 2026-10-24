@@ -54,8 +54,8 @@ record UrlSettings(Map<String, String> values, List<String> unknownProperties) {
     /** The keys, {@code config} first and then the settings of the engine of {@code fyrql-config}. */
     static final List<Key> KEYS = List.of(
             new Key(CONFIG, "The configuration file of the sources and the engine, YAML or JSON; without it the"
-                    + " engine has the sources csv, json and parquet without tables, for table functions and file"
-                    + " names in FROM", List.of()),
+                    + " engine has the sources csv, json, parquet, iceberg and memory without tables, for table"
+                    + " functions, file names in FROM and the tables that SQL creates", List.of()),
             new Key("defaultSource", "The source in which names of fewer than three parts are looked up first",
                     List.of()),
             new Key("defaultSchema", "The schema of the default source in which one-part names are looked up"

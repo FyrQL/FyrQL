@@ -31,6 +31,9 @@ import java.util.Optional;
  * such as {@code 1MB}, the default. A source without tables serves only the
  * table functions.
  * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
+ * <p>
  * Internal; not covered by the compatibility promise.
  */
 public final class ParquetConnectorFactory implements ConnectorFactory {

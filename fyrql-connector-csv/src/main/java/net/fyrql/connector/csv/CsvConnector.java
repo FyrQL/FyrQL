@@ -373,7 +373,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                         zone = FileWriterProvider.timeZone(string(function, e.getKey(), value));
                 default -> throw new IllegalArgumentException("Invalid named parameter \"" + e.getKey()
                         + "\" for function " + function + "; supported are header, delim, sep, quote, nullstr,"
-                        + " dateformat, timestampformat");
+                        + " dateformat, timestampformat, timezone");
             }
         }
         Call call;
@@ -1186,8 +1186,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         }
 
         /** Sets the number of rows the schema is sniffed from; 1000 by default. */
-        public Builder sampleRows(int sampleRows) {
-            this.sampleRows = sampleRows;
+        public Builder sampleSize(int sampleSize) {
+            this.sampleRows = sampleSize;
             return this;
         }
 

@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.6</version>
+		<version>0.13.7</version>
 	</parent>
 
 	<artifactId>fyrql-codegen</artifactId>
@@ -50,6 +50,29 @@
 
 	<build>
 		<plugins>
+			<!--
+			  The artifacts that the shade plugin below takes, for the test that the lists of third-party software
+			  name their versions; the filter is the one of its artifact set.
+			-->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-dependency-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>shaded-dependencies</id>
+						<phase>generate-resources</phase>
+						<goals>
+							<goal>list</goal>
+						</goals>
+						<configuration>
+							<includeScope>runtime</includeScope>
+							<includeGroupIds>io.github.janino-lts</includeGroupIds>
+							<outputFile>${project.build.directory}/shaded-dependencies.txt</outputFile>
+							<sort>true</sort>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-shade-plugin</artifactId>

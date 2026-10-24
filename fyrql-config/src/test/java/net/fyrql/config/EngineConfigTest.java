@@ -173,10 +173,10 @@ class EngineConfigTest {
         assertEquals(dir.toAbsolutePath(), fromYaml.directory());
         assertEquals(Map.of("directory", "data"), fromYaml.sources().get(0).options());
         Path json = Files.writeString(dir.resolve("fyrql.json"), "{\"sources\": [{\"name\": \"a\", \"type\":"
-                + " \"csv\",\n\t\"sampleRows\": 10, \"header\": true}], \"engine\": {\"batchSize\": 64}}",
+                + " \"csv\",\n\t\"sampleSize\": 10, \"header\": true}], \"engine\": {\"batchSize\": 64}}",
                 StandardCharsets.UTF_8);
         EngineConfig fromJson = EngineConfig.read(json);
-        assertEquals(Map.of("sampleRows", "10", "header", "true"), fromJson.sources().get(0).options());
+        assertEquals(Map.of("sampleSize", "10", "header", "true"), fromJson.sources().get(0).options());
         assertEquals(Map.of("batchSize", "64"), fromJson.settings());
         Path broken = Files.writeString(dir.resolve("broken.json"), "{\"sources\": [}", StandardCharsets.UTF_8);
         String message = assertThrows(ConfigException.class, () -> EngineConfig.read(broken)).getMessage();

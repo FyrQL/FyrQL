@@ -31,8 +31,8 @@ import java.util.Optional;
  * Builds the engine of a connection from its settings: from the
  * configuration file the settings name, whose settings of the engine they
  * overlay, or, without a file, with a source without tables for each of
- * the types {@code csv}, {@code json}, {@code parquet} and {@code memory}
- * whose connector is there, so that table functions such as
+ * the types {@code csv}, {@code json}, {@code parquet}, {@code iceberg} and
+ * {@code memory} whose connector is there, so that table functions such as
  * {@code read_csv} and file names in {@code FROM} work, {@code COPY}
  * writes files and {@code CREATE TABLE memory.t AS ...} keeps a table for
  * as long as the connection. The factories of the connectors are found

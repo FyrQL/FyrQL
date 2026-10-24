@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.stefan-zobel</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.13.6</version>
+		<version>0.13.7</version>
 	</parent>
 
 	<artifactId>fyrql-flight-sql-all</artifactId>
@@ -119,6 +119,34 @@
 				<configuration>
 					<forceCreation>true</forceCreation>
 				</configuration>
+			</plugin>
+			<!--
+			  The artifacts that the shade plugin below takes, for the test that the lists of third-party software
+			  name their versions: all but the modules of FyrQL, whose own libraries their own lists name, and the
+			  annotations that its artifact set leaves out.
+			-->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-dependency-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>shaded-dependencies</id>
+						<phase>generate-resources</phase>
+						<goals>
+							<goal>list</goal>
+						</goals>
+						<configuration>
+							<includeScope>runtime</includeScope>
+							<excludeGroupIds>io.github.stefan-zobel</excludeGroupIds>
+							<excludeArtifactIds>
+								jsr305, error_prone_annotations, j2objc-annotations, annotations, animal-sniffer-annotations,
+								jspecify, javax.annotation-api, listenablefuture
+							</excludeArtifactIds>
+							<outputFile>${project.build.directory}/shaded-dependencies.txt</outputFile>
+							<sort>true</sort>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>

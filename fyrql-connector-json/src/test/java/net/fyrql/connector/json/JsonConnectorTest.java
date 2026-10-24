@@ -288,7 +288,8 @@ class JsonConnectorTest {
         assertEquals("json BIGINT[]", JsonSchemaInferenceTest.describe(c.catalog().schema(
                 c.bind("read_ndjson", List.of(lines.toString()), Map.of()))));
         assertEquals("Invalid named parameter \"header\" for function read_json; supported are format, sample_size, "
-                + "ignore_errors, map_inference_threshold, field_appearance_threshold, dateformat, timestampformat",
+                + "ignore_errors, map_inference_threshold, field_appearance_threshold, dateformat, timestampformat, "
+                + "timezone",
                 assertThrows(IllegalArgumentException.class,
                         () -> c.bind("read_json", List.of(path), Map.of("header", true))).getMessage());
         assertEquals("The argument sample_size of read_json must be an INTEGER", assertThrows(

@@ -29,9 +29,9 @@ import java.util.Set;
  * ({@code h2}, {@code sqlite}, {@code postgresql}, {@code mysql} or
  * {@code generic}; by default from the URL or the database, and
  * {@code generic} for a database without a dialect of its own), for the
- * generic dialect {@code pushdown} ({@code filters}, the default, or
- * {@code none}), {@code quote} ({@code "}, {@code `}, {@code [} or
- * {@code none}), {@code limit} ({@code maxRows}, the default,
+ * generic dialect {@code pushdownFilters} ({@code true}, the default, or
+ * {@code false}), {@code quote} ({@code "}, {@code `}, {@code [} or
+ * {@code none}), {@code limitStyle} ({@code maxRows}, the default,
  * {@code fetchFirst}, {@code limit} or {@code top}) and {@code trust} (a
  * comma-separated list of {@code decimal}, {@code double},
  * {@code timestamp} and {@code boolean}), {@code schemas} (a
@@ -42,6 +42,9 @@ import java.util.Set;
  * and {@link JdbcConnector.Builder#splitColumn}), and
  * {@code properties.<key>} for any property of the driver. A relative path in the URL is resolved by the driver, not
  * against the directory of the configuration.
+ * <p>
+ * Its type and its options are keys of the configuration file, which the
+ * compatibility promise covers; the class itself is internal.
  * <p>
  * Internal; not covered by the compatibility promise.
  */
@@ -59,10 +62,11 @@ public final class JdbcConnectorFactory implements ConnectorFactory {
         o.string("user").ifPresent(b::user);
         o.string("password").ifPresent(b::password);
         o.get("dialect", null, JdbcDialect::ofName).ifPresent(b::dialect);
-        o.get("pushdown", "filters or none", JdbcConnectorFactory::pushdown).ifPresent(b::pushdownFilters);
+        o.bool("pushdownFilters").ifPresent(b::pushdownFilters);
         o.get("quote", "\", `, [ or none", v -> v.strip().equalsIgnoreCase("none") ? "" : v.strip())
                 .ifPresent(b::quote);
-        o.get("limit", "maxRows, fetchFirst, limit or top", JdbcConnectorFactory::limit).ifPresent(b::limitStyle);
+        o.get("limitStyle", "maxRows, fetchFirst, limit or top", JdbcConnectorFactory::limitStyle)
+                .ifPresent(b::limitStyle);
         o.get("trust", "a list of decimal, double, timestamp and boolean", JdbcConnectorFactory::trust)
                 .ifPresent(b::trust);
         o.string("schemas").ifPresent(v -> {
@@ -86,15 +90,7 @@ public final class JdbcConnectorFactory implements ConnectorFactory {
         return b.build();
     }
 
-    private static boolean pushdown(String value) {
-        return switch (value.strip().toLowerCase(Locale.ROOT)) {
-            case "filters" -> true;
-            case "none" -> false;
-            default -> throw new IllegalArgumentException(value);
-        };
-    }
-
-    private static JdbcConnector.LimitStyle limit(String value) {
+    private static JdbcConnector.LimitStyle limitStyle(String value) {
         return switch (value.strip().toLowerCase(Locale.ROOT)) {
             case "maxrows" -> JdbcConnector.LimitStyle.MAX_ROWS;
             case "fetchfirst" -> JdbcConnector.LimitStyle.FETCH_FIRST;

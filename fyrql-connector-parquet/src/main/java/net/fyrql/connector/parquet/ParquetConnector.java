@@ -350,7 +350,7 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         for (String key : namedArguments.keySet()) {
             if (!key.equals(FileWriterProvider.TIME_ZONE)) {
                 throw new IllegalArgumentException("Invalid named parameter \"" + key + "\" for function " + function
-                        + "; it has none");
+                        + "; it has only timezone");
             }
         }
         String location = ParquetFiles.absolute(path, Path.of(""));
