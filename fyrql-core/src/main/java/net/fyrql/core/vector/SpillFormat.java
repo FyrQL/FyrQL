@@ -146,6 +146,18 @@ public final class SpillFormat {
                 case DoubleVector x -> putDoubles(x.values, from, n);
                 case DecimalVector x when x.small != null -> putLongs(x.small, from, n);
                 case DecimalVector x -> putBigs(x.big, from, n);
+                case BytesVector x when x.offsets == null -> {
+                    // A dictionary is written flat, a NULL without bytes.
+                    int total = 0;
+                    for (int r = from; r < to; r++) {
+                        putInt(total);
+                        total += x.flatLength(r);
+                    }
+                    putInt(total);
+                    for (int r = from; r < to; r++) {
+                        putBytes(x.data(), x.start(r), x.flatLength(r));
+                    }
+                }
                 case BytesVector x -> {
                     int base = x.offsets[from];
                     if (base == 0) {

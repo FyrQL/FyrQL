@@ -97,7 +97,7 @@ public final class BatchToArrow {
             Vector v = batch.column(c);
             FieldVector out = vectors.get(c);
             if (out instanceof BaseVariableWidthVector bytes && v instanceof BytesVector in) {
-                bytes.allocateNew(Math.max(1, rows == 0 ? 0 : in.end(rows - 1) - in.start(0)), Math.max(1, rows));
+                bytes.allocateNew(Math.max(1, byteCount(in, 0, rows)), Math.max(1, rows));
             } else {
                 out.setInitialCapacity(Math.max(1, rows));
                 out.allocateNew();
@@ -296,17 +296,35 @@ public final class BatchToArrow {
     }
 
     /**
+     * The bytes that the rows {@code from} to {@code to} of strings or blobs
+     * take in Arrow; a {@code NULL} from a dictionary takes none.
+     */
+    private static int byteCount(BytesVector b, int from, int to) {
+        if (to == from) {
+            return 0;
+        }
+        if (!b.hasDictionary()) {
+            return b.end(to - 1) - b.start(from);
+        }
+        int bytes = 0;
+        for (int r = from; r < to; r++) {
+            bytes += b.isNull(r) ? 0 : b.length(r);
+        }
+        return bytes;
+    }
+
+    /**
      * Writes strings or blobs: the bytes of the rows {@code from} to
-     * {@code to}, which lie one after the other, in one copy, and their
-     * offsets, moved to start at 0.
+     * {@code to}, which in the flat form lie one after the other, in one
+     * copy, and their offsets, moved to start at 0; the dictionary form row
+     * by row, a {@code NULL} without bytes.
      */
     private static void writeBytes(BytesVector b, int from, int to, BaseVariableWidthVector out) {
         int rows = to - from;
         if (rows == 0) {
             return;
         }
-        int base = b.start(from);
-        int bytes = b.end(to - 1) - base;
+        int bytes = byteCount(b, from, to);
         while (out.getValueCapacity() < rows) {
             out.reallocValidityAndOffsetBuffers();
         }
@@ -314,11 +332,25 @@ public final class BatchToArrow {
             out.reallocDataBuffer(bytes);
         }
         valid(out.getValidityBuffer(), b, from, to);
-        out.getDataBuffer().setBytes(0, b.data(), base, bytes);
+        ArrowBuf data = out.getDataBuffer();
         ArrowBuf offsets = out.getOffsetBuffer();
         offsets.setInt(0, 0);
-        for (int r = from, i = 1; r < to; r++, i++) {
-            offsets.setInt((long) i * BaseVariableWidthVector.OFFSET_WIDTH, b.end(r) - base);
+        if (b.hasDictionary()) {
+            int used = 0;
+            for (int r = from, i = 1; r < to; r++, i++) {
+                if (!b.isNull(r)) {
+                    int length = b.length(r);
+                    data.setBytes(used, b.data(), b.start(r), length);
+                    used += length;
+                }
+                offsets.setInt((long) i * BaseVariableWidthVector.OFFSET_WIDTH, used);
+            }
+        } else {
+            int base = b.start(from);
+            data.setBytes(0, b.data(), base, bytes);
+            for (int r = from, i = 1; r < to; r++, i++) {
+                offsets.setInt((long) i * BaseVariableWidthVector.OFFSET_WIDTH, b.end(r) - base);
+            }
         }
         out.setLastSet(rows - 1);
     }

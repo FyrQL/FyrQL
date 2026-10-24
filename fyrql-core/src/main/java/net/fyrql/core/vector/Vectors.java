@@ -234,16 +234,42 @@ public final class Vectors {
                 return new DecimalVector(x.type(), null, values, nulls);
             }
             case BytesVector x -> {
+                if (sharedDictionary(parts) != null) {
+                    int[] codes = new int[n];
+                    for (Vector p : parts) {
+                        int[] c = ((BytesVector) p).codes;
+                        System.arraycopy(c, 0, codes, k, c.length);
+                        k += c.length;
+                    }
+                    return new BytesVector(type, codes, x.dictionary, nulls);
+                }
                 int bytes = 0;
                 for (Vector p : parts) {
-                    int[] o = ((BytesVector) p).offsets;
-                    bytes += o[o.length - 1] - o[0];
+                    BytesVector y = (BytesVector) p;
+                    if (y.offsets != null) {
+                        int[] o = y.offsets;
+                        bytes += o[o.length - 1] - o[0];
+                    } else {
+                        for (int i = 0; i < y.size(); i++) {
+                            bytes += y.flatLength(i);
+                        }
+                    }
                 }
                 byte[] data = new byte[bytes];
                 int[] offsets = new int[n + 1];
                 int used = 0;
                 for (Vector p : parts) {
                     BytesVector y = (BytesVector) p;
+                    if (y.offsets == null) {
+                        // A dictionary is copied row by row, a NULL without bytes.
+                        for (int i = 0; i < y.size(); i++) {
+                            int length = y.flatLength(i);
+                            System.arraycopy(y.data(), y.start(i), data, used, length);
+                            offsets[k++] = used;
+                            used += length;
+                        }
+                        continue;
+                    }
                     int[] o = y.offsets;
                     int m = o.length - 1;
                     int from = o[0];
@@ -337,6 +363,17 @@ public final class Vectors {
                         nulls);
             }
         }
+    }
+
+    /** Returns the dictionary that all bytes vectors share, or {@code null} if one is flat or two differ. */
+    private static BytesVector.Dictionary sharedDictionary(List<Vector> parts) {
+        BytesVector.Dictionary d = ((BytesVector) parts.get(0)).dictionary;
+        for (Vector p : parts) {
+            if (d == null || ((BytesVector) p).dictionary != d) {
+                return null;
+            }
+        }
+        return d;
     }
 
     /** Returns the rows of a vector from one index to another, the vector itself if that is all of it. */
@@ -465,18 +502,28 @@ public final class Vectors {
                 }
                 return new DecimalVector(x.type(), null, values, nulls);
             }
+            case BytesVector x when x.codes != null && x.size() > 0 -> {
+                // A NULL from -1 takes the code 0, whose bytes do not count.
+                int[] codes = new int[n];
+                for (int i = 0; i < n; i++) {
+                    if (rows[i] >= 0) {
+                        codes[i] = x.codes[rows[i]];
+                    }
+                }
+                return new BytesVector(x.type(), codes, x.dictionary, nulls);
+            }
             case BytesVector x -> {
                 int[] offsets = new int[n + 1];
                 int bytes = 0;
                 for (int i = 0; i < n; i++) {
                     offsets[i] = bytes;
-                    bytes += rows[i] >= 0 ? x.length(rows[i]) : 0;
+                    bytes += rows[i] >= 0 ? x.flatLength(rows[i]) : 0;
                 }
                 offsets[n] = bytes;
                 byte[] data = new byte[bytes];
                 for (int i = 0; i < n; i++) {
                     if (rows[i] >= 0) {
-                        System.arraycopy(x.data(), x.start(rows[i]), data, offsets[i], x.length(rows[i]));
+                        System.arraycopy(x.data(), x.start(rows[i]), data, offsets[i], offsets[i + 1] - offsets[i]);
                     }
                 }
                 return new BytesVector(x.type(), data, offsets, nulls);
@@ -659,19 +706,26 @@ public final class Vectors {
                 }
                 return new DecimalVector(x.type(), null, values, nulls);
             }
+            case BytesVector x when sharedDictionary(parts) != null -> {
+                int[] codes = new int[n];
+                for (int i = 0; i < n; i++) {
+                    codes[i] = ((BytesVector) ps[partOf[from + i]]).codes[rowOf[from + i]];
+                }
+                return new BytesVector(type, codes, x.dictionary, nulls);
+            }
             case BytesVector x -> {
                 int[] offsets = new int[n + 1];
                 int bytes = 0;
                 for (int i = 0; i < n; i++) {
                     offsets[i] = bytes;
-                    bytes += ((BytesVector) ps[partOf[from + i]]).length(rowOf[from + i]);
+                    bytes += ((BytesVector) ps[partOf[from + i]]).flatLength(rowOf[from + i]);
                 }
                 offsets[n] = bytes;
                 byte[] data = new byte[bytes];
                 for (int i = 0; i < n; i++) {
                     BytesVector y = (BytesVector) ps[partOf[from + i]];
                     int r = rowOf[from + i];
-                    System.arraycopy(y.data(), y.offsets[r], data, offsets[i], offsets[i + 1] - offsets[i]);
+                    System.arraycopy(y.data(), y.start(r), data, offsets[i], offsets[i + 1] - offsets[i]);
                 }
                 return new BytesVector(type, data, offsets, nulls);
             }

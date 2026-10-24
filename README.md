@@ -133,10 +133,10 @@ data, the plan of the query and what comes next.
 ## Performance
 
 All 22 TPC-H queries run at scale factor 1 over tables spread across Parquet, CSV, JSON,
-PostgreSQL and Java collections, on a laptop in about 22 s on one thread and 16 s on
-twelve with version 0.14.0, where DuckDB takes about 14.5 s and 9.5 s over the same
-sources, PostgreSQL included. The figures of each query, of one thread against twelve, of
-compiled code against the interpreter and of spilling are under
+PostgreSQL and Java collections, on a laptop in about 21.5 s on one thread and 16 s on
+twelve with version 0.15.0, where DuckDB takes about 14.5 s and 9 s over the same sources,
+PostgreSQL included. The figures of each query, of one thread against twelve, of compiled
+code against the interpreter and of spilling are under
 [Performance](docs/manual.md#performance).
 
 ## Status

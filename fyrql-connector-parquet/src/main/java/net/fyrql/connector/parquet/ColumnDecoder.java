@@ -60,6 +60,12 @@ import java.util.function.Function;
  * until the next page is read, and those of the dictionary page not at
  * all, so that a decompressor can reuse its buffer for the next page.
  * <p>
+ * Strings and blobs from the dictionary keep its ids as codes: the vectors
+ * of the chunk share one {@link BytesVector.Dictionary} over the copy of
+ * the dictionary page. A batch with rows of a page in {@code PLAIN}, or of
+ * the rest of the chunk read through parquet-java, is flat, and so are the
+ * batches after it.
+ * <p>
  * The metadata of a column chunk need not name all encodings of its pages;
  * DuckDB, for one, leaves out some. At the first page in an encoding it
  * does not read, the decoder hands that page and the rest of the chunk to
@@ -87,6 +93,10 @@ final class ColumnDecoder {
     /** Whether the integers decoded are the values of the vector, so that each batch needs its own array. */
     private final boolean longOutput;
     private final PageDictionary dictionary;
+    /** The dictionary of strings or blobs that the vectors of the chunk share, or {@code null}. */
+    private final BytesVector.Dictionary shared;
+    /** Whether a batch starts with codes into {@link #shared}: until the first page that is not in it. */
+    private boolean coding;
     /** The values of the pages decoded so far. */
     private long valuesRead;
     /** The column reader of parquet-java the rest of the chunk is read through, or {@code null}. */
@@ -120,6 +130,8 @@ final class ColumnDecoder {
     private byte[] data;
     private int used;
     private int[] offsets;
+    /** The codes of the batch while all its rows come from {@link #shared}, else {@code null}. */
+    private int[] codes;
     private long[] most;
     private long[] least;
     private Vector.Builder builder;
@@ -160,6 +172,9 @@ final class ColumnDecoder {
         };
         DictionaryPage d = pages.readDictionaryPage();
         this.dictionary = d == null ? null : PageDictionary.read(d, descriptor.getPrimitiveType());
+        this.shared = dictionary != null && target == ParquetLeaf.Target.BYTES && dictionary.size() > 0
+                ? BytesVector.Dictionary.of(dictionary.data(), dictionary.offsets()) : null;
+        this.coding = shared != null;
     }
 
     /**
@@ -230,7 +245,8 @@ final class ColumnDecoder {
                 case BYTES -> {
                     data = NO_BYTES;
                     used = 0;
-                    offsets = new int[n + 1];
+                    offsets = coding ? null : new int[n + 1];
+                    codes = coding ? new int[n] : null;
                 }
                 case UUID -> {
                     most = new long[n];
@@ -270,6 +286,13 @@ final class ColumnDecoder {
             }
         }
         if (bytes) {
+            if (codes != null) {
+                if (encoding != Encoding.PLAIN || present == 0) {
+                    code(at, count, present);
+                    return;
+                }
+                uncode(at);
+            }
             locate(present);
             if (target == ParquetLeaf.Target.BYTES) {
                 long total = used;
@@ -296,6 +319,41 @@ final class ColumnDecoder {
             decode(stage, 0, present);
             for (int i = 0, k = 0; i < count; i++) {
                 raw[at + i] = nulls[at + i] ? 0 : stage[k++];
+            }
+        }
+    }
+
+    /** Takes the dictionary ids of the next rows of the page as their codes, 0 for a {@code NULL}. */
+    private void code(int at, int count, int present) {
+        if (present == count) {
+            System.arraycopy(ids, idAt, codes, at, count);
+        } else {
+            for (int i = 0, k = idAt; i < count; i++) {
+                codes[at + i] = nulls[at + i] ? 0 : ids[k++];
+            }
+        }
+        idAt += present;
+    }
+
+    /**
+     * Turns the first rows of the batch from codes into bytes, for a page
+     * that is not in the dictionary; the batches after it start with bytes.
+     */
+    private void uncode(int rows) {
+        int[] c = codes;
+        codes = null;
+        coding = false;
+        offsets = new int[n + 1];
+        long total = 0;
+        for (int i = 0; i < rows; i++) {
+            total += nulls != null && nulls[i] ? 0 : shared.length(c[i]);
+        }
+        reserve(total);
+        for (int i = 0; i < rows; i++) {
+            if (nulls != null && nulls[i]) {
+                putNull(i);
+            } else {
+                put(i, shared.data(), shared.start(c[i]), shared.length(c[i]));
             }
         }
     }
@@ -404,6 +462,10 @@ final class ColumnDecoder {
 
     /** Reads rows of the batch through the column reader of parquet-java. */
     private void fill(int at, int count) {
+        if (codes != null) {
+            uncode(at);
+        }
+        coding = false;
         ColumnReader r = reader;
         for (int row = at; row < at + count; row++) {
             if (r.getCurrentDefinitionLevel() < maxDefinition) {
@@ -521,8 +583,9 @@ final class ColumnDecoder {
                 yield DecimalVector.wrap((DataType.Decimal) leaf.type(), v, nulls);
             }
             case TIME -> build();
-            case BYTES -> BytesVector.wrap(leaf.type(), data.length == used ? data : Arrays.copyOf(data, used),
-                    offsets, nulls);
+            case BYTES -> codes != null ? BytesVector.dictionary(leaf.type(), codes, shared, nulls)
+                    : BytesVector.wrap(leaf.type(), data.length == used ? data : Arrays.copyOf(data, used), offsets,
+                            nulls);
             case UUID -> UuidVector.wrap(most, least, nulls);
             case INT96 -> BigIntVector.wrap(leaf.type(), v, nulls);
             case FLOAT16, INTERVAL -> builder.build();

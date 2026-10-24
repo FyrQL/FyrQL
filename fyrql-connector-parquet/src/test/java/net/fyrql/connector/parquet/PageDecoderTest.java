@@ -12,6 +12,7 @@
 package net.fyrql.connector.parquet;
 
 import net.fyrql.core.type.DataType;
+import net.fyrql.core.vector.BytesVector;
 import net.fyrql.core.vector.Vector;
 import org.apache.parquet.bytes.BytesInput;
 import org.apache.parquet.bytes.HeapByteBufferAllocator;
@@ -340,6 +341,50 @@ class PageDecoderTest {
         assertEquals(List.of("c", "c"), List.of(first.get(0), first.get(1)));
         assertEquals(List.of("ab", "c", "plain", ""), List.of(second.get(0), second.get(1), second.get(2),
                 second.get(3)));
+        assertTrue(((BytesVector) first).hasDictionary());
+        assertFalse(((BytesVector) second).hasDictionary());
+    }
+
+    @Test
+    void stringsKeepTheCodesOfTheDictionaryUntilAPageInPlain() throws IOException {
+        PlainValuesWriter dictionary = plain();
+        for (String s : new String[] {"ab", "c", "Grüße"}) {
+            dictionary.writeBytes(Binary.fromString(s));
+        }
+        PlainValuesWriter plain3 = plain();
+        plain3.writeBytes(Binary.fromString("plain"));
+        plain3.writeBytes(Binary.fromString(""));
+        Object[] expected = {"Grüße", null, "ab", "c", null, null, "c", "c", "plain", null, "", "ab",
+            "Grüße"};
+        // The page in PLAIN starts at row 8; the batches before it keep the codes, all from it on are flat.
+        int plainFrom = 8;
+        for (int batch : new int[] {1, 3, 5, 8, 13}) {
+            ColumnDecoder decoder = decoder("optional binary s (STRING)", DataType.VARCHAR, new DictionaryPage(
+                    dictionary.getBytes(), 3, Encoding.PLAIN_DICTIONARY),
+                    v1(5, new int[] {1, 0, 1, 1, 0}, dictionaryIds(2, 2, 0, 1), Encoding.PLAIN_DICTIONARY),
+                    v1(3, new int[] {0, 1, 1}, dictionaryIds(2, 1, 1), Encoding.RLE_DICTIONARY),
+                    v1(3, new int[] {1, 0, 1}, plain3.getBytes().toByteArray(), Encoding.PLAIN),
+                    v1(2, new int[] {1, 1}, dictionaryIds(2, 0, 2), Encoding.RLE_DICTIONARY));
+            List<Object> read = new ArrayList<>();
+            BytesVector.Dictionary shared = null;
+            for (int at = 0; at < expected.length; at += batch) {
+                BytesVector v = (BytesVector) decoder.read(Math.min(batch, expected.length - at));
+                String what = "batch " + batch + " at row " + at;
+                assertEquals(at + v.size() <= plainFrom, v.hasDictionary(), what);
+                if (v.hasDictionary()) {
+                    assertTrue(shared == null || shared == v.dictionary(), what + ": one dictionary");
+                    shared = v.dictionary();
+                }
+                for (int r = 0; r < v.size(); r++) {
+                    read.add(v.get(r));
+                    if (v.isNull(r) && !v.hasDictionary()) {
+                        assertEquals(0, v.length(r), what + ": a NULL has no bytes");
+                    }
+                }
+            }
+            assertEquals(Arrays.asList(expected), read, "batch " + batch);
+            assertFalse(decoder.fellBack());
+        }
     }
 
     @Test

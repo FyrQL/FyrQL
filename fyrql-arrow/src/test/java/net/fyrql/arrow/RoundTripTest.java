@@ -14,6 +14,7 @@ package net.fyrql.arrow;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.core.vector.BytesVector;
 import net.fyrql.jdbc.AllTypesTable;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -320,6 +321,36 @@ class RoundTripTest {
             assertEquals(0, v.getStartOffset(1));
             assertEquals(6, v.getEndOffset(1));
             assertEquals("row 99", new String(v.get(1), StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void stringsWithADictionaryGoOutFlat() throws IOException {
+        byte[] bytes = "##MAILSHIPTRUCKä".getBytes(StandardCharsets.UTF_8);
+        BytesVector.Dictionary dictionary = BytesVector.Dictionary.of(bytes, new int[] {2, 6, 10, 10, 15, 17});
+        SplittableRandom random = new SplittableRandom(20261024);
+        int n = 200;
+        int[] codes = new int[n];
+        boolean[] nulls = new boolean[n];
+        for (int i = 0; i < n; i++) {
+            codes[i] = random.nextInt(dictionary.size());
+            nulls[i] = random.nextInt(5) == 0;
+        }
+        nulls[0] = true;
+        Schema schema = Schema.of(new Schema.Field("v", DataType.VARCHAR), new Schema.Field("b", DataType.BLOB));
+        Batch batch = new Batch(schema, n, List.of(BytesVector.dictionary(DataType.VARCHAR, codes, dictionary, nulls),
+                BytesVector.dictionary(DataType.BLOB, codes, dictionary, null)));
+        assertRoundTrip(schema, List.of(batch, batch.select(new int[] {199, 0, 3, 3}), batch.select(new int[0])));
+        try (VectorSchemaRoot root = BatchToArrow.root(schema, allocator)) {
+            BatchToArrow.fill(batch, root);
+            org.apache.arrow.vector.VarCharVector v = (org.apache.arrow.vector.VarCharVector) root.getVector(0);
+            assertTrue(v.isNull(0));
+            assertEquals(0, v.getEndOffset(0), "a NULL has no bytes");
+            for (int i = 1; i < n; i++) {
+                if (!nulls[i]) {
+                    assertEquals(dictionary.getString(codes[i]), new String(v.get(i), StandardCharsets.UTF_8));
+                }
+            }
         }
     }
 }

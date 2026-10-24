@@ -17,6 +17,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.core.vector.BytesVector;
 import net.fyrql.core.vector.Vector;
 import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.example.data.Group;
@@ -103,8 +104,17 @@ class PageDecoderDifferentialTest {
             String what = variant.name() + " with " + nulls[0] + "+" + nulls[1] + " tenths NULL";
             Map<String, Integer> decoded = new java.util.TreeMap<>();
             for (int batchSize : new int[] {1, 7, 2048}) {
-                decoded = assertSameBatches(parquet, all, columns, List.of(), batchSize, Long.MAX_VALUE,
-                        what + " in batches of " + batchSize);
+                String in = what + " in batches of " + batchSize;
+                decoded = assertSameBatches(parquet, all, columns, List.of(), batchSize, Long.MAX_VALUE, in);
+                Map<String, int[]> forms = forms(parquet, all, columns, batchSize, in);
+                if (variant.name().equals("v1-dictionary")) {
+                    // Few distinct values keep the dictionary for the whole chunk.
+                    for (String name : List.of("e", "j")) {
+                        assertTrue(forms.get(name)[0] > 0 && forms.get(name)[1] == 0, in + ", column " + name);
+                    }
+                } else if (variant.name().contains("plain") || variant.name().contains("split")) {
+                    assertTrue(forms.values().stream().allMatch(f -> f[0] == 0), in);
+                }
             }
             // A limit below the rows of a row group.
             assertSameBatches(parquet, all, columns, List.of(), 64, 500, what + " up to 500 rows");
@@ -113,6 +123,43 @@ class PageDecoderDifferentialTest {
                         what + ": " + decoded);
             }
             assertFalse(decoded.isEmpty(), what);
+        }
+    }
+
+    @Test
+    void stringsGoOnInAnotherEncodingWithinAChunk() throws Exception {
+        String schema = "message m { required int64 id; optional binary s (STRING); }";
+        String[] words = {"MAIL", "SHIP", "TRUCK", "AIR"};
+        for (ParquetProperties.WriterVersion version : List.of(V1, V2)) {
+            // A few words first, then unique values: the dictionary fills up, and the writer goes on in PLAIN
+            // (v1) or DELTA_BYTE_ARRAY (v2); the metadata of v2 names the latter, so parquet-java reads the chunk.
+            Path file = ParquetTestFiles.write(dir.resolve("switch-" + version + ".parquet"), schema,
+                    w -> w.withWriterVersion(version).withDictionaryEncoding(true).withDictionaryPageSize(256)
+                            .withPageRowCountLimit(50).withRowGroupRowCountLimit(1000)
+                            .withCompressionCodec(CompressionCodecName.SNAPPY),
+                    rows -> {
+                        for (long id = 0; id < 2000; id++) {
+                            long i = id;
+                            rows.row(g -> {
+                                g.add("id", i);
+                                if (i % 7 != 3) {
+                                    g.add("s", i % 1000 < 300 ? words[(int) (i % words.length)]
+                                            : "unique value " + i);
+                                }
+                            });
+                        }
+                    });
+            ParquetFile parquet = open(file);
+            Schema all = parquet.schema();
+            List<ColumnPath> columns = ColumnPath.whole(range(all.size()));
+            for (int batchSize : new int[] {1, 7, 128, 2048}) {
+                String what = version + " in batches of " + batchSize;
+                assertSameBatches(parquet, all, columns, List.of(), batchSize, Long.MAX_VALUE, what);
+                int[] f = forms(parquet, all, columns, batchSize, what).get("s");
+                // A batch with rows of both encodings is made flat; a row group in one batch has such rows.
+                assertEquals(version == V1 && batchSize < 1000, f[0] > 0, what);
+                assertTrue(f[1] > 0, what);
+            }
         }
     }
 
@@ -237,6 +284,7 @@ class PageDecoderDifferentialTest {
             for (int batchSize : new int[] {7, 2048}) {
                 decoded = assertSameBatches(parquet, all, columns, List.of(), batchSize, Long.MAX_VALUE,
                         file.getFileName() + " in batches of " + batchSize);
+                forms(parquet, all, columns, batchSize, file.getFileName() + " in batches of " + batchSize);
             }
             // Without a column index, a filter of pages skips none, and the decoder reads the pages all the same.
             Expression late = new Expression.Comparison(Expression.ComparisonOp.GE,
@@ -298,6 +346,40 @@ class PageDecoderDifferentialTest {
             }
         }
         return decoded;
+    }
+
+    /**
+     * Reads all row groups with the decoder and counts for each column of
+     * strings or blobs the batches in the dictionary form and in the flat
+     * form; asserts that the batches of a column in a row group share one
+     * dictionary.
+     */
+    private static Map<String, int[]> forms(ParquetFile parquet, Schema output, List<ColumnPath> columns,
+            int batchSize, String what) {
+        Map<String, int[]> forms = new java.util.TreeMap<>();
+        for (int group = 0; group < parquet.rowGroups(); group++) {
+            try (RowGroupReader reader = parquet.read(group, parquet.rows(group), output, columns, List.of(),
+                    batchSize, null, true)) {
+                Map<String, BytesVector.Dictionary> seen = new java.util.HashMap<>();
+                for (Batch b = reader.next(); b != null; b = reader.next()) {
+                    for (int c = 0; c < output.size(); c++) {
+                        if (b.column(c) instanceof BytesVector v) {
+                            String name = output.name(c);
+                            int[] f = forms.computeIfAbsent(name, k -> new int[2]);
+                            if (v.hasDictionary()) {
+                                f[0]++;
+                                BytesVector.Dictionary d = seen.putIfAbsent(name, v.dictionary());
+                                assertTrue(d == null || d == v.dictionary(), what + ", row group " + group
+                                        + ", column " + name + ": one dictionary for all batches");
+                            } else {
+                                f[1]++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return forms;
     }
 
     private static void assertSameVector(Vector expected, Vector actual, String what) {

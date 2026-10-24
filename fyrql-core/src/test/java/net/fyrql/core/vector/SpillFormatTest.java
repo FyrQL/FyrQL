@@ -93,6 +93,53 @@ class SpillFormatTest {
     }
 
     @Test
+    void aDictionaryIsWrittenFlat() throws IOException {
+        SplittableRandom random = new SplittableRandom(20261024);
+        byte[] bytes = "##RNAOFä€".getBytes(StandardCharsets.UTF_8);
+        int[] offsets = {2, 3, 4, 4, 5, 6, 7, 9, 12};
+        BytesVector.Dictionary dictionary = BytesVector.Dictionary.of(bytes, offsets);
+        int n = 300;
+        int[] codes = new int[n];
+        boolean[] nulls = new boolean[n];
+        int[] values = new int[n];
+        for (int i = 0; i < n; i++) {
+            codes[i] = random.nextInt(dictionary.size());
+            nulls[i] = random.nextInt(4) == 0;
+            values[i] = i;
+        }
+        Schema schema = Schema.of(new Schema.Field("s", DataType.VARCHAR), new Schema.Field("b", DataType.BLOB),
+                new Schema.Field("i", DataType.INTEGER));
+        Batch batch = new Batch(schema, n, List.of(BytesVector.dictionary(DataType.VARCHAR, codes, dictionary, nulls),
+                BytesVector.dictionary(DataType.BLOB, codes, dictionary, null),
+                new IntVector(DataType.INTEGER, values, null)));
+        int[][] ranges = {{0, 0}, {0, 1}, {17, 18}, {5, 250}, {299, 300}, {0, 300}};
+        for (int bufferBytes : new int[] {16, 100, SpillFormat.DEFAULT_BUFFER_BYTES}) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            try (SpillFormat.Writer w = new SpillFormat.Writer(Channels.newChannel(out), bufferBytes)) {
+                for (int[] r : ranges) {
+                    w.write(batch, r[0], r[1]);
+                }
+            }
+            List<Batch> back = read(schema, out.toByteArray(), bufferBytes);
+            assertEquals(ranges.length, back.size());
+            for (int i = 0; i < ranges.length; i++) {
+                int from = ranges[i][0];
+                int[] rows = new int[ranges[i][1] - from];
+                Arrays.setAll(rows, k -> from + k);
+                String what = "range " + Arrays.toString(ranges[i]) + ", buffer " + bufferBytes;
+                assertIdentical(batch.select(rows), back.get(i), what);
+                BytesVector s = (BytesVector) back.get(i).column(0);
+                assertTrue(!s.hasDictionary(), what);
+                for (int r = 0; r < rows.length; r++) {
+                    if (s.isNull(r)) {
+                        assertEquals(0, s.length(r), what + ": a NULL has no bytes");
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     void valuesUnderNullsAndTheFormOfDecimalsStay() throws IOException {
         DataType.Decimal small = DataType.decimal(10, 2);
         DataType.Decimal large = DataType.decimal(38, 2);

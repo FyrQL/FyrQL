@@ -15,8 +15,9 @@ import net.fyrql.core.type.DataType;
 
 /**
  * A column of values of one type, stored column-wise: a primitive array per
- * scalar type, a byte buffer with offsets for {@code VARCHAR} and
- * {@code BLOB}, child vectors for the nested types, and a null mask. Vectors
+ * scalar type, a byte buffer with offsets, or codes into a shared
+ * dictionary, for {@code VARCHAR} and {@code BLOB}, child vectors for the
+ * nested types, and a null mask. Vectors
  * are immutable once built; a {@link Builder} fills one value at a time.
  * Access to a value as a Java object goes through {@link #get}; the typed
  * accessors of the implementations avoid the boxing.
