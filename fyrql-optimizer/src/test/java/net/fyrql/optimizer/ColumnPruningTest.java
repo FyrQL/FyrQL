@@ -230,6 +230,22 @@ class ColumnPruningTest {
     }
 
     @Test
+    void anAggregateWithoutGroupsAndCallsCountsItsRow() {
+        // As for SELECT 0 FROM t HAVING true.
+        PlanNode aggregate = new PlanNode.Aggregate(Scan.all(Tables.T_REF, Tables.T), List.of(), List.of());
+        PlanNode plan = new PlanNode.Project(new PlanNode.Filter(aggregate, lit(true)),
+                List.of(new NamedExpression("z", lit(0))));
+        PlanNode pruned = ColumnPruning.prune(plan);
+        PlanNode.Filter f = assertInstanceOf(PlanNode.Filter.class,
+                assertInstanceOf(PlanNode.Project.class, pruned).input());
+        PlanNode.Aggregate a = assertInstanceOf(PlanNode.Aggregate.class, f.input());
+        assertEquals(List.of(AggregateFunction.COUNT_STAR), a.aggregates().stream().map(AggregateCall::function)
+                .toList());
+        assertEquals(List.of(0), assertInstanceOf(Scan.class, a.input()).columns());
+        assertEquals(1, Tables.rows(EXECUTOR, pruned).size());
+    }
+
+    @Test
     void theRootKeepsItsColumnsAndANegotiatedScanIsLeftAlone() {
         Scan all = Scan.all(Tables.T_REF, Tables.T);
         assertEquals(all, ColumnPruning.prune(all));

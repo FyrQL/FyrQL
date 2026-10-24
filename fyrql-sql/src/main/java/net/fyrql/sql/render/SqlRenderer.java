@@ -18,6 +18,7 @@ import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.type.TypeRules;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -508,18 +509,19 @@ public final class SqlRenderer {
             case Expression.Arithmetic a -> dialect.arithmetic(a.op(), expression(a.left(), columns),
                     expression(a.right(), columns));
             case Expression.Negate n -> "(-" + expression(n.operand(), columns) + ")";
-            case Expression.Comparison c -> "(" + expression(c.left(), columns) + " " + c.op().symbol() + " "
-                    + expression(c.right(), columns) + ")";
+            case Expression.Comparison c -> "(" + compared(c.left(), c.right().type(), columns) + " "
+                    + c.op().symbol() + " " + compared(c.right(), c.left().type(), columns) + ")";
             case Expression.And a -> "(" + expression(a.left(), columns) + " AND " + expression(a.right(), columns) + ")";
             case Expression.Or o -> "(" + expression(o.left(), columns) + " OR " + expression(o.right(), columns) + ")";
             case Expression.Not n -> "(NOT " + expression(n.operand(), columns) + ")";
             case Expression.IsNull n -> "(" + expression(n.operand(), columns) + (n.negated() ? " IS NOT NULL)" : " IS NULL)");
-            case Expression.Between b -> "(" + expression(b.value(), columns) + " BETWEEN " + expression(b.low(), columns)
-                    + " AND " + expression(b.high(), columns) + ")";
+            case Expression.Between b -> "(" + expression(b.value(), columns) + " BETWEEN "
+                    + compared(b.low(), b.value().type(), columns) + " AND "
+                    + compared(b.high(), b.value().type(), columns) + ")";
             case Expression.In in -> {
                 StringBuilder b = new StringBuilder("(").append(expression(in.value(), columns)).append(" IN (");
                 for (int i = 0; i < in.list().size(); i++) {
-                    b.append(i > 0 ? ", " : "").append(expression(in.list().get(i), columns));
+                    b.append(i > 0 ? ", " : "").append(compared(in.list().get(i), in.value().type(), columns));
                 }
                 yield b.append("))").toString();
             }
@@ -566,6 +568,20 @@ public final class SqlRenderer {
                 yield b.append(')').toString();
             }
         };
+    }
+
+    /**
+     * Renders an operand compared with a value of a type. A literal bound
+     * as a parameter is cast to its own type unless that type holds all of
+     * its values: a database takes the type of a parameter from what it is
+     * compared with, and would else reject the value or cut it, as Derby
+     * rejects 2147483648 against a {@code SMALLINT} and a date drops the
+     * time of a timestamp.
+     */
+    private String compared(Expression e, DataType with, IntFunction<String> columns) {
+        String rendered = expression(e, columns);
+        return parameters != null && e instanceof Expression.Literal l && l.value() != null
+                && !TypeRules.common(l.type(), with).equals(with) ? dialect.cast(rendered, l.type(), false) : rendered;
     }
 
     /** Renders a {@code CREATE TABLE} statement for a schema. */

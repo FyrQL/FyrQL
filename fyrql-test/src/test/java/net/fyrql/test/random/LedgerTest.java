@@ -58,4 +58,22 @@ class LedgerTest {
             assertEquals("window-argument-without-cast", explained(o));
         }
     }
+
+    @Test
+    void aCastBetweenScalarTypesWithoutAConversionFailsInFyrqlOnly() {
+        for (String pair : new String[] {"BOOLEAN to TIMESTAMP", "TIMESTAMP WITH TIME ZONE to BOOLEAN",
+                "DECIMAL(10,2) to DATE", "INTEGER to TIMESTAMP WITH TIME ZONE", "TIME to DATE"}) {
+            assertEquals("cast-without-conversion", explained(castFails(pair)), pair);
+        }
+        // DuckDB converts between BLOB and UUID, and nested types are not scalar.
+        for (String pair : new String[] {"UUID to BLOB", "BLOB to UUID", "INTEGER[] to STRUCT(a INTEGER)",
+                "BOOLEAN to INTEGER[]"}) {
+            assertNull(explained(castFails(pair)), pair);
+        }
+    }
+
+    private static Outcome castFails(String pair) {
+        return new Outcome(Outcome.Kind.FYRQL_FAILS, "SELECT TRY_CAST(x AS T) FROM q",
+                "SqlException: Cannot cast " + pair + " at line 1, column 8", null, "DuckDB gives rows: 3\n");
+    }
 }

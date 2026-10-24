@@ -239,6 +239,28 @@ class GenericDialectTest {
     }
 
     @Test
+    void aParameterOfAnotherTypeThanItsColumnIsCastToItsOwn() {
+        // The database would take each parameter for a value of the type of its column; a DECIMAL(10,2) holds
+        // not every INTEGER, a DOUBLE does.
+        Schema s = new PlanNode.Scan(FullPlan.ORDERS_REF, S, List.of(0, 1, 4, 6)).schema();
+        PlanNode.Pushed pushed = new PlanNode.Pushed(List.of(ne(col(s, 0), lit(2147483648L)),
+                between(col(s, 0), lit(1L), lit(5)), in(col(s, 0), lit(1), lit(3000000000L)),
+                gt(lit(7L), col(s, 0)), lt(col(s, 1), lit(new BigDecimal("1.234"))), lt(col(s, 1), lit(2)),
+                ge(col(s, 2), lit(DataType.TIMESTAMP, 86_400_000_001L)), gt(col(s, 3), lit(2))),
+                OptionalLong.empty(), List.of(), Optional.empty());
+        BoundSql bound = new SqlRenderer(GenericDialect.DEFAULT, FullPlan::tableName).renderScanBound(
+                new PlanNode.Scan(FullPlan.ORDERS_REF, S, List.of(0, 1, 4, 6), pushed), null);
+        assertEquals("SELECT t.\"id\", t.\"amount\", t.\"day\", t.\"weight\" FROM " + TABLE + " t WHERE "
+                + "((((((((t.\"id\" <> CAST(? AS BIGINT)) AND (t.\"id\" BETWEEN CAST(? AS BIGINT) AND ?)) AND "
+                + "(t.\"id\" IN (?, CAST(? AS BIGINT)))) AND (CAST(? AS BIGINT) > t.\"id\")) AND (t.\"amount\" < "
+                + "CAST(? AS DECIMAL(4,3)))) AND (t.\"amount\" < CAST(? AS INTEGER))) AND (t.\"day\" >= CAST(? AS "
+                + "TIMESTAMP))) AND "
+                + "(t.\"weight\" > ?))", bound.sql());
+        assertEquals(List.of(2147483648L, 1L, 5, 1, 3000000000L, 7L, new BigDecimal("1.234"), 2, 86_400_000_001L, 2),
+                bound.parameters().stream().map(BoundSql.Parameter::value).toList());
+    }
+
+    @Test
     void theFirstRowsAreKeptAsTheSettingsSay() {
         PlanNode.Scan scan = scan(OptionalLong.of(10), List.of());
         String where = " FROM " + TABLE + " t WHERE ((t.\"id\" > ?) AND (t.\"day\" IS NULL))";

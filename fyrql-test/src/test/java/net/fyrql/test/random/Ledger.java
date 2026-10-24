@@ -19,6 +19,7 @@ import net.fyrql.core.plan.Plans;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
@@ -211,6 +212,11 @@ final class Ledger {
                             + " of type (?!VARCHAR ).+ and type (?!VARCHAR ).+ - an explicit cast.*")
                             || o.fyrqlError().matches(".*Cannot compare values of type (VARCHAR and type (MAP|STRUCT)"
                                     + "|(MAP|STRUCT).* and type VARCHAR ).*"))),
+            new Entry("cast-without-conversion", "DuckDB binds a cast between two scalar types without a"
+                    + " conversion, such as BOOLEAN to TIMESTAMP, and fails only when a value that is not NULL reaches"
+                    + " it, while TRY_CAST gives NULL; FyrQL rejects it while binding. DuckDB has no conversion for"
+                    + " any pair of scalar types that FyrQL rejects but BLOB and UUID, which the entry leaves out.",
+                    "1.5.6", null, Ledger::castsWithoutConversion),
             new Entry("set-operation-without-common-type", "DuckDB unites two columns of types without a common"
                     + " type, such as DATE and DECIMAL, or a list and a VARCHAR, with a cast that fails only when a"
                     + " row reaches it; FyrQL rejects them while binding.", "1.5.6", null,
@@ -421,9 +427,16 @@ final class Ledger {
     /** A query with an aggregate that joins distinct strings. */
     private static final Pattern DISTINCT_STRING_AGG = Pattern.compile("(?s).*\\b(string_agg|listagg)\\(DISTINCT .*");
 
+    /** The name of a scalar type in a message of FyrQL. */
+    private static final String SCALAR = "TIMESTAMP WITH TIME ZONE|DECIMAL\\(\\d+,\\d+\\)|[A-Z]+";
+
     /** The two types of a set operation that FyrQL does not unite. */
     private static final Pattern SET_OPERATION_TYPES = Pattern.compile(
             "(?s).*Cannot combine types (.+) and (.+) in a set operation.*");
+
+    /** The two scalar types of a cast that FyrQL rejects, each name whole. */
+    private static final Pattern CAST_TYPES = Pattern.compile("(?s).*Cannot cast (" + SCALAR + ") to (" + SCALAR
+            + ")(?![A-Za-z(\\[]| WITH ).*");
 
     /** The node a QueryException names: its label, the type and the number of the node in the plan. */
     private static final Pattern FAILED_NODE = Pattern.compile(".* in Project#(\\d+)$");
@@ -694,6 +707,18 @@ final class Ledger {
         String left = m.group(1);
         String right = m.group(2);
         return !left.equals("VARCHAR") && !right.equals("VARCHAR") || nested(left) || nested(right);
+    }
+
+    /**
+     * Tells whether FyrQL rejected a cast between two scalar types of which
+     * DuckDB has no conversion either: any but between BLOB and UUID.
+     */
+    private static boolean castsWithoutConversion(Outcome o) {
+        if (o.kind() != Outcome.Kind.FYRQL_FAILS) {
+            return false;
+        }
+        Matcher m = CAST_TYPES.matcher(o.fyrqlError());
+        return m.matches() && !Set.of(m.group(1), m.group(2)).equals(Set.of("BLOB", "UUID"));
     }
 
     /** Tells whether a type name is one of a list, a struct or a map. */

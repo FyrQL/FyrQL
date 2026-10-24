@@ -169,9 +169,10 @@ class GenericDialectConnectorTest {
             assertEquals("SELECT t.\"id\", t.\"s\", t.\"x\", t.\"n\" FROM " + TABLE + " t", none.statements().get(0));
             assertEquals("SELECT t.\"id\", t.\"s\", t.\"x\", t.\"n\" FROM " + TABLE + " t WHERE ((t.\"id\" > ?) AND "
                     + "(t.\"s\" = ?)) -- parameters: 1, 'ab '", plain.statements().get(0));
+            // A DOUBLE holds every INTEGER, a DECIMAL(10,2) does not.
             assertEquals("SELECT t.\"id\", t.\"s\", t.\"x\", t.\"n\" FROM " + TABLE + " t WHERE ((((t.\"id\" > ?) AND "
-                    + "(t.\"x\" > ?)) AND (t.\"n\" < ?)) AND (t.\"s\" = ?)) -- parameters: 1, 2, 5, 'ab '",
-                    trusting.statements().get(0));
+                    + "(t.\"x\" > ?)) AND (t.\"n\" < CAST(? AS INTEGER))) AND (t.\"s\" = ?)) -- parameters: 1, 2, 5, "
+                    + "'ab '", trusting.statements().get(0));
             assertEquals(List.of(4, 5), ids(trusted, "SELECT id FROM items WHERE x > 4 AND n >= 4.75"));
         }
         // The options belong to the generic dialect only.

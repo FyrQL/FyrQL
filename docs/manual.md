@@ -488,6 +488,11 @@ parameter `?` of a prepared statement:
 | `LIMIT` without `ORDER BY`, with `Statement.setMaxRows` or a clause | yes |
 | `ORDER BY`, `GROUP BY`, aggregates, joins | no |
 
+A database takes the type of a parameter from the column it is compared with, so a
+literal of a type that the type of the column does not hold, such as `2147483648`
+against a `SMALLINT`, `0.5` against an `INTEGER` or a timestamp against a `DATE`, is
+cast to its own type, as in `CAST(? AS BIGINT)`.
+
 A hint holds wherever the filter holds: the database returns at least the rows that
 satisfy the filter, and the engine filters them once more, so a scan with a hint keeps
 no limit in the database. The connector reads dates and timestamps with the getters of
@@ -1777,6 +1782,10 @@ here; the random tests explain such differences by a ledger of their own, see
 - `SELECT DISTINCT` cannot be ordered by a column that is not selected.
 - A string literal is not converted to the type of a function argument, as in
   `sqrt('4')`.
+- A cast between two types that have no conversion, such as a `BOOLEAN` to a
+  `TIMESTAMP`, fails while binding, with `CAST` and `TRY_CAST` alike. DuckDB 1.5.6
+  fails only when a value that is not `NULL` reaches the cast, and `TRY_CAST` gives
+  `NULL` there.
 - The name of an output column that is no plain column follows FyrQL's own text form of
   the expression, which is not always DuckDB's.
 - `list(x ORDER BY x)` orders intervals as `ORDER BY` does, by the value they compare

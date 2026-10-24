@@ -19,6 +19,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
+import net.fyrql.core.plan.PlanNode.AggregateFunction;
 import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.PlanNode.SortKey;
 import net.fyrql.core.plan.PlanNode.WindowCall;
@@ -247,7 +248,7 @@ final class ColumnPruning {
                     for (int i = used.nextSetBit(groups); i >= 0 && i < width; i = used.nextSetBit(i + 1)) {
                         kept.set(i);
                     }
-                    if (kept.isEmpty()) {
+                    if (kept.isEmpty() && width > 0) {
                         // Grouping by nothing, and no aggregate in use: keep one, so that the row count is right.
                         kept.set(groups);
                     }
@@ -268,6 +269,11 @@ final class ColumnPruning {
                     List<AggregateCall> calls = new ArrayList<>();
                     for (int i = kept.nextSetBit(groups); i >= 0; i = kept.nextSetBit(i + 1)) {
                         calls.add(remap(a.aggregates().get(i - groups), in.mapping()));
+                    }
+                    if (width == 0) {
+                        // Neither groups nor calls, as for a HAVING without either: a count, so that the one row
+                        // has a column.
+                        calls.add(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "count", null, List.of()));
                     }
                     yield new Pruned(new PlanNode.Aggregate(in.node(), remap(a.groupColumns(), in.mapping()), calls),
                             mapping(kept, width));
