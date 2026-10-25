@@ -146,7 +146,7 @@ class StatementBinderTest {
         c = assertInstanceOf(BoundStatement.Copy.class, bind("COPY t TO 'x.jsonl.zst'"));
         assertEquals(Map.of("compression", "zstd"), c.options());
 
-        assertEquals("No format for the file x.txt: end its name in .csv, .json or .parquet, or give one, as in"
+        assertEquals("No format for the file x.txt: end its name in .csv, .json, .parquet or .xlsx, or give one, as in"
                 + " (FORMAT csv)@1:11", error("COPY t TO 'x.txt'"));
         assertEquals("Table with name nope does not exist@1:6", error("COPY nope TO 'x.csv'"));
     }
@@ -193,7 +193,7 @@ class StatementBinderTest {
         assertEquals("Column a is given more than once in the COPY into t@1:6", error("COPY t (a, A) FROM 'x.csv'"));
         assertEquals("Table t does not have a column with name \"zz\"@1:6", error("COPY t (zz) FROM 'x.csv'"));
         assertEquals("Table with name nope does not exist@1:6", error("COPY nope FROM 'x.csv'"));
-        assertEquals("No format for the file x.txt: end its name in .csv, .json or .parquet, or give one, as in"
+        assertEquals("No format for the file x.txt: end its name in .csv, .json, .parquet or .xlsx, or give one, as in"
                 + " (FORMAT csv)@1:13", error("COPY t FROM 'x.txt'"));
         assertEquals("No files found that match the pattern \"missing.csv\"@1:13", error("COPY t FROM 'missing.csv'"));
         assertEquals("The file p.parquet has 4 columns, but the COPY into t reads 2@1:20",

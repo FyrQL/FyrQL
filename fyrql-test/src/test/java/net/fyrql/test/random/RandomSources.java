@@ -22,6 +22,7 @@ import net.fyrql.connector.jdbc.JdbcDialect;
 import net.fyrql.connector.json.JsonConnector;
 import net.fyrql.connector.json.JsonFormat;
 import net.fyrql.connector.parquet.ParquetConnector;
+import net.fyrql.connector.xlsx.XlsxConnector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -191,6 +192,30 @@ final class RandomSources {
         files.forEach((table, file) -> b.schema(table, RandomTables.SCHEMAS.get(table)).file(table, file));
         CsvConnector csv = b.build();
         return source("CSV", csv, List.copyOf(files.keySet()), engine -> splits(csv));
+    }
+
+    /**
+     * The random tables as Excel workbooks with a header, read as
+     * {@code read_xlsx} reads them: each column takes its type from its
+     * first value, so that most of them are a {@code DOUBLE} or a
+     * {@code VARCHAR}, and a value that does not fit is a {@code NULL}. A
+     * sheet is read in one part; the check: every row of a table comes back.
+     */
+    static Source xlsx(Path dir) {
+        Map<String, Path> files = write(dir, "xlsx", all(), " (HEADER true)");
+        XlsxConnector.Builder b = XlsxConnector.builder("files").batchSize(8).ignoreErrors(true);
+        files.forEach((table, file) -> b.file(table, file));
+        XlsxConnector xlsx = b.build();
+        Map<String, List<Object[]>> rows = RandomTables.rows(RandomRun.SEED);
+        return source("Excel", xlsx, List.copyOf(files.keySet()), engine -> () -> {
+            for (String table : files.keySet()) {
+                Object count = engine.rows("SELECT count(*) FROM " + table).get(0)[0];
+                if (((Number) count).intValue() != rows.get(table).size()) {
+                    throw new AssertionError("the workbook of " + table + " has " + count + " of "
+                            + rows.get(table).size() + " rows");
+                }
+            }
+        });
     }
 
     /** The random tables as JSON files of records, read with their schemas in splits of 256 bytes. */

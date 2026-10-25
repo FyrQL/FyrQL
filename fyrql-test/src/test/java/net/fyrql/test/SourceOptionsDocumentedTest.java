@@ -50,7 +50,7 @@ class SourceOptionsDocumentedTest {
             factories.put(f.type(), f);
         }
         assertTrue(factories.keySet().containsAll(List.of("csv", "http", "iceberg", "jdbc", "json", "memory", "odata",
-                "parquet", "s3")), factories.keySet().toString());
+                "parquet", "s3", "xlsx")), factories.keySet().toString());
         List<String> blocks = blocks(Files.readString(Path.of("..", "docs", "manual.md"), StandardCharsets.UTF_8));
         List<String> missing = new ArrayList<>();
         for (Map.Entry<String, ConnectorFactory> e : factories.entrySet()) {

@@ -124,7 +124,7 @@ class FlightSqlJdbcWriteTest {
             s.executeUpdate("INSERT INTO t VALUES (1, 'a'), (2, NULL)");
             assertEquals(2, s.executeUpdate("COPY t TO '" + file + "'"));
         }
-        assertEquals(List.of("mem", "csv", "iceberg", "json", "parquet"), engine.sources());
+        assertEquals(List.of("mem", "csv", "iceberg", "json", "parquet", "xlsx"), engine.sources());
         assertEquals(List.of("[1, a]", "[2, null]"), rows("SELECT * FROM '" + file + "' ORDER BY k"));
     }
 

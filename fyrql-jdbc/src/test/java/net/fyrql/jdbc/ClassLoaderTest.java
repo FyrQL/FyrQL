@@ -57,7 +57,7 @@ class ClassLoaderTest {
                 assertEquals(List.of(BigDecimal.valueOf(3)), DriverTest.first(c, "SELECT sum(a) FROM files.t"));
             }
             try (Connection c = new FyrQLDriver().connect("jdbc:fyrql:", null)) {
-                assertEquals(List.of("csv", "json", "parquet", "iceberg", "memory"),
+                assertEquals(List.of("csv", "json", "parquet", "iceberg", "memory", "xlsx"),
                         c.unwrap(FyrQL.class).sources());
             }
         } finally {

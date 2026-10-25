@@ -58,6 +58,7 @@ import java.util.zip.GZIPInputStream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * {@code COPY ... TO} writes the tables of the random queries ({@code p},
@@ -66,7 +67,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * columns) into CSV, JSON and Parquet files. DuckDB reads each file, with
  * the column types given for CSV and JSON, and gets the rows of the table;
  * so does FyrQL, and {@code COPY ... FROM} loads the file into a table with
- * the columns of the first one. What the formats lose: CSV keeps no types
+ * the columns of the first one. An Excel workbook keeps few types: FyrQL and
+ * DuckDB read it with {@code read_xlsx} and get the same rows, see
+ * {@link WrittenFiles#xlsx}, and {@code COPY ... FROM} loads the tables
+ * {@code t} and {@code u}, whose values a double holds. What the formats
+ * lose: CSV keeps no types
  * and holds no nested values, and FyrQL's CSV reader reads an empty string
  * as {@code NULL}, as DuckDB does by default; a Parquet file holds a
  * {@code HUGEINT} as a {@code DECIMAL(38,0)}, which a value of 39 digits
@@ -77,7 +82,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CopyRoundTripTest {
 
     private static final List<String> TABLES = List.of("p", "q", "e", "t", "u", "w", "n");
-    private static final List<String> FORMATS = List.of("csv", "json", "parquet");
+    private static final List<String> FORMATS = List.of("csv", "json", "parquet", "xlsx");
     private static final String MAX_38_DIGITS = "99999999999999999999999999999999999999";
 
     @TempDir
@@ -135,6 +140,16 @@ class CopyRoundTripTest {
             schema = r.schema();
             // In the form of vectors, as the readers below give them.
             rows = Rows.internal(schema, r.rows());
+        }
+        if (format.equals("xlsx")) {
+            assumeTrue(WrittenFiles.loadExcel(duck), "DuckDB has no extension excel in its cache");
+            assertEquals(rows.size(), engine.update("COPY (" + query + ") TO '" + path(file) + "' (HEADER true)"));
+            WrittenFiles.ReadBack back = WrittenFiles.xlsx(duck, engine, file, "");
+            same(back.schema(), back.expected(), back.actual(), "FyrQL and DuckDB read " + file.getFileName());
+            if (table.equals("t") || table.equals("u")) {
+                same(schema, rows, copyFrom(file, schema, "", ""), "COPY FROM " + file.getFileName());
+            }
+            return;
         }
         assertEquals(rows.size(), engine.update("COPY (" + query + ") TO '" + path(file) + "'"));
 

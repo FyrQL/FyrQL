@@ -117,7 +117,7 @@ class FyrQLConfigTest {
                       orders: lake/orders
                 """, StandardCharsets.UTF_8);
         try (FyrQL engine = FyrQLConfig.open(file)) {
-            assertEquals(List.of("lake", "csv", "json", "parquet"), engine.sources());
+            assertEquals(List.of("lake", "csv", "json", "parquet", "xlsx"), engine.sources());
             assertEquals(List.of(List.of(0L)), engine.rows("SELECT count(*) FROM lake.orders").stream()
                     .map(Arrays::asList).toList());
             assertEquals(List.of(List.of(0L)), engine.rows("SELECT count(*) FROM iceberg_scan('"
@@ -132,7 +132,7 @@ class FyrQLConfigTest {
         Path file = config("defaultSource: shop\nbatchSize: 2\nmemoryBudget: 64MiB\ncodegen: off\npushdown: true\n"
                 + "threads: 3\npreserveOrder: false\nspill: on\nspillDirectory: spill\n");
         try (FyrQL engine = FyrQLConfig.open(file)) {
-            assertEquals(List.of("shop", "files", "docs", "iceberg", "parquet"), engine.sources());
+            assertEquals(List.of("shop", "files", "docs", "iceberg", "parquet", "xlsx"), engine.sources());
             assertEquals(Optional.of(file.getParent().resolve("spill")), engine.spillDirectory(),
                     "a relative directory lies next to the file");
             assertTrue(engine.pushdown());
@@ -312,7 +312,7 @@ class FyrQLConfigTest {
                           events: s3://lake/events/*.parquet
                     """.formatted(s3.endpoint()), StandardCharsets.UTF_8);
             try (FyrQL engine = FyrQLConfig.open(file)) {
-                assertEquals(List.of("s3", "lake", "csv", "iceberg", "json"), engine.sources());
+                assertEquals(List.of("s3", "lake", "csv", "iceberg", "json", "xlsx"), engine.sources());
                 assertEquals(2, engine.update("COPY (SELECT * FROM (VALUES (1), (2)) v(n)) TO"
                         + " 's3://lake/events/a.parquet'"));
                 assertEquals(1, engine.update("COPY (SELECT 3 AS n) TO 's3://lake/events/b.parquet'"));

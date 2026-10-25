@@ -359,8 +359,10 @@ public sealed interface PlanNode {
     record Project(PlanNode input, List<NamedExpression> columns) implements PlanNode {
         public Project {
             columns = List.copyOf(columns);
+            // The schema once: a scan builds its schema anew each time, for each of thousands of columns.
+            Schema in = input.schema();
             for (NamedExpression c : columns) {
-                Expressions.check(input.schema(), c.expression());
+                Expressions.check(in, c.expression());
             }
         }
 
@@ -654,11 +656,12 @@ public sealed interface PlanNode {
         public Aggregate {
             groupColumns = List.copyOf(groupColumns);
             aggregates = List.copyOf(aggregates);
+            Schema in = input.schema();
             for (int c : groupColumns) {
-                checkColumn(input.schema(), c);
+                checkColumn(in, c);
             }
             for (AggregateCall a : aggregates) {
-                a.check(input.schema());
+                a.check(in);
             }
         }
 
@@ -694,8 +697,9 @@ public sealed interface PlanNode {
             if (keys.isEmpty()) {
                 throw new IllegalArgumentException("Sort without keys");
             }
+            Schema in = input.schema();
             for (SortKey k : keys) {
-                checkColumn(input.schema(), k.column());
+                checkColumn(in, k.column());
             }
         }
 
@@ -1202,20 +1206,23 @@ public sealed interface PlanNode {
     record SetOperation(PlanNode left, PlanNode right, SetOperationKind kind, boolean all) implements PlanNode {
         public SetOperation {
             Objects.requireNonNull(kind, "kind");
-            if (left.schema().size() != right.schema().size()) {
+            Schema l = left.schema();
+            Schema r = right.schema();
+            if (l.size() != r.size()) {
                 throw new IllegalArgumentException(kind + " of different widths");
             }
-            for (int i = 0; i < left.schema().size(); i++) {
-                TypeRules.require(left.schema().type(i), right.schema().type(i), kind + " column " + i);
+            for (int i = 0; i < l.size(); i++) {
+                TypeRules.require(l.type(i), r.type(i), kind + " column " + i);
             }
         }
 
         @Override
         public Schema schema() {
             Schema l = left.schema();
+            Schema r = right.schema();
             List<Schema.Field> fields = new ArrayList<>();
             for (int i = 0; i < l.size(); i++) {
-                fields.add(new Schema.Field(l.name(i), l.type(i), l.nullable(i) || right.schema().nullable(i)));
+                fields.add(new Schema.Field(l.name(i), l.type(i), l.nullable(i) || r.nullable(i)));
             }
             return new Schema(fields);
         }

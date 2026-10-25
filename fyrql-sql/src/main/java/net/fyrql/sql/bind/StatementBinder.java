@@ -196,7 +196,7 @@ final class StatementBinder {
         if (format == null) {
             format = CatalogView.fileFunction(path).map(f -> f.substring("read_".length()))
                     .orElseThrow(() -> new SqlException("No format for the file " + path + ": end its name in"
-                            + " .csv, .json or .parquet, or give one, as in (FORMAT csv)", position));
+                            + " .csv, .json, .parquet or .xlsx, or give one, as in (FORMAT csv)", position));
         }
         format = format.toLowerCase(Locale.ROOT);
         String lower = path.toLowerCase(Locale.ROOT);

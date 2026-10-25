@@ -46,7 +46,11 @@ What FyrQL does not protect against, by design:
   an Iceberg table in full; the memory budget does not cover these buffers. A file that
   the operator does not trust can exhaust the heap. Avro records that contain themselves,
   annotations of OData nested more than 64 deep and XML answers of S3 above 16 MiB are
-  refused.
+  refused. The reader of Excel workbooks holds the shared strings of a workbook in
+  memory, outside the memory budget; it refuses an entry of the archive that inflates to
+  more than the size its directory gives, or, beyond 64 MiB, to more than 100 times its
+  compressed size, and every part with a document type declaration, so that no entity is
+  expanded and nothing outside the workbook is read.
 - **The allowed directories belong to the operator.** The check of a location comes
   before the file is opened; whoever may change an allowed directory, such as by putting a
   link in place of a directory between the check and the read, can lead a statement

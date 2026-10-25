@@ -49,8 +49,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The results of random plans, written with {@code COPY ... TO} into a CSV,
- * a JSON and a Parquet file: DuckDB reads each file and gets the rows of
- * the query, in their order if the plan sorts its output, and
+ * a JSON and a Parquet file and an Excel workbook: DuckDB reads each file
+ * and gets the rows of the query, in their order if the plan sorts its
+ * output, or of a workbook, which keeps few types, the rows FyrQL reads
+ * from it with {@code read_xlsx}, see {@link WrittenFiles#xlsx}; and
  * {@code COPY ... FROM} loads each file into a table of the memory source
  * with the columns of the result, which then has the rows of the query; an
  * empty string comes back from a CSV file as {@code NULL}. The columns are
@@ -60,12 +62,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * a {@code DECIMAL(38,0)} does not hold, or with a negative part of an
  * interval, which Parquet does not hold either, and the load of a CSV file of a
  * result with nested columns, which CSV does not hold; the report counts
- * them. The engine has only the memory source registered, the sources of
- * the formats come with their modules. No temporary file is left behind.
+ * them, as the loads of workbooks, whose values lose their types. The
+ * engine has only the memory source registered, the sources of the formats
+ * come with their modules. No temporary file is left behind; the workbooks
+ * are left out when DuckDB has no extension {@code excel} in its cache.
  */
 class WriteRoundTripTest {
 
-    private static final List<String> FORMATS = List.of("csv", "json", "parquet");
+    private static final List<String> FORMATS = List.of("csv", "json", "parquet", "xlsx");
 
     private final SqlRenderer renderer = new SqlRenderer(DuckDbDialect.INSTANCE,
             t -> DuckDbDialect.INSTANCE.quoteIdentifier(t.table()));
@@ -79,11 +83,13 @@ class WriteRoundTripTest {
         int failed = 0;
         int tooLarge = 0;
         int nestedInCsv = 0;
+        int workbooks = 0;
         long rowsWritten = 0;
         List<String> unexplained = new ArrayList<>();
         try (FyrQL engine = RandomTables.engine(RandomTables.rows(RandomRun.SEED), CodegenMode.OFF,
                 Executor.threadsFromSystemProperty());
                 DuckDbReference duck = RandomTables.duck()) {
+            boolean excel = WrittenFiles.loadExcel(duck);
             for (int i = 0; i < RandomRun.QUERIES; i++) {
                 PlanNode plan = renamed(new PlanGenerator(RandomRun.random(i)).plan(3));
                 boolean ordered = Plans.ordered(plan);
@@ -99,10 +105,15 @@ class WriteRoundTripTest {
                     continue;
                 }
                 for (String format : FORMATS) {
+                    boolean workbook = format.equals("xlsx");
+                    if (workbook && !excel) {
+                        continue;
+                    }
                     Path file = dir.resolve("result." + format);
                     long count;
                     try {
-                        count = engine.update("COPY (" + sql + ") TO '" + WrittenFiles.path(file) + "'");
+                        count = engine.update("COPY (" + sql + ") TO '" + WrittenFiles.path(file) + "'"
+                                + (workbook ? " (HEADER true)" : ""));
                     } catch (SqlException e) {
                         if (format.equals("parquet") && (e.getMessage().contains(" has more than 38 digits; a Parquet"
                                 + " file holds a HUGEINT as a DECIMAL(38,0)")
@@ -124,7 +135,8 @@ class WriteRoundTripTest {
                     String report;
                     List<Object[]> written = asWritten(format, schema, rows);
                     try {
-                        ResultComparison.Outcome same = WrittenFiles.duckDb(duck, file, format, schema, written)
+                        ResultComparison.Outcome same = workbook ? WrittenFiles.xlsx(duck, engine, file, "")
+                                .compare(true) : WrittenFiles.duckDb(duck, file, format, schema, written)
                                 .compare(ordered);
                         report = same.same() ? null : same.report();
                     } catch (RuntimeException e) {
@@ -134,7 +146,9 @@ class WriteRoundTripTest {
                         unexplained.add("query " + i + " to " + format + ":\n" + report.indent(2) + "  sql: " + sql);
                         continue;
                     }
-                    if (format.equals("csv") && schema.fields().stream().anyMatch(f -> f.type().isNested())) {
+                    if (workbook) {
+                        workbooks++;
+                    } else if (format.equals("csv") && schema.fields().stream().anyMatch(f -> f.type().isNested())) {
                         nestedInCsv++;
                     } else {
                         report = loaded(engine, file, format, schema, written);
@@ -157,7 +171,8 @@ class WriteRoundTripTest {
                 + checked + " results in " + FORMATS.size() + " formats with " + rowsWritten + " rows read back, "
                 + failed + " failed in FyrQL, " + tooLarge + " not in Parquet with a HUGEINT of 39 digits or a"
                 + " negative interval, "
-                + nestedInCsv + " not loaded from CSV with nested columns\n"
+                + nestedInCsv + " not loaded from CSV with nested columns, " + workbooks + " workbooks read by"
+                + " both engines and not loaded\n"
                 + "  unexplained: " + unexplained.size() + "\n" + String.join("\n", unexplained.stream()
                         .limit(20).toList());
         System.out.println(report);

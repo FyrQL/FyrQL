@@ -320,7 +320,8 @@ class ShadedPgWireServerTest {
                     "net.fyrql.connector.jdbc.JdbcConnectorFactory",
                     "net.fyrql.connector.memory.MemoryConnectorFactory",
                     "net.fyrql.connector.s3.S3ConnectorFactory",
-                    "net.fyrql.connector.iceberg.IcebergConnectorFactory"),
+                    "net.fyrql.connector.iceberg.IcebergConnectorFactory",
+                    "net.fyrql.connector.xlsx.XlsxConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),
                     services(jar, "net.fyrql.exec.compiled.ExpressionCompiler"));

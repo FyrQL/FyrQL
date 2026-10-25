@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.16.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.17.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it runs
 queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -237,8 +237,8 @@ files belong to the engine, not to a session.
 ## Connectors
 
 Each kind of source is a connector in a module of its own, and every connector serves its
-tables in the schema `main` unless it says otherwise. The connectors of CSV, JSON and
-Parquet also write files and read them with the columns of a table, and those of memory
+tables in the schema `main` unless it says otherwise. The connectors of CSV, JSON, Parquet
+and Excel also write files and read them with the columns of a table, and those of memory
 and JDBC write tables; see [Writing](#writing-and-loading).
 
 - `fyrql-connector-memory`: Java collections of records, beans or rows; records and
@@ -292,6 +292,38 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   (`1MB`) is the size of the reads of the headers of pages, of dictionaries and of indexes
   there. `read_parquet` takes the named argument `timezone`, as the table functions of CSV
   and JSON do, but a Parquet file holds its instants in UTC and needs none.
+- `fyrql-connector-xlsx`: the sheets of Excel workbooks (`.xlsx` and `.xlsm`), read and
+  written with the zip and XML support of the JDK alone, without Apache POI. A table is a
+  sheet, by default the first worksheet, read as DuckDB's `read_xlsx` reads it: it starts
+  at the first row with a value, its columns from that value to the last one before a
+  cell without a value, or else it is a `range` such as `A1:C10` or `A:C`; its first row
+  is a header if all its cells hold strings; each column takes its type from its first
+  row of data alone, a number a `DOUBLE`, or a `DATE`, `TIMESTAMP` or `TIME` by its number
+  format, a text a `VARCHAR`, a boolean a `BOOLEAN`, a missing cell a `DOUBLE`; and
+  without a range reading stops at the first empty row. A value that does
+  not fit its column fails with its cell, such as `Failed to parse cell 'A3' of the sheet
+  "Sheet1" of sales.xlsx: Could not convert string 'b' to DOUBLE`, or is a `NULL` with
+  `ignore_errors`. A formula is read as the result stored with it. A serial number is a
+  date or a time as Excel counts it, from 1900-03-01 on as DuckDB counts it, and from
+  1904-01-01 in a workbook of the date system of 1904; a time less than a millisecond away
+  from a whole second is that second, as in DuckDB. A sheet is read in one part, with the
+  shared strings of its workbook in memory, outside the memory budget; an entry of the
+  archive that inflates to more than its size, or beyond 64 MiB to more than 100 times its
+  compressed size, fails, and so do a part with a document type declaration, Zip64
+  archives, encrypted workbooks and the binary formats `.xls` and `.xlsb`. A workbook in
+  S3 is read in ranges of 1 MiB. `read_xlsx` takes the named arguments of DuckDB:
+  `header`, `sheet`, `range`, `stop_at_empty`, `all_varchar`, `ignore_errors`,
+  `empty_as_varchar` and `normalize_names`. The source of the type `xlsx` takes
+  `directory`, whose `.xlsx` and `.xlsm` workbooks become tables of their first
+  worksheets, `tables.<name>` or `tables.<name>.file` with `.sheet` and `.range`, and
+  `header`, `stopAtEmpty`, `allVarchar`, `ignoreErrors`, `emptyAsVarchar`,
+  `normalizeNames` and `batchSize` for all its tables.
+
+  ```sql
+  SELECT * FROM 'sales.xlsx';
+  SELECT region, sum(amount) FROM read_xlsx('sales.xlsx', sheet = 'Q3', range = 'B2:F200') GROUP BY ALL;
+  COPY (SELECT * FROM orders) TO 'orders.xlsx' (HEADER true, SHEET 'Orders');
+  ```
 - `fyrql-connector-iceberg`: Apache Iceberg tables, read in pure Java without Hadoop
   and without a catalog: a table is its directory, the one with `metadata/`, or one of its
   metadata files, local or in S3. In a directory, `metadata/version-hint.text` names the
@@ -376,30 +408,30 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   scan of a table of more than `n` rows is read in parts on several threads, see
   [Parallel execution](#parallel-execution).
 - `fyrql-connector-s3`: the objects of S3, and of stores with its API such as MinIO, as
-  the files of locations `s3://bucket/key`, which the connectors of CSV, JSON and Parquet
-  read and write in `FROM`, in their table functions, in `COPY` and as the tables of their
-  sources, such as `tables.events: s3://lake/events/*.parquet`. The source of the type
-  `s3` has no tables of its own, and an engine has at most one. It talks to S3 over HTTP
-  with a client of its own, without the SDK of AWS, and signs its requests with the
+  the files of locations `s3://bucket/key`, which the connectors of CSV, JSON, Parquet and
+  Excel read and write in `FROM`, in their table functions, in `COPY` and as the tables of
+  their sources, such as `tables.events: s3://lake/events/*.parquet`. The source of the
+  type `s3` has no tables of its own, and an engine has at most one. It talks to S3 over
+  HTTP with a client of its own, without the SDK of AWS, and signs its requests with the
   Signature Version 4 of AWS. A location names an object, the objects directly under a
-  prefix (`s3://lake/events/` or `s3://lake/events`), or those whose names match a
-  pattern in the last part (`s3://lake/events/2026-*.parquet`). A Parquet object is read
-  in ranges: the footer, usually with one request for the tail of the object, and then
-  only the column chunks of the row groups and columns a scan needs, so that a filter
-  that excludes every row group by the statistics reads nothing more. Each read names
-  the entity tag of the object, so that an object that changes during a query fails it
-  rather than mixing versions. A CSV or JSON object is read as one stream, in one part.
-  An object is written as a multipart upload in parts of `partSize` and appears only with
-  the last row, as a local file does; a statement that fails abandons the upload. A
-  request that fails on the network, with a status of 500 or more or with 429 is tried
-  again `retries` times. The options: `endpoint` (such as `http://127.0.0.1:9000` for
-  MinIO; by default that of AWS in the region), `region` (`us-east-1`), `accessKey`,
-  `secretKey` and `sessionToken`, `profile`, `pathStyle` (`true` with an `endpoint`,
-  otherwise `false`), `timeout` (`30s`), `partSize` (`8MB`, at least `5MB`) and `retries`
-  (`3`). What is not given comes from the environment as for the tools of AWS:
-  `AWS_ENDPOINT_URL_S3` or `AWS_ENDPOINT_URL`, `AWS_REGION` or `AWS_DEFAULT_REGION`,
-  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, or else the profile
-  of `~/.aws/credentials` that `profile` or `AWS_PROFILE` names; without credentials the
+  prefix (`s3://lake/events/` or `s3://lake/events`), or those whose names match a pattern
+  in the last part (`s3://lake/events/2026-*.parquet`). A Parquet object is read in
+  ranges: the footer, usually with one request for the tail of the object, and then only
+  the column chunks of the row groups and columns a scan needs, so that a filter that
+  excludes every row group by the statistics reads nothing more. Each read names the
+  entity tag of the object, so that an object that changes during a query fails it rather
+  than mixing versions. A CSV or JSON object is read as one stream, in one part. An object
+  is written as a multipart upload in parts of `partSize` and appears only with the last
+  row, as a local file does; a statement that fails abandons the upload. A request that
+  fails on the network, with a status of 500 or more or with 429 is tried again `retries`
+  times. The options: `endpoint` (such as `http://127.0.0.1:9000` for MinIO; by default
+  that of AWS in the region), `region` (`us-east-1`), `accessKey`, `secretKey` and
+  `sessionToken`, `profile`, `pathStyle` (`true` with an `endpoint`, otherwise `false`),
+  `timeout` (`30s`), `partSize` (`8MB`, at least `5MB`) and `retries` (`3`). What is not
+  given comes from the environment as for the tools of AWS: `AWS_ENDPOINT_URL_S3` or
+  `AWS_ENDPOINT_URL`, `AWS_REGION` or `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, or else the profile of
+  `~/.aws/credentials` that `profile` or `AWS_PROFILE` names; without credentials the
   requests go unsigned, as for a public bucket. No message shows the value of an option.
   Without a source of S3, a location of S3 fails with `No source handles s3:// locations;
   register a source of the type s3`.
@@ -574,7 +606,7 @@ Five statements write, and each gives one row with the number of rows written in
 column `Count` of the type `BIGINT`, as in DuckDB:
 
 - `COPY (query) TO 'file' [(option value, ...)]`, or `COPY table [(columns)] TO 'file'`,
-  writes the rows of a query into a CSV, JSON or Parquet file;
+  writes the rows of a query into a CSV, JSON or Parquet file or an Excel workbook;
 - `COPY table [(columns)] FROM 'file' [(option value, ...)]` loads such a file into a
   table with the types of its columns;
 - `CREATE TABLE t AS query` creates a table with the columns of the query and its rows,
@@ -630,10 +662,10 @@ scripts of several statements are not supported.
 
 ### Files
 
-`COPY` takes the format from the option `FORMAT` (`csv`, `json` or
-`parquet`), or else from the end of the name of the file: `.csv` and `.tsv`, `.json`,
-`.jsonl` and `.ndjson`, or `.parquet`, CSV and JSON also with `.gz`, which compresses
-them with gzip. A relative path is resolved against the working directory of the
+`COPY` takes the format from the option `FORMAT` (`csv`, `json`, `parquet` or
+`xlsx`), or else from the end of the name of the file: `.csv` and `.tsv`, `.json`,
+`.jsonl` and `.ndjson`, `.parquet`, or `.xlsx`, CSV and JSON also with `.gz`, which
+compresses them with gzip. A relative path is resolved against the working directory of the
 process; a location `s3://bucket/key` writes an object of S3, see
 [Connectors](#connectors). The rows go into a temporary file `<name>.<random>.tmp` next to the file, which
 takes its name when the last row is written and replaces a file of that name, so that a
@@ -646,6 +678,7 @@ options, all optional, with their defaults:
 | CSV | `header` (`true`), `delimiter`, `delim` or `sep` (`,`, or a tab for `.tsv`), `quote` (`"`), `escape` (the quote), `nullstr` or `null` (empty), `dateformat` and `timestampformat` (as in `strftime`), `timezone` (the time zone of a `TIMESTAMPTZ`; that of the session), `compression` (`gzip` or `none`, by default from the name) |
 | JSON | `array` (`false`: one record per line, `true`: one array of records), `dateformat`, `timestampformat`, `timezone`, `compression` |
 | Parquet | `compression` or `codec` (`zstd`, `snappy`, `gzip`, `lz4_raw` or `lz4`, `uncompressed` or `none`; `zstd`), `row_group_size` (122,880 rows), `row_group_size_bytes` (128 MB), `parquet_version` (`v1` or `v2`; `v1`), `timezone`, which changes nothing |
+| Excel | `header` (`false`, as in DuckDB), `sheet` (`Sheet1`; 1 to 31 characters, none of `[ ] : * ? / \`), `sheet_row_limit` (1,048,576, the rows of a sheet; a row beyond it fails the statement), `timezone` (the time zone of a `TIMESTAMPTZ`; that of the session) |
 
 An unknown option fails with a message that lists the known ones. A CSV file is written
 as DuckDB writes it, byte for byte: in UTF-8 with line feeds, a field in quotes only
@@ -667,6 +700,17 @@ DuckDB writes a `HUGEINT` as a `DOUBLE`. An `INTERVAL` is held as DuckDB holds i
 twelve bytes of months, days and milliseconds, so that a part of a millisecond is lost
 and an interval with a negative part fails. Its metadata has the key `writer.model.name`
 with the value `fyrql`.
+
+An Excel workbook holds a sheet of numbers, booleans and texts, as DuckDB writes one: a
+number of any numeric type as a number with its exact text, which Excel reads as a double,
+so that a `BIGINT` of more than 15 digits and a `DECIMAL` of more than 15 lose digits;
+`NaN` and infinity, which a workbook cannot hold as numbers, as the texts `nan`, `inf` and
+`-inf`; a `DATE`, `TIMESTAMP` and `TIME` as a serial number with a number format of its
+kind, which reads back to the microsecond unless it is less than a millisecond away from a
+whole second; a `TIMESTAMPTZ` as a `TIMESTAMP` in the time zone of the session; every other
+value, nested ones too, as a text, the cast to `VARCHAR`, with a character that XML cannot
+hold written as `_xHHHH_`; and a `NULL` as no cell. Without `HEADER true`, a reader such as
+`read_xlsx` takes a first row of texts for a header, as DuckDB does.
 
 ### Formats
 
@@ -718,12 +762,16 @@ The options of reading, all optional, with their defaults:
 | CSV | `header` (`true`), `delimiter`, `delim` or `sep` (`,`, or a tab for `.tsv`), `quote` (`"`), `escape` (only the quote), `nullstr` or `null` (empty), `dateformat` and `timestampformat` (as in `strptime`; a value must have that form), `timezone` (the time zone in which a timestamp without an offset is read into a `TIMESTAMPTZ` column; that of the session), `compression` (`gzip`, `none` or `auto`: by the name) |
 | JSON | `format` (`auto`, `array` or `newline_delimited`; `auto`) or `array` (`true` or `false`), `dateformat`, `timestampformat`, `ignore_errors` (`false`; with `true`, a value that does not fit is `NULL`), `timezone`, `compression` |
 | Parquet | `timezone`, which changes nothing |
+| Excel | `header` (decided as `read_xlsx` decides it), `sheet`, `range`, `stop_at_empty`, `all_varchar`, `ignore_errors`, `empty_as_varchar`, `normalize_names`, `timezone` (in which a serial number of a `TIMESTAMPTZ` column is read; that of the session) |
 
-A CSV file holds no nested values: a column of the type `STRUCT`, `LIST` or `MAP` in the
-list fails the statement. In a CSV file of one column whose null string is empty, an
-empty line is a `NULL`, as DuckDB writes and reads it; otherwise it is skipped. An object
-of S3 is loaded by its location, as in `COPY mem.archive FROM 's3://lake/archive.csv'`.
-Files compressed with zstd, and several files at once, are not loaded.
+A CSV file and an Excel workbook hold no nested values: a column of the type `STRUCT`,
+`LIST` or `MAP` in the list fails the statement. An Excel workbook gives its cells from
+the first column of its table on, in the order of the list, each read as the type of its
+column, a number cast from a `DOUBLE`. In a CSV file of one column whose null string is
+empty, an empty line is a `NULL`, as DuckDB writes and reads it; otherwise it is skipped.
+An object of S3 is loaded by its location, as in `COPY mem.archive FROM
+'s3://lake/archive.csv'`. Files compressed with zstd, and several files at once, are not
+loaded.
 
 ### Tables
 
@@ -865,20 +913,20 @@ engine:
 ```
 
 The `type` of a source picks its connector, which must be on the class path: `csv`,
-`json`, `parquet`, `iceberg`, `http`, `odata`, `jdbc`, `memory` or `s3`; a connector of an
-application joins them through a `ConnectorFactory` listed in `META-INF/services`. The
-other keys of a source are the options of its type, read as text with nested keys joined
-by dots (`tables.products.url`); an unknown or misspelled option is an error that lists
-the known ones. Relative paths are resolved against the directory of the file. A value may
-name an environment variable as `${env:NAME}`, or `${env:NAME:-default}`, and a system
-property as `${sys:name}`, so that secrets need not be in the file. The settings under
-`engine` are those of the builder, listed under [Engine settings](#engine-settings);
-`allowedLocations` is a list, or a text with commas between its entries, whose relative
-directories are resolved against the directory of the file, and `queryTimeout` and
-`maxQueryTimeout` are durations such as `30s` or `5m`. A
-file whose name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` returns the
-builder instead, so that an application can add sources of its own, such as tables in
-memory. A third section, `server`, holds the settings of the [Flight SQL
+`json`, `parquet`, `xlsx`, `iceberg`, `http`, `odata`, `jdbc`, `memory` or `s3`; a
+connector of an application joins them through a `ConnectorFactory` listed in
+`META-INF/services`. The other keys of a source are the options of its type, read as text
+with nested keys joined by dots (`tables.products.url`); an unknown or misspelled option
+is an error that lists the known ones. Relative paths are resolved against the directory
+of the file. A value may name an environment variable as `${env:NAME}`, or
+`${env:NAME:-default}`, and a system property as `${sys:name}`, so that secrets need not
+be in the file. The settings under `engine` are those of the builder, listed under [Engine
+settings](#engine-settings); `allowedLocations` is a list, or a text with commas between
+its entries, whose relative directories are resolved against the directory of the file,
+and `queryTimeout` and `maxQueryTimeout` are durations such as `30s` or `5m`. A file whose
+name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` returns the builder
+instead, so that an application can add sources of its own, such as tables in memory. A
+third section, `server`, holds the settings of the [Flight SQL
 server](#flight-sql-server), and a fourth, `pgwire`, those of the [PostgreSQL wire
 protocol server](pgwire.md); the engine leaves both aside.
 
@@ -901,6 +949,14 @@ A source of the type `parquet` takes `directory`, whose `.parquet` files and
 subdirectories of them become tables, and `tables.<name>` or `tables.<name>.path` for a
 file, a directory or a pattern such as `lake/events/*.parquet`; and `batchSize` and
 `readAhead` (`1MB`, see [Connectors](#connectors)).
+
+A source of the type `xlsx` takes `directory`, whose `.xlsx` and `.xlsm` workbooks become
+tables of their first worksheets, and `tables.<name>` or `tables.<name>.file` for a
+workbook, also in S3, with `tables.<name>.sheet` and `tables.<name>.range` for its sheet
+and its cells, such as `B2:F200`; and, for every table, `header` (decided as DuckDB
+decides it), `stopAtEmpty` (`true`, without a range), `allVarchar`, `ignoreErrors`,
+`emptyAsVarchar` and `normalizeNames` (all `false`), which mean what the named arguments
+of `read_xlsx` with these names in snake case mean, and `batchSize`.
 
 A source of the type `http` takes `tables.<name>` or `tables.<name>.url` for the endpoint
 of a table and `tables.<name>.pointer` for a JSON pointer to its records, `headers.<name>`
@@ -930,16 +986,16 @@ list), `defaultSchema`, `fetchSize`, `batchSize`, `batchRows` (the rows of a bat
 the driver.
 
 A source of the type `memory` starts without tables, for those that SQL
-[creates](#writing-and-loading), and takes `batchSize` and `splitRows`, the rows of the parts that
-a scan of a table reads on several threads. A source of the type `csv`, `json` or
-`parquet` without options has no tables; the engine has one of each anyway whose module
-is on the class path, unless `implicitSources: false` stands under `engine` (see
+[creates](#writing-and-loading), and takes `batchSize` and `splitRows`, the rows of the
+parts that a scan of a table reads on several threads. A source of the type `csv`, `json`,
+`parquet` or `xlsx` without options has no tables; the engine has one of each anyway whose
+module is on the class path, unless `implicitSources: false` stands under `engine` (see
 [Writing](#writing-and-loading)).
 
 A source of the type `s3` holds no tables; it opens the objects of `s3://` locations to
 the sources of the formats, with the options of `fyrql-connector-s3` (see
-[Connectors](#connectors)). A table of a source of the type `csv`, `json` or `parquet`
-in S3 is looked up when it is first used:
+[Connectors](#connectors)). A table of a source of the type `csv`, `json`, `parquet` or
+`xlsx` in S3 is looked up when it is first used:
 
 ```yaml
 sources:
@@ -1027,8 +1083,8 @@ only the files under `data` (see [File access](#file-access)). The settings of t
 the properties win over those of the file, `fileAccess` and the time limits too, so that
 whoever chooses the URL chooses what the engine allows: a URL from others needs the
 trust a configuration file needs.
-Without `config`, the engine has the sources `csv`, `json`, `parquet` and `iceberg`
-without tables, so that file names and table functions can be queried, as in `SELECT *
+Without `config`, the engine has the sources `csv`, `json`, `parquet`, `iceberg` and
+`xlsx` without tables, so that file names and table functions can be queried, as in `SELECT *
 FROM 'data/orders.csv'`, `SELECT * FROM read_parquet('lake/events.parquet')` or `SELECT *
 FROM iceberg_scan('warehouse/db/orders')`, and files written, and the source `memory`, in
 which `CREATE TABLE memory.t AS ...` creates tables that live as long as the connection.
@@ -1447,9 +1503,9 @@ of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHO
   `ORDER BY`.
 - `FROM` with tables, subqueries, `VALUES`, the table functions `read_csv`,
   `read_csv_auto`, `read_json`, `read_json_auto`, `read_ndjson`, `read_ndjson_auto`,
-  `read_parquet`, `parquet_scan`, `iceberg_scan`, `read_iceberg` and
-  `iceberg_snapshots`, and file names such as `FROM 'data/orders.csv'`,
-  `FROM 'events.jsonl'` or `FROM 'lake/*.parquet'`, as far as the
+  `read_parquet`, `parquet_scan`, `iceberg_scan`, `read_iceberg`,
+  `iceberg_snapshots` and `read_xlsx`, and file names such as `FROM 'data/orders.csv'`,
+  `FROM 'events.jsonl'`, `FROM 'lake/*.parquet'` or `FROM 'sales.xlsx'`, as far as the
   [file access](#file-access) of the engine allows; `INNER`, `LEFT`,
   `RIGHT`, `FULL` and `CROSS JOIN` with `ON` and any condition without a subquery,
   `USING` or `NATURAL`; `SELECT` without `FROM`.
@@ -1793,6 +1849,25 @@ here; the random tests explain such differences by a ledger of their own, see
 - `COPY ... FROM` takes the first line of a CSV file as a header unless `HEADER false` is
   given, where DuckDB detects whether it is one; it reads a quote inside a quoted value
   only as two quotes, so that `ESCAPE` must be the quote.
+- Of an Excel workbook, FyrQL reads a serial number below 61 as Excel does, from
+  1900-01-01 for the 1 on and with the 29th of February 1900, which never was, as
+  1900-03-01, where DuckDB 1.5.6 counts every number from 1899-12-30, one day early; it
+  reads the serial numbers of a workbook of the date system of 1904 from 1904-01-01, which
+  DuckDB takes for those of 1900, and decodes the escapes `_xHHHH_` of a text, as Excel
+  does, which DuckDB leaves as they are. Without `sheet` it reads the first worksheet,
+  passing over chart sheets, and a `range` beyond the column `XFD` is invalid. A shared
+  string without its index is an empty text, where DuckDB takes the first shared string;
+  an empty sheet with a formatted row has no rows, where DuckDB gives it 16,384 columns;
+  and an archive with an entry twice or with a damaged directory fails, which DuckDB
+  reads.
+- `COPY ... TO` an Excel workbook writes a character that XML cannot hold as `_xHHHH_`,
+  where DuckDB writes it as it is, which gives a workbook that no reader opens, and `NaN`
+  and infinity as texts, where DuckDB writes `nan` and `inf` as numbers; it fails on an
+  unknown option, which DuckDB ignores, and on a name of a sheet that Excel does not take.
+  Its dates before 1900-03-01 are Excel's, and its number formats are ISO 8601, such as
+  `yyyy-mm-dd`.
+- DuckDB 1.5.6 finds no sheets in a workbook that Apache POI streams with its
+  `SXSSFWorkbook`, which FyrQL reads.
 
 ### Execution
 
@@ -2586,6 +2661,7 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | `net.fyrql.connector.odata` | API | `ODataConnectorFactory` (internal) |
 | `net.fyrql.connector.jdbc` | API | `JdbcConnectorFactory` (internal) |
 | `net.fyrql.connector.s3` | API | `S3ConnectorFactory` (internal) |
+| `net.fyrql.connector.xlsx` | API | `XlsxConnectorFactory` (internal) |
 | `net.fyrql.connector` | SPI | - |
 | `net.fyrql.core.type` | SPI | - |
 | `net.fyrql.core.vector` | SPI | `SpillFormat` (internal) |
@@ -2617,11 +2693,12 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | `fyrql-connector-csv` | CSV and TSV files as tables, also compressed with gzip, and their writer |
 | `fyrql-connector-json` | JSON files as tables, with the columns inferred as DuckDB infers them, and their writer |
 | `fyrql-connector-parquet` | Parquet files as tables, read and written with parquet-java without Hadoop, which it carries renamed |
+| `fyrql-connector-xlsx` | the sheets of Excel workbooks as tables, read as DuckDB reads them, and their writer, with the zip and XML support of the JDK alone |
 | `fyrql-connector-iceberg` | Apache Iceberg tables, local or in S3, with snapshots, deletes, schema evolution and the pruning of files by the manifests, read through the Parquet connector |
 | `fyrql-connector-http` | JSON from HTTP endpoints as tables |
 | `fyrql-connector-odata` | the entity sets of OData services of versions 2 and 4 as tables, with filters, orders, limits and `count(*)` pushed to the service |
 | `fyrql-connector-jdbc` | tables of H2, SQLite, PostgreSQL and MySQL over JDBC, and of any other database through a generic dialect, read and written |
-| `fyrql-connector-s3` | the objects of S3 and MinIO as the files of the connectors of CSV, JSON and Parquet, over a client of its own with the signatures of AWS |
+| `fyrql-connector-s3` | the objects of S3 and MinIO as the files of the connectors of CSV, JSON, Parquet and Excel, over a client of its own with the signatures of AWS |
 | `fyrql-engine` | the public Java API and the catalog over the registered sources and those of the file formats on the class path |
 | `fyrql-config` | the configuration file in YAML, and connectors found by their type; its JAR carries Jackson and SnakeYAML renamed under `net.fyrql.internal.config`, so that an application keeps its own versions |
 | `fyrql-jdbc` | a JDBC driver that runs an engine in the process of the application |
@@ -2660,6 +2737,15 @@ writers, such as PyIceberg or Spark, are compared with DuckDB with
 `-Dfyrql.test.iceberg.dir=<directory>`, in which every directory with a directory
 `metadata` is a table, and the tables in S3 against a running MinIO with
 `-Dfyrql.test.s3.endpoint=http://127.0.0.1:9000`.
+
+The workbooks of the tests of the Excel connector are written by Apache POI, a test
+dependency only, by DuckDB's `COPY ... (FORMAT xlsx)` and by FyrQL; FyrQL's `read_xlsx`
+must give the columns and rows of DuckDB's with its extension `excel`, which these tests
+load from the cache of DuckDB like the extension `iceberg`, after `INSTALL excel`.
+`-Dfyrql.test.python=<python>` has openpyxl and xlsxwriter write workbooks and say what
+they hold, which checks what DuckDB reads otherwise, and
+`-Dfyrql.test.xlsx.dir=<directory>` compares every workbook of a directory with DuckDB,
+such as the spreadsheets of the test data of Apache POI.
 
 Besides a corpus of SQL texts, two generators of random queries compare FyrQL with DuckDB:
 random plans, which FyrQL runs as they are and as it binds them from their SQL, and random

@@ -59,7 +59,7 @@ public final class EngineCatalog implements CatalogView {
     private final Map<String, FileReaderProvider> fileReaders = new LinkedHashMap<>();
 
     /** The formats of files that a module of their own brings. */
-    private static final List<String> MODULE_FORMATS = List.of("csv", "json", "parquet");
+    private static final List<String> MODULE_FORMATS = List.of("csv", "json", "parquet", "xlsx");
 
     /** The table functions of the Iceberg connector, which its module brings. */
     private static final List<String> ICEBERG_FUNCTIONS = List.of("iceberg_scan", "read_iceberg",

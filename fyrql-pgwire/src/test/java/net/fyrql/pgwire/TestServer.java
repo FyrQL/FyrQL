@@ -27,6 +27,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -46,7 +47,8 @@ final class TestServer implements AutoCloseable {
 
     final FyrQL engine;
     final PgWireServer server;
-    private final List<Connection> clients = new ArrayList<>();
+    /** The connections opened, from several threads at once in some tests. */
+    private final List<Connection> clients = new CopyOnWriteArrayList<>();
 
     TestServer() throws IOException {
         this(PgWireConfig.defaults().withPort(0), FyrQL.builder());

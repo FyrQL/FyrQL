@@ -28,8 +28,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * The {@linkplain Metamorphic metamorphic checks} over the
  * {@linkplain RandomSources other sources}: Parquet, CSV and JSON files,
- * H2, SQLite and PostgreSQL, Derby and HSQLDB through the generic
- * dialect, and Iceberg. The queries are generated over
+ * Excel workbooks, H2, SQLite and PostgreSQL, Derby and HSQLDB through the
+ * generic dialect, and Iceberg. The queries are generated over
  * the tables as each source gives them, with literals from samples of their
  * rows; a difference that is not known fails the test, and the source must
  * have done its part of the work.
@@ -58,6 +58,11 @@ class MetamorphicSourcesTest {
     @Test
     void csv(@TempDir Path dir) {
         check(RandomSources.csv(dir));
+    }
+
+    @Test
+    void xlsx(@TempDir Path dir) {
+        check(RandomSources.xlsx(dir));
     }
 
     @Test

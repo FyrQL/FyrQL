@@ -187,6 +187,12 @@ class DocumentationExampleTest {
             assertTrue(engine.explain("COPY mem.archive FROM '" + file + "'").startsWith("Copy from '" + file
                     + "' into mem.main.archive [format: csv]\n"));
 
+            // The example of Excel, with a workbook in the same directory.
+            String workbook = data.resolve("regions.xlsx").toString().replace('\\', '/');
+            engine.update("COPY (SELECT * FROM regions ORDER BY region) TO '" + workbook + "' (HEADER true)");
+            assertEquals("[[north, 15.75], [south, 20.0]]", engine.rows("SELECT * FROM '" + workbook + "'").stream()
+                    .map(Arrays::toString).toList().toString());
+
             assertTrue(engine.explain("INSERT INTO mem.regions SELECT region, 0 FROM customers")
                     .startsWith("Insert into mem.main.regions\n"));
             assertTrue(engine.explain("COPY regions TO '" + file + "'").startsWith("Copy to '" + file

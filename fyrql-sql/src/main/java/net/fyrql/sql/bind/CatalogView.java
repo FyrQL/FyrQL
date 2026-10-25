@@ -113,10 +113,14 @@ public interface CatalogView {
      * DuckDB chooses it by the extension: {@code read_csv} for {@code .csv}
      * and {@code .tsv}, {@code read_parquet} for {@code .parquet},
      * {@code read_json} for {@code .json}, {@code .jsonl} and
-     * {@code .ndjson}, each also with {@code .gz} or {@code .zst} after it.
+     * {@code .ndjson}, each also with {@code .gz} or {@code .zst} after it,
+     * and {@code read_xlsx} for {@code .xlsx}.
      */
     static Optional<String> fileFunction(String path) {
         String p = path.toLowerCase(Locale.ROOT);
+        if (p.endsWith(".xlsx")) {
+            return Optional.of("read_xlsx");
+        }
         for (String compression : List.of(".gz", ".zst")) {
             if (p.endsWith(compression)) {
                 p = p.substring(0, p.length() - compression.length());

@@ -184,7 +184,7 @@ class ShadedJdbcDriverTest {
                         catalogs.add(rs.getString(1));
                     }
                 }
-                assertEquals(List.of("files", "docs", "pq", "db", "erp", "s3", "iceberg"), catalogs);
+                assertEquals(List.of("files", "docs", "pq", "db", "erp", "s3", "iceberg", "xlsx"), catalogs);
                 try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery(sql)) {
                     assertTrue(rs.next());
                     assertEquals("Ann", rs.getString(1));
@@ -277,7 +277,8 @@ class ShadedJdbcDriverTest {
                     "net.fyrql.connector.jdbc.JdbcConnectorFactory",
                     "net.fyrql.connector.memory.MemoryConnectorFactory",
                     "net.fyrql.connector.s3.S3ConnectorFactory",
-                    "net.fyrql.connector.iceberg.IcebergConnectorFactory"),
+                    "net.fyrql.connector.iceberg.IcebergConnectorFactory",
+                    "net.fyrql.connector.xlsx.XlsxConnectorFactory"),
                     Set.copyOf(services(jar, "net.fyrql.connector.ConnectorFactory")));
             assertEquals(List.of("net.fyrql.codegen.JaninoCompiler"),
                     services(jar, "net.fyrql.exec.compiled.ExpressionCompiler"));

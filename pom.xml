@@ -17,7 +17,7 @@
 
 	<groupId>io.github.fyrql</groupId>
 	<artifactId>fyrql</artifactId>
-	<version>0.16.0</version>
+	<version>0.17.0</version>
 	<packaging>pom</packaging>
 
 	<name>FyrQL</name>
@@ -66,6 +66,7 @@
 		<module>fyrql-connector-jdbc</module>
 		<module>fyrql-connector-s3</module>
 		<module>fyrql-connector-iceberg</module>
+		<module>fyrql-connector-xlsx</module>
 		<module>fyrql-optimizer</module>
 		<module>fyrql-engine</module>
 		<module>fyrql-config</module>
@@ -105,6 +106,11 @@
 		  test dependency. The connector itself reads Iceberg without it.
 		-->
 		<iceberg.version>1.12.0</iceberg.version>
+		<!--
+		  Apache POI writes the workbooks of the tests of the Excel connector and reads its output as a reference; only
+		  ever a test dependency. The connector itself reads and writes Excel without it.
+		-->
+		<poi.version>5.5.1</poi.version>
 		<!-- janino-lts: the latest release on Maven Central; every release of FyrQL names a fixed version. -->
 		<janino.version>3.1.20</janino.version>
 		<!-- The test oracle; only ever a test dependency. -->
@@ -248,6 +254,11 @@
 				<artifactId>fyrql-connector-iceberg</artifactId>
 				<version>${project.version}</version>
 				<type>test-jar</type>
+			</dependency>
+			<dependency>
+				<groupId>io.github.fyrql</groupId>
+				<artifactId>fyrql-connector-xlsx</artifactId>
+				<version>${project.version}</version>
 			</dependency>
 			<dependency>
 				<groupId>io.github.fyrql</groupId>
@@ -417,6 +428,11 @@
 				<groupId>org.apache.iceberg</groupId>
 				<artifactId>iceberg-parquet</artifactId>
 				<version>${iceberg.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.poi</groupId>
+				<artifactId>poi-ooxml</artifactId>
+				<version>${poi.version}</version>
 			</dependency>
 			<dependency>
 				<groupId>com.github.jsqlparser</groupId>

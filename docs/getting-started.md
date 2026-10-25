@@ -41,27 +41,27 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.16.0</version>
+    <version>0.17.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.16.0</version>
+    <version>0.17.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.16.0</version>
+    <version>0.17.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.16.0</version>
+    <version>0.17.0</version>
 </dependency>
 ```
 
-The other connectors are `fyrql-connector-json`, `-parquet`, `-iceberg`, `-s3`, `-http`,
-`-odata` and `-jdbc`; [Modules](manual.md#modules) lists all modules.
+The other connectors are `fyrql-connector-json`, `-parquet`, `-xlsx`, `-iceberg`, `-s3`,
+`-http`, `-odata` and `-jdbc`; [Modules](manual.md#modules) lists all modules.
 
 ## Your first query
 
@@ -231,7 +231,8 @@ More: [Connectors](manual.md#connectors) with what each source takes over,
 ## Writing results
 
 *3 minutes.* `COPY ... TO` writes the result of a query into a CSV, JSON or Parquet
-file, `CREATE TABLE` and `INSERT INTO` write into tables in memory and in databases, and
+file or an Excel workbook, `CREATE TABLE` and `INSERT INTO` write into tables in memory
+and in databases, and
 `COPY ... FROM` loads a file into a table. `engine.update(sql)` runs such a statement and
 returns the number of rows. With the engine of the first query:
 
@@ -255,6 +256,19 @@ The file that `COPY ... TO` wrote loads back into a table with types of its own:
 ```java
 engine.update("CREATE TABLE mem.archive (id BIGINT NOT NULL, region VARCHAR, amount DECIMAL(10,2))");
 long loaded = engine.update("COPY mem.archive FROM 'data/orders-by-region.csv'");
+```
+
+With `fyrql-connector-xlsx`, the same goes for Excel: a workbook holds numbers, texts,
+booleans, dates and times, and `read_xlsx` or the name of the file reads it as DuckDB
+does, a number as a `DOUBLE`:
+
+```java
+engine.update("COPY (SELECT * FROM regions ORDER BY region) TO 'data/regions.xlsx' (HEADER true)");
+System.out.println(engine.rows("SELECT * FROM 'data/regions.xlsx'").stream().map(Arrays::toString).toList());
+```
+
+```
+[[north, 15.75], [south, 20.0]]
 ```
 
 More: [Writing and loading](manual.md#writing-and-loading).
@@ -343,8 +357,8 @@ engine:
   queryTimeout: 30s
 ```
 
-The `type` of a source picks its connector: `csv`, `json`, `parquet`, `iceberg`, `http`,
-`odata`, `jdbc`, `memory` or `s3`. `${env:NAME}` and `${sys:name}` take a value from the
+The `type` of a source picks its connector: `csv`, `json`, `parquet`, `xlsx`, `iceberg`,
+`http`, `odata`, `jdbc`, `memory` or `s3`. `${env:NAME}` and `${sys:name}` take a value from the
 environment or a system property, so that secrets need not be in the file, and relative
 paths are resolved against the directory of the file. Files in S3 or MinIO need a source
 of the type `s3`:
@@ -577,7 +591,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.16.0</version>
+    <version>0.17.0</version>
 </dependency>
 ```
 

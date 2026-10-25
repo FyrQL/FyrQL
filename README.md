@@ -22,9 +22,9 @@ warehouse first.
 ## What it can do
 
 - **Heterogeneous sources, one query.** PostgreSQL, MySQL, SQLite, H2 and any other
-  database with a JDBC driver; CSV, JSON and Parquet files and Apache Iceberg tables,
-  local or in S3 and MinIO; JSON from HTTP endpoints, OData services of versions 2 and
-  4, and Java collections. The columns of files and endpoints are inferred as DuckDB
+  database with a JDBC driver; CSV, JSON and Parquet files, Excel workbooks and Apache
+  Iceberg tables, local or in S3 and MinIO; JSON from HTTP endpoints, OData services of
+  versions 2 and 4, and Java collections. The columns of files and endpoints are inferred as DuckDB
   infers them, nested `STRUCT`, `LIST` and `MAP` values included.
   See [Connectors](docs/manual.md#connectors).
 - **Federation that lets each source do its part.** A source receives the columns,
@@ -40,7 +40,8 @@ warehouse first.
   [Code generation](docs/manual.md#code-generation) and
   [Parallel execution](docs/manual.md#parallel-execution).
 - **Moving data.** `COPY ... TO` writes the result of a query into a CSV, JSON or Parquet
-  file, also in S3, `COPY ... FROM` loads such a file into a table, and
+  file or an Excel workbook, also in S3, `COPY ... FROM` loads such a file into a table,
+  and
   `CREATE TABLE ... AS` and `INSERT INTO` write into tables in memory and in databases.
   See [Writing and loading](docs/manual.md#writing-and-loading).
 - **Embedded, with clients.** The engine runs inside the application and is set up with
@@ -120,6 +121,7 @@ data, the plan of the query and what comes next.
 | CSV and TSV files, also compressed with gzip | `fyrql-connector-csv` | [Connectors](docs/manual.md#connectors) |
 | JSON files and JSON lines | `fyrql-connector-json` | [Connectors](docs/manual.md#connectors) |
 | Parquet files | `fyrql-connector-parquet` | [Connectors](docs/manual.md#connectors) |
+| Excel workbooks (`.xlsx`, `.xlsm`) | `fyrql-connector-xlsx` | [Connectors](docs/manual.md#connectors) |
 | Apache Iceberg tables | `fyrql-connector-iceberg` | [Connectors](docs/manual.md#connectors) |
 | Files in S3 and MinIO | `fyrql-connector-s3` | [Connectors](docs/manual.md#connectors) |
 | JSON from HTTP endpoints | `fyrql-connector-http` | [Connectors](docs/manual.md#connectors) |

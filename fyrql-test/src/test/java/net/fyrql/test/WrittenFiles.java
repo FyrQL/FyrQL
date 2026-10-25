@@ -11,11 +11,14 @@
 
 package net.fyrql.test;
 
+import net.fyrql.FyrQL;
+import net.fyrql.QueryResult;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 
 import java.math.BigDecimal;
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,7 +27,9 @@ import java.util.Map;
 /**
  * DuckDB reads a file that {@code COPY ... TO} wrote: a CSV or a JSON file
  * with the column types given, since neither format keeps them, and a
- * Parquet file as it is; each column is cast to its type in FyrQL.
+ * Parquet file as it is; each column is cast to its type in FyrQL. An Excel
+ * workbook keeps few types, so that FyrQL and DuckDB both read it with
+ * {@code read_xlsx}, see {@link #xlsx}.
  */
 public final class WrittenFiles {
 
@@ -137,5 +142,75 @@ public final class WrittenFiles {
             }
             default -> value;
         };
+    }
+
+    /** The first and the last day DuckDB reads one day early: the serial numbers from 0 to below 61. */
+    private static final int EARLY_FROM = (int) LocalDate.of(1899, 12, 30).toEpochDay();
+    private static final int EARLY_TO = (int) LocalDate.of(1900, 2, 28).toEpochDay();
+    private static final long MICROS_PER_DAY = 86_400_000_000L;
+
+    /**
+     * Loads the extension {@code excel} of DuckDB from its cache, never from
+     * the network; false if it is not there, and the comparisons of
+     * workbooks are skipped.
+     */
+    public static boolean loadExcel(DuckDbReference duck) {
+        try {
+            duck.execute("SET autoinstall_known_extensions = false");
+            duck.execute("LOAD excel");
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * FyrQL and DuckDB read a workbook with {@code read_xlsx} and the same
+     * arguments, with {@code ignore_errors}, so that a value that does not
+     * fit the type its column took from the first row is a {@code NULL} in
+     * both. The expected rows are FyrQL's, the actual ones DuckDB's in the
+     * types of FyrQL's columns, which must be DuckDB's types as well. DuckDB
+     * reads the serial numbers below 61 one day early, as it counts them all
+     * from 1899-12-30; FyrQL reads them as Excel does, so DuckDB's dates and
+     * timestamps of those days are moved by one day.
+     *
+     * @param arguments further arguments of {@code read_xlsx}, such as {@code ", header = true"}, or empty
+     * @throws IllegalStateException if the types of the columns differ
+     */
+    public static ReadBack xlsx(DuckDbReference duck, FyrQL engine, Path file, String arguments) {
+        String sql = "SELECT * FROM read_xlsx('" + path(file) + "', ignore_errors = true" + arguments + ")";
+        Schema schema;
+        List<Object[]> fyrql;
+        try (QueryResult r = engine.sql(sql)) {
+            schema = r.schema();
+            fyrql = Rows.internal(schema, r.rows());
+        }
+        Schema text = Schema.of(new Schema.Field("name", DataType.VARCHAR), new Schema.Field("type",
+                DataType.VARCHAR));
+        List<String> duckTypes = new ArrayList<>();
+        for (Object[] row : duck.query("SELECT column_name, column_type FROM (DESCRIBE " + sql + ")", text)) {
+            duckTypes.add(row[0] + " " + row[1]);
+        }
+        List<String> types = new ArrayList<>();
+        for (Schema.Field f : schema.fields()) {
+            types.add(f.name() + " " + f.type().sqlName());
+        }
+        if (!types.equals(duckTypes)) {
+            throw new IllegalStateException("The columns of " + file.getFileName() + " differ: FyrQL " + types
+                    + ", DuckDB " + duckTypes);
+        }
+        List<Object[]> duckRows = duck.query(sql, schema);
+        for (Object[] row : duckRows) {
+            for (int c = 0; c < row.length; c++) {
+                if (row[c] instanceof Integer d && schema.type(c) == DataType.DATE && d >= EARLY_FROM
+                        && d <= EARLY_TO) {
+                    row[c] = d + 1;
+                } else if (row[c] instanceof Long m && schema.type(c) == DataType.TIMESTAMP
+                        && m >= EARLY_FROM * MICROS_PER_DAY && m < (EARLY_TO + 1L) * MICROS_PER_DAY) {
+                    row[c] = m + MICROS_PER_DAY;
+                }
+            }
+        }
+        return new ReadBack(schema, fyrql, duckRows);
     }
 }

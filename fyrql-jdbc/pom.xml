@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.16.0</version>
+		<version>0.17.0</version>
 	</parent>
 
 	<artifactId>fyrql-jdbc</artifactId>
@@ -72,6 +72,11 @@
 		<dependency>
 			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-iceberg</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-xlsx</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>

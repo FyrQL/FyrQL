@@ -60,6 +60,9 @@ class FileAccessTest {
         Files.writeString(secret.resolve("s.csv"), "k,v\n7,hidden\n");
         try (FyrQL engine = engine(FileAccess.READ_WRITE, List.of())) {
             engine.update("COPY (SELECT 1 AS k, 'p' AS v) TO '" + path(data.resolve("parts/p1.parquet")) + "'");
+            engine.update("COPY (SELECT 1 AS k, 'x' AS v) TO '" + path(data.resolve("a.xlsx")) + "' (HEADER true)");
+            engine.update("COPY (SELECT 7 AS k, 'hidden' AS v) TO '" + path(secret.resolve("s.xlsx"))
+                    + "' (HEADER true)");
         }
     }
 
@@ -101,6 +104,8 @@ class FileAccessTest {
             assertEquals(new Position(1, 15), e.position());
             denied(() -> engine.rows("SELECT * FROM read_csv('" + path(data.resolve("a.csv")) + "')"), none);
             denied(() -> engine.rows("SELECT * FROM read_parquet('" + path(data.resolve("parts")) + "')"), none);
+            denied(() -> engine.rows("SELECT * FROM read_xlsx('" + path(data.resolve("a.xlsx")) + "')"), none);
+            denied(() -> engine.rows("SELECT * FROM '" + path(data.resolve("a.xlsx")) + "'"), none);
             denied(() -> engine.update("COPY (SELECT 1 AS k) TO '" + path(data.resolve("out.csv")) + "'"),
                     "Writing " + path(data.resolve("out.csv")) + " is not allowed: " + none);
             denied(() -> engine.explain("COPY (SELECT 1 AS k) TO '" + path(data.resolve("out.csv")) + "'"), none);
@@ -125,6 +130,12 @@ class FileAccessTest {
             String outside = "is not under the allowed locations";
             denied(() -> engine.rows("SELECT * FROM '" + path(secret.resolve("s.csv")) + "'"), outside);
             denied(() -> engine.rows("SELECT * FROM '" + path(data) + "/../secret/s.csv'"), outside);
+            assertEquals(1, engine.rows("SELECT * FROM read_xlsx('" + path(data.resolve("a.xlsx")) + "')").size());
+            assertEquals(1, engine.rows("SELECT * FROM '" + path(data.resolve("a.xlsx")) + "'").size());
+            denied(() -> engine.rows("SELECT * FROM read_xlsx('" + path(secret.resolve("s.xlsx")) + "')"), outside);
+            denied(() -> engine.rows("SELECT * FROM '" + path(data) + "/../secret/s.xlsx'"), outside);
+            denied(() -> engine.update("COPY (SELECT 1 AS k) TO '" + path(data.resolve("out.xlsx")) + "'"),
+                    "the engine allows only reading files from SQL (fileAccess read)");
             SqlException e = denied(() -> engine.update("COPY t FROM '" + path(secret.resolve("s.csv")) + "'"),
                     outside);
             assertEquals(1, e.position().line());

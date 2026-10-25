@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  This Source Code Form is "Incompatible With Secondary Licenses", as
+  defined by the Mozilla Public License, v. 2.0.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.github.fyrql</groupId>
+		<artifactId>fyrql</artifactId>
+		<version>0.17.0</version>
+	</parent>
+
+	<artifactId>fyrql-connector-xlsx</artifactId>
+	<name>FyrQL Excel connector</name>
+	<description>The sheets of Excel workbooks (.xlsx) as tables, read and written with the JDK alone.</description>
+
+	<properties>
+		<fyrql.module.name>net.fyrql.connector.xlsx</fyrql.module.name>
+	</properties>
+
+	<dependencies>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-spi</artifactId>
+		</dependency>
+		<!-- Writes the workbooks of the tests and reads the written ones as a reference. -->
+		<dependency>
+			<groupId>org.apache.poi</groupId>
+			<artifactId>poi-ooxml</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<systemPropertyVariables>
+						<!-- POI logs through the Log4j API; its simple logger keeps the tests quiet without a binding. -->
+						<log4j2.loggerContextFactory>org.apache.logging.log4j.simple.SimpleLoggerContextFactory</log4j2.loggerContextFactory>
+					</systemPropertyVariables>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+</project>
