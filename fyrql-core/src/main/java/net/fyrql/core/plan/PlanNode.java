@@ -1271,6 +1271,76 @@ public sealed interface PlanNode {
         }
     }
 
+    /**
+     * A common table expression that runs once: the rows of the definition
+     * are kept, and each {@link CommonTableScan} of the same id in the input
+     * reads them. The output is that of the input. The definition may read
+     * the common tables around this node, not those in its input.
+     *
+     * @param id the id of the common table, unique in the plan
+     * @param name the name of the common table, for showing the plan
+     * @param definition the plan of the rows
+     * @param input the plan that reads them
+     */
+    record CommonTable(int id, String name, PlanNode definition, PlanNode input) implements PlanNode {
+        public CommonTable {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(definition, "definition");
+            Objects.requireNonNull(input, "input");
+        }
+
+        @Override
+        public Schema schema() {
+            return input.schema();
+        }
+
+        @Override
+        public List<PlanNode> children() {
+            return List.of(definition, input);
+        }
+    }
+
+    /**
+     * Reads columns of the rows of the {@link CommonTable} of the same id
+     * above it. The node is a leaf; the definition of the common table is
+     * kept for the output and the estimates only.
+     *
+     * @param id the id of the common table
+     * @param name the name of the common table
+     * @param columns the columns to read, by index into the output of the definition
+     * @param definition the plan of the rows of the common table
+     */
+    record CommonTableScan(int id, String name, List<Integer> columns, PlanNode definition) implements PlanNode {
+        public CommonTableScan {
+            Objects.requireNonNull(name, "name");
+            columns = List.copyOf(columns);
+            Objects.requireNonNull(definition, "definition");
+            Schema schema = definition.schema();
+            for (int c : columns) {
+                checkColumn(schema, c);
+            }
+        }
+
+        /** Reads all columns of a common table. */
+        public static CommonTableScan all(int id, String name, PlanNode definition) {
+            List<Integer> columns = new ArrayList<>();
+            for (int i = 0; i < definition.schema().size(); i++) {
+                columns.add(i);
+            }
+            return new CommonTableScan(id, name, columns, definition);
+        }
+
+        @Override
+        public Schema schema() {
+            return definition.schema().select(columns);
+        }
+
+        @Override
+        public List<PlanNode> children() {
+            return List.of();
+        }
+    }
+
     /** The columns of a scan: a column or a field per path. */
     private static Schema scanColumns(Schema table, List<Integer> columns, List<List<String>> fields) {
         List<Schema.Field> result = new ArrayList<>();

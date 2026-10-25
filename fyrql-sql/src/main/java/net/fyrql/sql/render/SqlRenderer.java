@@ -132,6 +132,10 @@ public final class SqlRenderer {
                 yield "SELECT * FROM (" + operand(s.left()) + " " + dialect.setOperation(s.kind(), s.all()) + " "
                         + operand(s.right()) + ") " + t;
             }
+            // A source never runs a common table: the parts it runs are made of its scans only.
+            case PlanNode.CommonTable t -> throw new IllegalArgumentException("A common table as SQL: " + t.name());
+            case PlanNode.CommonTableScan s -> throw new IllegalArgumentException("A common table as SQL: "
+                    + s.name());
         };
     }
 

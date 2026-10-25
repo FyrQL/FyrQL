@@ -41,13 +41,28 @@ public record Query(List<CommonTable> with, QueryBody body, List<OrderItem> orde
         return with.isEmpty() && orderBy.isEmpty() && limit == null && offset == null;
     }
 
-    /** {@code name [(columns)] AS (query)} in a {@code WITH}. */
-    public record CommonTable(String name, List<String> columns, Query query, Position position) {
+    /**
+     * Whether a common table is to run once: as the engine decides, or as
+     * {@code MATERIALIZED} or {@code NOT MATERIALIZED} says.
+     */
+    public enum Materialized {
+        DEFAULT, ALWAYS, NEVER
+    }
+
+    /** {@code name [(columns)] AS [[NOT] MATERIALIZED] (query)} in a {@code WITH}. */
+    public record CommonTable(String name, List<String> columns, Query query, Materialized materialized,
+            Position position) {
         public CommonTable {
             Objects.requireNonNull(name, "name");
             columns = List.copyOf(columns);
             Objects.requireNonNull(query, "query");
+            Objects.requireNonNull(materialized, "materialized");
             Objects.requireNonNull(position, "position");
+        }
+
+        /** A common table without {@code MATERIALIZED} or {@code NOT MATERIALIZED}. */
+        public CommonTable(String name, List<String> columns, Query query, Position position) {
+            this(name, columns, query, Materialized.DEFAULT, position);
         }
     }
 }

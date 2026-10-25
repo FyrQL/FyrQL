@@ -284,7 +284,8 @@ final class SqlGenerator {
 
     private Relation relation(int depth) {
         int kind = random.nextInt(100);
-        if (kind < 15 && !ctes.isEmpty()) {
+        // Often, so that a common table is read more than once and runs once.
+        if (kind < 25 && !ctes.isEmpty()) {
             String name = pick(new ArrayList<>(ctes.keySet()));
             String alias = chance(50) ? "c" + names++ : null;
             List<Column> columns = new ArrayList<>();
@@ -1113,11 +1114,21 @@ final class SqlGenerator {
 
     // ---------------------------------------------------------- subqueries
 
-    /** A table under a fresh alias, as the {@code FROM} of a subquery, with its columns qualified by the alias. */
+    /**
+     * A table or, at times, a common table under a fresh alias, as the
+     * {@code FROM} of a subquery, with its columns qualified by the alias.
+     */
     private Relation inner() {
-        String table = pick(new ArrayList<>(tables.keySet()));
         String alias = "b" + names++;
         List<Column> columns = new ArrayList<>();
+        if (!ctes.isEmpty() && chance(20)) {
+            String name = pick(new ArrayList<>(ctes.keySet()));
+            for (Column c : ctes.get(name)) {
+                columns.add(new Column(alias, c.name(), c.type(), c.sample()));
+            }
+            return new Relation(new FromItem.TableName(List.of(name), alias(alias), P), columns);
+        }
+        String table = pick(new ArrayList<>(tables.keySet()));
         List<Schema.Field> fields = tables.get(table).fields();
         for (int i = 0; i < fields.size(); i++) {
             columns.add(new Column(alias, fields.get(i).name(), fields.get(i).type(), sample(table, i)));

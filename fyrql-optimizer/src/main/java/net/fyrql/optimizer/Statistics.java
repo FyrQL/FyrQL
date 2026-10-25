@@ -77,6 +77,8 @@ final class Statistics {
             case PlanNode.Unnest u -> rows(u.input()) * UNNEST_FACTOR;
             case PlanNode.Window w -> rows(w.input());
             case PlanNode.Values v -> v.rows().size();
+            case PlanNode.CommonTable t -> rows(t.input());
+            case PlanNode.CommonTableScan s -> rows(s.definition());
         };
     }
 

@@ -526,4 +526,115 @@ class BinderTest {
                 error("SELECT unnest([a]), unnest([e]) FROM t").reason());
         assertEquals("UNNEST not supported here", error("SELECT a FROM t WHERE unnest([a]) = 1").reason());
     }
+
+    /** The common tables of a plan, from the outermost one on. */
+    private static List<PlanNode.CommonTable> commonTables(PlanNode plan) {
+        return net.fyrql.core.plan.Plans.nodes(plan).stream().filter(n -> n instanceof PlanNode.CommonTable)
+                .map(n -> (PlanNode.CommonTable) n).toList();
+    }
+
+    /** The scans of common tables of a plan, without those of the definitions that are scans themselves. */
+    private static long commonTableScans(PlanNode plan) {
+        return net.fyrql.core.plan.Plans.nodes(plan).stream().filter(n -> n instanceof PlanNode.CommonTableScan)
+                .count();
+    }
+
+    private static long scans(PlanNode plan) {
+        return net.fyrql.core.plan.Plans.nodes(plan).stream().filter(n -> n instanceof PlanNode.Scan).count();
+    }
+
+    @Test
+    void aCommonTableThatComputesAndIsReadTwiceRunsOnce() {
+        PlanNode plan = bind("WITH c AS (SELECT a, count(*) AS n FROM t GROUP BY a) "
+                + "SELECT * FROM c WHERE n = (SELECT max(n) FROM c)");
+        PlanNode.CommonTable table = assertInstanceOf(PlanNode.CommonTable.class, plan);
+        assertEquals("c", table.name());
+        assertTrue(net.fyrql.core.plan.Plans.nodes(table.definition()).stream()
+                .anyMatch(n -> n instanceof PlanNode.Aggregate));
+        assertEquals(1, scans(plan));
+        assertEquals(2, commonTableScans(plan));
+        assertEquals(List.of(DataType.INTEGER, DataType.BIGINT), plan.schema().types());
+
+        // A join, a sort with a limit, a window and a set operation compute too.
+        for (String query : List.of("SELECT t.a FROM t JOIN u ON t.a = u.a", "SELECT a FROM t ORDER BY a LIMIT 2",
+                "SELECT a, rank() OVER (ORDER BY e) FROM t", "SELECT a FROM t UNION SELECT a FROM t",
+                "SELECT a FROM t EXCEPT SELECT a FROM t", "SELECT DISTINCT a FROM t")) {
+            PlanNode twice = bind("WITH c AS (" + query + ") SELECT * FROM c, c AS d");
+            assertEquals(1, commonTables(twice).size(), query);
+        }
+    }
+
+    @Test
+    void aCommonTableThatOnlyReadsOrIsReadOnceTakesThePlaceOfItsScans() {
+        // Each scan keeps its filters in the source.
+        PlanNode filtered = bind("WITH c AS (SELECT a, b FROM t WHERE e > 1) SELECT * FROM c, c AS d WHERE c.a = 1");
+        assertEquals(List.of(), commonTables(filtered));
+        assertEquals(0, commonTableScans(filtered));
+        assertEquals(2, scans(filtered));
+        PlanNode once = bind("WITH c AS (SELECT a, count(*) FROM t GROUP BY a) SELECT * FROM c");
+        assertEquals(List.of(), commonTables(once));
+        assertEquals(1, scans(once));
+        PlanNode unread = bind("WITH c AS (SELECT a, count(*) FROM t GROUP BY a) SELECT 1");
+        assertEquals(0, scans(unread));
+        assertEquals(0, commonTableScans(unread));
+    }
+
+    @Test
+    void materializedAndNotMaterializedDecide() {
+        PlanNode always = bind("WITH c AS MATERIALIZED (SELECT a FROM t) SELECT * FROM c");
+        assertEquals(1, scans(assertInstanceOf(PlanNode.CommonTable.class, always).definition()));
+        assertEquals(1, commonTableScans(always));
+        PlanNode never = bind("WITH c AS NOT MATERIALIZED (SELECT a, count(*) FROM t GROUP BY a) "
+                + "SELECT * FROM c, c AS d");
+        assertEquals(List.of(), commonTables(never));
+        assertEquals(2, scans(never));
+    }
+
+    @Test
+    void aLaterCommonTableReadsAnEarlierOne() {
+        // b runs once and reads a, which runs once too, around it; b's column list renames.
+        PlanNode plan = bind("WITH a AS (SELECT a, count(*) AS n FROM t GROUP BY a), "
+                + "b(x, y) AS (SELECT a.a, a.n FROM a JOIN a AS a2 ON a.a = a2.a) "
+                + "SELECT * FROM b, b AS b2");
+        List<PlanNode.CommonTable> tables = commonTables(plan);
+        assertEquals(List.of("a", "b"), tables.stream().map(PlanNode.CommonTable::name).toList());
+        assertEquals(tables.get(1), tables.get(0).input());
+        assertEquals(1, scans(plan));
+        assertEquals(4, commonTableScans(plan));
+        assertEquals(List.of("x", "y", "x", "y"), plan.schema().fields().stream().map(Schema.Field::name).toList());
+
+        // b is read once and goes in place of its scan; a is then read twice and runs once.
+        PlanNode inlined = bind("WITH a AS (SELECT a, count(*) AS n FROM t GROUP BY a), "
+                + "b AS (SELECT a.a FROM a JOIN a AS a2 ON a.a = a2.a) SELECT * FROM b");
+        assertEquals(List.of("a"), commonTables(inlined).stream().map(PlanNode.CommonTable::name).toList());
+        assertEquals(2, commonTableScans(inlined));
+
+        // b reads a once and is read twice: a is read twice in the end, once in each plan of b.
+        PlanNode twice = bind("WITH a AS (SELECT a, count(*) AS n FROM t GROUP BY a), b AS (SELECT a FROM a) "
+                + "SELECT * FROM b, b AS b2");
+        assertEquals(List.of("a"), commonTables(twice).stream().map(PlanNode.CommonTable::name).toList());
+        assertEquals(2, commonTableScans(twice));
+    }
+
+    @Test
+    void aCommonTableOfASubqueryInAnExpressionTakesThePlaceOfItsScans() {
+        PlanNode plan = bind("SELECT a FROM t WHERE a IN (WITH c AS (SELECT a, count(*) AS n FROM u GROUP BY a) "
+                + "SELECT c.a FROM c JOIN c AS d ON c.a = d.a)");
+        assertEquals(List.of(), commonTables(plan));
+        assertEquals(3, scans(plan));
+        // One of the query around it is read from the subquery as well.
+        PlanNode outer = bind("WITH c AS (SELECT a, count(*) AS n FROM t GROUP BY a) "
+                + "SELECT * FROM c WHERE EXISTS (SELECT 1 FROM c AS d WHERE d.a = c.a AND d.n > 1)");
+        assertEquals(1, commonTables(outer).size());
+        assertEquals(2, commonTableScans(outer));
+    }
+
+    @Test
+    void theScansOfACommonTableKeepItsBareNulls() {
+        // The NULL of the common table takes the type of the other side of the union, as it does without one.
+        PlanNode plan = bind("WITH c AS (SELECT DISTINCT NULL AS x FROM t) SELECT x FROM c UNION ALL "
+                + "SELECT 'a' FROM c");
+        assertEquals(List.of(DataType.VARCHAR), plan.schema().types());
+        assertEquals(1, commonTables(plan).size());
+    }
 }

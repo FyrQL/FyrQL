@@ -55,8 +55,21 @@ import java.util.function.ToIntFunction;
 /** Binds the queries of one statement; see {@link Binder}. */
 final class QueryBinder {
 
-    /** A common table expression with the ones visible to its own query. */
-    private record Cte(Query.CommonTable table, Map<String, Cte> environment) {
+    /**
+     * A common table expression with the ones visible to its own query, its
+     * id in the plan, and the plan of its query once a query reads it.
+     */
+    private static final class Cte {
+        final Query.CommonTable table;
+        final Map<String, Cte> environment;
+        final int id;
+        PlanNode definition;
+
+        Cte(Query.CommonTable table, Map<String, Cte> environment, int id) {
+            this.table = table;
+            this.environment = environment;
+            this.id = id;
+        }
     }
 
     /** The plan of a {@code FROM} clause with its columns. */
@@ -119,6 +132,8 @@ final class QueryBinder {
     private final BindContext context;
     /** The bare NULLs of the select lists, by the plan of each select. */
     private final Map<PlanNode, BitSet> untypedNulls = new IdentityHashMap<>();
+    /** The ids given to the common tables of the statement so far. */
+    private int commonTables;
 
     QueryBinder(CatalogView catalog, BindContext context) {
         this.catalog = catalog;
@@ -140,20 +155,119 @@ final class QueryBinder {
     private PlanNode query(Query q, Map<String, Cte> ctes, Correlation correlation) {
         Map<String, Cte> environment = ctes;
         Set<String> names = new HashSet<>();
+        List<Cte> defined = new ArrayList<>();
         for (Query.CommonTable ct : q.with()) {
             if (!names.add(SqlTrees.key(ct.name()))) {
                 throw new SqlException("Duplicate CTE name \"" + ct.name() + "\"", ct.position());
             }
+            Cte cte = new Cte(ct, environment, ++commonTables);
+            defined.add(cte);
             Map<String, Cte> next = new HashMap<>(environment);
-            next.put(SqlTrees.key(ct.name()), new Cte(ct, environment));
+            next.put(SqlTrees.key(ct.name()), cte);
             environment = next;
         }
+        PlanNode plan;
         if (q.body() instanceof QueryBody.Select s) {
-            return select(s, q.orderBy(), q.limit(), q.offset(), environment, correlation);
+            plan = select(s, q.orderBy(), q.limit(), q.offset(), environment, correlation);
+        } else {
+            plan = body(q.body(), environment);
+            plan = orderByOutputs(plan, q.orderBy());
+            plan = limit(plan, q.limit(), q.offset());
         }
-        PlanNode plan = body(q.body(), environment);
-        plan = orderByOutputs(plan, q.orderBy());
-        return limit(plan, q.limit(), q.offset());
+        return commonTables(plan, defined, correlation);
+    }
+
+    /**
+     * Decides for each common table of a query that the plan reads whether
+     * it runs once: then a {@link PlanNode.CommonTable} above the plan keeps
+     * its rows for the scans. Otherwise the plan of its query takes the
+     * place of each scan of it, bound anew for each but the first. A common
+     * table runs once with {@code MATERIALIZED}, never with
+     * {@code NOT MATERIALIZED}, and else if the plan reads it more than once
+     * and it computes something, see {@link #computes}; a common table of a
+     * subquery in an expression never runs once. The common tables are
+     * decided from the last to the first, since a later one may read an
+     * earlier one, whose {@link PlanNode.CommonTable} is then around the
+     * one of the later.
+     *
+     * @param defined the common tables of the query, in their order
+     */
+    private PlanNode commonTables(PlanNode plan, List<Cte> defined, Correlation correlation) {
+        PlanNode result = plan;
+        for (int i = defined.size() - 1; i >= 0; i--) {
+            Cte cte = defined.get(i);
+            if (cte.definition == null) {
+                continue;
+            }
+            int reads = 0;
+            for (PlanNode n : Plans.nodes(result)) {
+                if (n instanceof PlanNode.CommonTableScan s && s.id() == cte.id) {
+                    reads++;
+                }
+            }
+            boolean once = correlation == null && switch (cte.table.materialized()) {
+                case ALWAYS -> true;
+                case NEVER -> false;
+                case DEFAULT -> reads > 1 && computes(cte.definition);
+            };
+            result = once ? new PlanNode.CommonTable(cte.id, cte.table.name(), cte.definition, result)
+                    : inline(result, cte, new boolean[1]);
+        }
+        return result;
+    }
+
+    /**
+     * Tells whether a plan computes something that its scans and filters do
+     * not: an aggregation, a join, a window, a sort or a set operation.
+     * Every scan of a common table that only reads and filters keeps its
+     * filters in the source.
+     */
+    private static boolean computes(PlanNode plan) {
+        for (PlanNode n : Plans.nodes(plan)) {
+            if (n instanceof PlanNode.Aggregate || n instanceof PlanNode.Join || n instanceof PlanNode.Window
+                    || n instanceof PlanNode.Sort || n instanceof PlanNode.SetOperation
+                    || n instanceof PlanNode.Union) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Puts the plan of the query of a common table in place of each scan of
+     * it: the plan bound at its first read for the first scan, a plan bound
+     * anew for any other. The rebuilt nodes keep their bare NULLs.
+     *
+     * @param used whether the plan bound at the first read is in place already
+     */
+    private PlanNode inline(PlanNode node, Cte cte, boolean[] used) {
+        if (node instanceof PlanNode.CommonTableScan s && s.id() == cte.id) {
+            PlanNode plan = used[0] ? definition(cte) : cte.definition;
+            used[0] = true;
+            return plan;
+        }
+        List<PlanNode> children = new ArrayList<>();
+        boolean changed = false;
+        for (PlanNode child : node.children()) {
+            PlanNode c = inline(child, cte, used);
+            changed |= c != child;
+            children.add(c);
+        }
+        if (!changed) {
+            return node;
+        }
+        PlanNode rebuilt = Plans.withChildren(node, children);
+        BitSet nulls = untypedNulls.get(node);
+        if (nulls != null) {
+            untypedNulls.put(rebuilt, nulls);
+        }
+        return rebuilt;
+    }
+
+    /** Binds the query of a common table, with the names of its column list. */
+    private PlanNode definition(Cte cte) {
+        PlanNode plan = query(cte.table.query(), cte.environment);
+        return rename(plan, cte.table.columns(), cte.table.name(), cte.table.position());
     }
 
     PlanNode query(Query q) {
@@ -591,9 +705,12 @@ final class QueryBinder {
         if (t.name().size() == 1) {
             Cte cte = ctes.get(SqlTrees.key(t.name().get(0)));
             if (cte != null) {
-                PlanNode plan = query(cte.table().query(), cte.environment());
-                plan = rename(plan, cte.table().columns(), cte.table().name(), cte.table().position());
-                return named(plan, t.alias(), cte.table().name(), true, t.position());
+                // Bound once; the query decides at its end whether its scans read the rows or bind it each.
+                if (cte.definition == null) {
+                    cte.definition = definition(cte);
+                }
+                PlanNode plan = PlanNode.CommonTableScan.all(cte.id, cte.table.name(), cte.definition);
+                return named(plan, t.alias(), cte.table.name(), true, t.position());
             }
         }
         TableRef table;
@@ -714,6 +831,15 @@ final class QueryBinder {
             case PlanNode.SetOperation s -> {
                 BitSet result = (BitSet) untypedNulls(s.left()).clone();
                 result.and(untypedNulls(s.right()));
+                yield result;
+            }
+            case PlanNode.CommonTable t -> untypedNulls(t.input());
+            case PlanNode.CommonTableScan s -> {
+                BitSet definition = untypedNulls(s.definition());
+                BitSet result = new BitSet();
+                for (int i = 0; i < s.columns().size(); i++) {
+                    result.set(i, definition.get(s.columns().get(i)));
+                }
                 yield result;
             }
             default -> new BitSet();

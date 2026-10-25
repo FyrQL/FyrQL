@@ -184,4 +184,26 @@ class ExplainAnalyzeTest {
             assertTrue(((String) rows.get(0)[0]).matches("Analyzed in .*: 1 row, 1 thread"), (String) rows.get(0)[0]);
         }
     }
+
+    @Test
+    void aCommonTableShowsItsRowsAndEachScanThoseItRead() {
+        String query = "WITH g AS (SELECT k, count(*) AS c FROM t GROUP BY k) "
+                + "SELECT k FROM g WHERE c = (SELECT max(c) FROM g) ORDER BY k";
+        for (int threads : new int[] {1, 4}) {
+            try (FyrQL engine = builder(threads).build()) {
+                String text = engine.explainAnalyze(query);
+                assertEquals(plan(engine.explain(query)), plan(text).subList(1, text.split("\n").length));
+                assertTrue(line(text, "CommonTable g").contains(" -- 4 rows, "), text);
+                List<String> scans = Arrays.stream(text.split("\n"))
+                        .filter(l -> l.strip().startsWith("CommonTableScan g")).toList();
+                assertEquals(2, scans.size(), text);
+                for (String scan : scans) {
+                    assertTrue(scan.contains(" -- 7 rows, "), text);
+                }
+                assertEquals(1, Arrays.stream(text.split("\n")).filter(l -> l.strip().startsWith("Scan ")).count(),
+                        text);
+                assertEquals(List.of(0, 1, 2, 3), engine.rows(query).stream().map(r -> r[0]).toList());
+            }
+        }
+    }
 }

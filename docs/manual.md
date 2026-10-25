@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.17.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.17.5 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it runs
 queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -1519,7 +1519,9 @@ of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHO
   around it in its `WHERE`, as TPC-H Q2, Q4, Q17, Q20, Q21 and Q22 do; one that
   aggregates, only through equalities, and its `count` is 0 for a row it finds nothing
   for.
-- `UNION [ALL]`, `EXCEPT [ALL]`, `INTERSECT [ALL]`, `WITH`.
+- `UNION [ALL]`, `EXCEPT [ALL]`, `INTERSECT [ALL]`, `WITH`, also with `AS MATERIALIZED`
+  and `AS NOT MATERIALIZED`; a common table read more than once runs once, see
+  [Optimizer](#optimizer).
 - Expressions: arithmetic with `+ - * / % //`, comparisons, `AND`, `OR`, `NOT`, `BETWEEN`,
   `IN (...)`, `LIKE`, `ILIKE`, `IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`, `CASE`, `CAST`,
   `TRY_CAST`, `::`, `||` of strings and of lists, `~` and `!~`, which match the whole
@@ -1739,6 +1741,10 @@ here; the random tests explain such differences by a ledger of their own, see
   `NULL` there.
 - The name of an output column that is no plain column follows FyrQL's own text form of
   the expression, which is not always DuckDB's.
+- A common table read more than once runs once only if it computes something, see
+  [Optimizer](#optimizer); DuckDB 1.5.6 runs every common table read more than once
+  once, also one that only reads a table. FyrQL keeps `AS NOT MATERIALIZED`, which DuckDB
+  ignores there. The rows are the same either way.
 - `list(x ORDER BY x)` orders intervals as `ORDER BY` does, by the value they compare
   by; DuckDB 1.5.6 orders them there by their months, days and microseconds as written.
 - Intervals that compare as equal but are written differently, such as `30 days`,
@@ -1888,6 +1894,19 @@ than one. A correlated subquery is joined on its equalities with the outer query
 its other correlated conditions become the condition of the join; one that aggregates
 also groups by the columns of its equalities, so that it runs once for all rows of the
 outer query.
+
+A common table of `WITH` that the query reads more than once runs once if it computes
+something: an aggregation, a join, a window, a sort or a set operation, as `revenue` in
+TPC-H Q15. Its rows are kept in the memory budget, spilled to disk when the budget is
+exhausted, and every read takes them from there; `EXPLAIN` shows the definition once,
+below a node `CommonTable`, and each read as a `CommonTableScan`. A common table that
+only reads, filters and projects a table, and one that is read once, take the place of
+each read instead, so that every read keeps its own filters in the source.
+`AS MATERIALIZED` runs a common table once even for one read, and `AS NOT MATERIALIZED`
+puts it in place of each read. A common table of a subquery in an expression, such as in
+`EXISTS (WITH ... SELECT ...)`, always takes the place of its reads. The optimizer moves no
+condition of a read into the definition, and the definition keeps the columns that any
+of the reads uses.
 
 Before a plan runs, the module `fyrql-optimizer` rewrites it in these steps; each step
 keeps the rows of the plan, and a second run changes nothing:
@@ -2268,14 +2287,14 @@ that a query asks for wins over it, and the `maxQueryTimeout` bounds it as every
 ## Memory budget and spilling
 
 The builder setting `memoryBudget` limits the memory that the queries of an engine take
-together for what they hold: the hash tables of joins, the groups of aggregations, the rows
-of sorts, windows and set operations. Without it, the budget has no limit, but in the
-[Flight SQL server](#flight-sql-server) it is half the heap; in a configuration file and
-the URL of the JDBC driver, `0` is no limit. When an
-aggregation, a sort or a window does not fit, it spills to disk, unless the setting `spill`
-is `false`; then the query fails with `Memory budget of ... bytes exceeded`, as do the
-others when they do not fit, with the SQL state `53200` in the JDBC driver and
-`RESOURCE_EXHAUSTED` in the Flight SQL server.
+together for what they hold: the hash tables of joins, the groups of aggregations, the
+rows of sorts, windows, set operations and common tables that run once. Without it, the
+budget has no limit, but in the [Flight SQL server](#flight-sql-server) it is half the
+heap; in a configuration file and the URL of the JDBC driver, `0` is no limit. When an
+aggregation, a sort, a window or a common table does not fit, it spills to disk, unless
+the setting `spill` is `false`; then the query fails with `Memory budget of ... bytes
+exceeded`, as do the others when they do not fit, with the SQL state `53200` in the JDBC
+driver and `RESOURCE_EXHAUSTED` in the Flight SQL server.
 
 - A **sort** keeps its rows while they fit. Then the rows held, with the batch that did
   not fit, are sorted into a run that goes to disk with the place of each row among all
@@ -2298,6 +2317,9 @@ others when they do not fit, with the SQL state `53200` in the JDBC driver and
   for each row: a `list` or `string_agg` over frames that grow with the rows holds
   n * (n + 1) / 2 values for a partition of n rows, and fails with `Memory budget of ...
   bytes exceeded` when they do not fit.
+- A **common table** that runs once keeps its rows while they fit. Then all of them go
+  to one file, the rest are appended to it, and every read reads the file from the
+  start.
 - Joins, `EXCEPT` and `INTERSECT` do not spill.
 
 The files go to a directory of the engine under the setting `spillDirectory`, by default
@@ -2476,15 +2498,17 @@ three read only the smaller tables. DuckDB is furthest ahead where a query reads
 FyrQL on one thread go to reading the Parquet file. Since version 0.14.0, the connector
 decodes the pages of the file itself; on the same day, with the column readers of
 parquet-java, Q6 took 0.61 s on one thread and Q1 1.61 s. Since version 0.15.0, strings
-from a dictionary keep its codes; with version 0.14.0, Q1 took 0.98 s on one thread. Q15,
-Q17 and Q18 read `lineitem` twice, once for the subquery, and Q21 three times. On twelve
-threads, Q6 takes FyrQL less than half the time of one thread, and most other queries half
-to four fifths; Q7 and Q18 gain little, Q4 and Q22 nothing, Q22 since PostgreSQL runs its
-`NOT EXISTS` over the customers and orders on one core. The profile `tpch` checks that all
-22 queries give the rows of DuckDB, in the interpreter and compiled, on one thread and on
-all. With version 0.5.5, timed from the plan and with DuckDB reading `orders` and
-`customer` from CSV files, the 22 queries took 34.4 s in the interpreter on one thread and
-19.4 s on twelve.
+from a dictionary keep its codes; with version 0.14.0, Q1 took 0.98 s on one thread. Q17
+and Q18 read `lineitem` twice, once for the subquery, and Q21 three times, as DuckDB does.
+Since version 0.17.5, Q15 computes `revenue` once for both its reads, see
+[Optimizer](#optimizer): Q15 took 0.37 s on one thread and 0.18 s on twelve, where
+version 0.17.0 took 0.91 s and 0.40 s on the same day. On twelve threads, Q6 takes FyrQL
+less than half the time of one thread, and most other queries half to four fifths; Q7 and
+Q18 gain little, Q4 and Q22 nothing, Q22 since PostgreSQL runs its `NOT EXISTS` over the
+customers and orders on one core. The profile `tpch` checks that all 22 queries give the
+rows of DuckDB, in the interpreter and compiled, on one thread and on all. With version
+0.5.5, timed from the plan and with DuckDB reading `orders` and `customer` from CSV files,
+the 22 queries took 34.4 s in the interpreter on one thread and 19.4 s on twelve.
 
 ### Compiled code and scans
 

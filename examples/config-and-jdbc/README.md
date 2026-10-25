@@ -112,7 +112,7 @@ The same file works in DBeaver, by hand:
 
 1. Build the JAR with the driver, the engine and all connectors from the root of the
    repository: `./mvnw -B -ntp clean package -pl fyrql-jdbc-all -am -DskipTests`. It is
-   `fyrql-jdbc-all/target/fyrql-jdbc-all-0.17.0.jar`.
+   `fyrql-jdbc-all/target/fyrql-jdbc-all-0.17.5.jar`.
 2. Run the example once, so that the database exists.
 3. In DBeaver, create a driver in the Driver Manager with the class name
    `net.fyrql.jdbc.FyrQLDriver`, the URL template `jdbc:fyrql:?config={file}`, no user and

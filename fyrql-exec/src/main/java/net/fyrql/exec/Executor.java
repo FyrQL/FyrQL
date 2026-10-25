@@ -19,6 +19,7 @@ import net.fyrql.exec.compiled.JoinTable;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -227,6 +228,8 @@ public final class Executor {
         private MorselScan morselScan;
         /** The tables of the joins of the copy of a chain that is being built. */
         private Map<PlanNode.Join, JoinTable> tables;
+        /** The buffers of the common tables around the node that is being opened, by their ids. */
+        private final Map<Integer, CommonTableBuffer> commonTables = new HashMap<>();
 
         Opening(PlanNode plan, ToDoubleFunction<PlanNode> estimate, QueryContext context) {
             this.ids = Plans.ids(plan);
@@ -248,6 +251,14 @@ public final class Executor {
                 case PlanNode.Limit l -> unordered(l.input());
                 case PlanNode.Join j -> unordered(j.left());
                 case PlanNode.Union u -> u.inputs().forEach(this::unordered);
+                case PlanNode.CommonTable t -> {
+                    unordered(t.input());
+                    // The order of the rows matters as long as one scan of them keeps it.
+                    if (Plans.nodes(t.input()).stream().allMatch(n -> !(n instanceof PlanNode.CommonTableScan s)
+                            || s.id() != t.id() || unordered.contains(s))) {
+                        unordered(t.definition());
+                    }
+                }
                 default -> {
                 }
             }
@@ -360,7 +371,28 @@ public final class Executor {
                 case PlanNode.Values v -> new ValuesOperator(label, v, batchSize);
                 case PlanNode.SetOperation s -> new SetOperationOperator(label, s, open(s.left()),
                         open(s.right()), budget, batchSize);
+                case PlanNode.CommonTable t -> commonTable(label, t);
+                case PlanNode.CommonTableScan s -> new CommonTableScanOperator(label, s, commonTables.get(s.id()));
             };
+        }
+
+        /**
+         * Opens the definition of a common table, and then the input, whose
+         * scans of the common table find its buffer.
+         */
+        private AbstractOperator commonTable(String label, PlanNode.CommonTable t) {
+            Operator definition = open(t.definition());
+            CommonTableBuffer buffer = new CommonTableBuffer(label, t.definition().schema(), budget, spill, context);
+            // The ids are unique in the plan; the copies of chains that workers build later find the buffer too.
+            commonTables.put(t.id(), buffer);
+            Operator input;
+            try {
+                input = open(t.input());
+            } catch (RuntimeException e) {
+                definition.close();
+                throw e;
+            }
+            return new CommonTableOperator(label, t, definition, buffer, input);
         }
     }
 

@@ -81,7 +81,11 @@ public final class SqlPrinter {
                 if (!t.columns().isEmpty()) {
                     names(b, t.columns());
                 }
-                b.append(" AS (");
+                b.append(switch (t.materialized()) {
+                    case DEFAULT -> " AS (";
+                    case ALWAYS -> " AS MATERIALIZED (";
+                    case NEVER -> " AS NOT MATERIALIZED (";
+                });
                 query(b, t.query());
                 b.append(')');
             }

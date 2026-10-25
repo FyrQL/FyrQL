@@ -51,6 +51,8 @@ import java.util.List;
  * {@code EXCEPT} and {@code INTERSECT} pass everything to their left input,
  * whose rows they keep, and an unnest passes the conjuncts that do not read
  * its elements;</li>
+ * <li>a common table passes everything to its input, and nothing to its
+ * definition, whose rows all its scans read;</li>
  * <li>a limit passes nothing.</li>
  * </ul>
  * What a node does not pass stays in a filter right above it. A conjunct
@@ -150,6 +152,10 @@ final class PredicatePushdown {
             case PlanNode.Scan s -> filter(s, conjuncts);
             case PlanNode.Remote r -> filter(r, conjuncts);
             case PlanNode.Values v -> filter(v, conjuncts);
+            // The rows of a common table are those of all its scans: nothing above one scan goes into them.
+            case PlanNode.CommonTable t -> new PlanNode.CommonTable(t.id(), t.name(), push(t.definition(), List.of()),
+                    push(t.input(), conjuncts));
+            case PlanNode.CommonTableScan s -> filter(s, conjuncts);
         };
     }
 

@@ -129,4 +129,30 @@ class ExplainTest {
             assertEquals(List.of(List.of(2, "b")), engine.rows(plan).stream().map(List::of).toList());
         }
     }
+
+    @Test
+    void aCommonTableShowsItsDefinitionOnceAndItsScansByName() {
+        try (FyrQL engine = FyrQL.builder().build()) {
+            String sql = """
+                    WITH g AS (SELECT k, count(*) AS n FROM (VALUES (1), (1), (2)) v(k) GROUP BY k)
+                    SELECT k FROM g WHERE n = (SELECT max(n) FROM g)""";
+            // The scan in the subquery reads only the column it needs; the definition keeps those of both.
+            assertEquals("""
+                    CommonTable g #1
+                      Project #0 AS k, #1 AS n
+                        Aggregate GROUP BY #0: count(*) AS "count_star()"
+                          Project #0 AS "#group0"
+                            Values 3 rows (col0 INTEGER)
+                      Project #0 AS k
+                        Filter (#1 = #2)
+                          Join SINGLE
+                            CommonTableScan g #1 (k INTEGER, n BIGINT)
+                            Project #0 AS "max(n)"
+                              Aggregate max(#0) AS "max(n)"
+                                Project #0 AS "#argument0"
+                                  CommonTableScan g #1 (n BIGINT)
+                    """, engine.explain(sql));
+            assertEquals(List.of(List.of(1)), engine.rows(sql).stream().map(List::of).toList());
+        }
+    }
 }

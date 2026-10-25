@@ -128,14 +128,16 @@ final class TpchQueries {
 
     /**
      * Returns the sort keys of a plan in terms of its output columns: the
-     * keys of the sort below limits, filters and projections, each through
-     * a projection that passes its column on; {@code null} if the plan does
-     * not sort or a key is not an output column.
+     * keys of the sort below limits, filters, projections and common
+     * tables, each through a projection that passes its column on;
+     * {@code null} if the plan does not sort or a key is not an output
+     * column.
      */
     static List<SortKey> outputOrder(PlanNode plan) {
         return switch (plan) {
             case PlanNode.Sort s -> s.keys();
             case PlanNode.Limit l -> outputOrder(l.input());
+            case PlanNode.CommonTable t -> outputOrder(t.input());
             case PlanNode.Filter f -> outputOrder(f.input());
             case PlanNode.Project p -> {
                 List<SortKey> inner = outputOrder(p.input());

@@ -374,4 +374,40 @@ class ColumnPruningTest {
                 () -> ColumnPruning.prune(plan, name -> MEMORY));
         assertTrue(e.getMessage().contains("breaks the rules of the scan negotiation"), e.getMessage());
     }
+
+    @Test
+    void theDefinitionOfACommonTableKeepsTheColumnsOfAllItsScans() {
+        PlanNode definition = Scan.all(Tables.T_REF, Tables.T);
+        PlanNode.CommonTableScan left = PlanNode.CommonTableScan.all(1, "c", definition);
+        PlanNode.CommonTableScan right = PlanNode.CommonTableScan.all(1, "c", definition);
+        PlanNode join = new PlanNode.Join(left, right, List.of(0), List.of(0), JoinType.INNER);
+        // b of the one scan and c of the other.
+        PlanNode plan = new PlanNode.Project(new PlanNode.CommonTable(1, "c", definition, join),
+                List.of(new NamedExpression("b", col(join.schema(), 1)),
+                        new NamedExpression("c", col(join.schema(), 6))));
+        PlanNode pruned = ColumnPruning.prune(plan);
+        PlanNode.CommonTable table = assertInstanceOf(PlanNode.CommonTable.class,
+                assertInstanceOf(PlanNode.Project.class, pruned).input());
+        assertEquals(List.of(0, 1, 2), assertInstanceOf(Scan.class, table.definition()).columns());
+        PlanNode.Join j = assertInstanceOf(PlanNode.Join.class, table.input());
+        PlanNode.CommonTableScan l = assertInstanceOf(PlanNode.CommonTableScan.class, j.left());
+        PlanNode.CommonTableScan r = assertInstanceOf(PlanNode.CommonTableScan.class, j.right());
+        assertEquals(List.of(0, 1), l.columns());
+        assertEquals(List.of(0, 2), r.columns());
+        assertSame(table.definition(), l.definition());
+        assertSame(table.definition(), r.definition());
+        assertSameRows(plan, pruned);
+        assertEquals(pruned, ColumnPruning.prune(pruned));
+
+        // A scan that reads no column reads the first, so that its rows are counted.
+        PlanNode.CommonTableScan alone = PlanNode.CommonTableScan.all(2, "d", definition);
+        PlanNode count = new PlanNode.Aggregate(new PlanNode.CommonTable(2, "d", definition, alone), List.of(),
+                List.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n", null, List.of())));
+        PlanNode counted = ColumnPruning.prune(count);
+        PlanNode.CommonTable d = assertInstanceOf(PlanNode.CommonTable.class,
+                assertInstanceOf(PlanNode.Aggregate.class, counted).input());
+        assertEquals(List.of(0), assertInstanceOf(Scan.class, d.definition()).columns());
+        assertEquals(List.of(0), assertInstanceOf(PlanNode.CommonTableScan.class, d.input()).columns());
+        assertSameRows(count, counted);
+    }
 }

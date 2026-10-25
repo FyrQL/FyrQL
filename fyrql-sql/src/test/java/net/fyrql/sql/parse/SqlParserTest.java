@@ -286,8 +286,13 @@ class SqlParserTest {
         assertEquals("s", q.with().get(0).name());
         assertEquals(List.of("x"), q.with().get(0).columns());
         assertInstanceOf(QueryBody.SetOperation.class, q.body());
-        assertEquals("WITH s(x) AS (SELECT 1), u AS (SELECT 2) SELECT * FROM s UNION SELECT * FROM u",
+        assertEquals("WITH s(x) AS (SELECT 1), u AS MATERIALIZED (SELECT 2) SELECT * FROM s UNION SELECT * FROM u",
                 print("WITH s(x) AS (SELECT 1), u AS MATERIALIZED (SELECT 2) SELECT * FROM s UNION SELECT * FROM u"));
+        assertEquals(List.of(Query.Materialized.DEFAULT, Query.Materialized.ALWAYS, Query.Materialized.NEVER),
+                SqlParser.parse("WITH a AS (SELECT 1), b AS MATERIALIZED (SELECT 2), c AS NOT MATERIALIZED "
+                        + "(SELECT 3) SELECT 4").with().stream().map(Query.CommonTable::materialized).toList());
+        assertEquals("WITH c AS NOT MATERIALIZED (SELECT 1) SELECT * FROM c",
+                print("with c as not materialized (select 1) select * from c"));
         assertEquals("VALUES (1, 2), (3, 4)", print("VALUES (1, 2), (3, 4)"));
         assertEquals(List.of(2), ((QueryBody.Values) SqlParser.parse("VALUES (1, 2)").body()).rows().stream()
                 .map(List::size).toList());

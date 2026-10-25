@@ -15,6 +15,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.type.Schema;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,7 +76,47 @@ public final class Plans {
             case PlanNode.Values v -> v;
             case PlanNode.SetOperation s -> new PlanNode.SetOperation(children.get(0), children.get(1), s.kind(),
                     s.all());
+            case PlanNode.CommonTable t -> new PlanNode.CommonTable(t.id(), t.name(), children.get(0),
+                    children.get(1));
+            case PlanNode.CommonTableScan s -> s;
         };
+    }
+
+    /**
+     * Gives each scan of a common table the definition of its
+     * {@link PlanNode.CommonTable}, as it is after a rewrite of the plan;
+     * a plan whose scans have them already comes back as it is.
+     */
+    public static PlanNode linkCommonTables(PlanNode plan) {
+        return link(plan, new HashMap<>());
+    }
+
+    private static PlanNode link(PlanNode node, Map<Integer, PlanNode> definitions) {
+        if (node instanceof PlanNode.CommonTableScan s) {
+            PlanNode definition = definitions.get(s.id());
+            return definition == null || definition == s.definition() ? s
+                    : new PlanNode.CommonTableScan(s.id(), s.name(), s.columns(), definition);
+        }
+        if (node instanceof PlanNode.CommonTable t) {
+            PlanNode definition = link(t.definition(), definitions);
+            PlanNode outer = definitions.put(t.id(), definition);
+            PlanNode input = link(t.input(), definitions);
+            if (outer == null) {
+                definitions.remove(t.id());
+            } else {
+                definitions.put(t.id(), outer);
+            }
+            return definition == t.definition() && input == t.input() ? t
+                    : new PlanNode.CommonTable(t.id(), t.name(), definition, input);
+        }
+        List<PlanNode> children = new ArrayList<>();
+        boolean changed = false;
+        for (PlanNode child : node.children()) {
+            PlanNode linked = link(child, definitions);
+            changed |= linked != child;
+            children.add(linked);
+        }
+        return changed ? withChildren(node, children) : node;
     }
 
     /**
@@ -155,7 +196,8 @@ public final class Plans {
 
     /**
      * Tells whether the output of a plan has a defined order: only with a
-     * sort at the top, possibly below a filter, projection or limit.
+     * sort at the top, possibly below a filter, projection, limit or
+     * common table.
      */
     public static boolean ordered(PlanNode plan) {
         return switch (plan) {
@@ -163,6 +205,7 @@ public final class Plans {
             case PlanNode.Filter f -> ordered(f.input());
             case PlanNode.Project p -> ordered(p.input());
             case PlanNode.Limit l -> ordered(l.input());
+            case PlanNode.CommonTable t -> ordered(t.input());
             default -> false;
         };
     }
@@ -221,6 +264,9 @@ public final class Plans {
             case PlanNode.Values v -> sb.append("Values ").append(v.rows().size()).append(" rows ")
                     .append(fields(v.schema()));
             case PlanNode.SetOperation s -> sb.append(s.kind()).append(s.all() ? " ALL" : "");
+            case PlanNode.CommonTable t -> sb.append("CommonTable ").append(t.name()).append(" #").append(t.id());
+            case PlanNode.CommonTableScan s -> sb.append("CommonTableScan ").append(s.name()).append(" #")
+                    .append(s.id()).append(' ').append(s.columns()).append(' ').append(fields(s.schema()));
         }
         sb.append('\n');
         for (PlanNode child : node.children()) {

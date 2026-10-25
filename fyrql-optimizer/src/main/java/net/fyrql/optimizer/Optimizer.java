@@ -13,6 +13,7 @@ package net.fyrql.optimizer;
 
 import net.fyrql.connector.Connector;
 import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.plan.Plans;
 
 import java.util.Locale;
 import java.util.Objects;
@@ -140,6 +141,7 @@ public final class Optimizer {
         if (options.pushdown()) {
             result = ScanPushdown.push(result, connectors);
         }
-        return result;
+        // The scans of common tables estimate their rows from the definitions as they are now.
+        return Plans.linkCommonTables(result);
     }
 }

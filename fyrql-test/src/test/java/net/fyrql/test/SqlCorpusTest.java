@@ -317,6 +317,26 @@ public class SqlCorpusTest {
             "WITH s AS (SELECT 1 AS v), r AS (SELECT v + 1 AS v FROM s) SELECT * FROM r UNION ALL SELECT * FROM s",
             "WITH t AS (SELECT 9 AS z) SELECT * FROM t",
             "SELECT * FROM (WITH q AS (SELECT a FROM t) SELECT max(a) FROM q) z",
+            // Common tables that run once: read more than once and computing, or MATERIALIZED
+            "WITH r AS (SELECT k, sum(a) AS s FROM t GROUP BY k) SELECT k, s FROM r WHERE s = (SELECT max(s) FROM r)",
+            "WITH g AS (SELECT b, count(*) AS c, max(a) AS m FROM t GROUP BY b) "
+                    + "SELECT g1.b, g2.c, g3.m FROM g AS g1 JOIN g AS g2 ON g1.b = g2.b JOIN g AS g3 ON g2.b = g3.b",
+            "WITH g AS (SELECT k, count(*) AS c FROM t GROUP BY k), "
+                    + "h AS (SELECT g1.k, g1.c + g2.c AS d FROM g AS g1 JOIN g AS g2 ON g1.k = g2.k) "
+                    + "SELECT * FROM h UNION ALL SELECT * FROM h",
+            "WITH top AS (SELECT a, b FROM t ORDER BY a NULLS LAST, b NULLS LAST LIMIT 3) "
+                    + "SELECT * FROM top WHERE a > (SELECT min(a) FROM top)",
+            "WITH d AS (SELECT DISTINCT b, NULL AS z FROM t) SELECT d1.b, d1.z FROM d AS d1, d AS d2 WHERE d1.b = d2.b",
+            "WITH d AS (SELECT DISTINCT NULL AS z FROM t) SELECT z FROM d UNION ALL SELECT 'x' FROM d",
+            "WITH m AS MATERIALIZED (SELECT a, b FROM t WHERE a > 1) SELECT b, count(*) FROM m GROUP BY b",
+            "WITH g AS NOT MATERIALIZED (SELECT k, count(*) AS c FROM t GROUP BY k) "
+                    + "SELECT * FROM g AS g1 JOIN g AS g2 ON g1.k = g2.k",
+            "WITH g AS (SELECT k, max(a) AS m FROM t GROUP BY k) "
+                    + "SELECT a FROM t WHERE a IN (SELECT m FROM g) AND EXISTS (SELECT 1 FROM g WHERE g.k = t.k)",
+            "SELECT * FROM (WITH q AS (SELECT k, count(*) AS c FROM t GROUP BY k) "
+                    + "SELECT q1.k, q2.c FROM q AS q1 JOIN q AS q2 ON q1.k = q2.k) z WHERE z.c > 1",
+            "WITH g AS (SELECT k, count(*) AS c FROM t GROUP BY k) SELECT * FROM g WHERE c > (SELECT min(c) FROM g) "
+                    + "ORDER BY k",
             // Subqueries in expressions
             "SELECT a FROM t WHERE a IN (SELECT a FROM u)",
             "SELECT a FROM t WHERE a NOT IN (SELECT a FROM u)",

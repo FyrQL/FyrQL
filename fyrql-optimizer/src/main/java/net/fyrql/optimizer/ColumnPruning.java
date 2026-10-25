@@ -23,6 +23,7 @@ import net.fyrql.core.plan.PlanNode.AggregateFunction;
 import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.PlanNode.SortKey;
 import net.fyrql.core.plan.PlanNode.WindowCall;
+import net.fyrql.core.plan.Plans;
 import net.fyrql.core.type.Schema;
 
 import java.util.ArrayList;
@@ -48,7 +49,8 @@ import java.util.function.Function;
  * columns, so the output of the plan is unchanged; the inputs of
  * {@code EXCEPT} and {@code INTERSECT} keep all of theirs, since the rows
  * are compared whole. A node keeps at least one column, so that no batch
- * is without columns.
+ * is without columns. The definition of a common table keeps the columns
+ * that any of its scans reads, whole.
  * <p>
  * Where the nodes above use a {@code STRUCT} column only to take fields
  * out of it by constant names, the pass may also narrow the column to
@@ -223,6 +225,8 @@ final class ColumnPruning {
 
     private static final class Pass {
         private final Function<String, Connector> connectors;
+        /** The columns of the definitions of common tables that their scans read so far, by id. */
+        private final Map<Integer, BitSet> commonColumns = new HashMap<>();
 
         Pass(Function<String, Connector> connectors) {
             this.connectors = connectors;
@@ -231,6 +235,8 @@ final class ColumnPruning {
         Pruned prune(PlanNode node, Need required) {
             return switch (node) {
                 case PlanNode.Scan s -> scan(s, required);
+                case PlanNode.CommonTable t -> commonTable(t, required);
+                case PlanNode.CommonTableScan s -> commonTableScan(s, required);
                 case PlanNode.Filter f -> {
                     Need need = required.copy();
                     need.add(f.condition());
@@ -324,6 +330,53 @@ final class ColumnPruning {
                 case PlanNode.Values v -> new Pruned(v, identity(v.schema().size()));
                 case PlanNode.Remote r -> new Pruned(r, identity(r.schema().size()));
             };
+        }
+
+        /**
+         * A common table prunes its input first, whose scans of it note the
+         * columns they read; then the definition keeps what all of them read,
+         * and the scans read those columns where the pruned definition has
+         * them.
+         */
+        private Pruned commonTable(PlanNode.CommonTable t, Need required) {
+            commonColumns.put(t.id(), new BitSet());
+            Pruned in = prune(t.input(), required);
+            BitSet read = commonColumns.remove(t.id());
+            Pruned definition = prune(t.definition(), Need.whole(read));
+            PlanNode input = rescan(in.node(), t.id(), definition);
+            return new Pruned(new PlanNode.CommonTable(t.id(), t.name(), definition.node(), input), in.mapping(),
+                    in.fields());
+        }
+
+        /** A scan of a common table reads the columns required of it, whole, and at least one. */
+        private Pruned commonTableScan(PlanNode.CommonTableScan s, Need required) {
+            BitSet kept = keep(required.used(), s.columns().size());
+            List<Integer> columns = new ArrayList<>();
+            BitSet read = commonColumns.get(s.id());
+            for (int i = kept.nextSetBit(0); i >= 0; i = kept.nextSetBit(i + 1)) {
+                columns.add(s.columns().get(i));
+                if (read != null) {
+                    read.set(s.columns().get(i));
+                }
+            }
+            return new Pruned(new PlanNode.CommonTableScan(s.id(), s.name(), columns, s.definition()),
+                    mapping(kept, s.columns().size()));
+        }
+
+        /** Points the scans of a common table in a plan at the columns of its pruned definition. */
+        private static PlanNode rescan(PlanNode node, int id, Pruned definition) {
+            if (node instanceof PlanNode.CommonTableScan s && s.id() == id) {
+                return new PlanNode.CommonTableScan(id, s.name(), remap(s.columns(), definition.mapping()),
+                        definition.node());
+            }
+            List<PlanNode> children = new ArrayList<>();
+            boolean changed = false;
+            for (PlanNode child : node.children()) {
+                PlanNode c = rescan(child, id, definition);
+                changed |= c != child;
+                children.add(c);
+            }
+            return changed ? Plans.withChildren(node, children) : node;
         }
 
         /**

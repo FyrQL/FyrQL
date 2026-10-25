@@ -73,7 +73,8 @@ final class QueryShrinker {
             Query.CommonTable table = q.with().get(i);
             for (Query smaller : query(table.query())) {
                 List<Query.CommonTable> with = new ArrayList<>(q.with());
-                with.set(i, new Query.CommonTable(table.name(), table.columns(), smaller, table.position()));
+                with.set(i, new Query.CommonTable(table.name(), table.columns(), smaller, table.materialized(),
+                        table.position()));
                 result.add(new Query(with, q.body(), q.orderBy(), q.limit(), q.offset()));
             }
         }

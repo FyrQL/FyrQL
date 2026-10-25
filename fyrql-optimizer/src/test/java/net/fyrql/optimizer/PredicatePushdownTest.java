@@ -302,4 +302,18 @@ class PredicatePushdownTest {
         assertEquals(JoinType.CROSS, ((Join) ((Filter) ((PlanNode.Project) without.optimize(plan)).input())
                 .input()).type());
     }
+
+    @Test
+    void conditionsGoIntoTheInputOfACommonTableAndStayAboveItsScans() {
+        PlanNode definition = new Filter(T, gt(A, lit(1)));
+        PlanNode.CommonTableScan left = PlanNode.CommonTableScan.all(1, "c", definition);
+        PlanNode.CommonTableScan right = PlanNode.CommonTableScan.all(1, "c", definition);
+        PlanNode plan = new Filter(new PlanNode.CommonTable(1, "c", definition,
+                join(left, right, JoinType.INNER, 0, 0)), lt(K, lit(5)));
+        PlanNode.CommonTable table = (PlanNode.CommonTable) pushed(plan);
+        assertEquals(definition, table.definition());
+        Join j = (Join) table.input();
+        assertEquals(new Filter(left, lt(K, lit(5))), j.left());
+        assertEquals(right, j.right());
+    }
 }

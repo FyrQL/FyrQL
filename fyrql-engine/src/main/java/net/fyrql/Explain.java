@@ -371,6 +371,14 @@ final class Explain {
                         + String.join(", ", columns) + ")";
             }
             case PlanNode.SetOperation s -> s.kind() + (s.all() ? " ALL" : "");
+            case PlanNode.CommonTable t -> "CommonTable " + name(t.name()) + " #" + t.id();
+            case PlanNode.CommonTableScan s -> {
+                List<String> columns = new ArrayList<>();
+                for (Schema.Field f : s.schema().fields()) {
+                    columns.add(name(f.name()) + " " + f.type().sqlName());
+                }
+                yield "CommonTableScan " + name(s.name()) + " #" + s.id() + " (" + String.join(", ", columns) + ")";
+            }
         };
     }
 

@@ -248,6 +248,17 @@ class TpchTest {
         assertEquals(List.of("orders"), Plans.scans(semi.left()).stream().map(s -> s.table().table()).toList());
     }
 
+    @Test
+    void theRevenueOfQ15IsComputedOnceForBothItsReads() {
+        TpchQueries.Query q15 = queries().stream().filter(q -> q.name().equals("q15")).findFirst().orElseThrow();
+        PlanNode plan = engine.optimize(engine.plan(q15.sql()));
+        List<PlanNode> nodes = Plans.nodes(plan);
+        assertEquals(1, nodes.stream().filter(n -> n instanceof PlanNode.CommonTable).count(), Plans.print(plan));
+        assertEquals(2, nodes.stream().filter(n -> n instanceof PlanNode.CommonTableScan).count(), Plans.print(plan));
+        assertEquals(1, Plans.scans(plan).stream().filter(s -> s.table().table().equals("lineitem")).count(),
+                Plans.print(plan));
+    }
+
     static List<TpchQueries.Query> joinsInTheDatabase() {
         return queries().stream().filter(q -> List.of("q03", "q05", "q07", "q08", "q10", "q22").contains(q.name()))
                 .toList();

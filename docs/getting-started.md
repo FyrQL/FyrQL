@@ -41,22 +41,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.17.0</version>
+    <version>0.17.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.17.0</version>
+    <version>0.17.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.17.0</version>
+    <version>0.17.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.17.0</version>
+    <version>0.17.5</version>
 </dependency>
 ```
 
@@ -591,7 +591,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.17.0</version>
+    <version>0.17.5</version>
 </dependency>
 ```
 

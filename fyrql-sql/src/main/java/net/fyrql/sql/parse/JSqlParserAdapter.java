@@ -393,7 +393,10 @@ final class JSqlParserAdapter {
                 columns.add(simpleName(column.getExpression()));
             }
         }
-        return new Query.CommonTable(aliasName(item.getAlias()), columns, parenthesized(select), position);
+        Query.Materialized materialized = !item.isMaterialized() ? Query.Materialized.DEFAULT
+                : item.isUsingNot() ? Query.Materialized.NEVER : Query.Materialized.ALWAYS;
+        return new Query.CommonTable(aliasName(item.getAlias()), columns, parenthesized(select), materialized,
+                position);
     }
 
     /** A query in parentheses, with the {@code ORDER BY} and {@code LIMIT} that may follow the parentheses. */
