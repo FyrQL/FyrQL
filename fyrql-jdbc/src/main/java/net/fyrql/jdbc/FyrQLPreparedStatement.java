@@ -178,7 +178,7 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
      * no value, and once every parameter has one, those of the query with
      * the literals of the values. It is {@code null} for a statement that
      * writes, and while a parameter has no value if the engine cannot
-     * prepare the query, as for {@code SELECT ?}.
+     * prepare the query, as for {@code ORDER BY ?}.
      */
     @Override
     public ResultSetMetaData getMetaData() throws SQLException {
@@ -193,7 +193,7 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
 
     /**
      * Returns the parameters with the types the engine gives them when it
-     * prepares the query; if it cannot, as for {@code SELECT ?}, their types
+     * prepares the query; if it cannot, as for {@code ORDER BY ?}, their types
      * are unknown, see {@link FyrQLParameterMetaData}.
      */
     @Override

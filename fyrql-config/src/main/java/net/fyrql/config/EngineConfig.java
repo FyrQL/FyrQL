@@ -56,6 +56,8 @@ import java.util.regex.Pattern;
  *   pushdown: true
  * server:
  *   port: 32010
+ * pgwire:
+ *   port: 5433
  * }</pre>
  * Each source has a name, a type and the options of its type, which are
  * read flat: a nested key becomes the keys on its path joined by dots, such
@@ -68,19 +70,21 @@ import java.util.regex.Pattern;
  * text <code>${</code>. The settings of the engine are those of
  * {@link FyrQLConfig#builder(EngineConfig)}. The section {@code server}
  * holds the settings of the Flight SQL server of the module
- * {@code fyrql-flight-sql}, read flat as the options of a source; the
- * engine does not read them.
+ * {@code fyrql-flight-sql}, the section {@code pgwire} those of the
+ * PostgreSQL wire protocol server of the module {@code fyrql-pgwire}, each
+ * read flat as the options of a source; the engine reads neither.
  * <p>
  * A file is YAML, or JSON if its name ends in {@code .json}. Relative paths
  * in the options are resolved against the directory of the file.
  *
  * @param sources the sources in the order of the file
  * @param settings the settings of the engine, flat as the options of a source
- * @param server the settings of a server for the engine, flat as the options of a source
+ * @param server the settings of the Flight SQL server for the engine, flat as the options of a source
+ * @param pgwire the settings of the PostgreSQL wire protocol server for the engine, flat as the options of a source
  * @param directory the directory against which relative paths are resolved
  */
 public record EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Map<String, String> server,
-        Path directory) {
+        Map<String, String> pgwire, Path directory) {
 
     private static final Pattern VARIABLE = Pattern.compile("\\$\\$\\{|\\$\\{(?:([a-z]+):([^}]*)})?");
     private static final String DEFAULT = ":-";
@@ -89,31 +93,38 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
         sources = List.copyOf(sources);
         settings = Collections.unmodifiableMap(new LinkedHashMap<>(settings));
         server = Collections.unmodifiableMap(new LinkedHashMap<>(server));
+        pgwire = Collections.unmodifiableMap(new LinkedHashMap<>(pgwire));
         Objects.requireNonNull(directory, "directory");
+    }
+
+    /** A configuration without settings of a PostgreSQL wire protocol server. */
+    public EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Map<String, String> server,
+            Path directory) {
+        this(sources, settings, server, Map.of(), directory);
     }
 
     /** A configuration without settings of a server. */
     public EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Path directory) {
-        this(sources, settings, Map.of(), directory);
+        this(sources, settings, Map.of(), Map.of(), directory);
     }
 
     /** Returns the configuration with a setting of the engine added or replaced. */
     public EngineConfig withSetting(String key, String value) {
         Map<String, String> with = new LinkedHashMap<>(settings);
         with.put(key, value);
-        return new EngineConfig(sources, with, server, directory);
+        return new EngineConfig(sources, with, server, pgwire, directory);
     }
 
     /**
      * Names the sources as {@link SourceConfig#toString()} does, the
-     * settings of the engine, and the keys of the settings of the server,
-     * but not their values, which hold the passwords of its users and its
+     * settings of the engine, and the keys of the settings of the servers,
+     * but not their values, which hold the passwords of their users and the
      * token.
      */
     @Override
     public String toString() {
         return "EngineConfig[sources=" + sources + ", settings=" + settings + ", server=" + server.keySet()
-                + ", directory=" + directory + "]";
+                + ", pgwire=" + pgwire.keySet() + ", directory=" + directory + "]";
     }
 
     /**
@@ -185,23 +196,25 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
                 throw new ConfigException(where(0) + "the configuration cannot be read: " + e, e);
             }
             if (!(root.value() instanceof Map<?, ?> top)) {
-                throw failure(root.line(), "the configuration must be a mapping with the keys sources, engine and"
-                        + " server");
+                throw failure(root.line(), "the configuration must be a mapping with the keys sources, engine,"
+                        + " server and pgwire");
             }
             List<SourceConfig> sources = new ArrayList<>();
             Map<String, String> settings = new LinkedHashMap<>();
             Map<String, String> server = new LinkedHashMap<>();
+            Map<String, String> pgwire = new LinkedHashMap<>();
             for (Map.Entry<String, Node> e : entries(top)) {
                 Node n = e.getValue();
                 switch (e.getKey()) {
                     case "sources" -> sources = sources(n);
                     case "engine" -> section(n, settings, "engine", "the engine");
                     case "server" -> section(n, server, "server", "the server");
+                    case "pgwire" -> section(n, pgwire, "pgwire", "the PostgreSQL wire protocol server");
                     default -> throw failure(n.line(), "the key " + e.getKey() + " is unknown; known are sources,"
-                            + " engine and server");
+                            + " engine, server and pgwire");
                 }
             }
-            return new EngineConfig(sources, settings, server, directory);
+            return new EngineConfig(sources, settings, server, pgwire, directory);
         }
 
         /** Adds the settings of a section that is a mapping of settings, or empty. */

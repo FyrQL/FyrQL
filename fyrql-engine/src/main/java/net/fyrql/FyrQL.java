@@ -76,6 +76,7 @@ import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.concurrent.ScheduledFuture;
+import java.util.function.Function;
 
 /**
  * The engine: registered connectors, a catalog over them, and the
@@ -133,6 +134,7 @@ public final class FyrQL implements AutoCloseable {
     private final FunctionRegistry functions;
     private final Optimizer optimizer;
     private final Executor executor;
+    private final Execution execution;
     private final Codegen codegen;
     private final Writes writes;
     /** The directory to which operators spill, {@code null} if they do not. */
@@ -157,33 +159,60 @@ public final class FyrQL implements AutoCloseable {
         this.optimizer = new Optimizer(this::connector, options);
         this.codegen = codegen;
         this.writes = new Writes(this);
-        this.executor = new Executor(new TableSource() {
+        this.executor = new Executor(tables(this::connector), budget, batchSize, codegen, threads, preserveOrder,
+                spill);
+        this.execution = new Execution(optimizer, executor);
+        this.session = new Session(this, zone, timeouts.queryTimeout(), catalog);
+    }
+
+    /**
+     * The optimizer and the executor over the sources of the engine, or over
+     * those of a session that has more, see {@link Overlay}.
+     */
+    record Execution(Optimizer optimizer, Executor executor) {
+    }
+
+    /** Returns the optimizer and the executor over the sources of the engine. */
+    Execution execution() {
+        return execution;
+    }
+
+    /**
+     * Returns an optimizer and an executor over other connectors, with the
+     * options, the budget and the threads of the engine.
+     */
+    Execution execution(Function<String, Connector> connectors) {
+        return new Execution(optimizer.withConnectors(connectors), executor.withSource(tables(connectors)));
+    }
+
+    /** Returns the tables of the executor, read through the connectors of their sources. */
+    private TableSource tables(Function<String, Connector> connectors) {
+        return new TableSource() {
             @Override
             public BatchReader open(PlanNode.Scan scan) {
-                return FyrQL.this.open(scan, QueryContext.NONE);
+                return FyrQL.this.open(scan, QueryContext.NONE, connectors);
             }
 
             @Override
             public BatchReader open(PlanNode.Scan scan, QueryContext context) {
-                return FyrQL.this.open(scan, context);
+                return FyrQL.this.open(scan, context, connectors);
             }
 
             @Override
             public Splits splits(PlanNode.Scan scan, QueryContext context) {
-                return FyrQL.this.splits(scan, 1);
+                return FyrQL.this.splits(scan, 1, connectors);
             }
 
             @Override
             public Splits splits(PlanNode.Scan scan, int threads, QueryContext context) {
-                return FyrQL.this.splits(scan, threads);
+                return FyrQL.this.splits(scan, threads, connectors);
             }
 
             @Override
             public BatchReader open(PlanNode.Remote remote) {
-                return FyrQL.this.open(remote);
+                return FyrQL.this.open(remote, connectors);
             }
-        }, budget, batchSize, codegen, threads, preserveOrder, spill);
-        this.session = new Session(this, zone, timeouts.queryTimeout(), catalog);
+        };
     }
 
     /**
@@ -324,6 +353,11 @@ public final class FyrQL implements AutoCloseable {
         return new Session(this, initialZone, timeouts.queryTimeout(), catalog.searchPath());
     }
 
+    /** Starts a session with more sources and its own functions, see {@link Overlay#newSession}. */
+    Session newSession(Map<String, Connector> overlay, FunctionRegistry functions) {
+        return new Session(this, initialZone, timeouts.queryTimeout(), catalog.searchPath(), overlay, functions);
+    }
+
     /** Returns the connector of a source. */
     public Connector connector(String source) {
         Connector c = connectors.get(source);
@@ -391,8 +425,9 @@ public final class FyrQL implements AutoCloseable {
     }
 
     /**
-     * Parses and binds a query with parameters {@code ?}, without running
-     * it: the types of the parameters and the columns of the result. A
+     * Parses and binds a query with parameters {@code ?}, or {@code $1},
+     * {@code $2} and so on, each of which may stand more than once, without
+     * running it: the types of the parameters and the columns of the result. A
      * parameter takes the type that its context gives a bare {@code NULL}:
      * the type of the other side of a comparison or of arithmetic, of the
      * other values of {@code IN}, {@code BETWEEN}, {@code CASE} and
@@ -401,13 +436,16 @@ public final class FyrQL implements AutoCloseable {
      * type it takes of {@code BIGINT}, {@code DOUBLE}, {@code INTEGER} and
      * so on, {@code VARCHAR} last; in {@code VALUES} of an {@code INSERT},
      * the type of the column its value goes to. A parameter without such a
-     * context, as in {@code SELECT ?}, is an error, as is a parameter where
-     * a constant is needed, such as in {@code LIMIT}, or one of a type with
-     * a {@code MAP}, which has no literal. A statement that writes is
-     * prepared as well; its result has the column {@code Count}.
+     * context, as in {@code SELECT ?}, is a {@code VARCHAR}, as a parameter
+     * without a type is a {@code text} in PostgreSQL; a parameter by itself
+     * in {@code LIMIT} or {@code OFFSET} is a {@code BIGINT}. A parameter in
+     * another place where a constant is needed, such as {@code ORDER BY ?},
+     * is an error, as is one of a type with a {@code MAP}, which has no
+     * literal. A statement that writes is prepared as well; its result has
+     * the column {@code Count}.
      *
      * @throws SqlException if the query cannot be parsed or bound, or a
-     *         parameter has no type or one with a {@code MAP}
+     *         parameter has two types or one with a {@code MAP}
      */
     public PreparedQuery prepare(String sql) {
         return session.prepare(sql);
@@ -658,7 +696,8 @@ public final class FyrQL implements AutoCloseable {
             return execute(q.plan(), context, sql, session);
         }
         if (statement instanceof BoundStatement.Explain e) {
-            String plan = e.analyze() ? explainAnalyze(e.statement(), context, session) : explain(e.statement());
+            String plan = e.analyze() ? explainAnalyze(e.statement(), context, session)
+                    : explain(e.statement(), session);
             List<Object[]> lines = new ArrayList<>();
             for (String line : plan.split("\n")) {
                 lines.add(new Object[] {line});
@@ -672,7 +711,7 @@ public final class FyrQL implements AutoCloseable {
 
     /** The result of a statement that has run, whose operators count nothing for the context of the statement. */
     private QueryResult result(PlanNode.Values rows, QueryContext context, Session session) {
-        return new QueryResult(open(rows, QueryContext.NONE), context, null, session.timeZone());
+        return new QueryResult(open(rows, QueryContext.NONE, session), context, null, session.timeZone());
     }
 
     /**
@@ -704,7 +743,13 @@ public final class FyrQL implements AutoCloseable {
 
     /** Returns a plan as the engine runs it, as text in the form of {@link #explain(String)}. */
     public String explain(PlanNode plan) {
-        return Explain.print(optimize(plan), codegen, optimizer.estimator(), executor.threads());
+        return explain(plan, session);
+    }
+
+    /** Returns a plan as a session runs it. */
+    String explain(PlanNode plan, Session session) {
+        Execution x = session.execution();
+        return Explain.print(x.optimizer().optimize(plan), codegen, x.optimizer().estimator(), executor.threads());
     }
 
     /**
@@ -712,16 +757,16 @@ public final class FyrQL implements AutoCloseable {
      * {@link #explain(String)}; for {@code EXPLAIN}, that of its statement.
      */
     public String explain(SqlStatement statement) {
-        return explain(statement.bound());
+        return explain(statement.bound(), session);
     }
 
-    /** Returns a bound statement as the engine runs it, see {@link #explain(SqlStatement)}. */
-    String explain(BoundStatement statement) {
+    /** Returns a bound statement as a session runs it, see {@link #explain(SqlStatement)}. */
+    String explain(BoundStatement statement, Session session) {
         if (statement instanceof BoundStatement.Explain e) {
-            return explain(e.statement());
+            return explain(e.statement(), session);
         }
         if (statement instanceof BoundStatement.Query q) {
-            return explain(q.plan());
+            return explain(q.plan(), session);
         }
         StringBuilder sb = new StringBuilder(Explain.header(statement)).append('\n');
         PlanNode input = switch (statement) {
@@ -732,7 +777,7 @@ public final class FyrQL implements AutoCloseable {
             default -> null;
         };
         if (input != null) {
-            for (String line : explain(input).split("\n")) {
+            for (String line : explain(input, session).split("\n")) {
                 sb.append("  ").append(line).append('\n');
             }
         }
@@ -781,7 +826,7 @@ public final class FyrQL implements AutoCloseable {
                 }
             }
             QueryStatistics statistics = context.statistics();
-            return Explain.analyzed(statistics, rows, false) + "\n" + explain(statistics);
+            return Explain.analyzed(statistics, rows, false) + "\n" + explain(statistics, session);
         }
         long written = update(run, context, null, session);
         context.finished();
@@ -789,7 +834,7 @@ public final class FyrQL implements AutoCloseable {
         StringBuilder sb = new StringBuilder(Explain.analyzed(statistics, written, true)).append('\n')
                 .append(Explain.header(run)).append('\n');
         if (statistics.plan() != null) {
-            for (String line : explain(statistics).split("\n")) {
+            for (String line : explain(statistics, session).split("\n")) {
                 sb.append("  ").append(line).append('\n');
             }
         }
@@ -811,7 +856,12 @@ public final class FyrQL implements AutoCloseable {
      * @param statistics what a query did, see {@link QueryResult#statistics()}
      */
     public String explain(QueryStatistics statistics) {
-        return Explain.print(statistics, codegen, optimizer.estimator(), executor.threads());
+        return explain(statistics, session);
+    }
+
+    /** Returns the plan a query of a session ran with what each of its operators did. */
+    String explain(QueryStatistics statistics, Session session) {
+        return Explain.print(statistics, codegen, session.execution().optimizer().estimator(), executor.threads());
     }
 
     /**
@@ -848,7 +898,7 @@ public final class FyrQL implements AutoCloseable {
         QueryEvent event = RECORDABLE ? QueryEvent.start() : null;
         ScheduledFuture<?> timeout = timeouts.start(context, session.timeout());
         try {
-            return new QueryResult(open(plan, context), context, timeout, session.timeZone(), event, sql);
+            return new QueryResult(open(plan, context, session), context, timeout, session.timeZone(), event, sql);
         } catch (RuntimeException | Error e) {
             Timeouts.stop(timeout);
             if (event != null) {
@@ -863,10 +913,11 @@ public final class FyrQL implements AutoCloseable {
      * plan is noted in the context, if it is the first one of the query, see
      * {@link QueryContext#plan(PlanNode)}.
      */
-    Operator open(PlanNode plan, QueryContext context) {
-        PlanNode optimized = optimize(plan);
+    Operator open(PlanNode plan, QueryContext context, Session session) {
+        Execution x = session.execution();
+        PlanNode optimized = x.optimizer().optimize(plan);
         context.plan(optimized);
-        return executor.open(optimized, optimizer.estimator(), context);
+        return x.executor().open(optimized, x.optimizer().estimator(), context);
     }
 
     /** Runs a plan and collects all rows as Java values. */
@@ -891,8 +942,8 @@ public final class FyrQL implements AutoCloseable {
      * Opens the reader of a scan, which reads its splits one after the
      * other on one thread, see {@link Splits#sequential}.
      */
-    private BatchReader open(PlanNode.Scan scan, QueryContext context) {
-        return Splits.sequential(splits(scan, 1), context);
+    private BatchReader open(PlanNode.Scan scan, QueryContext context, Function<String, Connector> connectors) {
+        return Splits.sequential(splits(scan, 1, connectors), context);
     }
 
     /**
@@ -901,8 +952,8 @@ public final class FyrQL implements AutoCloseable {
      * scan was negotiated, which must give what the scan carries as taken
      * over; for at most {@code threads} threads that read them at a time.
      */
-    private Splits splits(PlanNode.Scan scan, int threads) {
-        Connector connector = connector(scan.table().source());
+    private Splits splits(PlanNode.Scan scan, int threads, Function<String, Connector> connectors) {
+        Connector connector = connectors.apply(scan.table().source());
         PlanNode.Pushed pushed = scan.pushed();
         List<Expression> filters = new ArrayList<>(pushed.filters());
         filters.addAll(pushed.hints());
@@ -935,8 +986,8 @@ public final class FyrQL implements AutoCloseable {
      * connector plans it once more, which must give the columns of the
      * part.
      */
-    private BatchReader open(PlanNode.Remote remote) {
-        Connector connector = connector(remote.source());
+    private BatchReader open(PlanNode.Remote remote, Function<String, Connector> connectors) {
+        Connector connector = connectors.apply(remote.source());
         RemotePlan plan = connector.planRemote(remote.logical()).orElseThrow(() -> new IllegalStateException(
                 "The connector " + connector.name() + " declines a part of a plan it accepted before: "
                         + remote.description()));

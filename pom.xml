@@ -17,7 +17,7 @@
 
 	<groupId>io.github.fyrql</groupId>
 	<artifactId>fyrql</artifactId>
-	<version>0.15.1</version>
+	<version>0.16.0</version>
 	<packaging>pom</packaging>
 
 	<name>FyrQL</name>
@@ -74,6 +74,8 @@
 		<module>fyrql-arrow</module>
 		<module>fyrql-flight-sql</module>
 		<module>fyrql-flight-sql-all</module>
+		<module>fyrql-pgwire</module>
+		<module>fyrql-pgwire-all</module>
 		<module>fyrql-spring-boot-starter</module>
 		<module>fyrql-test</module>
 		<module>fyrql-bench</module>
@@ -296,6 +298,16 @@
 			<dependency>
 				<groupId>io.github.fyrql</groupId>
 				<artifactId>fyrql-flight-sql-all</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>io.github.fyrql</groupId>
+				<artifactId>fyrql-pgwire</artifactId>
+				<version>${project.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>io.github.fyrql</groupId>
+				<artifactId>fyrql-pgwire-all</artifactId>
 				<version>${project.version}</version>
 			</dependency>
 			<dependency>

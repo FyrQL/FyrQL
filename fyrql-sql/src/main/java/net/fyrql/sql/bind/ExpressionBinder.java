@@ -1250,6 +1250,22 @@ final class ExpressionBinder {
                 }
                 return Bound.typed(new Expression.Literal(DataType.VARCHAR, context.setting(setting)));
             }
+            case "current_database", "current_catalog", "current_schema" -> {
+                // The parts of the search path: the default source as the database, and its schema.
+                if (!args.isEmpty()) {
+                    throw arity(name, p);
+                }
+                List<String> path = Settings.searchPath(context.setting(Settings.SEARCH_PATH));
+                int part = name.equals("current_schema") ? 1 : 0;
+                return Bound.typed(new Expression.Literal(DataType.VARCHAR,
+                        part < path.size() ? path.get(part) : null));
+            }
+            case "version" -> {
+                if (!args.isEmpty()) {
+                    throw arity(name, p);
+                }
+                return Bound.typed(new Expression.Literal(DataType.VARCHAR, Versions.VERSION));
+            }
             case "age" -> {
                 if (args.size() == 1) {
                     // The age at midnight of the current date.

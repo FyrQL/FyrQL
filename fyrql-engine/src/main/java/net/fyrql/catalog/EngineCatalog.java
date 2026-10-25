@@ -155,6 +155,22 @@ public final class EngineCatalog implements CatalogView {
         return new EngineCatalog(sources, searchPath, zone, policy);
     }
 
+    /**
+     * Returns a catalog over the sources of this one and more after them,
+     * with the same search path and time zone.
+     *
+     * @throws IllegalArgumentException if one of the more sources has the name of a source of this one
+     */
+    public EngineCatalog withSources(Map<String, Connector> more) {
+        Map<String, Connector> all = new LinkedHashMap<>(sources);
+        for (Map.Entry<String, Connector> e : more.entrySet()) {
+            if (all.putIfAbsent(e.getKey(), e.getValue()) != null) {
+                throw new IllegalArgumentException("There is a source " + e.getKey() + " already");
+            }
+        }
+        return new EngineCatalog(all, searchPath(), zone, policy);
+    }
+
     /** Returns which locations table functions and {@code COPY} may read and write. */
     public FileAccessPolicy fileAccessPolicy() {
         return policy;

@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.15.1</version>
+		<version>0.16.0</version>
 	</parent>
 
 	<artifactId>fyrql-test</artifactId>
@@ -245,6 +245,12 @@
 			<artifactId>fyrql-flight-sql</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- The PostgreSQL wire protocol server, which the JDBC driver of PostgreSQL connects to. -->
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-pgwire</artifactId>
+			<scope>test</scope>
+		</dependency>
 		<!-- For the test of the API boundary; its public types name no type of Spring, which stays off the class path. -->
 		<dependency>
 			<groupId>io.github.fyrql</groupId>
@@ -276,6 +282,17 @@
 		<dependency>
 			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-flight-sql-all</artifactId>
+			<scope>test</scope>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-pgwire-all</artifactId>
 			<scope>test</scope>
 			<exclusions>
 				<exclusion>
@@ -373,6 +390,7 @@
 					<classpathDependencyExcludes>
 						<classpathDependencyExclude>io.github.fyrql:fyrql-jdbc-all</classpathDependencyExclude>
 						<classpathDependencyExclude>io.github.fyrql:fyrql-flight-sql-all</classpathDependencyExclude>
+						<classpathDependencyExclude>io.github.fyrql:fyrql-pgwire-all</classpathDependencyExclude>
 					</classpathDependencyExcludes>
 					<!--
 					  In UTC: the JDBC driver of DuckDB turns a TIMESTAMP WITH TIME ZONE into a Java value through the
@@ -384,6 +402,7 @@
 						<fyrql.tpch.dir>${fyrql.tpch.dir}</fyrql.tpch.dir>
 						<fyrql.jdbc.all.jar>${project.basedir}/../fyrql-jdbc-all/target/fyrql-jdbc-all-${project.version}.jar</fyrql.jdbc.all.jar>
 						<fyrql.flight.all.jar>${project.basedir}/../fyrql-flight-sql-all/target/fyrql-flight-sql-all-${project.version}.jar</fyrql.flight.all.jar>
+						<fyrql.pgwire.all.jar>${project.basedir}/../fyrql-pgwire-all/target/fyrql-pgwire-all-${project.version}.jar</fyrql.pgwire.all.jar>
 						<org.slf4j.simpleLogger.defaultLogLevel>warn</org.slf4j.simpleLogger.defaultLogLevel>
 					</systemPropertyVariables>
 				</configuration>

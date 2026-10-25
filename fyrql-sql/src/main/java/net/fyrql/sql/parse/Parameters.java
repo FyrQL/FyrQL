@@ -19,12 +19,14 @@ import java.util.Arrays;
 import java.util.Objects;
 
 /**
- * A query text with {@code ?} for its parameters. A {@code ?} is a
- * parameter unless it is inside a string {@code '...'}, a quoted identifier
- * {@code "..."}, a line comment from {@code --}, a block comment or a
- * string {@code $$...$$}; the text is split the way the parser of FyrQL
- * reads it, so that the parameters are those
- * {@link SqlParser#parseWithParameters} numbers, in the same order.
+ * A query text with {@code ?} or {@code $n} for its parameters. A
+ * {@code ?} or {@code $n} is a parameter unless it is inside a string
+ * {@code '...'}, a quoted identifier {@code "..."}, a line comment from
+ * {@code --}, a block comment or a string {@code $$...$$}, or a {@code $}
+ * is part of a name; the text is split the way the parser of FyrQL reads
+ * it, so that the parameters are those
+ * {@link SqlParser#parseWithParameters} numbers. A {@code ?} is numbered by
+ * its place, a {@code $n} by its {@code n}, and may stand more than once.
  * {@link #render} puts literals in place of the parameters.
  */
 public final class Parameters {
@@ -32,17 +34,33 @@ public final class Parameters {
     private final String sql;
     /** The offsets of the parameters in the text. */
     private final int[] positions;
+    /** The length of each parameter in the text. */
+    private final int[] lengths;
+    /** The number of each parameter, from 1. */
+    private final int[] numbers;
+    /** The number of distinct parameters. */
+    private final int count;
 
-    private Parameters(String sql, int[] positions) {
+    private Parameters(String sql, int[] positions, int[] lengths, int[] numbers) {
         this.sql = sql;
         this.positions = positions;
+        this.lengths = lengths;
+        this.numbers = numbers;
+        int max = 0;
+        for (int n : numbers) {
+            max = Math.max(max, n);
+        }
+        this.count = max;
     }
 
     /** Finds the parameters of a query text. */
     public static Parameters parse(String sql) {
         Objects.requireNonNull(sql, "sql");
         int[] positions = new int[8];
+        int[] lengths = new int[8];
+        int[] numbers = new int[8];
         int count = 0;
+        int questionMarks = 0;
         int n = sql.length();
         int i = 0;
         while (i < n) {
@@ -64,16 +82,40 @@ public final class Parameters {
                     i++;
                 }
             } else {
+                int length = 0;
+                int number = 0;
                 if (c == '?') {
-                    if (count == positions.length) {
-                        positions = Arrays.copyOf(positions, count * 2);
+                    length = 1;
+                    number = ++questionMarks;
+                } else if (c == '$' && next >= '0' && next <= '9') {
+                    int end = i + 1;
+                    while (end < n && sql.charAt(end) >= '0' && sql.charAt(end) <= '9') {
+                        end++;
                     }
-                    positions[count++] = i;
+                    try {
+                        number = Integer.parseInt(sql, i + 1, end, 10);
+                        length = end - i;
+                    } catch (NumberFormatException e) {
+                        // Too large for a parameter; the parser rejects it.
+                    }
                 }
-                i++;
+                if (length == 0 || number == 0) {
+                    i++;
+                    continue;
+                }
+                if (count == positions.length) {
+                    positions = Arrays.copyOf(positions, count * 2);
+                    lengths = Arrays.copyOf(lengths, count * 2);
+                    numbers = Arrays.copyOf(numbers, count * 2);
+                }
+                positions[count] = i;
+                lengths[count] = length;
+                numbers[count++] = number;
+                i += length;
             }
         }
-        return new Parameters(sql, Arrays.copyOf(positions, count));
+        return new Parameters(sql, Arrays.copyOf(positions, count), Arrays.copyOf(lengths, count),
+                Arrays.copyOf(numbers, count));
     }
 
     /** Returns the end of a quoted string or identifier; a doubled quote stays inside. */
@@ -111,42 +153,45 @@ public final class Parameters {
         return sql;
     }
 
-    /** Returns the number of parameters. */
+    /** Returns the number of parameters: of the {@code ?}, or the highest {@code n} of a {@code $n}. */
     public int count() {
-        return positions.length;
+        return count;
     }
 
     /**
      * Returns the text with the literals in place of the parameters. A
      * literal next to a letter or a digit is set apart by a space, so that
-     * {@code ?AND} does not run into one word.
+     * {@code ?AND} does not run into one word. Each {@code $n} becomes the
+     * literal of parameter {@code n}.
      *
      * @param literals the literal of every parameter, from the first
      * @throws IllegalArgumentException if the number of literals differs
      *         from that of the parameters, or a literal is {@code null}
      */
     public String render(String[] literals) {
-        if (literals.length != positions.length) {
-            throw new IllegalArgumentException("The query has " + positions.length + " parameters, not "
-                    + literals.length);
+        if (literals.length != count) {
+            throw new IllegalArgumentException("The query has " + count + " parameters, not " + literals.length);
+        }
+        for (int i = 0; i < literals.length; i++) {
+            if (literals[i] == null) {
+                throw new IllegalArgumentException("No value is set for parameter " + (i + 1));
+            }
         }
         StringBuilder b = new StringBuilder(sql.length() + 16 * positions.length);
         int from = 0;
         for (int i = 0; i < positions.length; i++) {
-            String literal = literals[i];
-            if (literal == null) {
-                throw new IllegalArgumentException("No value is set for parameter " + (i + 1));
-            }
+            String literal = literals[numbers[i] - 1];
             int p = positions[i];
+            int end = p + lengths[i];
             b.append(sql, from, p);
             if (p > 0 && isIdentifierPart(sql.charAt(p - 1))) {
                 b.append(' ');
             }
             b.append(literal);
-            if (p + 1 < sql.length() && isIdentifierPart(sql.charAt(p + 1))) {
+            if (end < sql.length() && isIdentifierPart(sql.charAt(end))) {
                 b.append(' ');
             }
-            from = p + 1;
+            from = end;
         }
         return b.append(sql, from, sql.length()).toString();
     }

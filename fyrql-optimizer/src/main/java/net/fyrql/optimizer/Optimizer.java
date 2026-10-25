@@ -104,6 +104,11 @@ public final class Optimizer {
         return options;
     }
 
+    /** Returns an optimizer with the same options over other connectors. */
+    public Optimizer withConnectors(Function<String, Connector> connectors) {
+        return new Optimizer(connectors, options);
+    }
+
     /**
      * Returns the estimated rows of the nodes of a plan, from the row counts
      * that the catalogs know, as the join order is chosen; a table whose

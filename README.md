@@ -10,7 +10,7 @@ warehouse first.
 
 - [Getting started: FyrQL in 30 minutes](docs/getting-started.md): from an empty project
   to queries over files, Java objects and databases, writing results, a configuration
-  file, the JDBC driver, Python and Spring Boot.
+  file, the JDBC driver, Python, psql and Spring Boot.
 - [Manual](docs/manual.md): everything in full, from the API and its settings, every
   connector and the SQL with its differences from DuckDB to the optimizer, code
   generation, parallel execution, spilling and performance.
@@ -45,14 +45,17 @@ warehouse first.
   See [Writing and loading](docs/manual.md#writing-and-loading).
 - **Embedded, with clients.** The engine runs inside the application and is set up with
   a builder, a YAML file or, with a starter, the `application.yml` of Spring Boot. A JDBC
-  driver, also as one JAR, opens it to tools such as
-  DBeaver; results come as Apache Arrow vectors, in the process or from a Flight SQL
-  server in one executable JAR, which Python reads through ADBC into pyarrow and pandas.
-  Rules for the files that statements may read and write, which the server closes by
-  default, time limits for queries, and sessions with their own time zone, search path
-  and timeout for each connection and client let others use an engine.
+  driver, also as one JAR, opens it to tools such as DBeaver; results come as Apache
+  Arrow vectors, in the process or from a Flight SQL server in one executable JAR, which
+  Python reads through ADBC into pyarrow and pandas. A server that speaks the wire
+  protocol of PostgreSQL, also in one executable JAR, lets psql, psycopg, DBeaver and
+  Metabase query it as they query PostgreSQL. Rules for the files that statements may
+  read and write, which the servers close by default, time limits for queries, and
+  sessions with their own time zone, search path and timeout for each connection and
+  client let others use an engine.
   See [JDBC driver](docs/manual.md#jdbc-driver),
   [Flight SQL server](docs/manual.md#flight-sql-server),
+  [PostgreSQL wire protocol server](docs/manual.md#postgresql-wire-protocol-server),
   [File access](docs/manual.md#file-access), [Time limits](docs/manual.md#time-limits),
   [Sessions](docs/manual.md#sessions) and [Spring Boot](docs/manual.md#spring-boot).
 - **Observable.** `EXPLAIN ANALYZE` runs a query and shows for each node of its plan the
@@ -128,6 +131,7 @@ data, the plan of the query and what comes next.
 | A JDBC driver, also in one JAR for tools | `fyrql-jdbc`, `fyrql-jdbc-all` | [JDBC driver](docs/manual.md#jdbc-driver) |
 | Results as Apache Arrow vectors | `fyrql-arrow` | [Arrow](docs/manual.md#arrow) |
 | An Arrow Flight SQL server, also as one executable JAR | `fyrql-flight-sql`, `fyrql-flight-sql-all` | [Flight SQL server](docs/manual.md#flight-sql-server) |
+| A server over the wire protocol of PostgreSQL, for psql, psycopg, DBeaver and Metabase, also as one executable JAR | `fyrql-pgwire`, `fyrql-pgwire-all` | [PostgreSQL wire protocol server](docs/manual.md#postgresql-wire-protocol-server) |
 | An engine as a bean of Spring Boot 4, configured in `application.yml` | `fyrql-spring-boot-starter` | [Spring Boot](docs/manual.md#spring-boot) |
 
 ## Performance

@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  This Source Code Form is "Incompatible With Secondary Licenses", as
+  defined by the Mozilla Public License, v. 2.0.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.github.fyrql</groupId>
+		<artifactId>fyrql</artifactId>
+		<version>0.16.0</version>
+	</parent>
+
+	<artifactId>fyrql-pgwire</artifactId>
+	<name>FyrQL PostgreSQL wire protocol server</name>
+	<description>A server for an engine of FyrQL that speaks the wire protocol of PostgreSQL, for psql, psycopg, the JDBC driver of PostgreSQL and the tools that use them.</description>
+
+	<properties>
+		<fyrql.module.name>net.fyrql.pgwire</fyrql.module.name>
+	</properties>
+
+	<!-- The protocol, TLS and SCRAM come from the JDK; the server needs no library of its own. -->
+	<dependencies>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-config</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-engine</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-spi</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-core</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-memory</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-jdbc</artifactId>
+			<type>test-jar</type>
+			<scope>test</scope>
+		</dependency>
+		<!-- COPY to a file. -->
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-csv</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- A database with several schemas, for the search path and the catalogs. -->
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-jdbc</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- The functions of the server compiled as well as interpreted. -->
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-codegen</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<resources>
+			<!-- The version of the server, which it reports to its clients. -->
+			<resource>
+				<directory>src/main/resources</directory>
+				<filtering>true</filtering>
+			</resource>
+		</resources>
+	</build>
+</project>

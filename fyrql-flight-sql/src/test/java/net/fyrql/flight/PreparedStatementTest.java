@@ -218,10 +218,8 @@ class PreparedStatementTest {
                 assertEquals(List.of(List.of(1)), TestServer.comparable(run(p, good)));
             }
         }
-        TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "The type of parameter 1 cannot be inferred",
-                () -> client.prepare("SELECT ?"));
         TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "Not supported: a parameter in LIMIT or OFFSET",
-                () -> client.prepare("SELECT k FROM tiny LIMIT ?"));
+                () -> client.prepare("SELECT k FROM tiny LIMIT ? + 1"));
         try (FlightSqlClient.PreparedStatement p = client.prepare("SELECT k FROM tiny")) {
             TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "A query returns rows, not a number of rows written",
                     p::executeUpdate);

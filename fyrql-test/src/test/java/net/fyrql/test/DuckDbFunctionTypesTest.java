@@ -56,13 +56,21 @@ class DuckDbFunctionTypesTest {
      * engines take for a constant count only, FyrQL in
      * {@code ScalarFunction.specialize}, which a probe of types does not
      * reach; and {@code age(x)} of one argument, which the binder turns
-     * into {@code age} of the midnight of the current date and the argument.
+     * into {@code age} of the midnight of the current date and the argument;
+     * the functions of regular expressions with options or a group that are
+     * columns, which both engines reject, FyrQL in {@code specialize}; and
+     * {@code list_concat()} and its aliases without arguments, a {@code NULL}
+     * in DuckDB.
      */
     private static boolean known(String call) {
         return call.startsWith("trunc(") && call.contains(",")
                 || call.startsWith("strftime(") || call.startsWith("strptime(") || call.startsWith("try_strptime(")
                 || call.startsWith("round(c7, ") || call.startsWith("round(c8, ")
-                || call.startsWith("age(") && !call.contains(",");
+                || call.startsWith("age(") && !call.contains(",")
+                || call.equals("regexp_matches(c9, c9, c9)") || call.equals("regexp_full_match(c9, c9, c9)")
+                || call.equals("regexp_extract(c9, c9, c2)")
+                || call.equals("list_concat()") || call.equals("list_cat()") || call.equals("array_concat()")
+                || call.equals("array_cat()");
     }
 
     @Test

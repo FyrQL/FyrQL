@@ -86,6 +86,14 @@ public final class Executor {
     }
 
     /**
+     * Returns an executor that reads the tables from another source, with
+     * the budget, the threads and the directory to spill to of this one.
+     */
+    public Executor withSource(TableSource source) {
+        return new Executor(source, budget, batchSize, codegen, threads, preserveOrder, spill);
+    }
+
+    /**
      * An executor whose operators do not spill.
      *
      * @param threads       the most threads on which one query runs at a time

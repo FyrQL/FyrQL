@@ -170,9 +170,14 @@ class PreparedQueryTest {
     void aQueryWithParametersNeedsPrepareAndTypesForThem() {
         SqlException e = assertThrows(SqlException.class, () -> engine.plan("SELECT 1 + ?"));
         assertEquals("Not supported: parameters outside a prepared query", e.reason());
-        e = assertThrows(SqlException.class, () -> engine.prepare("SELECT 1, ?"));
-        assertEquals("The type of parameter 1 cannot be inferred; write CAST(? AS type)", e.reason());
-        assertEquals(11, e.position().column());
+        // Without a context a parameter is a VARCHAR, as a text in PostgreSQL.
+        assertEquals(List.of(DataType.VARCHAR), engine.prepare("SELECT 1, ?").parameterTypes());
+        assertEquals(List.of(1, "x"), Arrays.asList(engine.rows(engine.prepare("SELECT 1, ?"), List.of("x")).get(0)));
+        PreparedQuery limit = engine.prepare("SELECT x FROM (VALUES (1), (2), (3)) t(x) ORDER BY x LIMIT $1 OFFSET $2");
+        assertEquals(List.of(DataType.BIGINT, DataType.BIGINT), limit.parameterTypes());
+        assertEquals(List.of(List.of(2)), engine.rows(limit, List.of(1L, 1L)).stream().map(Arrays::asList).toList());
+        PreparedQuery twice = engine.prepare("SELECT $1 + 1, $1 * 2");
+        assertEquals(List.of(4, 6), Arrays.asList(engine.rows(twice, List.of(3)).get(0)));
         e = assertThrows(SqlException.class, () -> engine.prepare(
                 "SELECT m = ? FROM (SELECT map(['a'], [1]) AS m) t"));
         assertTrue(e.reason().startsWith("Not supported: parameter 1 of the type MAP(VARCHAR, INTEGER)"),

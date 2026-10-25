@@ -68,7 +68,7 @@ final class EngineConfigs {
         }
         Map<String, String> settings = new LinkedHashMap<>(file.settings());
         settings.putAll(properties.getEngine().settings());
-        return new EngineConfig(sources, settings, file.server(), file.directory());
+        return new EngineConfig(sources, settings, file.server(), file.pgwire(), file.directory());
     }
 
     /** Returns a source of a map with its name, its type and its options, whose lists are joined by commas. */

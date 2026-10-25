@@ -22,8 +22,10 @@ import net.fyrql.sql.ast.Statement;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -136,7 +138,7 @@ public final class Binder {
      * Binds a query with parameters at the current time, see
      * {@link #prepare(Query, List, Instant, ZoneId)}.
      *
-     * @throws SqlException if the query does not bind, or the type of a parameter cannot be inferred
+     * @throws SqlException if the query does not bind, or a parameter would have two types
      */
     public Prepared prepare(Query query, List<SqlExpr.Parameter> parameters) {
         return prepare(query, parameters, Instant.now(), zone.get());
@@ -154,20 +156,19 @@ public final class Binder {
      * type, the query is bound once more with the types from the start,
      * which gives the plan: so the query binds to the types it binds to
      * with any value. A parameter that only a bare {@code NULL} would stand
-     * in for, such as {@code SELECT ?}, has no type, which is an error. A
-     * parameter in a place that needs a constant, such as {@code LIMIT}, is
-     * not supported.
+     * in for, such as {@code SELECT ?}, is a {@code VARCHAR}. A parameter
+     * by itself in {@code LIMIT} or {@code OFFSET} is a {@code BIGINT}; in
+     * another place that needs a constant it is not supported.
      *
      * @param parameters the parameters of the query, the one numbered
      *        {@code n} at index {@code n - 1}
-     * @throws SqlException if the query does not bind, or the type of a parameter cannot be inferred
+     * @throws SqlException if the query does not bind, or a parameter would have two types
      */
     public Prepared prepare(Query query, List<SqlExpr.Parameter> parameters, Instant now, ZoneId zone) {
         ParameterTypes types = ParameterTypes.inferred();
         new QueryBinder(catalog, context(now, zone, types)).query(query);
         List<DataType> result = parameterTypes(types, parameters);
-        PlanNode plan = new QueryBinder(catalog, context(now, zone, ParameterTypes.fixed(types.types())))
-                .query(query);
+        PlanNode plan = new QueryBinder(catalog, context(now, zone, fixed(parameters, result))).query(query);
         return new Prepared(ZoneBinding.plan(plan, zone), result);
     }
 
@@ -210,7 +211,7 @@ public final class Binder {
      * Binds a statement with parameters at the current time, see
      * {@link #prepare(Statement, List, Instant, ZoneId)}.
      *
-     * @throws SqlException if the statement does not bind, or the type of a parameter cannot be inferred
+     * @throws SqlException if the statement does not bind, or a parameter would have two types
      */
     public PreparedStatement prepare(Statement statement, List<SqlExpr.Parameter> parameters) {
         return prepare(statement, parameters, Instant.now(), zone.get());
@@ -222,30 +223,39 @@ public final class Binder {
      * {@code VALUES} of an {@code INSERT}, a parameter takes the type of
      * the column its value goes to.
      *
-     * @throws SqlException if the statement does not bind, or the type of a parameter cannot be inferred
+     * @throws SqlException if the statement does not bind, or a parameter would have two types
      */
     public PreparedStatement prepare(Statement statement, List<SqlExpr.Parameter> parameters, Instant now,
             ZoneId zone) {
         ParameterTypes types = ParameterTypes.inferred();
         new StatementBinder(catalog, context(now, zone, types)).statement(statement);
         List<DataType> result = parameterTypes(types, parameters);
-        BoundStatement bound = new StatementBinder(catalog, context(now, zone,
-                ParameterTypes.fixed(types.types()))).statement(statement);
+        BoundStatement bound = new StatementBinder(catalog, context(now, zone, fixed(parameters, result)))
+                .statement(statement);
         return new PreparedStatement(ZoneBinding.statement(bound, zone), result);
     }
 
-    /** Returns the types the first binding found for the parameters, in their order. */
+    /**
+     * Returns the types the first binding found for the parameters, in their
+     * order; a parameter without a type is a {@code VARCHAR}, as a parameter
+     * of PostgreSQL without a type is a {@code text}.
+     */
     private static List<DataType> parameterTypes(ParameterTypes types, List<SqlExpr.Parameter> parameters) {
         List<DataType> result = new ArrayList<>();
         for (SqlExpr.Parameter p : parameters) {
             DataType type = types.type(p.index());
-            if (type == null) {
-                throw new SqlException("The type of parameter " + p.index() + " cannot be inferred; write CAST(? AS"
-                        + " type)", p.position());
-            }
-            result.add(type);
+            result.add(type != null ? type : DataType.VARCHAR);
         }
         return result;
+    }
+
+    /** Returns the types of the parameters for the second binding, by number. */
+    private static ParameterTypes fixed(List<SqlExpr.Parameter> parameters, List<DataType> types) {
+        Map<Integer, DataType> byIndex = new HashMap<>();
+        for (int i = 0; i < parameters.size(); i++) {
+            byIndex.put(parameters.get(i).index(), types.get(i));
+        }
+        return ParameterTypes.fixed(byIndex);
     }
 
     private BindContext context(Instant now, ZoneId zone, ParameterTypes parameters) {

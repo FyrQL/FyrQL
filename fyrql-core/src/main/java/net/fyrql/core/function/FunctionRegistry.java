@@ -65,4 +65,16 @@ public final class FunctionRegistry {
     public List<String> names() {
         return List.copyOf(functions.keySet());
     }
+
+    /**
+     * Returns a new registry with the functions of this one, in the same
+     * order; functions registered in either later are not in the other.
+     */
+    public FunctionRegistry copy() {
+        FunctionRegistry r = new FunctionRegistry();
+        for (Map.Entry<String, List<ScalarFunction>> e : functions.entrySet()) {
+            r.functions.put(e.getKey(), new ArrayList<>(e.getValue()));
+        }
+        return r;
+    }
 }

@@ -160,16 +160,45 @@ class BinderParameterTest {
     }
 
     @Test
-    void aParameterWithoutAContextOrWhereAConstantIsNeededIsAnError() {
+    void aParameterWithoutAContextIsAVarcharAndOneInLimitOrOffsetABigint() {
+        // As PostgreSQL takes a parameter without a type as a text.
+        Map<String, List<String>> cases = Map.ofEntries(
+                Map.entry("SELECT ?", List.of("VARCHAR")),
+                Map.entry("SELECT a FROM t WHERE a = ? AND ? IS NULL", List.of("INTEGER", "VARCHAR")),
+                Map.entry("SELECT a FROM t UNION SELECT ?", List.of("VARCHAR")),
+                Map.entry("SELECT a FROM t LIMIT ?", List.of("BIGINT")),
+                Map.entry("SELECT a FROM t ORDER BY a LIMIT ? OFFSET ?", List.of("BIGINT", "BIGINT")),
+                Map.entry("SELECT a FROM t WHERE b = ? OFFSET ?", List.of("VARCHAR", "BIGINT")));
+        for (Map.Entry<String, List<String>> c : cases.entrySet()) {
+            assertEquals(c.getValue(), types(c.getKey()), c.getKey());
+        }
+        assertEquals(List.of(DataType.VARCHAR), prepare("SELECT ?").plan().schema().types());
+        // The limit of the prepared plan, which does not run, is open; with a value it is bound anew.
+        assertEquals(List.of(DataType.INTEGER), prepare("SELECT a FROM t LIMIT ?").plan().schema().types());
+    }
+
+    @Test
+    void aNumberedParameterMayStandMoreThanOnce() {
+        assertEquals(List.of("INTEGER"), types("SELECT a FROM t WHERE a = $1 OR a > $1 + 1"));
+        assertEquals(List.of("VARCHAR", "INTEGER"), types("SELECT $2 + 1 AS x FROM t WHERE b = $1"));
+        assertEquals(List.of("VARCHAR"), types("SELECT $1"));
+        assertEquals(List.of("BIGINT"), types("SELECT a FROM t LIMIT $1"));
+        Map<String, String> errors = Map.of(
+                "SELECT a FROM t WHERE a = $2",
+                "The statement has no parameter $1; number the parameters from $1 without a gap@1:27",
+                "SELECT a FROM t WHERE a = $1 AND b = ?", "Not supported: parameters ? and $n in one statement@1:38",
+                "SELECT a FROM t WHERE a = $1 AND b = $1", "Parameter 1 would be a INTEGER in one place and a VARCHAR"
+                        + " in another; write CAST(? AS type)@1:38");
+        for (Map.Entry<String, String> c : errors.entrySet()) {
+            SqlException e = error(c.getKey());
+            assertEquals(c.getValue(), e.reason() + "@" + e.position().line() + ":" + e.position().column(),
+                    c.getKey());
+        }
+    }
+
+    @Test
+    void aParameterWhereAConstantIsNeededIsAnError() {
         Map<String, String> cases = Map.ofEntries(
-                Map.entry("SELECT ?", "The type of parameter 1 cannot be inferred; write CAST(? AS type)@1:8"),
-                Map.entry("SELECT a FROM t WHERE a = ? AND ? IS NULL",
-                        "The type of parameter 2 cannot be inferred; write CAST(? AS type)@1:33"),
-                Map.entry("SELECT a FROM t UNION SELECT ?",
-                        "The type of parameter 1 cannot be inferred; write CAST(? AS type)@1:30"),
-                Map.entry("SELECT coalesce(?, ?) = a FROM t",
-                        "The type of parameter 1 cannot be inferred; write CAST(? AS type)@1:17"),
-                Map.entry("SELECT a FROM t LIMIT ?", "Not supported: a parameter in LIMIT or OFFSET@1:23"),
                 Map.entry("SELECT a FROM t OFFSET 1 + ?", "Not supported: a parameter in LIMIT or OFFSET@1:28"),
                 Map.entry("SELECT a FROM t ORDER BY ?", "Not supported: a parameter as a term of ORDER BY@1:26"),
                 Map.entry("SELECT b, count(*) FROM t GROUP BY ?",

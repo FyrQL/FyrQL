@@ -11,14 +11,6 @@
 
 package net.fyrql.jdbc;
 
-import net.fyrql.connector.FileAccessException;
-import net.fyrql.core.value.ConversionException;
-import net.fyrql.exec.QueryCancelledException;
-import net.fyrql.exec.QueryContext;
-import net.fyrql.exec.QueryException;
-import net.fyrql.sql.SqlException;
-
-import java.io.UncheckedIOException;
 import java.sql.SQLDataException;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
@@ -26,7 +18,6 @@ import java.sql.SQLIntegrityConstraintViolationException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLSyntaxErrorException;
 import java.sql.SQLTimeoutException;
-import java.util.Set;
 
 /**
  * The SQLStates of the driver and the exceptions that carry them. The
@@ -98,10 +89,6 @@ final class SqlStates {
     /** The query ran longer than its timeout. */
     static final String TIMEOUT = "HYT00";
 
-    /** The exceptions of the connectors for a failing source, by name: the driver does not depend on them. */
-    private static final Set<String> SOURCE_EXCEPTIONS = Set.of("net.fyrql.connector.jdbc.JdbcSourceException",
-            "net.fyrql.connector.http.HttpSourceException");
-
     private SqlStates() {
     }
 
@@ -160,79 +147,21 @@ final class SqlStates {
         return create(message, state(e), e);
     }
 
-    /** Returns the state of an error of the engine, see {@link #map}. */
+    /**
+     * Returns the state of an error of the engine, see {@link #map}: that of
+     * {@link net.fyrql.SqlStates#state}, but {@code HYT00} after a timeout
+     * and {@code HY000} for any other error, as JDBC has them.
+     */
     static String state(Throwable e) {
-        for (Throwable t = e; t != null && t.getCause() != t; t = t.getCause()) {
-            if (t instanceof QueryCancelledException c) {
-                return c.reason() == QueryContext.Reason.TIMEOUT ? TIMEOUT : QUERY_CANCELED;
-            }
-            if (t instanceof FileAccessException
-                    || t instanceof SqlException && t.getCause() instanceof FileAccessException) {
-                return INSUFFICIENT_PRIVILEGE;
-            }
-            if (t instanceof SqlException s) {
-                return stateOf(s.reason());
-            }
-            if (t instanceof ArithmeticException) {
-                return String.valueOf(t.getMessage()).contains("by zero") ? DIVISION_BY_ZERO : NUMERIC_OUT_OF_RANGE;
-            }
-            if (t instanceof ConversionException) {
-                return INVALID_CAST;
-            }
-            if (t instanceof UncheckedIOException || SOURCE_EXCEPTIONS.contains(t.getClass().getName())) {
-                return IO_ERROR;
-            }
-            if (t instanceof QueryException && String.valueOf(t.getMessage()).startsWith("Memory budget")) {
-                return OUT_OF_MEMORY;
-            }
+        String state = net.fyrql.SqlStates.state(e);
+        if (state.equals(net.fyrql.SqlStates.INTERNAL_ERROR)) {
+            return GENERAL;
         }
-        return GENERAL;
+        return net.fyrql.SqlStates.timedOut(e) ? TIMEOUT : state;
     }
 
     /** Returns the state of a query that cannot be parsed or bound, by the reason FyrQL gives. */
     static String stateOf(String reason) {
-        String r = reason == null ? "" : reason;
-        if (r.startsWith("Syntax error") || r.startsWith("Unterminated") || r.equals("Empty query")
-                || r.startsWith("Only one statement")) {
-            return SYNTAX_ERROR;
-        }
-        if (r.startsWith("Query is nested too deeply")) {
-            return STATEMENT_TOO_COMPLEX;
-        }
-        if (r.startsWith("Table with name") && r.endsWith(" already exists")) {
-            return DUPLICATE_TABLE;
-        }
-        if (r.startsWith("NOT NULL constraint failed")) {
-            return NOT_NULL_VIOLATION;
-        }
-        if (r.startsWith("Table with name") || r.startsWith("No source ") || r.startsWith("Table function with name")
-                || r.startsWith("Referenced table")) {
-            return UNDEFINED_TABLE;
-        }
-        if (r.startsWith("Ambiguous reference to table") || r.startsWith("Table name ") && r.contains(" is ambiguous")) {
-            return AMBIGUOUS_TABLE;
-        }
-        if (r.startsWith("Ambiguous reference to column")) {
-            return AMBIGUOUS_COLUMN;
-        }
-        if (r.startsWith("column \"") && r.contains("must appear in the GROUP BY")
-                || r.startsWith("Cannot mix aggregates")) {
-            return GROUPING_ERROR;
-        }
-        if (r.startsWith("Referenced column") || r.startsWith("Column \"")) {
-            return UNDEFINED_COLUMN;
-        }
-        if (r.startsWith("Function with name") || r.startsWith("No function matches")
-                || r.startsWith("Wrong number of arguments") || r.startsWith("No operator")) {
-            return UNDEFINED_FUNCTION;
-        }
-        if (r.startsWith("Cannot cast") || r.startsWith("Could not convert") || r.startsWith("Invalid number")) {
-            return INVALID_CAST;
-        }
-        if (r.startsWith("Not supported") || r.startsWith("Only queries")
-                || r.contains("not supported")) {
-            return FEATURE_NOT_SUPPORTED;
-        }
-        return SYNTAX_ERROR_OR_ACCESS_RULE;
+        return net.fyrql.SqlStates.stateOf(reason);
     }
 }

@@ -58,6 +58,36 @@ class SqlParserTest {
         return assertThrows(SqlException.class, () -> SqlParser.parse(sql), sql);
     }
 
+    /** The text of the string literal that a query selects first. */
+    private static String string(String sql) {
+        SqlExpr.Literal l = assertInstanceOf(SqlExpr.Literal.class, items(sql).get(0));
+        assertEquals(LiteralKind.STRING, l.kind());
+        return l.text();
+    }
+
+    @Test
+    void formsOfPostgreSqlThatDuckDbTakesToo() {
+        // Strings with escapes after a backslash.
+        assertEquals("a\nb", string("SELECT E'a\\nb'"));
+        assertEquals("\t", string("SELECT e'\\t'"));
+        assertEquals("AAB", string("SELECT E'\\x41\\101\\u0042'"));
+        assertEquals("it's a \\ q", string("SELECT E'it''s a \\\\ \\q'"));
+        assertEquals("\uD83D\uDE00", string("SELECT E'\\U0001F600'"));
+        // Numbered parameters, each one once in the list.
+        SqlParser.Parameterized p = SqlParser.parseWithParameters("SELECT $1, $2 + $1 FROM t WHERE a = $2");
+        assertEquals(List.of(1, 2), p.parameters().stream().map(SqlExpr.Parameter::index).toList());
+        // The schema main of the functions of DuckDB.
+        SqlExpr.FunctionCall lower = assertInstanceOf(SqlExpr.FunctionCall.class,
+                items("SELECT main.lower('A')").get(0));
+        assertEquals("lower", lower.name());
+        // ~ matches the whole string, as in DuckDB.
+        List<SqlExpr> match = items("SELECT a ~ 'x', a !~ 'y' FROM t");
+        assertEquals("regexp_full_match", assertInstanceOf(SqlExpr.FunctionCall.class, match.get(0)).name());
+        SqlExpr.Unary not = assertInstanceOf(SqlExpr.Unary.class, match.get(1));
+        assertEquals(SqlExpr.UnaryOp.NOT, not.op());
+        assertEquals("regexp_full_match", assertInstanceOf(SqlExpr.FunctionCall.class, not.operand()).name());
+    }
+
     @Test
     void selectClauses() {
         assertEquals("SELECT DISTINCT a, (b + 1) AS c FROM t WHERE (a > 1) GROUP BY a, (b + 1) HAVING (count(*) > 2)"
@@ -333,7 +363,7 @@ class SqlParserTest {
         assertEquals("SELECT (? + a), '?' AS \"?\" FROM t WHERE ((b = ?) AND (c IN (SELECT ? FROM u))) LIMIT 1",
                 SqlPrinter.print(parsed.query()));
         assertEquals(List.of(), SqlParser.parseWithParameters("SELECT 1").parameters());
-        for (String named : List.of("SELECT :x", "SELECT ?1", "SELECT $1")) {
+        for (String named : List.of("SELECT :x", "SELECT ?1")) {
             SqlException e = assertThrows(SqlException.class, () -> SqlParser.parseWithParameters(named), named);
             assertTrue(e.reason().startsWith("Not supported: ") && e.reason().endsWith(" parameters")
                     || e.reason().startsWith("Syntax error"), named + ": " + e.reason());
@@ -505,7 +535,11 @@ class SqlParserTest {
                 Map.entry("SELECT x = ?", "Not supported: parameters outside a prepared query@1:12"),
                 Map.entry("SELECT (1, 2)", "Not supported: row values@1:8"),
                 Map.entry("SELECT * EXCEPT (a) FROM t", "Not supported: * EXCEPT@1:8"),
-                Map.entry("SELECT E'a'", "Not supported: a string with a prefix@1:8"),
+                Map.entry("SELECT N'a'", "Not supported: a string with a prefix@1:8"),
+                Map.entry("SELECT pg_catalog.lower('A')", "Not supported: qualified function names@1:8"),
+                Map.entry("SELECT a ~* 'x'", "Not supported: the operator ~*@1:8"),
+                Map.entry("SELECT E'\\u12'", "Invalid Unicode escape: \\u12@1:8"),
+                Map.entry("SELECT E'\\0'", "Invalid escape: a string cannot hold the character 0@1:8"),
                 Map.entry("SELECT 1 LIMIT 2, 3", "Not supported: LIMIT with an offset before the count@1:10"),
                 Map.entry("SELECT a.b(1)", "Not supported: qualified function names@1:8"),
                 Map.entry("FROM t", "Not supported: FROM QUERY@1:1"),

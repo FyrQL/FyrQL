@@ -217,7 +217,7 @@ final class FyrQLConnection implements Connection {
     /**
      * Prepares a query with parameters without running it and returns the
      * types of its parameters, or {@code null} if the engine cannot prepare
-     * it, e.g. for {@code SELECT ?}; for {@code EXPLAIN}, those of its statement
+     * it, e.g. for {@code ORDER BY ?}; for {@code EXPLAIN}, those of its statement
      * of the query.
      */
     List<DataType> parameterTypes(String sql) throws SQLException {
@@ -237,7 +237,7 @@ final class FyrQLConnection implements Connection {
     /**
      * Prepares a query with parameters without running it and returns the
      * columns of its result, or {@code null} for a statement that writes and
-     * if the engine cannot prepare it, e.g. for {@code SELECT ?};
+     * if the engine cannot prepare it, e.g. for {@code ORDER BY ?};
      * {@code EXPLAIN} has the column {@code plan}.
      */
     Schema preparedColumns(String sql) throws SQLException {

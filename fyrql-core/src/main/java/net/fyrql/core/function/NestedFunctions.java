@@ -20,6 +20,7 @@ import net.fyrql.core.type.TypeRules;
 import net.fyrql.core.value.ConversionException;
 import net.fyrql.core.value.Order;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -49,7 +50,9 @@ final class NestedFunctions {
                 CONTAINS.alias("list_has"), CONTAINS.alias("array_contains"), CONTAINS.alias("array_has"),
                 sort("list_sort", false), sort("array_sort", false), sort("list_reverse_sort", true),
                 sort("array_reverse_sort", true), MAP, MAP_EXTRACT, MAP_EXTRACT.alias("element_at"),
-                MAP_EXTRACT_VALUE);
+                MAP_EXTRACT_VALUE, series("generate_series", true), series("range", false), ARRAY_TO_STRING,
+                CONCAT_OPERATOR, LIST_CONCAT, LIST_CONCAT.alias("list_cat"), LIST_CONCAT.alias("array_concat"),
+                LIST_CONCAT.alias("array_cat"));
     }
 
     /** The common type of the element of a list and a value, or {@code null} if they have none. */
@@ -360,6 +363,152 @@ final class NestedFunctions {
         public Object evaluate(List<DataType> types, Object[] args) {
             Object[] value = new Object[1];
             return findKey((Map<?, ?>) args[0], args[1], types.get(1), value) ? value[0] : null;
+        }
+    };
+
+    /**
+     * {@code generate_series(start, stop [, step])} and
+     * {@code range(start, stop [, step])}: the list of {@code BIGINT}s from
+     * {@code start} in steps of {@code step} (by default 1), up to
+     * {@code stop} for {@code generate_series} and short of it for
+     * {@code range}; with one argument from 0 to it. A step of 0, or one
+     * that leads away from {@code stop}, gives the empty list. Over dates and
+     * timestamps they are not supported.
+     */
+    private static SimpleFunction series(String name, boolean inclusive) {
+        return new SimpleFunction(name, types -> {
+            if (types.isEmpty() || types.size() > 3) {
+                return null;
+            }
+            for (DataType t : types) {
+                if (!SimpleFunction.isInt64(t)) {
+                    return null;
+                }
+            }
+            return DataType.listOf(DataType.BIGINT);
+        }, SimpleFunction.allTo(DataType.BIGINT)) {
+            @Override
+            public Object evaluate(List<DataType> types, Object[] args) {
+                long start = args.length == 1 ? 0 : (Long) args[0];
+                long stop = args.length == 1 ? (Long) args[0] : (Long) args[1];
+                long step = args.length == 3 ? (Long) args[2] : 1;
+                List<Object> result = new ArrayList<>();
+                if (step == 0) {
+                    return result;
+                }
+                // The count in exact arithmetic, as the bounds may lie far apart.
+                BigInteger span = BigInteger.valueOf(stop).subtract(BigInteger.valueOf(start));
+                if (span.signum() != 0 && span.signum() != Long.signum(step)) {
+                    return result;
+                }
+                BigInteger[] steps = span.abs().divideAndRemainder(BigInteger.valueOf(step).abs());
+                BigInteger values = inclusive || steps[1].signum() != 0 ? steps[0].add(BigInteger.ONE) : steps[0];
+                if (values.compareTo(BigInteger.valueOf(MAX_SERIES)) > 0) {
+                    throw new ArithmeticException(name + " would give more than " + MAX_SERIES + " values");
+                }
+                long count = values.longValue();
+                long v = start;
+                for (long i = 0; i < count; i++) {
+                    result.add(v);
+                    v += step;
+                }
+                return result;
+            }
+        };
+    }
+
+    /** The common type of the elements of lists, or {@code null} if one is no list or they have none. */
+    private static DataType commonElement(List<DataType> types) {
+        List<DataType> elements = new ArrayList<>();
+        for (DataType t : types) {
+            if (!(t instanceof ListType l)) {
+                return null;
+            }
+            elements.add(l.element());
+        }
+        try {
+            return TypeRules.common(elements);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static List<Object> concat(Object[] lists) {
+        List<Object> result = new ArrayList<>();
+        for (Object l : lists) {
+            if (l != null) {
+                result.addAll((List<?>) l);
+            }
+        }
+        return result;
+    }
+
+    /** {@code list || list}: the elements of both in their common type; {@code NULL} if either is. */
+    static final SimpleFunction CONCAT_OPERATOR = new SimpleFunction("||", types -> {
+        DataType element = types.size() == 2 ? commonElement(types) : null;
+        return element == null ? null : DataType.listOf(element);
+    }, types -> SimpleFunction.allTo(DataType.listOf(commonElement(types))).apply(types)) {
+        @Override
+        public Object evaluate(List<DataType> types, Object[] args) {
+            return concat(args);
+        }
+    };
+
+    /**
+     * {@code list_concat(list, ...)}, also {@code list_cat}, {@code array_concat}
+     * and {@code array_cat}: the elements of all lists in their common type,
+     * where a {@code NULL} counts as an empty list.
+     */
+    static final SimpleFunction LIST_CONCAT = new SimpleFunction("list_concat", types -> {
+        DataType element = types.isEmpty() ? null : commonElement(types);
+        return element == null ? null : DataType.listOf(element);
+    }, types -> SimpleFunction.allTo(DataType.listOf(commonElement(types))).apply(types)) {
+        @Override
+        public boolean nullOnNullInput() {
+            return false;
+        }
+
+        @Override
+        public Object evaluate(List<DataType> types, Object[] args) {
+            return concat(args);
+        }
+    };
+
+    /** The most values a series gives, below the size of the largest array of Java. */
+    private static final long MAX_SERIES = Integer.MAX_VALUE - 16;
+
+    /**
+     * {@code array_to_string(list, separator)}: the elements in their text
+     * form between separators, without the {@code NULL}s; a {@code NULL}
+     * separator is a comma, as in DuckDB.
+     */
+    static final SimpleFunction ARRAY_TO_STRING = new SimpleFunction("array_to_string",
+            types -> types.size() == 2 && types.get(0) instanceof ListType l && !l.element().isNested()
+                    && types.get(1) == DataType.VARCHAR ? DataType.VARCHAR : null,
+            types -> List.of(DataType.listOf(DataType.VARCHAR), DataType.VARCHAR)) {
+        @Override
+        public boolean nullOnNullInput() {
+            return false;
+        }
+
+        @Override
+        public Object evaluate(List<DataType> types, Object[] args) {
+            if (args[0] == null) {
+                return null;
+            }
+            String separator = args[1] == null ? "," : (String) args[1];
+            StringBuilder b = new StringBuilder();
+            boolean first = true;
+            for (Object e : (List<?>) args[0]) {
+                if (e != null) {
+                    if (!first) {
+                        b.append(separator);
+                    }
+                    b.append((String) e);
+                    first = false;
+                }
+            }
+            return b.toString();
         }
     };
 }

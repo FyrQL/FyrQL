@@ -42,7 +42,8 @@ class ThirdPartyListsTest {
             "fyrql-config", List.of(),
             "fyrql-connector-parquet", List.of(),
             "fyrql-jdbc-all", List.of("fyrql-codegen", "fyrql-config", "fyrql-connector-parquet"),
-            "fyrql-flight-sql-all", List.of("fyrql-codegen", "fyrql-config", "fyrql-connector-parquet"));
+            "fyrql-flight-sql-all", List.of("fyrql-codegen", "fyrql-config", "fyrql-connector-parquet"),
+            "fyrql-pgwire-all", List.of("fyrql-codegen", "fyrql-config", "fyrql-connector-parquet"));
 
     /** The start of the entry of each group of artifacts, for the group itself and the groups below it. */
     private static final Map<String, String> ENTRIES = Map.ofEntries(

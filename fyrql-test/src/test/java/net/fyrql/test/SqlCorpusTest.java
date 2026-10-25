@@ -87,6 +87,25 @@ public class SqlCorpusTest {
             "SELECT a, b = 1 FROM t WHERE b IS NULL",
             "SELECT a || b, b || 1, d || '', upper(b) || lower(b), concat(a, b, NULL), 'a' || NULL FROM t",
             "SELECT length(b), substring(b, 1, 1), replace(b, 'x', 'q'), strpos(b, 'y'), trim('  a  ') FROM t",
+            // Regular expressions, series, lists as text and strings with escapes, as PostgreSQL clients send them
+            "SELECT b, regexp_matches(b, '[xy]'), regexp_full_match(b, 'x'), b ~ '[a-z]', b !~ 'x',"
+                    + " regexp_matches(b, 'z', 'i'), regexp_matches(b, '.', 'l'), regexp_full_match(b, 'X', 'ci')"
+                    + " FROM t",
+            "SELECT regexp_replace(b, '([xy])', '<\\1\\0>'), regexp_replace('aaa', 'a*', 'X', 'g'),"
+                    + " regexp_replace('abc', '', '-', 'g'), regexp_replace('a.b.c', '.', '!', 'gl'),"
+                    + " regexp_replace('abcabc', 'b', 'X'), regexp_extract(b, '[a-z]'),"
+                    + " regexp_extract('abc', '(a)(b)', 2), regexp_extract('abc', 'x'),"
+                    + " regexp_extract('ABC', 'b', 0, 'i')"
+                    + " FROM t",
+            "SELECT generate_series(1, 3), range(1, 3), generate_series(3), range(0), generate_series(5, 1, -2),"
+                    + " range(5, 1, -2), generate_series(1, 3, 0), range(1, 9, 3), generate_series(a, 3) FROM t",
+            "SELECT array_to_string([1, 2, NULL, 3], ','), array_to_string(['a', 'b'], '-'), array_to_string([], ','),"
+                    + " array_to_string([1.5, 2.0], NULL), array_to_string([true, false], ''),"
+                    + " array_to_string([DATE '2024-01-02'], ',')",
+            "SELECT E'a\\nb', E'it''s', E'\\\\', E'\\x41\\101', length(e'\\t'), main.lower('A'), main.upper(b) FROM t",
+            "SELECT [1, 2] || [3], [1] || [2.5], ['a'] || ['b', NULL], [] || [1], [1] || CAST(NULL AS INTEGER[]),"
+                    + " list_concat([1], CAST(NULL AS INTEGER[])), list_concat([1], [2], [3]), array_cat([a], [e]),"
+                    + " list_concat([a]), list_cat(CAST(NULL AS INTEGER[])) FROM t",
             "SELECT d + 1, d - 1, d - DATE '2024-01-01', year(d), month(d), day(d), date_part('year', d),"
                     + " date_part('epoch', d), extract(month FROM d), date_trunc('month', d),"
                     + " strftime(d, '%Y/%m/%d') FROM t",
@@ -643,6 +662,11 @@ public class SqlCorpusTest {
             Map.entry("SELECT map(['a'], [1, 2])", "The map key list does not align with the map value list."),
             Map.entry("SELECT list_sort([1], 'UP')", "Unrecognized sort order \"UP\""),
             Map.entry("SELECT list_sort(l, b) FROM (SELECT [1] AS l, 'ASC' AS b)", "Sorting order must be a constant"),
+            Map.entry("SELECT regexp_matches(b, 'a', b) FROM t",
+                    "The options of a regular expression must be a constant"),
+            Map.entry("SELECT regexp_extract(b, '(a)', a) FROM t",
+                    "The group of a regular expression must be a constant"),
+            Map.entry("SELECT regexp_matches(b, 'a', 'x') FROM t", "Unrecognized Regex option x"),
             Map.entry("SELECT CAST({'a': 1} AS STRUCT(b INTEGER))",
                     "Cannot cast STRUCT(a INTEGER) to STRUCT(b INTEGER)"),
             Map.entry("SELECT CAST(x AS STRUCT(a INTEGER, A VARCHAR)) FROM (SELECT 1 AS x)",

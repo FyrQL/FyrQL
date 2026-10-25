@@ -13,6 +13,8 @@ package net.fyrql;
 
 import net.fyrql.catalog.EngineCatalog;
 import net.fyrql.catalog.SearchPath;
+import net.fyrql.connector.Connector;
+import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.value.ZonedDates;
@@ -28,6 +30,7 @@ import net.fyrql.sql.parse.SqlParser;
 
 import java.time.Duration;
 import java.time.ZoneId;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -76,6 +79,10 @@ public final class Session {
     /** The timeout of a statement that asks for none, {@code null} for none. */
     private volatile Duration timeout;
     private volatile Names names;
+    /** The sources that only this session sees, after those of the engine; see {@link Overlay}. */
+    private final Map<String, Connector> overlay;
+    private final FunctionRegistry functions;
+    private final FyrQL.Execution execution;
 
     /** The catalog of the search path of the session and the binder over it. */
     private record Names(EngineCatalog catalog, Binder binder) {
@@ -91,20 +98,51 @@ public final class Session {
         this.engine = engine;
         this.zone = zone;
         this.timeout = timeout;
+        this.overlay = Map.of();
+        this.functions = engine.functions();
+        this.execution = engine.execution();
         this.names = names(catalog);
     }
 
     /** A session of an engine with a search path, see {@link FyrQL#newSession()}. */
     Session(FyrQL engine, ZoneId zone, Duration timeout, SearchPath searchPath) {
+        this(engine, zone, timeout, searchPath, Map.of(), engine.functions());
+    }
+
+    /**
+     * A session of an engine with a search path, more sources and its own
+     * functions, see {@link Overlay#newSession}.
+     */
+    Session(FyrQL engine, ZoneId zone, Duration timeout, SearchPath searchPath, Map<String, Connector> overlay,
+            FunctionRegistry functions) {
         this.engine = engine;
         this.zone = zone;
         this.timeout = timeout;
-        this.names = names(engine.catalog().withSession(searchPath, this::timeZone));
+        this.overlay = Collections.unmodifiableMap(new LinkedHashMap<>(overlay));
+        this.functions = functions;
+        this.execution = this.overlay.isEmpty() ? engine.execution() : engine.execution(this::connector);
+        EngineCatalog catalog = engine.catalog().withSession(searchPath, this::timeZone);
+        this.names = names(this.overlay.isEmpty() ? catalog : catalog.withSources(this.overlay));
     }
 
     private Names names(EngineCatalog catalog) {
         SearchPath path = catalog.searchPath();
-        return new Names(catalog, new Binder(catalog, engine.functions(), this::timeZone, name -> value(name, path)));
+        return new Names(catalog, new Binder(catalog, functions, this::timeZone, name -> value(name, path)));
+    }
+
+    /**
+     * Returns the connector of a source of the engine or of this session.
+     *
+     * @throws IllegalArgumentException if there is no such source
+     */
+    Connector connector(String source) {
+        Connector c = overlay.get(source);
+        return c != null ? c : engine.connector(source);
+    }
+
+    /** Returns the optimizer and the executor over the sources of this session. */
+    FyrQL.Execution execution() {
+        return execution;
     }
 
     /** Returns the engine of the session. */
@@ -260,7 +298,7 @@ public final class Session {
                 return new SearchPath(source, TableRef.MAIN);
             }
             String current = searchPath().defaultSource();
-            List<String> schemas = current == null ? List.of() : engine.connector(current).catalog().schemas();
+            List<String> schemas = current == null ? List.of() : connector(current).catalog().schemas();
             String schema = match(schemas, parts.get(0));
             if (schema != null) {
                 return new SearchPath(current, schema);
@@ -273,7 +311,7 @@ public final class Session {
             throw new SqlException("No source " + parts.get(0) + "; there are " + String.join(", ", sources),
                     Position.UNKNOWN);
         }
-        List<String> schemas = engine.connector(source).catalog().schemas();
+        List<String> schemas = connector(source).catalog().schemas();
         String schema = match(schemas, parts.get(1));
         if (schema == null) {
             throw new SqlException("No schema " + parts.get(1) + " in the source " + source + "; there are "
@@ -317,7 +355,7 @@ public final class Session {
         if (searchPath.equals(current.catalog().searchPath())) {
             return current.binder();
         }
-        return new Binder(current.catalog().withSearchPath(searchPath), engine.functions(), this::timeZone,
+        return new Binder(current.catalog().withSearchPath(searchPath), functions, this::timeZone,
                 name -> value(name, searchPath));
     }
 
@@ -362,7 +400,7 @@ public final class Session {
      * {@link FyrQL#prepare(String)}; it keeps the search path of the session
      * at this call.
      *
-     * @throws SqlException if the query cannot be parsed or bound, or a parameter has no type
+     * @throws SqlException if the query cannot be parsed or bound, or a parameter has two types
      */
     public PreparedQuery prepare(String sql) {
         return engine.prepare(sql, searchPath(), binder());
@@ -511,7 +549,7 @@ public final class Session {
      * @throws SqlException if the statement cannot be parsed or bound
      */
     public String explain(String sql) {
-        return engine.explain(bind(sql));
+        return engine.explain(bind(sql), this);
     }
 
     /**

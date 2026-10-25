@@ -23,7 +23,7 @@ import java.util.List;
  * The parameters of a prepared statement: inputs whose nullability is
  * unknown, with the types the engine gives them when it prepares the query,
  * see {@link net.fyrql.FyrQL#prepare(String)}. Where it cannot, as for
- * {@code SELECT ?} or {@code LIMIT ?}, only the number of the parameters is
+ * {@code ORDER BY ?} or {@code LIMIT ? + 1}, only the number of the parameters is
  * known, and each is of the type {@link Types#OTHER}, named
  * {@value #UNKNOWN}. The value of a setter keeps its own type either way.
  */

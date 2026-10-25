@@ -269,11 +269,25 @@ final class QueryBinder {
         return (int) position - 1;
     }
 
+    /**
+     * Binds {@code LIMIT} and {@code OFFSET}, which are constants. A
+     * parameter by itself is a {@code BIGINT}; the plan of a prepared query,
+     * which is not run, has no bound for it, and with a value the query is
+     * bound anew with a constant in its place.
+     */
     private PlanNode limit(PlanNode plan, SqlExpr limit, SqlExpr offset) {
+        boolean parameter = false;
         for (SqlExpr e : new SqlExpr[] {limit, offset}) {
-            if (e != null) {
+            if (e instanceof SqlExpr.Parameter p) {
+                context.parameters().check(p);
+                context.parameters().typed(p, DataType.BIGINT);
+                parameter = true;
+            } else if (e != null) {
                 SqlTrees.noParameter(e, "in LIMIT or OFFSET");
             }
+        }
+        if (parameter) {
+            return plan;
         }
         long count = limit == null ? Long.MAX_VALUE : constantCount(limit, Long.MAX_VALUE);
         long skip = offset == null ? 0 : constantCount(offset, 0);

@@ -285,10 +285,11 @@ class StatementBinderTest {
         assertEquals(List.of(DataType.TINYINT), BINDER.prepare(parsed.statement(), parsed.parameters())
                 .parameterTypes());
 
-        SqlParser.ParameterizedStatement select = SqlParser.parseStatementWithParameters("INSERT INTO t (a) SELECT ?");
-        SqlException e = assertThrows(SqlException.class,
-                () -> BINDER.prepare(select.statement(), select.parameters()));
-        assertEquals("The type of parameter 1 cannot be inferred; write CAST(? AS type)", e.reason());
+        // A parameter without a context is a VARCHAR, which the column takes as it takes any VARCHAR.
+        SqlParser.ParameterizedStatement select = SqlParser.parseStatementWithParameters(
+                "INSERT INTO t (a, b) SELECT 1, ?");
+        assertEquals(List.of(DataType.VARCHAR), BINDER.prepare(select.statement(), select.parameters())
+                .parameterTypes());
     }
 
     @Test

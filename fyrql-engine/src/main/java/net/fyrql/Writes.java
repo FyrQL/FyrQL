@@ -71,10 +71,11 @@ final class Writes {
             case BoundStatement.Query q -> throw new IllegalArgumentException("A query writes nothing");
             case BoundStatement.Explain e -> throw new IllegalArgumentException("EXPLAIN writes nothing");
             case BoundStatement.Copy c -> copy(c, context, session);
-            case BoundStatement.CopyFrom c -> insert(new BoundStatement.Insert(c.table(), c.input()), context);
-            case BoundStatement.Create c -> create(c, context);
-            case BoundStatement.Insert i -> insert(i, context);
-            case BoundStatement.Drop d -> drop(d);
+            case BoundStatement.CopyFrom c -> insert(new BoundStatement.Insert(c.table(), c.input()), context,
+                    session);
+            case BoundStatement.Create c -> create(c, context, session);
+            case BoundStatement.Insert i -> insert(i, context, session);
+            case BoundStatement.Drop d -> drop(d, session);
             case BoundStatement.Set s -> {
                 session.apply(s);
                 yield 0;
@@ -92,15 +93,15 @@ final class Writes {
         engine.catalog().checkFileWrite(copy.path());
         Schema schema = copy.input().schema();
         Map<String, String> options = session.catalog().withTimeZone(copy.options());
-        return write(() -> provider.openFile(copy.format(), copy.path(), schema, options), rows(copy.input()),
-                null, null, context);
+        return write(() -> provider.openFile(copy.format(), copy.path(), schema, options),
+                rows(copy.input(), session), null, null, context);
     }
 
-    private long create(BoundStatement.Create create, QueryContext context) {
+    private long create(BoundStatement.Create create, QueryContext context, Session session) {
         TableRef table = create.table();
-        Connector connector = engine.connector(table.source());
+        Connector connector = session.connector(table.source());
         Writer writer = writer(connector);
-        Rows rows = create.input() == null ? null : rows(create.input());
+        Rows rows = create.input() == null ? null : rows(create.input(), session);
         if (exists(connector.catalog(), table)) {
             switch (create.mode()) {
                 case CREATE -> throw new SqlException("Table with name " + table.table() + " already exists",
@@ -110,7 +111,7 @@ final class Writes {
                 }
                 case OR_REPLACE -> {
                     if (rows != null && reads(create.input(), table)) {
-                        rows = collect(create.input(), context);
+                        rows = collect(create.input(), context, session);
                     }
                     perform(() -> writer.drop(table));
                 }
@@ -119,23 +120,23 @@ final class Writes {
         return write(() -> writer.create(table, create.schema()), rows, null, null, context);
     }
 
-    private long insert(BoundStatement.Insert insert, QueryContext context) {
+    private long insert(BoundStatement.Insert insert, QueryContext context, Session session) {
         TableRef table = insert.table();
-        Connector connector = engine.connector(table.source());
+        Connector connector = session.connector(table.source());
         Writer writer = writer(connector);
         if (!exists(connector.catalog(), table)) {
             throw new SqlException("Table with name " + table + " does not exist", Position.UNKNOWN);
         }
-        return write(() -> writer.append(table), rows(insert.input()), connector.catalog().schema(table), table,
-                context);
+        return write(() -> writer.append(table), rows(insert.input(), session), connector.catalog().schema(table),
+                table, context);
     }
 
-    private long drop(BoundStatement.Drop drop) {
+    private long drop(BoundStatement.Drop drop, Session session) {
         TableRef table = drop.table();
         if (table == null) {
             return 0;
         }
-        Connector connector = engine.connector(table.source());
+        Connector connector = session.connector(table.source());
         Writer writer = writer(connector);
         if (!exists(connector.catalog(), table)) {
             if (drop.ifExists()) {
@@ -153,15 +154,15 @@ final class Writes {
     }
 
     /** The rows of a plan, which runs as a query once they are opened. */
-    private Rows rows(PlanNode input) {
-        return context -> engine.open(input, context);
+    private Rows rows(PlanNode input, Session session) {
+        return context -> engine.open(input, context, session);
     }
 
     /** The rows of a plan, read to their end at once. */
-    private Rows collect(PlanNode input, QueryContext context) {
+    private Rows collect(PlanNode input, QueryContext context, Session session) {
         List<Batch> batches = new ArrayList<>();
         Schema schema;
-        try (Operator op = engine.open(input, context)) {
+        try (Operator op = engine.open(input, context, session)) {
             schema = op.schema();
             for (Batch b = op.next(); b != null; b = op.next()) {
                 context.check(LABEL);

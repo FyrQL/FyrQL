@@ -121,6 +121,22 @@ class SessionTest {
     }
 
     @Test
+    void theDatabaseAndTheSchemaAreThoseOfTheSearchPath() {
+        try (FyrQL engine = engine()) {
+            Session a = engine.newSession();
+            a.update("SET search_path = 'b.other'");
+            assertEquals(List.of("b", "b", "other"), Arrays.asList(a.rows(
+                    "SELECT current_database(), current_catalog(), current_schema()").get(0)));
+            a.update("SET search_path = ''");
+            assertEquals(Arrays.asList(null, null), Arrays.asList(a.rows(
+                    "SELECT current_database(), current_schema()").get(0)));
+            assertTrue(((String) value(a, "SELECT version()")).startsWith("FyrQL "), value(a, "SELECT version()")
+                    .toString());
+            assertEquals("mem", value(engine.session(), "SELECT current_database()"));
+        }
+    }
+
+    @Test
     void eachSessionHasItsTimeout() {
         try (FyrQL engine = FyrQL.builder().register(new QueryTimeoutTest.EndlessConnector()).threads(1)
                 .queryTimeout(Duration.ofHours(1)).maxQueryTimeout(Duration.ofHours(2)).build()) {

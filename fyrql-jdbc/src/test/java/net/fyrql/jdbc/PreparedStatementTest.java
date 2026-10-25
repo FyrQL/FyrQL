@@ -359,7 +359,8 @@ class PreparedStatementTest {
     void aParameterNeedsAValueAndAnIndexInRange() throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("SELECT ? AS a, ? AS b")) {
             ps.setInt(1, 1);
-            assertNull(ps.getMetaData(), "the columns are unknown while a parameter has no value and no type");
+            assertEquals("VARCHAR", ps.getMetaData().getColumnTypeName(2),
+                    "before its value a parameter without a type is a VARCHAR, as a text in PostgreSQL");
             SQLException e = assertThrows(SQLException.class, ps::executeQuery);
             assertEquals("07001", e.getSQLState());
             assertEquals("No value is set for parameter 2", e.getMessage());
@@ -502,7 +503,7 @@ class PreparedStatementTest {
 
     @Test
     void theParametersOfAQueryTheEngineCannotPrepareHaveOnlyACount() throws SQLException {
-        try (PreparedStatement ps = c.prepareStatement("SELECT ? AS a, '?' AS b, ? AS c")) {
+        try (PreparedStatement ps = c.prepareStatement("SELECT i AS a, '?' AS b FROM t ORDER BY ?, ?")) {
             ParameterMetaData pm = ps.getParameterMetaData();
             assertEquals(2, pm.getParameterCount());
             for (int i = 1; i <= 2; i++) {

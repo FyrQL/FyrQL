@@ -92,7 +92,7 @@ public final class SqlParser {
 
     /**
      * Parses a query of a prepared statement, which may have parameters
-     * {@code ?}; a trailing semicolon is allowed.
+     * {@code ?} or {@code $n}; a trailing semicolon is allowed.
      *
      * @throws SqlException if the text is not one query of the supported forms
      */
@@ -116,7 +116,8 @@ public final class SqlParser {
 
     /**
      * Parses a statement of a prepared statement, see
-     * {@link #parseStatement(String)}, which may have parameters {@code ?}.
+     * {@link #parseStatement(String)}, which may have parameters {@code ?}
+     * or {@code $n}.
      *
      * @throws SqlException if the text is not one statement of the supported forms
      */
@@ -170,9 +171,10 @@ public final class SqlParser {
         }
         List<SqlExpr.Parameter> numbered = new ArrayList<>(byIndex.values());
         for (int i = 0; i < numbered.size(); i++) {
+            // Only a $n can leave a gap; a ? is numbered by its place.
             if (numbered.get(i).index() != i + 1) {
-                throw new IllegalStateException("The parameters are not numbered 1 to " + numbered.size() + ": "
-                        + byIndex.keySet());
+                throw new SqlException("The statement has no parameter $" + (i + 1) + "; number the parameters"
+                        + " from $1 without a gap", numbered.get(i).position());
             }
         }
         return new ParameterizedStatement(statement, numbered);

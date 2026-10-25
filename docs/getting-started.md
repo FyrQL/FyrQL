@@ -3,8 +3,8 @@
 # Getting started: FyrQL in 30 minutes
 
 This tour takes you from an empty project to queries over files, Java objects and
-databases, results written into files and tables, a configuration file, the JDBC driver
-and Python, and at the end Spring Boot. Each step builds on the one before and takes a
+databases, results written into files and tables, a configuration file, the JDBC driver,
+Python and psql, and at the end Spring Boot. Each step builds on the one before and takes a
 few minutes. The [manual](manual.md) has the details of every step; the
 [README](../README.md) gives the overview.
 
@@ -20,6 +20,7 @@ few minutes. The [manual](manual.md) has the details of every step; the
 - [Threads, memory and code generation](#threads-memory-and-code-generation)
 - [The JDBC driver and DBeaver](#the-jdbc-driver-and-dbeaver)
 - [Arrow, Flight SQL and Python](#arrow-flight-sql-and-python)
+- [psql and the PostgreSQL protocol](#psql-and-the-postgresql-protocol)
 - [Spring Boot](#spring-boot)
 - [Where to go next](#where-to-go-next)
 
@@ -40,22 +41,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.15.1</version>
+    <version>0.16.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.15.1</version>
+    <version>0.16.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.15.1</version>
+    <version>0.16.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.15.1</version>
+    <version>0.16.0</version>
 </dependency>
 ```
 
@@ -165,7 +166,8 @@ for (Object[] row : engine.rows(larger, List.of(new BigDecimal("6.00")))) {
 ```
 
 A parameter takes its type from its context, here the `DECIMAL(10,2)` of `amount`; where
-there is none, as in `SELECT ?`, it needs a cast, `CAST(? AS DATE)`.
+there is none, as in `SELECT ?`, it is a `VARCHAR`, and a cast gives it another type, as
+`CAST(? AS DATE)`. Parameters may also be numbered, `$1`, `$2`, as in PostgreSQL.
 
 More: [Using the engine](manual.md#using-the-engine).
 
@@ -520,6 +522,48 @@ with flight_sql.connect("grpc://127.0.0.1:32010", autocommit=True) as conn, conn
 More: [Arrow](manual.md#arrow), [Flight SQL server](manual.md#flight-sql-server),
 [Python](manual.md#python).
 
+## psql and the PostgreSQL protocol
+
+*3 minutes.* Tools of PostgreSQL reach an engine through a server that speaks the wire
+protocol of PostgreSQL, another executable JAR with the engine and all connectors, which
+this builds and starts on the same `fyrql.yaml`:
+
+```
+./mvnw -B -ntp clean package -pl fyrql-pgwire-all -am -DskipTests
+java -jar fyrql-pgwire-all/target/fyrql-pgwire-all-<version>.jar fyrql.yaml
+```
+
+The server listens on `127.0.0.1:5433` and takes every client there; a section `pgwire`
+in the file sets another address, users and passwords, and TLS, and the limits of the
+Flight SQL server apply as well. Each source is a database, here `files`, and psql
+connects to it as to PostgreSQL:
+
+```
+psql -h 127.0.0.1 -p 5433 -d files
+files=> \dt
+           List of tables
+ Schema |   Name    | Type  | Owner
+--------+-----------+-------+-------
+ main   | customers | table | fyrql
+ main   | orders    | table | fyrql
+(2 rows)
+
+files=> SELECT c.region, count(*) AS orders, sum(o.amount) AS revenue
+files->   FROM orders AS o JOIN customers AS c ON o.customer = c.id
+files->   WHERE o.amount > 6 GROUP BY ALL ORDER BY revenue DESC;
+ region | orders | revenue
+--------+--------+---------
+ south  |      1 |      20
+ north  |      1 |    10.5
+(2 rows)
+```
+
+psycopg, the JDBC driver of PostgreSQL, DBeaver with a connection of the type PostgreSQL
+and Metabase connect the same way, with host, port and the source as the database.
+
+More: [PostgreSQL wire protocol server](manual.md#postgresql-wire-protocol-server),
+[psql](manual.md#psql), [psycopg](manual.md#psycopg).
+
 ## Spring Boot
 
 *Optional, 3 minutes more.* In an application of Spring Boot 4, the starter makes the
@@ -530,7 +574,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.15.1</version>
+    <version>0.16.0</version>
 </dependency>
 ```
 

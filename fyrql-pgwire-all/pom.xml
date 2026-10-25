@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 the FyrQL authors
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  This Source Code Form is "Incompatible With Secondary Licenses", as
+  defined by the Mozilla Public License, v. 2.0.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.github.fyrql</groupId>
+		<artifactId>fyrql</artifactId>
+		<version>0.16.0</version>
+	</parent>
+
+	<artifactId>fyrql-pgwire-all</artifactId>
+	<name>FyrQL PostgreSQL wire protocol server in one JAR</name>
+	<description>The PostgreSQL wire protocol server with the engine, the configuration, code generation and all connectors in one executable JAR; the drivers of the databases of JDBC sources are not in it.</description>
+
+	<properties>
+		<fyrql.module.name>net.fyrql.pgwire.all</fyrql.module.name>
+	</properties>
+
+	<!--
+	  Everything goes into the JAR of this module, which starts the server with java -jar. As in fyrql-jdbc-all, Jackson,
+	  SnakeYAML, JSqlParser and FastCSV are renamed into packages under net.fyrql.internal, as parquet-java and Janino
+	  already are in the JARs of their modules. Unlike fyrql-flight-sql-all, the JAR holds no Arrow, gRPC or Netty.
+	-->
+	<dependencies>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-pgwire</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-codegen</artifactId>
+			<!-- In the reactor the dependencies the module renames into its own JAR would come along. -->
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-memory</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-csv</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-json</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-parquet</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-http</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-odata</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-jdbc</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-s3</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.github.fyrql</groupId>
+			<artifactId>fyrql-connector-iceberg</artifactId>
+			<!-- The Parquet connector it reads its data files with is above, with what it renamed into its JAR. -->
+			<exclusions>
+				<exclusion>
+					<groupId>io.github.fyrql</groupId>
+					<artifactId>fyrql-connector-parquet</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<!-- Without a clean the JAR of the last build would be the shaded one, whose old classes
+				     the shade would keep over the new ones of the server. -->
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-jar-plugin</artifactId>
+				<configuration>
+					<forceCreation>true</forceCreation>
+				</configuration>
+			</plugin>
+			<!--
+			  The artifacts that the shade plugin below takes, for the test that the lists of third-party software
+			  name their versions: all but the modules of FyrQL, whose own libraries their own lists name.
+			-->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-dependency-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>shaded-dependencies</id>
+						<phase>generate-resources</phase>
+						<goals>
+							<goal>list</goal>
+						</goals>
+						<configuration>
+							<includeScope>runtime</includeScope>
+							<excludeGroupIds>io.github.fyrql</excludeGroupIds>
+							<outputFile>${project.build.directory}/shaded-dependencies.txt</outputFile>
+							<sort>true</sort>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-shade-plugin</artifactId>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<createDependencyReducedPom>false</createDependencyReducedPom>
+							<relocations>
+								<relocation>
+									<pattern>com.fasterxml.jackson</pattern>
+									<shadedPattern>net.fyrql.internal.jackson</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.yaml.snakeyaml</pattern>
+									<shadedPattern>net.fyrql.internal.snakeyaml</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>net.sf.jsqlparser</pattern>
+									<shadedPattern>net.fyrql.internal.jsqlparser</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>de.siegmar.fastcsv</pattern>
+									<shadedPattern>net.fyrql.internal.fastcsv</shadedPattern>
+								</relocation>
+							</relocations>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+										<exclude>META-INF/maven/**</exclude>
+										<exclude>META-INF/LICENSE*</exclude>
+										<exclude>META-INF/NOTICE*</exclude>
+										<exclude>META-INF/DEPENDENCIES*</exclude>
+										<exclude>module-info.class</exclude>
+										<!-- Classes for newer JDKs, which the shade plugin would not rename; the JAR is no multi-release JAR. -->
+										<exclude>META-INF/versions/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The JAR of the Parquet connector carries the same texts already. -->
+									<artifact>com.fasterxml.jackson.core:jackson-core</artifact>
+									<excludes>
+										<exclude>META-INF/FastDoubleParser-*</exclude>
+										<exclude>META-INF/Schubfach-*</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The style sheet of the railroad diagrams of the grammar. -->
+									<artifact>com.github.jsqlparser:jsqlparser</artifact>
+									<excludes>
+										<exclude>rr/**</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The list and the texts of this JAR name what the configuration carries as well. -->
+									<artifact>io.github.fyrql:fyrql-config</artifact>
+									<excludes>
+										<exclude>META-INF/licenses/**</exclude>
+										<exclude>META-INF/FastDoubleParser-*</exclude>
+										<exclude>META-INF/Schubfach-*</exclude>
+									</excludes>
+								</filter>
+								<filter>
+									<!-- The list of this JAR names what the connector carries as well. -->
+									<artifact>io.github.fyrql:fyrql-connector-parquet</artifact>
+									<excludes>
+										<exclude>META-INF/licenses/THIRD-PARTY.txt</exclude>
+									</excludes>
+								</filter>
+							</filters>
+							<transformers>
+								<!-- Merges the connector factories, the expression compiler and Janino's compiler factory. -->
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+									<mainClass>net.fyrql.pgwire.PgWireServerMain</mainClass>
+									<manifestEntries>
+										<Automatic-Module-Name>${fyrql.module.name}</Automatic-Module-Name>
+									</manifestEntries>
+								</transformer>
+							</transformers>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
+</project>

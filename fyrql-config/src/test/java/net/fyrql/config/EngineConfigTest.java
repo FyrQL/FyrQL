@@ -105,6 +105,24 @@ class EngineConfigTest {
     }
 
     @Test
+    void theSectionPgwireHoldsTheSettingsOfThePostgreSqlServer() {
+        EngineConfig config = parse("""
+                pgwire:
+                  port: 5433
+                  users:
+                    alice: s3cret
+                server:
+                  port: 32010
+                """);
+        assertEquals(Map.of("port", "5433", "users.alice", "s3cret"), config.pgwire());
+        assertEquals(Map.of("port", "32010"), config.server());
+        assertEquals("line 1: pgwire must be a mapping of settings", failure("pgwire: [a]\n"));
+        assertEquals(Map.of(), new EngineConfig(List.of(), Map.of(), Map.of("port", "1"), DIR).pgwire());
+        assertFalse(config.toString().contains("s3cret"), config.toString());
+        assertEquals(config.pgwire(), config.withSetting("threads", "2").pgwire());
+    }
+
+    @Test
     void aValueMayNameAnEnvironmentVariableOrASystemProperty() {
         System.setProperty("fyrql.test.config.user", "alice");
         try {
@@ -139,9 +157,9 @@ class EngineConfigTest {
     @Test
     void errorsNameTheLineAndNeverTheValue() {
         assertEquals("the configuration is empty", failure(""));
-        assertEquals("line 1: the configuration must be a mapping with the keys sources, engine and server",
+        assertEquals("line 1: the configuration must be a mapping with the keys sources, engine, server and pgwire",
                 failure("- a\n- b\n"));
-        assertEquals("line 2: the key source is unknown; known are sources, engine and server",
+        assertEquals("line 2: the key source is unknown; known are sources, engine, server and pgwire",
                 failure("sources: []\nsource: []\n"));
         assertEquals("line 2: a source has no name", failure("sources:\n  - type: csv\n"));
         assertEquals("line 2: the source s has no type", failure("sources:\n  - name: s\n"));

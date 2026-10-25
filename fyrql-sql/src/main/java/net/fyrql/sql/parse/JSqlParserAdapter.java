@@ -92,6 +92,8 @@ import net.sf.jsqlparser.expression.operators.relational.NamedExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.OldOracleJoinBinaryExpression;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
+import net.sf.jsqlparser.expression.operators.relational.RegExpMatchOperator;
+import net.sf.jsqlparser.expression.operators.relational.RegExpMatchOperatorType;
 import net.sf.jsqlparser.parser.ASTNodeAccess;
 import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.Column;
@@ -148,6 +150,8 @@ final class JSqlParserAdapter {
     private final SourceText source;
     /** The parameters met so far, or {@code null} for a query that takes none. */
     private final List<SqlExpr.Parameter> parameters;
+    /** The form of the parameters met so far, {@code "?"} or {@code "$"}, or {@code null} before the first. */
+    private String parameterForm;
 
     /**
      * @param parameters whether the query may have parameters; if not, a
@@ -862,6 +866,9 @@ final class JSqlParserAdapter {
             return new SqlExpr.Literal(LiteralKind.NUMBER, token != null ? token.image : e.toString(), position);
         }
         if (e instanceof StringValue s) {
+            if (s.getPrefix() != null && s.getPrefix().equalsIgnoreCase("E") && "'".equals(s.getQuoteStr())) {
+                return new SqlExpr.Literal(LiteralKind.STRING, escapeString(s.getValue(), position), position);
+            }
             reject(s.getPrefix(), "a string with a prefix", s);
             Token token = firstToken(s);
             return new SqlExpr.Literal(LiteralKind.STRING, stringValue(token != null ? token.image
@@ -1036,16 +1043,26 @@ final class JSqlParserAdapter {
 
     /**
      * A {@code ?}, numbered as JSqlParser numbers it, from 1 in the order of
-     * the text. A numbered form such as {@code ?1} or {@code $1} is not
-     * supported.
+     * the text, or a {@code $n} of PostgreSQL and DuckDB with its own
+     * number, which may stand more than once. One statement uses one of the
+     * two forms; {@code ?1} is not supported.
      */
     private SqlExpr parameter(JdbcParameter p, Position position) {
         if (parameters == null) {
             throw unsupported("parameters outside a prepared query", p);
         }
-        if (p.isUseFixedIndex() || !"?".equals(p.getParameterCharacter()) || p.getIndex() == null) {
+        String form = p.getParameterCharacter();
+        boolean dollar = "$".equals(form) && p.isUseFixedIndex();
+        if (!dollar && (p.isUseFixedIndex() || !"?".equals(form)) || p.getIndex() == null) {
             throw unsupported("numbered parameters", p);
         }
+        if (dollar && p.getIndex() < 1) {
+            throw new SqlException("There is no parameter $" + p.getIndex(), position);
+        }
+        if (parameterForm != null && !parameterForm.equals(form)) {
+            throw unsupported("parameters ? and $n in one statement", p);
+        }
+        parameterForm = form;
         SqlExpr.Parameter parameter = new SqlExpr.Parameter(p.getIndex(), position);
         parameters.add(parameter);
         return parameter;
@@ -1181,6 +1198,14 @@ final class JSqlParserAdapter {
             op = BinaryOp.AND;
         } else if (b instanceof OrExpression && symbol.equals("OR")) {
             op = BinaryOp.OR;
+        } else if (b instanceof RegExpMatchOperator r
+                && (r.getOperatorType() == RegExpMatchOperatorType.MATCH_CASESENSITIVE
+                        || r.getOperatorType() == RegExpMatchOperatorType.NOT_MATCH_CASESENSITIVE)) {
+            // As in DuckDB, ~ matches the whole string, unlike in PostgreSQL.
+            SqlExpr match = new SqlExpr.FunctionCall("regexp_full_match",
+                    List.of(expr(b.getLeftExpression()), expr(b.getRightExpression())), position);
+            return r.getOperatorType() == RegExpMatchOperatorType.MATCH_CASESENSITIVE ? match
+                    : new SqlExpr.Unary(UnaryOp.NOT, match, position);
         } else {
             throw unsupported("the operator " + b.getStringExpression().strip(), b);
         }
@@ -1235,10 +1260,7 @@ final class JSqlParserAdapter {
         reject(a.getLimit(), "LIMIT in a function", a);
         reject(a.getOnOverflowTruncate(), "ON OVERFLOW", a);
         reject(a.getKeywordArguments(), "this form of arguments", a);
-        Token first = firstToken(a);
-        if (first != null && first.next != null && ".".equals(first.next.image)) {
-            throw unsupported("qualified function names", a);
-        }
+        Token first = nameToken(firstToken(a), a);
         String name = first != null ? unquote(first.image, a) : unquote(a.getName(), a);
         boolean star = false;
         boolean ignoreNulls = a.isIgnoreNulls();
@@ -1401,9 +1423,10 @@ final class JSqlParserAdapter {
 
     /** Rejects the parts of a function call that other dialects add. */
     private void checkFunction(Function f) {
-        if (f.getMultipartName() != null && f.getMultipartName().size() > 1) {
+        if (f.getMultipartName() != null && f.getMultipartName().size() > 2) {
             throw unsupported("qualified function names", f);
         }
+        nameToken(firstToken(f), f);
         reject(f.getKeep(), "KEEP", f);
         reject(f.getNullHandling(), "IGNORE NULLS and RESPECT NULLS", f);
         reject(f.isIgnoreNullsOutside(), "IGNORE NULLS", f);
@@ -1419,8 +1442,26 @@ final class JSqlParserAdapter {
     }
 
     private String functionName(Function f) {
-        Token first = firstToken(f);
+        Token first = nameToken(firstToken(f), f);
         return first != null ? unquote(first.image, f) : unquote(f.getName(), f);
+    }
+
+    /**
+     * Returns the token of the name of a function, after a qualifier
+     * {@code main.}, the schema that DuckDB keeps its functions in; another
+     * qualifier is not supported.
+     *
+     * @param first the first token of the call, or {@code null}
+     */
+    private Token nameToken(Token first, Object node) {
+        if (first == null || first.next == null || !".".equals(first.next.image)) {
+            return first;
+        }
+        String qualifier = unquote(first.image, node).toLowerCase(Locale.ROOT);
+        if (!qualifier.equals("main") || first.next.next == null) {
+            throw unsupported("qualified function names", node);
+        }
+        return first.next.next;
     }
 
     // ---- names and tokens
@@ -1482,6 +1523,79 @@ final class JSqlParserAdapter {
             return image.substring(2, image.length() - 2);
         }
         throw unsupported("the string " + image, node);
+    }
+
+    /**
+     * Returns the value of a string {@code E'...'}, given its text between
+     * the quotes: a doubled quote is one quote, and a backslash starts an
+     * escape as in PostgreSQL: before {@code b}, {@code f}, {@code n},
+     * {@code r} and {@code t} the control character, before up to three
+     * octal digits their character, before {@code x} with one or two hex
+     * digits, {@code u} with four and {@code U} with eight the character of
+     * that code, and before any other character that character, as in two
+     * backslashes for one. The lexer of JSqlParser does not take a
+     * backslash before a quote; a quote is written as two.
+     */
+    static String escapeString(String text, Position position) {
+        StringBuilder b = new StringBuilder(text.length());
+        int n = text.length();
+        int i = 0;
+        while (i < n) {
+            char c = text.charAt(i);
+            if (c == '\'' && i + 1 < n && text.charAt(i + 1) == '\'') {
+                b.append('\'');
+                i += 2;
+                continue;
+            }
+            if (c != '\\' || i + 1 == n) {
+                b.append(c);
+                i++;
+                continue;
+            }
+            char x = text.charAt(i + 1);
+            i += 2;
+            switch (x) {
+                case 'b' -> b.append('\b');
+                case 'f' -> b.append('\f');
+                case 'n' -> b.append('\n');
+                case 'r' -> b.append('\r');
+                case 't' -> b.append('\t');
+                case 'x', 'u', 'U' -> {
+                    int max = x == 'x' ? 2 : x == 'u' ? 4 : 8;
+                    int end = i;
+                    while (end < n && end - i < max && Character.digit(text.charAt(end), 16) >= 0) {
+                        end++;
+                    }
+                    if (end == i || x != 'x' && end - i < max) {
+                        throw new SqlException("Invalid Unicode escape: \\" + x + text.substring(i, end), position);
+                    }
+                    int code = Integer.parseInt(text, i, end, 16);
+                    if (!Character.isValidCodePoint(code) || code == 0) {
+                        throw new SqlException("Invalid Unicode escape value: \\" + x + text.substring(i, end),
+                                position);
+                    }
+                    b.appendCodePoint(code);
+                    i = end;
+                }
+                default -> {
+                    if (x >= '0' && x <= '7') {
+                        int end = i;
+                        while (end < n && end - i < 2 && text.charAt(end) >= '0' && text.charAt(end) <= '7') {
+                            end++;
+                        }
+                        int code = Integer.parseInt(text, i - 1, end, 8);
+                        if (code == 0) {
+                            throw new SqlException("Invalid escape: a string cannot hold the character 0", position);
+                        }
+                        b.append((char) code);
+                        i = end;
+                    } else {
+                        b.append(x);
+                    }
+                }
+            }
+        }
+        return b.toString();
     }
 
     private static Token firstToken(Object node) {

@@ -31,6 +31,7 @@ final class BuiltinFunctions {
         List<ScalarFunction> all = new ArrayList<>();
         all.addAll(NumericFunctions.all());
         all.addAll(StringFunctions.all());
+        all.addAll(RegexFunctions.all());
         all.addAll(DateFunctions.all());
         all.addAll(GeneralFunctions.all());
         all.addAll(NestedFunctions.all());
