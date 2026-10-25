@@ -12,10 +12,12 @@
 package net.fyrql.pgwire;
 
 import net.fyrql.FyrQL;
+import net.fyrql.Overlay;
 import net.fyrql.PreparedQuery;
 import net.fyrql.QueryResult;
 import net.fyrql.Session;
 import net.fyrql.SqlStatement;
+import net.fyrql.catalog.DatabasePath;
 import net.fyrql.catalog.SearchPath;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
@@ -61,6 +63,8 @@ final class Connection implements Runnable, PgSql.Context {
     private static final int GSSENC_REQUEST = 80877104;
     private static final int CANCEL_REQUEST = 80877102;
     private static final int PROTOCOL_3 = 3 << 16;
+    /** The catalogs that are schemas of every database, {@code pg_catalog} first. */
+    private static final List<String> CATALOGS = List.of("pg_catalog", "information_schema");
 
     private final PgWireServer server;
     private final FyrQL engine;
@@ -75,6 +79,8 @@ final class Connection implements Runnable, PgSql.Context {
     private String database;
     /** The search path as the client set it, as {@code SHOW search_path} gives it. */
     private String searchPath;
+    /** The schemas of the search path, without quotes and with {@code $user} as the user. */
+    private List<String> path = List.of();
     /** {@code I} outside a transaction, {@code T} in one, {@code E} in one after an error. */
     private char status = 'I';
     private boolean wroteInTransaction;
@@ -336,10 +342,20 @@ final class Connection implements Runnable, PgSql.Context {
             String schema = source.equals(engineDefault.defaultSource()) ? engineDefault.defaultSchema()
                     : defaultSchema(source);
             session.use(new SearchPath(source, schema));
+            use(List.of(schema));
             searchPath = schema;
         } else {
             searchPath = "";
         }
+    }
+
+    /**
+     * Resolves the names of tables along the schemas of the search path, as
+     * PostgreSQL does, see {@link DatabasePath}.
+     */
+    private void use(List<String> schemas) {
+        path = List.copyOf(schemas);
+        Overlay.use(session, new DatabasePath(database, path, CATALOGS));
     }
 
     /** The schema a database starts with: {@code main}, else {@code public}, else its first. */
@@ -1172,10 +1188,12 @@ final class Connection implements Runnable, PgSql.Context {
     }
 
     /**
-     * Sets the search path: each part is a schema of the database of the
-     * connection, and the first that exists becomes the schema of the
-     * session; {@code $user} and schemas that do not exist are passed over
-     * as in PostgreSQL.
+     * Sets the search path: names of tables resolve along its schemas of the
+     * database of the connection, as in PostgreSQL, with {@code $user} as
+     * the schema of the name of the user; schemas that do not exist are
+     * passed over. A part may hold several schemas between commas, as a
+     * parameter of the start does. {@code null} resets it to the schema the
+     * connection starts with.
      */
     private void searchPath(List<String> parts) {
         if (database == null) {
@@ -1187,19 +1205,41 @@ final class Connection implements Runnable, PgSql.Context {
             String schema = database.equals(engineDefault.defaultSource()) ? engineDefault.defaultSchema()
                     : defaultSchema(database);
             session.use(new SearchPath(database, schema));
+            use(List.of(schema));
             searchPath = schema;
             return;
         }
-        List<String> schemas = engine.connector(database).catalog().schemas();
+        List<String> schemas = new ArrayList<>();
         for (String part : parts) {
-            String name = unquote(part);
-            String schema = name.equals("$user") ? null : match(schemas, name);
-            if (schema != null) {
-                session.use(new SearchPath(database, schema));
-                break;
+            for (String name : names(part)) {
+                String schema = unquote(name);
+                if (!schema.isEmpty()) {
+                    schemas.add(schema.equals("$user") ? user : schema);
+                }
             }
         }
+        use(schemas);
         searchPath = String.join(", ", parts);
+    }
+
+    /** Splits a part of a search path at the commas outside quotes. */
+    private static List<String> names(String part) {
+        List<String> names = new ArrayList<>();
+        StringBuilder name = new StringBuilder();
+        boolean quoted = false;
+        for (char c : part.toCharArray()) {
+            if (c == '"') {
+                quoted = !quoted;
+            }
+            if (c == ',' && !quoted) {
+                names.add(name.toString());
+                name.setLength(0);
+            } else {
+                name.append(c);
+            }
+        }
+        names.add(name.toString());
+        return names;
     }
 
     private static String unquote(String part) {
@@ -1438,12 +1478,16 @@ final class Connection implements Runnable, PgSql.Context {
     @Override
     public List<String> schemas(boolean implicit) {
         List<String> result = new ArrayList<>();
-        if (implicit) {
-            result.add("pg_catalog");
+        if (implicit && match(path, CATALOGS.get(0)) == null) {
+            result.add(CATALOGS.get(0));
         }
-        SearchPath path = session.searchPath();
-        if (path.defaultSource() != null) {
-            result.add(path.defaultSchema());
+        List<String> schemas = database == null ? List.of() : engine.connector(database).catalog().schemas();
+        for (String name : path) {
+            String catalog = match(CATALOGS, name);
+            String schema = catalog != null ? catalog : match(schemas, name);
+            if (schema != null && !result.contains(schema)) {
+                result.add(schema);
+            }
         }
         return result;
     }
@@ -1466,9 +1510,7 @@ final class Connection implements Runnable, PgSql.Context {
         if (parts.size() == 2) {
             oid = snapshot.classes().get(parts.get(0) + "." + parts.get(1));
         } else if (parts.size() == 1) {
-            List<String> path = new ArrayList<>(schemas(true));
-            path.add("information_schema");
-            for (String schema : path) {
+            for (String schema : schemas(true)) {
                 oid = snapshot.classes().get(schema.toLowerCase(Locale.ROOT) + "." + parts.get(0));
                 if (oid != null) {
                     break;

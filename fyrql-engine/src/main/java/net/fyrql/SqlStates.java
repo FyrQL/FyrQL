@@ -40,6 +40,8 @@ public final class SqlStates {
     public static final String INVALID_CAST = "22018";
     /** A {@code NULL} for a column that is {@code NOT NULL}. */
     public static final String NOT_NULL_VIOLATION = "23502";
+    /** An unknown schema, or none selected to create a table in. */
+    public static final String INVALID_SCHEMA_NAME = "3F000";
     /** Any other error of the query text. */
     public static final String SYNTAX_ERROR_OR_ACCESS_RULE = "42000";
     /** A file that the engine does not allow statements to read or write. */
@@ -147,6 +149,10 @@ public final class SqlStates {
         if (r.startsWith("Table with name") || r.startsWith("No source ") || r.startsWith("Table function with name")
                 || r.startsWith("Referenced table")) {
             return UNDEFINED_TABLE;
+        }
+        if (r.startsWith("No schema has been selected")
+                || r.startsWith("Schema with name") && r.endsWith(" does not exist")) {
+            return INVALID_SCHEMA_NAME;
         }
         if (r.startsWith("Ambiguous reference to table") || r.startsWith("Table name ") && r.contains(" is ambiguous")) {
             return AMBIGUOUS_TABLE;

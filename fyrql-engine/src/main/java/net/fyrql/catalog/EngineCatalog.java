@@ -33,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Supplier;
 
@@ -91,10 +92,15 @@ public final class EngineCatalog implements CatalogView {
      */
     public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone,
             FileAccessPolicy policy) {
+        this(sources, searchPath, zone, policy, null);
+    }
+
+    private EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone,
+            FileAccessPolicy policy, DatabasePath databasePath) {
         this.zone = zone;
         this.policy = policy;
         this.sources = new LinkedHashMap<>(sources);
-        this.resolver = new NameResolver(sources, searchPath);
+        this.resolver = new NameResolver(sources, searchPath, databasePath);
         Connector preferred = searchPath.defaultSource() == null ? null : sources.get(searchPath.defaultSource());
         if (preferred instanceof TableFunctionProvider p) {
             for (String f : p.tableFunctions()) {
@@ -142,7 +148,35 @@ public final class EngineCatalog implements CatalogView {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public EngineCatalog withSearchPath(SearchPath searchPath) {
-        return searchPath.equals(searchPath()) ? this : new EngineCatalog(sources, searchPath, zone, policy);
+        return searchPath.equals(searchPath()) ? this
+                : new EngineCatalog(sources, searchPath, zone, policy, databasePath());
+    }
+
+    /** Returns the path of the database along which names resolve as in PostgreSQL, or {@code null}. */
+    public DatabasePath databasePath() {
+        return resolver.databasePath();
+    }
+
+    /**
+     * Returns a catalog over the same sources in which names resolve as in
+     * PostgreSQL along the path of a database, see {@link DatabasePath}, or
+     * as in FyrQL for {@code null}; or this catalog if the path is its own.
+     *
+     * @throws IllegalArgumentException if the database or a catalog of the path is not registered
+     */
+    public EngineCatalog withDatabasePath(DatabasePath databasePath) {
+        return Objects.equals(databasePath, databasePath()) ? this
+                : new EngineCatalog(sources, searchPath(), zone, policy, databasePath);
+    }
+
+    /**
+     * Returns the schema of the database that a new table of one part goes
+     * to along the path of the database, see {@link NameResolver#creationSchema()}.
+     *
+     * @return the schema, or empty if there is none or no path of a database
+     */
+    public Optional<String> creationSchema() {
+        return resolver.creationSchema();
     }
 
     /**
@@ -152,12 +186,12 @@ public final class EngineCatalog implements CatalogView {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public EngineCatalog withSession(SearchPath searchPath, Supplier<ZoneId> zone) {
-        return new EngineCatalog(sources, searchPath, zone, policy);
+        return new EngineCatalog(sources, searchPath, zone, policy, databasePath());
     }
 
     /**
      * Returns a catalog over the sources of this one and more after them,
-     * with the same search path and time zone.
+     * with the same search paths and time zone.
      *
      * @throws IllegalArgumentException if one of the more sources has the name of a source of this one
      */
@@ -168,7 +202,7 @@ public final class EngineCatalog implements CatalogView {
                 throw new IllegalArgumentException("There is a source " + e.getKey() + " already");
             }
         }
-        return new EngineCatalog(all, searchPath(), zone, policy);
+        return new EngineCatalog(all, searchPath(), zone, policy, databasePath());
     }
 
     /** Returns which locations table functions and {@code COPY} may read and write. */
@@ -290,6 +324,20 @@ public final class EngineCatalog implements CatalogView {
     @Override
     public Optional<TableRef> find(List<String> name) {
         return resolver.find(name);
+    }
+
+    /**
+     * Returns the path of a resolved table for qualified columns: that of a
+     * catalog along the path of a database is {@code database.catalog.table},
+     * as in PostgreSQL.
+     */
+    @Override
+    public List<String> path(TableRef table) {
+        DatabasePath database = databasePath();
+        if (database != null && database.catalogs().contains(table.source())) {
+            return List.of(database.database(), table.source(), table.table());
+        }
+        return CatalogView.super.path(table);
     }
 
     /**

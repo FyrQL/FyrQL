@@ -46,8 +46,18 @@ final class PgSql {
         /** The text of {@code version()}. */
         String version();
 
-        /** The schemas of the search path that exist, with {@code pg_catalog} first if {@code implicit}. */
+        /**
+         * The schemas of the search path that exist, in its order, with
+         * {@code pg_catalog} first if {@code implicit} and the path does not
+         * name it.
+         */
         List<String> schemas(boolean implicit);
+
+        /** The first schema of the search path that exists, as {@code current_schema} gives it, or {@code null}. */
+        default String currentSchema() {
+            List<String> schemas = schemas(false);
+            return schemas.isEmpty() ? null : schemas.get(0);
+        }
 
         /** The value of a parameter the server holds, or {@code null} if it holds none of the name. */
         String setting(String name);
@@ -62,6 +72,11 @@ final class PgSql {
 
         /** The number of the backend, as {@code pg_backend_pid()} gives it. */
         int backend();
+    }
+
+    /** Returns the name of a schema as a literal, or a {@code NULL} of its type. */
+    private static String schema(String name) {
+        return name == null ? "CAST(NULL AS VARCHAR)" : literal(name);
     }
 
     /** Returns a text as a string literal of SQL. */
@@ -198,7 +213,10 @@ final class PgSql {
             } else if (bare && k.is("CURRENT_CATALOG")) {
                 edits.add(named(t, i, i, "current_database()", k.value()));
             } else if (bare && k.is("CURRENT_SCHEMA")) {
-                edits.add(named(t, i, i, "current_schema()", k.value()));
+                edits.add(named(t, i, i, schema(context.currentSchema()), k.value()));
+            } else if (call && !qualified && k.is("CURRENT_SCHEMA") && i + 2 < t.size()
+                    && t.get(i + 2).isSymbol(")")) {
+                edits.add(named(t, i, i + 2, schema(context.currentSchema()), "current_schema"));
             } else if (k.is("PG_CATALOG", "INFORMATION_SCHEMA") && !qualified && qualifies && i + 3 < t.size()
                     && t.get(i + 2).kind() == Kind.WORD && t.get(i + 3).isSymbol("(")) {
                 // A function of pg_catalog is a function of the engine or of the server.

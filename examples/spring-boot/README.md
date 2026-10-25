@@ -131,4 +131,4 @@ checks that the answers are exactly these.
   application, Jackson among them; FyrQL keeps the parser of its configuration file
   under names of its own, so that they do not meet.
 
-More in the manual: [Spring Boot](../../docs/manual.md#spring-boot).
+More: [Spring Boot](../../docs/spring-boot.md) in the documentation.

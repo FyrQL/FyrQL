@@ -29,6 +29,7 @@ import java.time.ZoneId;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -172,6 +173,101 @@ class NameResolverTest {
                 + " pg.sales.ORDERS, mem.main.orders", error(none, "orders"));
         assertEquals("Table with name nothing does not exist", error(none, "nothing"));
         assertThrows(IllegalArgumentException.class, () -> new NameResolver(sources(), new SearchPath("x", "main")));
+    }
+
+    /** The sources with the catalogs of PostgreSQL, of one schema each. */
+    private static Map<String, Connector> withCatalogs() {
+        Map<String, Connector> sources = new LinkedHashMap<>(sources());
+        sources.put("pg_catalog", new Stub("pg_catalog", Map.of("main", List.of("pg_class", "users"))));
+        sources.put("information_schema", new Stub("information_schema",
+                Map.of("main", List.of("tables", "columns"))));
+        return sources;
+    }
+
+    /** A resolver as in PostgreSQL in the database pg along the schemas. */
+    private static NameResolver postgres(String... schemas) {
+        return new NameResolver(withCatalogs(), new SearchPath("pg", "public"),
+                new DatabasePath("pg", List.of(schemas), List.of("pg_catalog", "information_schema")));
+    }
+
+    private static String resolveNew(NameResolver r, String... name) {
+        return r.resolveNew(List.of(name)).toString();
+    }
+
+    @Test
+    void onePartGoesAlongThePathOfTheDatabase() {
+        NameResolver r = postgres("public", "main");
+        // pg_catalog first, then the schemas in their order, and the first one with the table wins.
+        assertEquals("pg_catalog.main.users", resolve(r, "users"));
+        assertEquals("pg.public.orders", resolve(r, "orders"));
+        assertEquals("pg.main.orders", resolve(postgres("main", "public"), "orders"));
+        assertEquals("pg.public.orders", resolve(postgres("PUBLIC"), "Orders"));
+        // A pg_catalog that the path names keeps its place.
+        assertEquals("pg.public.users", resolve(postgres("public", "pg_catalog"), "users"));
+        assertEquals("pg_catalog.main.pg_class", resolve(postgres("public", "pg_catalog"), "pg_class"));
+        // A schema that the database does not have is passed over.
+        assertEquals("pg.public.orders", resolve(postgres("nowhere", "public"), "orders"));
+        assertEquals("Table with name orders does not exist", error(postgres("nowhere"), "orders"));
+        assertEquals("pg_catalog.main.pg_class", resolve(postgres(), "pg_class"));
+        // Other sources and information_schema only by their names.
+        assertEquals("Table with name items does not exist", error(r, "items"));
+        assertEquals("Table with name columns does not exist", error(r, "columns"));
+        assertEquals("information_schema.main.columns", resolve(postgres("information_schema"), "columns"));
+        // Only names in one schema can be ambiguous.
+        assertEquals("Table name orders is ambiguous: pg.sales.Orders, pg.sales.ORDERS",
+                error(postgres("sales", "public"), "orders"));
+    }
+
+    @Test
+    void twoPartsAreCatalogOrSchemaOfTheDatabaseAndThreeAnySource() {
+        NameResolver r = postgres("public");
+        assertEquals("pg.public.users", resolve(r, "public", "users"));
+        assertEquals("pg.main.orders", resolve(r, "main", "orders"));
+        assertEquals("pg_catalog.main.users", resolve(r, "pg_catalog", "users"));
+        assertEquals("information_schema.main.tables", resolve(r, "INFORMATION_SCHEMA", "tables"));
+        assertEquals("Table with name mem.items does not exist", error(r, "mem", "items"));
+        assertEquals("Table with name nowhere.users does not exist", error(r, "nowhere", "users"));
+        assertEquals("pg_catalog.main.pg_class", resolve(r, "pg", "pg_catalog", "pg_class"));
+        assertEquals("mem.main.items", resolve(r, "mem", "main", "items"));
+        assertEquals("pg.public.users", resolve(r, "pg", "public", "users"));
+        assertEquals("Table with name mem.pg_catalog.pg_class does not exist",
+                error(r, "mem", "pg_catalog", "pg_class"));
+        assertThrows(IllegalArgumentException.class, () -> new NameResolver(withCatalogs(), SearchPath.none(),
+                new DatabasePath("nosuch", List.of(), List.of("pg_catalog"))));
+        assertThrows(IllegalArgumentException.class, () -> new NameResolver(sources(), SearchPath.none(),
+                new DatabasePath("pg", List.of(), List.of("pg_catalog"))));
+    }
+
+    @Test
+    void newTablesGoToTheFirstSchemaOfThePath() {
+        assertEquals("pg.public.t", resolveNew(postgres("nowhere", "public", "main"), "t"));
+        assertEquals("pg.public.users", resolveNew(postgres("public"), "USERS"));
+        assertEquals("pg.main.t", resolveNew(postgres("pg_catalog", "main"), "t"));
+        assertEquals(Optional.of("sales"), postgres("nowhere", "SALES").creationSchema());
+        assertEquals(Optional.empty(), postgres("nowhere", "information_schema").creationSchema());
+        assertEquals(Optional.empty(), new NameResolver(sources(), SearchPath.none()).creationSchema());
+        assertEquals("No schema has been selected to create in; set the search_path to a schema of pg",
+                assertThrows(SqlException.class, () -> postgres("nowhere").resolveNew(List.of("t"))).getMessage());
+        assertEquals("pg.sales.x", resolveNew(postgres(), "sales", "x"));
+        assertEquals("pg_catalog.main.x", resolveNew(postgres(), "pg_catalog", "x"));
+        assertEquals("Schema with name nosuch does not exist",
+                assertThrows(SqlException.class, () -> postgres().resolveNew(List.of("nosuch", "x"))).getMessage());
+        assertEquals("mem.main.x", resolveNew(postgres(), "mem", "main", "x"));
+    }
+
+    @Test
+    void theCatalogQualifiesTheColumnsOfCatalogsAsDatabaseCatalogTable() {
+        DatabasePath path = new DatabasePath("pg", List.of("public"), List.of("pg_catalog", "information_schema"));
+        EngineCatalog fyrql = new EngineCatalog(withCatalogs(), new SearchPath("pg", "public"));
+        EngineCatalog postgres = fyrql.withDatabasePath(path);
+        assertEquals(List.of("pg_catalog", "main", "pg_class"), fyrql.path(fyrql.resolve(List.of("pg_class"))));
+        assertEquals(List.of("pg", "pg_catalog", "pg_class"), postgres.path(postgres.resolve(List.of("pg_class"))));
+        assertEquals(List.of("pg", "public", "users"), postgres.path(postgres.resolve(List.of("public", "users"))));
+        assertEquals(path, postgres.withSearchPath(new SearchPath("pg", "main")).databasePath());
+        assertEquals(path, postgres.withSources(Map.of("more", new Stub("more", Map.of()))).databasePath());
+        assertEquals(path, postgres.withSession(SearchPath.none(), () -> ZoneId.of("UTC")).databasePath());
+        assertEquals(postgres, postgres.withDatabasePath(path));
+        assertNull(postgres.withDatabasePath(null).databasePath());
     }
 
     @Test

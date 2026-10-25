@@ -4,11 +4,12 @@
 
 This manual describes FyrQL 0.16.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
-the Flight SQL server, the PostgreSQL wire protocol server and the starter for Spring
-Boot, the SQL it takes and where it differs from DuckDB, how it runs queries and how to
-observe them, with measurements. [Getting started](getting-started.md) is a shorter tour,
-and the [README](../README.md) an overview; the [examples](../examples/README.md) are programs that run, each
-with its output.
+the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it runs
+queries and how to observe them, with measurements. The [PostgreSQL wire protocol
+server](pgwire.md) and the starter for [Spring Boot](spring-boot.md) have documents of
+their own. [Getting started](getting-started.md) is a shorter tour, and the
+[README](../README.md) an overview; the [examples](../examples/README.md) are programs
+that run, each with its output.
 
 ## Contents
 
@@ -29,12 +30,12 @@ with its output.
 - [Flight SQL server](#flight-sql-server)
   - [Python](#python)
   - [JDBC tools](#jdbc-tools)
-- [PostgreSQL wire protocol server](#postgresql-wire-protocol-server)
-  - [psql](#psql)
-  - [psycopg](#psycopg)
-  - [pgjdbc and DBeaver](#pgjdbc-and-dbeaver)
-  - [Metabase](#metabase)
-- [Spring Boot](#spring-boot)
+- [PostgreSQL wire protocol server](pgwire.md)
+  - [psql](pgwire.md#psql)
+  - [psycopg](pgwire.md#psycopg)
+  - [pgjdbc and DBeaver](pgwire.md#pgjdbc-and-dbeaver)
+  - [Metabase](pgwire.md#metabase)
+- [Spring Boot](spring-boot.md)
 - [Supported SQL](#supported-sql)
   - [Time zone](#time-zone)
 - [Differences from DuckDB](#differences-from-duckdb)
@@ -157,7 +158,7 @@ The settings of an engine come from the methods of `FyrQL.Builder`, from the sec
 `engine` of the [configuration file](#configuration-file), with sizes such as `512MB`,
 and from the URL or the properties of a connection of the [JDBC driver](#jdbc-driver);
 the [Flight SQL server](#flight-sql-server) and the [PostgreSQL wire protocol
-server](#postgresql-wire-protocol-server) read them from their configuration file. A few
+server](pgwire.md) read them from their configuration file. A few
 take their default from a system property.
 
 | Builder method | Key in a file or URL | Default | Meaning |
@@ -196,7 +197,7 @@ binds a statement without running it, as a `SqlStatement` with the columns of it
 which `execute` runs in a `QueryContext` of the caller that can cancel it. Every
 connection of the [JDBC driver](#jdbc-driver) is a session, and so is every client of the
 [Flight SQL server](#flight-sql-server) and every connection of the [PostgreSQL wire
-protocol server](#postgresql-wire-protocol-server).
+protocol server](pgwire.md).
 
 ```java
 Session berlin = engine.newSession();
@@ -210,7 +211,7 @@ List<Object[]> rows = berlin.rows("SELECT current_setting('TimeZone'), current_s
 | Setting | Values | Starts with | Meaning |
 | --- | --- | --- | --- |
 | `TimeZone` | a zone such as `Europe/Berlin` | `timeZone` of the builder | The zone of `TIMESTAMPTZ`; see [Time zone](#time-zone) |
-| `search_path` | `source`, `source.schema`, a schema of the default source, or empty | `defaultSource` and `defaultSchema` | Where names of fewer than three parts are looked up first |
+| `search_path` | `source`, `source.schema`, a schema of the default source, or empty | `defaultSource` and `defaultSchema` | Where names of fewer than three parts are looked up first; in the [PostgreSQL wire protocol server](pgwire.md), the schemas of the database, as in PostgreSQL |
 | `statement_timeout` | milliseconds, or a number with `ms`, `s`, `min`, `h` or `d`; `0` for none | `queryTimeout` | The timeout of a statement that asks for none; see [Time limits](#time-limits) |
 
 The statements of a session, with the names of the settings in any case:
@@ -879,7 +880,7 @@ file whose name ends in `.json` is read as JSON. `FyrQLConfig.builder(path)` ret
 builder instead, so that an application can add sources of its own, such as tables in
 memory. A third section, `server`, holds the settings of the [Flight SQL
 server](#flight-sql-server), and a fourth, `pgwire`, those of the [PostgreSQL wire
-protocol server](#postgresql-wire-protocol-server); the engine leaves both aside.
+protocol server](pgwire.md); the engine leaves both aside.
 
 A source of the type `csv` takes `directory`, whose `.csv` and `.tsv` files become tables,
 and `tables.<name>` or `tables.<name>.file` for single files, also in S3; and, for every
@@ -1434,439 +1435,6 @@ milliseconds and an `INTERVAL` a `PeriodDuration` of the driver; the types of Fy
 in the type
 names of `getColumns` of its `DatabaseMetaData`.
 
-## PostgreSQL wire protocol server
-
-The module `fyrql-pgwire` is a server for an engine that speaks the wire protocol of
-PostgreSQL, version 3.0, so that psql, psycopg, the JDBC driver of PostgreSQL and the
-tools built on them, such as DBeaver and Metabase, query the sources of FyrQL without a
-driver of their own. It needs nothing but the JDK. The JAR of `fyrql-pgwire-all` holds
-the server with the engine, code generation and all connectors, without Arrow, gRPC and
-Netty, and starts it from a configuration file. This builds it as
-`fyrql-pgwire-all/target/fyrql-pgwire-all-<version>.jar`:
-
-```
-./mvnw -B -ntp clean package -pl fyrql-pgwire-all -am -DskipTests
-```
-
-and this starts it:
-
-```
-java -jar fyrql-pgwire-all-<version>.jar fyrql.yaml [--host HOST] [--port PORT]
-```
-
-The sources and the section `engine` of the file build the engine, as for the
-[configuration file](#configuration-file), and its section `pgwire` holds the settings of
-the server, all of them optional; `--host` and `--port` win over those of the file:
-
-```yaml
-pgwire:
-  host: 0.0.0.0
-  port: 5433
-  tls:
-    certificate: server.pem
-    key: server.key
-  users:
-    alice: ${env:ALICE_PASSWORD}
-  maxConnections: 100
-  maxQueries: 16
-  serverVersion: "18.0"
-```
-
-- `host` and `port`: where the server listens, by default `127.0.0.1` and 5433, so that
-  it does not meet a PostgreSQL on 5432; port 0 takes a free one.
-- `users`: names with their passwords. A client signs in with SCRAM-SHA-256, as
-  PostgreSQL asks by default, without channel binding (`SCRAM-SHA-256-PLUS`). The server
-  derives the keys from the passwords at its start and keeps no password; a user it does
-  not know goes through the same steps as one with a wrong password, and both fail with
-  `28P01`. Without `users`, the server takes every client under any name, and must then
-  listen on a loopback address: another host without them is an error at the start.
-  Users on another address without TLS keep their passwords off the network, as SCRAM
-  sends none, but queries and their rows cross it in plain text; the server then warns
-  on the standard error stream at the start, and runs, as TLS may come from a proxy in
-  front of it.
-- `tls.certificate` and `tls.key`: the certificate chain and its private key as PEM, the
-  key in PKCS #8, as for the [Flight SQL server](#flight-sql-server). With TLS, the
-  server takes only clients that ask for it, as with `sslmode=require`, and refuses the
-  others with `28000`; client certificates are not supported.
-- `maxConnections`: the most connections at once, by default 100; another one fails with
-  `53300`.
-- `maxQueries`: the most queries that run at once, by default twice the threads of the
-  engine; another one fails with `53000`.
-- `serverVersion`: the version of PostgreSQL that the server names, in the parameter
-  `server_version` and in `version()`, by default `18.0`. Clients such as pgjdbc and
-  DBeaver choose the forms of their queries of the catalogs by it.
-
-Unless the section `engine` sets them, the server sets `fileAccess` to `none`,
-`maxQueryTimeout` to an hour and `memoryBudget` to half the heap, as the [Flight SQL
-server](#flight-sql-server) does, with the same meaning. It prints the line `FyrQL
-PostgreSQL wire protocol server <version> listening on 127.0.0.1:5433`, with ` (TLS)` if
-it has a certificate, and a line such as `File access from SQL: none; query timeout:
-none, at most 1h; memory budget: 2048MiB; databases: files, iceberg, json, parquet`, and
-runs until the JVM ends, as with Ctrl+C, and then closes the engine. The JAR has the same
-libraries renamed as the one of the [JDBC driver](#dbeaver). The JDBC drivers of
-databases are not in it: for sources of the type `jdbc`, they go on the class path next
-to it, and the server then starts with its class name (with `;` between the entries of
-the class path on Windows):
-
-```
-java -cp "fyrql-pgwire-all-<version>.jar:drivers/*" net.fyrql.pgwire.PgWireServerMain fyrql.yaml
-```
-
-An application starts the server over an engine of its own with
-`PgWireServer.builder(engine).config(PgWireConfig.defaults()).build().start()`, and
-`PgWireConfig.of(config)` reads the section `pgwire` of a configuration file; closing the
-server leaves the engine open, and one engine may serve a Flight SQL server as well. That
-engine keeps the file access it was built with, as for the Flight SQL server.
-
-**Databases and schemas.** The database a client names is a source of the engine, and
-the schemas of that source are the schemas of PostgreSQL; `pg_database`, and so `\l` in
-psql, lists all sources. Without a database, or with the name of the user, as psql sends
-it by default, a client gets the default source of the engine, or else its first source;
-a name that is no source fails with `3D000`. A connection starts with the search path on
-its database and the default schema of the engine there, else `main`, else `public`, else
-the first schema. `SET search_path TO sales, public` takes the first schema of the list
-that the database has and passes over `$user`; `SHOW search_path`, `current_schema()` and
-`current_schemas(true)` give it. A query names the tables of the other sources as
-anywhere in FyrQL, `source.schema.table`, so that one connection joins across sources.
-
-**Sessions and statements.** Each connection is a [session](#sessions) of the engine, on a
-thread of its own; the parameters of the start, such as `TimeZone`, `application_name`
-and those in `options` (`-c name=value`, as psql passes `PGOPTIONS`), apply as `SET`
-would. The server answers these statements itself:
-
-- `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `ABORT`, `SAVEPOINT`,
-  `RELEASE` and `ROLLBACK TO`, see below;
-- `SET`, `RESET` and `SHOW`, also `SHOW ALL`, for the parameters of PostgreSQL:
-  `TimeZone`, `statement_timeout` (in milliseconds or with a unit, such as `'5s'`) and
-  `search_path` set the session; the server keeps those that only describe the client,
-  such as `application_name`, `extra_float_digits` and `client_min_messages`, refuses a
-  value it does not follow, such as a `DateStyle` other than ISO, takes any value for a
-  name with a dot, as extensions use them, and fails with `42704` for a name it does not
-  know;
-- `DECLARE`, `FETCH`, `MOVE` and `CLOSE` of cursors, `DISCARD`, `DEALLOCATE`, and
-  `UNLISTEN`, which does nothing.
-
-It refuses with `0A000`: `COPY` from `STDIN` or to `STDOUT` and `COPY ... PROGRAM`,
-`LISTEN` and `NOTIFY`, two-phase commit, `PREPARE` and `EXECUTE` in SQL (the extended
-protocol prepares statements), `VACUUM`, `ANALYZE`, `GRANT`, `TRUNCATE` and the other
-statements of maintenance and rights, cursors with `SCROLL` and fetching backward. Every
-other statement goes to the engine: queries, `EXPLAIN`, the statements that
-[write](#writing-and-loading), and `COPY` to and from the files of the machine of the
-server, as far as its [file access](#file-access) allows. A text of the simple protocol
-may hold several statements between semicolons, which run in turn; an empty one is
-answered as empty. The tags of the answers are those of PostgreSQL, such as `SELECT 3`,
-`INSERT 0 3`, `CREATE TABLE` and `COPY 3`.
-
-**Transactions.** FyrQL has no transactions, and each statement writes for itself.
-`BEGIN`, `COMMIT` and `ROLLBACK` only follow the state that PostgreSQL reports to its
-clients, so that a client that turns auto-commit off works: after an error in a block,
-every statement fails with `25P02` until `ROLLBACK`, as in PostgreSQL, and a `ROLLBACK`
-after a statement that wrote warns `FyrQL has no transactions: what the statements of
-the transaction wrote stays written`.
-
-**Prepared statements and parameters.** The extended protocol, with which pgjdbc,
-psycopg and most drivers send their statements, prepares named and unnamed statements,
-binds them to portals and runs them, also a part of the rows at a time; a portal ends
-with the next `Sync` outside a block. Its parameters are `$1`, `$2` and so on, which the
-engine takes as it takes `?` (see [Using the engine](#using-the-engine)). A parameter of a
-type that the client names, such as `int4` or `date`, is cast to that type, as
-`CAST($1 AS INTEGER)`; one without a type, as psycopg sends a string, takes the type of
-its context, `VARCHAR` without one, and a `numeric` without one `DECIMAL(38,10)`. Values
-come in text or in binary.
-
-**Cursors.** `DECLARE c CURSOR FOR query` opens a cursor in a block of `BEGIN`, and
-`DECLARE c CURSOR WITH HOLD FOR query` one that stays open after it; `FETCH [NEXT |
-FORWARD | n | FORWARD n | ALL | FORWARD ALL] [FROM | IN] c` reads its next rows, `MOVE`
-passes over them, and `CLOSE c` or `CLOSE ALL` ends it. A cursor reads forward only, and
-its query runs as the client fetches; the end of a block closes the cursors without
-`WITH HOLD`. pgjdbc reads a result in parts this way with `setFetchSize` while
-auto-commit is off, and psycopg with a named cursor.
-
-**Cancel and time limits.** A cancel request, as psql sends it on Ctrl+C and pgjdbc on
-`Statement.cancel()`, stops the query that runs on the connection, which fails with
-`57014`; so does one past its `statement_timeout`, with the message `canceling statement
-due to statement timeout`.
-
-**Catalogs.** For each database, the server builds the tables of `pg_catalog` and
-`information_schema` that clients read from the catalog of its source, with the columns
-of PostgreSQL 18: `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`, `pg_database`,
-`pg_proc`, `pg_settings`, `pg_roles`, `pg_tables`, `pg_views`, `pg_stat_user_tables` and
-others, and `schemata`, `tables`, `columns`, `views`, `table_constraints`,
-`key_column_usage` and `referential_constraints`. The tables of things that FyrQL has
-none of, such as indexes, constraints, triggers and partitions, are there and empty, and
-so a table has no primary key there. The two catalogs are only in the sessions of the
-server: the engine, the JDBC driver and the Flight SQL server do not see them, and they
-hide a schema of the same name of a source, such as the `information_schema` of H2. A
-snapshot is at most two seconds old, and new after a statement of the server that writes.
-The OIDs are stable: the catalogs and types have those of PostgreSQL, and the schemas,
-tables and columns of the sources numbers from a hash of their names, which stay the same
-while the names do. The owner of every object is `fyrql`. The functions that clients call
-over the catalogs are there as well: `format_type`, `pg_get_userbyid`, `to_regclass`,
-`has_table_privilege` and its kin, which always grant, the visibility of objects, which
-they always have, `obj_description` and `col_description`, which are `NULL`, the texts of
-definitions such as `pg_get_indexdef` and `pg_get_viewdef`, which are `NULL` too, and the
-sizes of relations, which are 0.
-
-**Rewriting.** The engine follows DuckDB, and the server rewrites the forms of PostgreSQL
-that it does not take before the engine sees a statement: casts to `regclass`, `regtype`,
-`oid`, `name` and the other types of the catalogs; the qualifier `pg_catalog.` of
-functions and types; `x = ANY(list)` and `x <> ALL(list)`; array literals such as
-`'{a,b}'::text[]`; `COLLATE`; `current_user`, `session_user`, `user`, `current_role`,
-`current_catalog`, `current_setting` of the parameters of the server, `version()` and
-`pg_backend_pid()`; strings in `$tag$`; keywords as labels after `AS`; `generate_series`
-in `FROM`; `array(SELECT ...)`; and the subqueries of the `\d` commands of psql. One rule
-matters for queries of one's own: `~`, `~*`, `!~` and `!~*` match a part of the string, as
-in PostgreSQL, where elsewhere in FyrQL `~` matches the whole string, as in DuckDB. The
-label of an output column that is no plain column follows FyrQL, as `lower(x)` where
-PostgreSQL says `lower`, except for the forms above that the server replaces, which get
-the label of PostgreSQL, as `version`.
-
-**Types.** The server gives the types of FyrQL these types of PostgreSQL:
-
-| FyrQL | PostgreSQL |
-| --- | --- |
-| `BOOLEAN` | `bool` |
-| `TINYINT`, `SMALLINT` | `int2` |
-| `INTEGER` | `int4` |
-| `BIGINT` | `int8` |
-| `HUGEINT`, `DECIMAL(p,s)` | `numeric`, with precision and scale |
-| `FLOAT` | `float4` |
-| `DOUBLE` | `float8` |
-| `VARCHAR` | `text` |
-| `BLOB` | `bytea` |
-| `DATE`, `TIME`, `TIMESTAMP`, `TIMESTAMPTZ`, `INTERVAL` | `date`, `time`, `timestamp`, `timestamptz`, `interval` |
-| `UUID` | `uuid` |
-| `T[]` of a type above | the array of its type, such as `int4[]` |
-| a list of lists, `STRUCT`, `MAP` | `text`, in the text form of FyrQL |
-
-Values go out in the text form of PostgreSQL, such as `t` and `f`, `\x0102` for bytes,
-`1 year 2 mons 3 days 04:05:06.5` and a `TIMESTAMPTZ` with the offset of the time zone of
-the session, or in binary, as the client asks for each column. Parameters come in either
-form for all of these types, and a `json` or `jsonb`, a `varchar` or a `bpchar` as a
-`VARCHAR`. FyrQL has no type `json`, so that the operators of `jsonb` such as `#>>` are not
-taken.
-
-The other errors have the SQLSTATEs of FyrQL, which are those of PostgreSQL, such as
-`42601` for a syntax error, `42P01` for a table and `42703` for a column that does not
-exist, with the position in the text where FyrQL has one, and `XX000` for an
-error of a source.
-
-### psql
-
-With the files of the [JDBC example](#jdbc-driver), and the server started on
-`fyrql.yaml` without the section `pgwire`, psql 18 lists the tables and runs the query
-of that example:
-
-```
-psql -h 127.0.0.1 -p 5433 -d files
-files=> \dt
-           List of tables
- Schema |   Name    | Type  | Owner
---------+-----------+-------+-------
- main   | customers | table | fyrql
- main   | orders    | table | fyrql
-(2 rows)
-
-files=> SELECT c.region, count(*) AS orders, sum(o.amount) AS revenue
-files->   FROM orders AS o JOIN customers AS c ON o.customer = c.id
-files->   WHERE o.amount > 6 GROUP BY ALL ORDER BY revenue DESC;
- region | orders | revenue
---------+--------+---------
- south  |      1 |      20
- north  |      1 |    10.5
-(2 rows)
-```
-
-`\l`, `\dn`, `\dt`, `\dv`, `\di`, `\d table`, `\d+ table`, `\df`, `\du`, `\dT` and
-`\conninfo` work, and `\d` shows no indexes, keys or defaults, which FyrQL does not have;
-`\copy` does not work, as it sends `COPY ... FROM STDIN`. With `users`, psql asks for the
-password, or takes it from `PGPASSWORD`; with TLS, it connects with
-`"host=... sslmode=require"`, or with `sslmode=verify-ca` and `sslrootcert=server.pem` for
-a certificate that no known authority signed.
-
-### psycopg
-
-psycopg 3 connects as to PostgreSQL:
-
-```python
-import psycopg
-
-with psycopg.connect("host=127.0.0.1 port=5433 dbname=files user=alice", autocommit=True) as conn:
-    rows = conn.execute("""
-        SELECT c.region, count(*) AS orders, sum(o.amount) AS revenue
-        FROM orders AS o JOIN customers AS c ON o.customer = c.id
-        WHERE o.amount > %s
-        GROUP BY ALL
-        ORDER BY revenue DESC""", (6.0,)).fetchall()
-    print(rows)
-```
-
-```
-[('south', 1, 20.0), ('north', 1, 10.5)]
-```
-
-Prepared statements (`prepare=True`), the binary format (`binary=True`), named cursors,
-`executemany` into a source of the type `memory`, and the types `date`, `timestamp`,
-`timestamptz`, `numeric`, `uuid`, `bytea` and lists both ways were tried with psycopg
-3.3.6. Without `autocommit=True`, psycopg opens a block with `BEGIN`, which works as
-described under Transactions.
-
-### pgjdbc and DBeaver
-
-The JDBC driver of PostgreSQL (`org.postgresql:postgresql`) connects with a URL such as
-
-```
-jdbc:postgresql://localhost:5433/files?user=alice&password=secret
-```
-
-and the tests run the 22 TPC-H queries through it, in text and in binary
-(`binaryTransfer=true&prepareThreshold=1`), the methods of its `DatabaseMetaData`, cursors
-with `setFetchSize`, cancel and statements that write; this was tried with pgjdbc 42.7.14.
-Its `getCatalogs()` lists all sources, while the schemas, tables and columns of its
-`DatabaseMetaData` are those of the database of the connection, as with PostgreSQL. In
-DBeaver, a connection of the type PostgreSQL with host, port, database and user shows the
-schemas, tables and columns with their types, the data of a table, sorted and filtered,
-and runs queries; with "Show all databases" on the page PostgreSQL of the connection, it
-shows every source as a database. A connection of the type PostgreSQL needs no driver of
-FyrQL, unlike the one of the [JDBC driver](#dbeaver), and the engine runs in the server.
-
-### Metabase
-
-Metabase connects with a database of the type PostgreSQL, with host, port, the source as
-the database name, and user and password; it synchronizes the schemas, tables and columns,
-fingerprints the columns, and answers questions of the query builder and native queries.
-This was tried with Metabase 0.64.3.2.
-
-## Spring Boot
-
-With the module `fyrql-spring-boot-starter`, an application of Spring Boot 4 gets an
-engine as a bean, configured in its `application.yml`. The application adds the starter
-and the connectors of its sources; Spring Boot it brings itself, in its own version of
-4.x (the starter is built and tested with 4.1.2):
-
-```xml
-<dependency>
-    <groupId>io.github.fyrql</groupId>
-    <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.16.0</version>
-</dependency>
-<dependency>
-    <groupId>io.github.fyrql</groupId>
-    <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.16.0</version>
-</dependency>
-```
-
-The keys under `fyrql` take the form of the [configuration file](#configuration-file),
-with the settings under `engine` and the sources under `sources`:
-
-```yaml
-fyrql:
-  engine:
-    threads: 4
-    memory-budget: 2GiB
-    query-timeout: 30s
-  sources:
-    - name: sales
-      type: jdbc
-      url: jdbc:postgresql://db/sales
-      user: sales
-      password: ${DB_PASSWORD}
-    - name: files
-      type: csv
-      directory: data
-```
-
-```java
-@Service
-class Revenue {
-
-    private final FyrQL engine;
-
-    Revenue(FyrQL engine) {
-        this.engine = engine;
-    }
-
-    List<Object[]> byRegion() {
-        return engine.rows("SELECT r.region, sum(o.amount) FROM sales.orders AS o"
-                + " JOIN files.regions AS r ON o.region_id = r.id GROUP BY r.region");
-    }
-}
-```
-
-The settings under `fyrql.engine` are those of [Engine settings](#engine-settings), with
-the relaxed names of Spring: `memory-budget` and `memoryBudget` are the same key, and an
-IDE completes them from the metadata of the starter. `memory-budget` takes the units of
-FyrQL, so that `512MB` are 512,000,000 bytes and `512MiB` 536,870,912, not those of
-Spring; `query-timeout` and `max-query-timeout` are durations such as `30s` or `5m`, or
-`0` for none.
-The sources under `fyrql.sources` are those of the file: a `name`, a `type` and the
-options of the type below them, with nested keys joined by dots and lists by commas.
-Unlike the settings, the options keep the names of their connector exactly, such as
-`recordStatements`, since Spring does not relax the keys of a map; for the same reason
-an option cannot come from an environment variable named after its key, which Spring
-reads in lower case, but from a placeholder in the YAML.
-
-Placeholders are those of Spring, such as `${DB_PASSWORD}`, which Spring resolves from
-environment variables, system properties and its other sources. The form
-`${env:NAME}` of the configuration file does not work in `application.yml`: Spring reads
-it as the property `env` with the default `NAME` and gives the text `NAME`, without an
-error.
-
-`fyrql.config` names a configuration file of FyrQL in addition. Its sources come first,
-with `${env:NAME}` as in any file and relative paths against its directory, then those
-under `fyrql.sources`; the settings under `fyrql.engine` replace those of the file.
-Relative paths under `fyrql.sources` and `fyrql.engine` are resolved against the working
-directory. Two sources with the same name, in any case, are an error.
-
-The engine closes with the application context. A bean of the type `FyrQL` of the
-application replaces it, and `fyrql.enabled: false` turns the starter off. Sources and
-functions of the application, such as tables in memory, join through beans of the type
-`FyrQLBuilderCustomizer`, which the starter applies in the order of their `@Order` before
-it builds the engine:
-
-```java
-@Bean
-FyrQLBuilderCustomizer products(ProductRepository repository) {
-    return builder -> builder.register(MemoryConnector.builder("app")
-            .table("products", Product.class, repository.findAll()).build());
-}
-```
-
-If the engine cannot be built, the application does not start, and the message names the
-setting or the source at fault; the connectors opened until then are closed.
-
-With `fyrql.datasource.enabled: true`, there is a `DataSource` of the engine, the bean
-`fyrqlDataSource`, for code that wants JDBC, such as a `JdbcTemplate`. Its connections
-share the engine and do not close it, each a [session](#sessions) of its own, as with
-`new FyrQLDataSource(engine)` of the [JDBC driver](#jdbc-driver). It is no default
-candidate: the `DataSource` of the application, which Spring Boot still creates from
-`spring.datasource`, stays the one that is injected by its type, and that of FyrQL is
-injected by its name:
-
-```java
-@Bean
-JdbcTemplate fyrqlTemplate(@Qualifier("fyrqlDataSource") DataSource dataSource) {
-    return new JdbcTemplate(dataSource);
-}
-```
-
-An application that wants FyrQL as its only `DataSource` defines the bean itself, as
-`new FyrQLDataSource(engine)`.
-
-With the health module of Spring Boot, which `spring-boot-starter-actuator` brings, the
-health indicator `fyrql` checks each source of the configuration by listing its schemas,
-which reaches the database or service behind it. It is up when all answer and down when
-one fails; its details give the status of each source and the error of one that failed,
-shown as Spring shows details (`management.endpoint.health.show-details`). Sources that
-a customizer registers, and those of the file formats, are not checked; without sources
-of the configuration, the indicator runs `SELECT 1`. `management.health.fyrql.enabled:
-false` turns it off. The messages of the indicator hold no passwords, keys or tokens of
-the sources. The endpoints `env` and `configprops` of Actuator show the values of
-`fyrql.sources`, the passwords among them, only with `show-values` set to `always`, or to
-`when-authorized` for the users it authorizes; by default, `never`, Spring Boot masks
-them.
-
 ## Supported SQL
 
 Queries, the statements of [Writing](#writing-and-loading), and `EXPLAIN` and `EXPLAIN ANALYZE`
@@ -2031,7 +1599,7 @@ in DuckDB. That zone is the one of the JVM, unless the builder sets another with
 `timeZone(ZoneId)`, the [configuration file](#configuration-file) with `timeZone` under
 `engine`, or the URL of the [JDBC driver](#jdbc-driver) with `timeZone`; the
 [Flight SQL server](#flight-sql-server) takes the one of its configuration file, and so
-does the [PostgreSQL wire protocol server](#postgresql-wire-protocol-server) for a client
+does the [PostgreSQL wire protocol server](pgwire.md) for a client
 that names none at its start; pgjdbc names the zone of its JVM, and psql the one of
 `PGTZ`.
 `SET TimeZone = 'Europe/Berlin'` changes it for the [session](#sessions), `RESET
@@ -2965,9 +2533,9 @@ covers
 - the API for applications and the SPI for connectors, the packages and classes the
   table below lists as such;
 - the keys of the [configuration file](#configuration-file), of the URL of the
-  [JDBC driver](#jdbc-driver) and of the starter for [Spring Boot](#spring-boot), and the
-  command lines of the [Flight SQL server](#flight-sql-server) and the [PostgreSQL wire
-  protocol server](#postgresql-wire-protocol-server);
+  [JDBC driver](#jdbc-driver) and of the starter for [Spring Boot](spring-boot.md), and
+  the command lines of the [Flight SQL server](#flight-sql-server) and the [PostgreSQL
+  wire protocol server](pgwire.md);
 - the behavior of SQL: the statements, functions and types FyrQL takes, the results it
   gives, the types it maps to JDBC, Arrow and PostgreSQL, and the SQLSTATEs of its
   errors. A minor
@@ -3001,7 +2569,7 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | Package | Tier | Classes of another tier |
 | --- | --- | --- |
 | `net.fyrql` | API | `Overlay`, `SqlStates` (internal) |
-| `net.fyrql.catalog` | API | `EngineCatalog` (internal) |
+| `net.fyrql.catalog` | API | `DatabasePath`, `EngineCatalog` (internal) |
 | `net.fyrql.config` | API | `Connectors` (internal) |
 | `net.fyrql.jdbc` | API | - |
 | `net.fyrql.arrow` | API | `ArrowTypes` (internal) |

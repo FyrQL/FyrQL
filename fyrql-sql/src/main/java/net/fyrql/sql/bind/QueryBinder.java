@@ -603,7 +603,7 @@ final class QueryBinder {
             throw new SqlException(e.reason(), t.position(), e.getCause());
         }
         PlanNode.Scan scan = scan(table);
-        List<String> path = t.alias() == null ? List.of(table.source(), table.schema(), table.table()) : List.of();
+        List<String> path = t.alias() == null ? catalog.path(table) : List.of();
         String alias = t.alias() == null ? table.table() : t.alias().name();
         List<String> names = aliasColumns(scan.schema().fields().stream().map(Schema.Field::name).toList(),
                 t.alias(), alias, t.position());

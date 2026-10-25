@@ -11,6 +11,7 @@
 
 package net.fyrql;
 
+import net.fyrql.catalog.DatabasePath;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.function.ScalarFunction;
@@ -104,6 +105,32 @@ class OverlayTest {
         assertThrows(IllegalArgumentException.class,
                 () -> engine.functions().resolve("twice", List.of(DataType.INTEGER)));
         assertEquals(List.of(List.of(1), List.of(2)), rows(engine.rows("SELECT a FROM t ORDER BY a")));
+    }
+
+    @Test
+    void namesResolveAsInPostgreSqlAlongTheDatabasePath() {
+        Session session = overlay();
+        Overlay.use(session, new DatabasePath("mem", List.of("main"), List.of("x")));
+        List<List<Object>> pq = List.of(List.of("p"), List.of("q"));
+        // The first catalog comes before the schemas of the path; database.catalog.table qualifies its columns.
+        assertEquals(pq, rows(session.rows("SELECT b FROM t ORDER BY b")));
+        assertEquals(pq, rows(session.rows("SELECT x.t.b FROM x.t ORDER BY 1")));
+        assertEquals(pq, rows(session.rows("SELECT mem.x.t.b FROM mem.x.t ORDER BY 1")));
+        assertEquals(List.of(List.of(1), List.of(2)), rows(session.rows("SELECT main.t.a FROM main.t ORDER BY 1")));
+        assertEquals(List.of(List.of(2)), rows(session.rows("SELECT a FROM mem.main.t WHERE a > 1")));
+        SqlException e = assertThrows(SqlException.class, () -> session.update("CREATE TABLE nosuch.u AS SELECT 1"));
+        assertEquals("3F000", SqlStates.state(e), e.getMessage());
+        Overlay.use(session, new DatabasePath("mem", List.of("nowhere"), List.of("x")));
+        e = assertThrows(SqlException.class, () -> session.update("CREATE TABLE u AS SELECT 1"));
+        assertEquals("No schema has been selected to create in; set the search_path to a schema of mem",
+                e.reason());
+        assertEquals("3F000", SqlStates.state(e));
+        assertEquals("42P01", SqlStates.state(assertThrows(SqlException.class,
+                () -> session.rows("SELECT * FROM main"))));
+        // Without the path, the rules of FyrQL again.
+        Overlay.use(session, null);
+        assertEquals(List.of(List.of(1), List.of(2)), rows(session.rows("SELECT t.a FROM t ORDER BY 1")));
+        assertThrows(SqlException.class, () -> session.rows("SELECT x.t.b FROM x.t"));
     }
 
     @Test

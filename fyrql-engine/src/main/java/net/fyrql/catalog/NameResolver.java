@@ -40,25 +40,79 @@ import java.util.stream.Collectors;
  * <p>
  * The name of a new table, see {@link #resolveNew}, is resolved to a
  * source and a schema in the same way, without the table.
+ * <p>
+ * With a {@link DatabasePath}, names resolve as in PostgreSQL instead,
+ * as it describes; names of three parts still reach every source.
  */
 final class NameResolver {
 
     private final Map<String, Connector> sources;
     private final SearchPath searchPath;
+    private final DatabasePath database;
 
     /** A resolver over sources by name, in the order of their registration. */
     public NameResolver(Map<String, Connector> sources, SearchPath searchPath) {
+        this(sources, searchPath, null);
+    }
+
+    /**
+     * A resolver over sources by name, in the order of their registration.
+     *
+     * @param database the path of the database along which names resolve as
+     *        in PostgreSQL, or {@code null} for the rules of FyrQL
+     * @throws IllegalArgumentException if the default source, the database
+     *         or a catalog is not registered
+     */
+    public NameResolver(Map<String, Connector> sources, SearchPath searchPath, DatabasePath database) {
         this.sources = new LinkedHashMap<>(sources);
         this.searchPath = searchPath;
+        this.database = database;
         if (searchPath.defaultSource() != null && !this.sources.containsKey(searchPath.defaultSource())) {
             throw new IllegalArgumentException("The default source " + searchPath.defaultSource()
                     + " is not registered; registered: " + this.sources.keySet());
+        }
+        if (database != null) {
+            for (String source : concat(List.of(database.database()), database.catalogs())) {
+                if (!this.sources.containsKey(source)) {
+                    throw new IllegalArgumentException("The source " + source + " of the database path is not"
+                            + " registered; registered: " + this.sources.keySet());
+                }
+            }
         }
     }
 
     /** Returns the search path. */
     public SearchPath searchPath() {
         return searchPath;
+    }
+
+    /** Returns the path of the database, or {@code null} for the rules of FyrQL. */
+    public DatabasePath databasePath() {
+        return database;
+    }
+
+    /**
+     * Returns the schema of the database that a new table of one part goes
+     * to along the path of the database: the first schema of the path that
+     * the database has and that is no catalog.
+     *
+     * @return the schema, or empty if there is none or no path of a database
+     * @throws SqlException if a schema of the path matches several ignoring case
+     */
+    public Optional<String> creationSchema() {
+        if (database == null) {
+            return Optional.empty();
+        }
+        var catalog = sources.get(database.database()).catalog();
+        for (String schema : database.schemas()) {
+            if (match(database.catalogs(), schema).isEmpty()) {
+                List<String> found = match(catalog.schemas(), schema);
+                if (!found.isEmpty()) {
+                    return Optional.of(one(found, "Schema", schema));
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     /**
@@ -79,7 +133,66 @@ final class NameResolver {
      */
     public Optional<TableRef> find(List<String> name) {
         String text = String.join(".", name);
-        List<TableRef> found = switch (name.size()) {
+        List<TableRef> found;
+        if (database == null || name.isEmpty() || name.size() > 3) {
+            found = candidates(name);
+        } else if (name.size() < 3) {
+            found = inDatabase(name);
+        } else if (isDatabase(name.get(0)) && !match(database.catalogs(), name.get(1)).isEmpty()) {
+            found = inSchema(name.get(1), name.get(2));
+        } else {
+            found = candidates(name);
+        }
+        if (found.size() > 1) {
+            throw new SqlException("Table name " + text + " is ambiguous: " + found.stream().map(TableRef::toString)
+                    .collect(Collectors.joining(", ")), Position.UNKNOWN);
+        }
+        return found.stream().findFirst();
+    }
+
+    /** Returns the tables of a name of one or two parts along the path of the database. */
+    private List<TableRef> inDatabase(List<String> name) {
+        if (name.size() == 2) {
+            return inSchema(name.get(0), name.get(1));
+        }
+        List<String> order = new ArrayList<>();
+        if (!database.catalogs().isEmpty() && match(database.schemas(), database.catalogs().get(0)).isEmpty()) {
+            order.add(database.catalogs().get(0));
+        }
+        order.addAll(database.schemas());
+        for (String schema : order) {
+            List<TableRef> found = inSchema(schema, name.get(0));
+            if (!found.isEmpty()) {
+                return found;
+            }
+        }
+        return List.of();
+    }
+
+    /** Returns the tables of a name in the catalog of a schema name, or else in that schema of the database. */
+    private List<TableRef> inSchema(String schema, String table) {
+        List<String> catalogs = match(database.catalogs(), schema);
+        if (catalogs.isEmpty()) {
+            return tables(database.database(), schema, table);
+        }
+        List<TableRef> result = new ArrayList<>();
+        for (String c : catalogs) {
+            for (String s : sources.get(c).catalog().schemas()) {
+                result.addAll(tables(c, s, table));
+            }
+        }
+        return result;
+    }
+
+    /** Tells whether a name, matched as the parts of names are, is the database. */
+    private boolean isDatabase(String name) {
+        return !match(List.of(database.database()), name).isEmpty();
+    }
+
+    /** Returns the tables of a name along the rules of FyrQL, see the class. */
+    private List<TableRef> candidates(List<String> name) {
+        String text = String.join(".", name);
+        return switch (name.size()) {
             case 3 -> {
                 List<TableRef> result = new ArrayList<>();
                 for (String source : match(sources.keySet(), name.get(0))) {
@@ -120,11 +233,6 @@ final class NameResolver {
             }
             default -> throw new SqlException("A table name has one to three parts: " + text, Position.UNKNOWN);
         };
-        if (found.size() > 1) {
-            throw new SqlException("Table name " + text + " is ambiguous: " + found.stream().map(TableRef::toString)
-                    .collect(Collectors.joining(", ")), Position.UNKNOWN);
-        }
-        return found.stream().findFirst();
     }
 
     /**
@@ -138,7 +246,10 @@ final class NameResolver {
      * <li>one part is a table in the default schema of the default
      * source.</li>
      * </ul>
-     * A table of the name that exists there, matched as by
+     * Along the path of a database, one part is a table in its
+     * {@linkplain #creationSchema() schema for new tables}, and two parts
+     * are {@code catalog.table} or else {@code schema.table} in the
+     * database. A table of the name that exists there, matched as by
      * {@link #resolve}, comes with its own name, so that the caller finds
      * that it exists.
      *
@@ -148,7 +259,26 @@ final class NameResolver {
         String text = String.join(".", name);
         String source;
         String schema;
-        switch (name.size()) {
+        // Negative for one or two parts along the path of a database, whose three parts are those of FyrQL.
+        int parts = database != null && name.size() < 3 ? -name.size() : name.size();
+        switch (parts) {
+            case -1 -> {
+                String db = database.database();
+                source = db;
+                schema = creationSchema().orElseThrow(() -> new SqlException("No schema has been selected to create"
+                        + " in; set the search_path to a schema of " + db, Position.UNKNOWN));
+            }
+            case -2 -> {
+                List<String> catalogs = match(database.catalogs(), name.get(0));
+                if (catalogs.isEmpty()) {
+                    source = database.database();
+                    schema = one(match(sources.get(source).catalog().schemas(), name.get(0)), "Schema",
+                            name.get(0));
+                } else {
+                    source = one(catalogs, "Schema", name.get(0));
+                    schema = one(sources.get(source).catalog().schemas(), "Schema", name.get(0));
+                }
+            }
             case 3 -> {
                 source = one(match(sources.keySet(), name.get(0)), "Source", name.get(0));
                 schema = one(match(sources.get(source).catalog().schemas(), name.get(1)), "Schema",
@@ -204,6 +334,12 @@ final class NameResolver {
                     Position.UNKNOWN);
         }
         return found.get(0);
+    }
+
+    private static List<String> concat(List<String> a, List<String> b) {
+        List<String> all = new ArrayList<>(a);
+        all.addAll(b);
+        return all;
     }
 
     /** Returns the tables of a name in a schema, given by names that need not match exactly. */

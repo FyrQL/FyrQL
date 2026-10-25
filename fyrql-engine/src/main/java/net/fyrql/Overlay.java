@@ -11,6 +11,7 @@
 
 package net.fyrql;
 
+import net.fyrql.catalog.DatabasePath;
 import net.fyrql.connector.Connector;
 import net.fyrql.core.function.FunctionRegistry;
 
@@ -54,5 +55,19 @@ public final class Overlay {
             }
         }
         return engine.newSession(sources, functions);
+    }
+
+    /**
+     * Resolves the names of tables in a session as in PostgreSQL along the
+     * path of a database, see {@link DatabasePath}, or again as in FyrQL for
+     * {@code null}. The search path of the session goes to the database and
+     * the schema that new tables of one part go to, if the database has one.
+     *
+     * @throws IllegalArgumentException if the database or a catalog of the
+     *         path is no source of the session
+     */
+    public static void use(Session session, DatabasePath path) {
+        Objects.requireNonNull(session, "session");
+        session.use(path);
     }
 }

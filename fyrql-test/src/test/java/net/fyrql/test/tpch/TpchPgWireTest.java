@@ -13,6 +13,7 @@ package net.fyrql.test.tpch;
 
 import net.fyrql.FyrQL;
 import net.fyrql.core.plan.PlanNode;
+import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.pgwire.PgWireConfig;
@@ -35,11 +36,14 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -51,8 +55,10 @@ import static org.junit.jupiter.api.Assertions.fail;
  * PostgreSQL wire protocol server, read with the JDBC driver of PostgreSQL
  * in the binary format, over the five sources of {@link TpchEngine}: each
  * gives the rows of the engine, in its order, with the names of the columns
- * of its plan and the types of PostgreSQL of their types. The driver signs
- * in with SCRAM. Q6 runs once more as a prepared statement, twice, and the
+ * of its plan and the types of PostgreSQL of their types. As the server
+ * resolves names as PostgreSQL does, in the database of the connection,
+ * the queries name their tables by three parts. The driver signs in with
+ * SCRAM. Q6 runs once more as a prepared statement, twice, and the
  * driver lists the tables in their databases, which are the sources.
  */
 class TpchPgWireTest {
@@ -60,6 +66,11 @@ class TpchPgWireTest {
     private static FyrQL engine;
     private static PgWireServer server;
     private static Connection connection;
+    /** The tables by their names of three parts, {@code source.schema.table}. */
+    private static final Map<String, String> TABLES = new HashMap<>();
+    /** A table after {@code FROM}, {@code JOIN} or a comma, where a query names its tables. */
+    private static final Pattern TABLE = Pattern.compile(
+            "(?i)(\\bfrom|\\bjoin|,)(\\s+)(lineitem|orders|customer|partsupp|part|supplier|nation|region)\\b");
 
     @BeforeAll
     static void setUp() throws Exception {
@@ -69,6 +80,22 @@ class TpchPgWireTest {
                 .withUsers(Map.of("tpch", "dbgen"))).build();
         server.start();
         connection = connect(engine.catalog().searchPath().defaultSource());
+        for (String table : List.of("lineitem", "orders", "customer", "partsupp", "part", "supplier", "nation",
+                "region")) {
+            TableRef t = engine.catalog().resolve(List.of(table));
+            TABLES.put(table, t.source() + "." + t.schema() + "." + t.table());
+        }
+    }
+
+    /** Returns a query with its tables named by three parts, so that it reaches all the sources. */
+    private static String qualify(String sql) {
+        Matcher m = TABLE.matcher(sql);
+        StringBuilder b = new StringBuilder();
+        while (m.find()) {
+            m.appendReplacement(b, Matcher.quoteReplacement(m.group(1) + m.group(2)
+                    + TABLES.get(m.group(3).toLowerCase(Locale.ROOT))));
+        }
+        return m.appendTail(b).toString();
     }
 
     private static Connection connect(String database) throws SQLException {
@@ -162,7 +189,7 @@ class TpchPgWireTest {
         PlanNode plan = engine.plan(query.sql());
         List<Object[]> expected = engine.rows(plan);
         assertFalse(expected.isEmpty(), query.name() + " gives no rows");
-        try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery(query.sql())) {
+        try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery(qualify(query.sql()))) {
             assertSameRows(query.name(), plan, expected, rows(rs, plan.schema()));
         }
     }
@@ -178,7 +205,7 @@ class TpchPgWireTest {
                     and l_shipdate < ?
                     and l_discount between ? and ?
                     and l_quantity < ?""";
-        try (PreparedStatement p = connection.prepareStatement(sql)) {
+        try (PreparedStatement p = connection.prepareStatement(qualify(sql))) {
             p.setDate(1, Date.valueOf("1994-01-01"));
             p.setDate(2, Date.valueOf("1995-01-01"));
             p.setBigDecimal(3, new BigDecimal("0.05"));

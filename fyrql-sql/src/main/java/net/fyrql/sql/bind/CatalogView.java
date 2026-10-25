@@ -73,6 +73,15 @@ public interface CatalogView {
     Schema schema(TableRef table);
 
     /**
+     * Returns the parts of the name of a resolved table that qualify its
+     * columns, as {@code t.c}, {@code schema.t.c} and {@code source.schema.t.c}
+     * do; the default is {@code source.schema.table}.
+     */
+    default List<String> path(TableRef table) {
+        return List.of(table.source(), table.schema(), table.table());
+    }
+
+    /**
      * Returns the table a call of a table function reads.
      *
      * @param arguments constant positional arguments as Java values

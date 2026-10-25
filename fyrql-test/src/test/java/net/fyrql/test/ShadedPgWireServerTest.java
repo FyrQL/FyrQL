@@ -75,11 +75,12 @@ class ShadedPgWireServerTest {
     private static final Pattern LISTENING = Pattern.compile(
             "FyrQL PostgreSQL wire protocol server (\\S+) listening on 127\\.0\\.0\\.1:(\\d+)");
 
+    /** A query in the database files, which names the tables of the other databases by three parts. */
     private static final String FEDERATED = """
             SELECT c.name, sum(o.amount * i.qty) AS total
             FROM orders o
-            JOIN customers c ON o.customer = c.id
-            JOIN items i ON i.order_id = o.id
+            JOIN docs.main.customers c ON o.customer = c.id
+            JOIN pq.main.items i ON i.order_id = o.id
             WHERE o.amount > 1
             GROUP BY c.name
             ORDER BY c.name""";
@@ -251,7 +252,7 @@ class ShadedPgWireServerTest {
             assertEquals(List.of(List.of("Ann", "73.5"), List.of("Bob", "20")), query(c, FEDERATED));
             String plan = String.join("\n", query(c, "EXPLAIN " + FEDERATED).stream().map(r -> r.get(0)).toList());
             assertTrue(plan.contains("[codegen"), "the expressions are compiled:\n" + plan);
-            try (PreparedStatement p = c.prepareStatement("SELECT name FROM customers WHERE id = ?")) {
+            try (PreparedStatement p = c.prepareStatement("SELECT name FROM docs.main.customers WHERE id = ?")) {
                 p.setLong(1, 2);
                 assertEquals(List.of(List.of("Bob")), rows(p.executeQuery()));
             }

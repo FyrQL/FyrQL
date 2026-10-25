@@ -559,10 +559,13 @@ files->   WHERE o.amount > 6 GROUP BY ALL ORDER BY revenue DESC;
 ```
 
 psycopg, the JDBC driver of PostgreSQL, DBeaver with a connection of the type PostgreSQL
-and Metabase connect the same way, with host, port and the source as the database.
+and Metabase connect the same way, with host, port and the source as the database. Names
+resolve as in PostgreSQL, along the `search_path` in the database of the connection; with
+more sources, a query reaches the tables of the others by three parts, such as
+`shop.main.customers`.
 
-More: [PostgreSQL wire protocol server](manual.md#postgresql-wire-protocol-server),
-[psql](manual.md#psql), [psycopg](manual.md#psycopg).
+More: [PostgreSQL wire protocol server](pgwire.md), [psql](pgwire.md#psql),
+[psycopg](pgwire.md#psycopg).
 
 ## Spring Boot
 
@@ -612,7 +615,7 @@ class Regions {
 Placeholders in `application.yml` are those of Spring, such as `${DB_PASSWORD}`, not
 `${env:DB_PASSWORD}` as in a configuration file.
 
-More: [Spring Boot](manual.md#spring-boot), with sources of the application, a
+More: [Spring Boot](spring-boot.md), with sources of the application, a
 `DataSource` and the health indicator.
 
 ## Where to go next

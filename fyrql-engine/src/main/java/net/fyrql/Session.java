@@ -11,6 +11,7 @@
 
 package net.fyrql;
 
+import net.fyrql.catalog.DatabasePath;
 import net.fyrql.catalog.EngineCatalog;
 import net.fyrql.catalog.SearchPath;
 import net.fyrql.connector.Connector;
@@ -254,6 +255,26 @@ public final class Session {
         if (!searchPath.equals(current.catalog().searchPath())) {
             names = names(current.catalog().withSearchPath(searchPath));
         }
+    }
+
+    /**
+     * Resolves names as in PostgreSQL along the path of a database, or as in
+     * FyrQL for {@code null}, see {@link Overlay#use}. The search path goes
+     * to the database and the schema that new tables of one part go to, if
+     * the database has one, so that the table functions of the database
+     * come first.
+     *
+     * @throws IllegalArgumentException if the database or a catalog of the path is not registered
+     */
+    void use(DatabasePath path) {
+        EngineCatalog catalog = names.catalog().withDatabasePath(path);
+        if (path != null) {
+            Optional<String> schema = catalog.creationSchema();
+            if (schema.isPresent()) {
+                catalog = catalog.withSearchPath(new SearchPath(path.database(), schema.get()));
+            }
+        }
+        names = names(catalog);
     }
 
     /**

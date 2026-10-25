@@ -70,9 +70,11 @@ class PgSqlTest {
                                 + " FROM t"),
                 Map.entry("SELECT lower(current_user), current_user AS u, current_user::text",
                         "SELECT lower('ann'), 'ann' AS u, 'ann'::text"),
-                Map.entry("select current_catalog, current_schema, current_schema()",
-                        "select current_database() AS \"current_catalog\", current_schema() AS \"current_schema\","
-                                + " current_schema()"),
+                Map.entry("select current_catalog, current_schema, current_schema(), pg_catalog.current_schema()",
+                        "select current_database() AS \"current_catalog\", 'main' AS \"current_schema\","
+                                + " 'main' AS \"current_schema\", 'main' AS \"current_schema\""),
+                Map.entry("SELECT upper(current_schema()) AS s, current_schema = 'main'",
+                        "SELECT upper('main') AS s, 'main' = 'main'"),
                 Map.entry("SELECT version(), pg_catalog.version(), pg_backend_pid()",
                         "SELECT 'PostgreSQL 18.0 (FyrQL 1)' AS \"version\", 'PostgreSQL 18.0 (FyrQL 1)' AS \"version\","
                                 + " 7 AS \"pg_backend_pid\""),
