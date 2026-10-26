@@ -53,8 +53,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * of {@code orders} and {@code customer} are read in ranges of their keys.
  * With a budget of {@value #SPILL_BUDGET} bytes, the hash tables of the
  * joins fit and every query gives the same rows, the aggregation of Q18
- * spilling to disk; with {@value #SMALLER_BUDGET} bytes, those of Q1, Q13,
- * Q17 and Q18 spill too.
+ * spilling to disk; with {@value #SMALLER_BUDGET} bytes, those of Q1, Q13
+ * and Q18 spill too, and on one thread with {@value #SINGLE_THREAD_BUDGET}
+ * bytes, that of Q17.
  * The files are
  * written into {@code target/tpch} once, or into the directory of the
  * system property {@code fyrql.tpch.dir}.
@@ -65,7 +66,7 @@ class TpchTest {
     static final long SPILL_BUDGET = 4L << 20;
 
     /**
-     * A budget in which Q1, Q13, Q17 and Q18 spill, but the hash tables of
+     * A budget in which Q1, Q13 and Q18 spill, but the hash tables of
      * Q21 do not fit. Q20 spills only in about this budget, in which the hash
      * table of one of its joins fits or not depending on what the workers
      * hold at the same moment, so that it is not among them.
@@ -76,10 +77,19 @@ class TpchTest {
      * The threads of the engine with the smaller budget. What its workers
      * hold at the same time decides whether a query spills and whether the
      * hash tables of the joins fit beside it, so that the number must not
-     * follow the processors of the machine: on one thread, Q17 does not
-     * spill, and on two, the hash table of Q20 does not fit.
+     * follow the processors of the machine: on two, the hash table of Q20
+     * does not fit.
      */
     static final int SMALLER_BUDGET_THREADS = 4;
+
+    /**
+     * The budget in which the aggregation of Q17 spills on one thread. On
+     * {@value #SMALLER_BUDGET_THREADS} threads with {@value #SMALLER_BUDGET}
+     * bytes it spills only if their workers hold their tables at the same
+     * time; on one thread it spills in 1 MiB and not in 1.5 MiB, whatever
+     * the timing.
+     */
+    static final long SINGLE_THREAD_BUDGET = 1L << 19;
 
     private static TpchEngine tpch;
     private static FyrQL engine;
@@ -165,25 +175,37 @@ class TpchTest {
     @Test
     void aggregationsSortsAndWindowsSpillWithASmallerBudget() throws IOException {
         Path dir = Files.createTempDirectory("fyrql-tpch-");
-        try (FyrQL small = tpch.open(null, null, SMALLER_BUDGET_THREADS, List.of(),
-                b -> b.memoryBudget(SMALLER_BUDGET).spillDirectory(dir))) {
-            for (String name : List.of("q01", "q13", "q17", "q18")) {
-                TpchQueries.Query q = queries().stream().filter(x -> x.name().equals(name)).findFirst().orElseThrow();
-                PlanNode plan = engine.plan(q.sql());
-                try (QueryResult result = small.sql(q.sql())) {
-                    Optional<String> differs = TpchQueries.compare(plan, engine.rows(plan), result.rows());
-                    if (differs.isPresent()) {
-                        fail(name + " with a budget of " + SMALLER_BUDGET + " bytes differs:\n" + differs.get());
-                    }
-                    // Q1 has four groups: whether it spills depends on how many workers reserve for a batch
-                    // at the same time, so that only its rows are compared.
-                    if (!name.equals("q01")) {
-                        assertTrue(result.spill().parts() > 0, name + " spilled nothing: " + result.spill());
-                    }
+        try {
+            try (FyrQL small = tpch.open(null, null, SMALLER_BUDGET_THREADS, List.of(),
+                    b -> b.memoryBudget(SMALLER_BUDGET).spillDirectory(dir))) {
+                for (String name : List.of("q01", "q13", "q17", "q18")) {
+                    // Q1 has four groups and Q17 groups a table each worker holds a part of: whether they
+                    // spill depends on how many workers reserve at the same time, so that only their rows
+                    // are compared here.
+                    assertSpills(small, name, SMALLER_BUDGET, !name.equals("q01") && !name.equals("q17"));
                 }
+            }
+            try (FyrQL one = tpch.open(null, null, 1, List.of(),
+                    b -> b.memoryBudget(SINGLE_THREAD_BUDGET).spillDirectory(dir))) {
+                assertSpills(one, "q17", SINGLE_THREAD_BUDGET, true);
             }
         } finally {
             Files.deleteIfExists(dir);
+        }
+    }
+
+    /** Runs a query in an engine with a budget, compares its rows and, if asked, that it spilled. */
+    private static void assertSpills(FyrQL budgeted, String name, long budget, boolean spills) {
+        TpchQueries.Query q = queries().stream().filter(x -> x.name().equals(name)).findFirst().orElseThrow();
+        PlanNode plan = engine.plan(q.sql());
+        try (QueryResult result = budgeted.sql(q.sql())) {
+            Optional<String> differs = TpchQueries.compare(plan, engine.rows(plan), result.rows());
+            if (differs.isPresent()) {
+                fail(name + " with a budget of " + budget + " bytes differs:\n" + differs.get());
+            }
+            if (spills) {
+                assertTrue(result.spill().parts() > 0, name + " spilled nothing: " + result.spill());
+            }
         }
     }
 
