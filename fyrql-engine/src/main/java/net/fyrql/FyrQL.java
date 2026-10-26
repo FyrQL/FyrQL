@@ -13,6 +13,7 @@ package net.fyrql;
 
 import net.fyrql.catalog.CatalogTables;
 import net.fyrql.catalog.EngineCatalog;
+import net.fyrql.catalog.Views;
 import net.fyrql.catalog.SearchPath;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Connector;
@@ -52,9 +53,11 @@ import net.fyrql.optimizer.Optimizer;
 import net.fyrql.exec.CodegenStatistics;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.Position;
+import net.fyrql.sql.ast.CreateView;
 import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.bind.Binder;
 import net.fyrql.sql.bind.BoundStatement;
+import net.fyrql.sql.bind.ViewDefinition;
 import net.fyrql.sql.parse.Parameters;
 import net.fyrql.sql.parse.SqlParser;
 
@@ -107,6 +110,11 @@ import java.util.function.Function;
  * alone. Each statement is a transaction of its own in the source it
  * writes, as far as the source allows.
  * <p>
+ * {@code CREATE VIEW} and {@code DROP VIEW} define views in a schema of any
+ * source, which every session and client of the engine sees as a table of
+ * that schema, until the engine closes; {@link Builder#view(String, List,
+ * String)} defines them as the engine is built.
+ * <p>
  * The formats of files come with their modules: with
  * {@code fyrql-connector-csv}, {@code fyrql-connector-json} or
  * {@code fyrql-connector-parquet} on the class path, the engine reads and
@@ -152,8 +160,9 @@ public final class FyrQL implements AutoCloseable {
         this.connectors = Collections.unmodifiableMap(new LinkedHashMap<>(connectors));
         this.spill = spill;
         this.timeouts = timeouts;
-        this.catalog = new EngineCatalog(this.connectors, searchPath, this::timeZone, files);
-        this.catalogTables = new CatalogTables(this.connectors);
+        Views views = new Views();
+        this.catalog = new EngineCatalog(this.connectors, searchPath, this::timeZone, files, views);
+        this.catalogTables = catalog.catalogTables();
         this.functions = functions;
         this.initialZone = zone;
         this.optimizer = new Optimizer(this::connector, options);
@@ -376,9 +385,10 @@ public final class FyrQL implements AutoCloseable {
         return List.copyOf(connectors.keySet());
     }
 
-    /** Returns the columns of a table. */
+    /** Returns the columns of a table, or of a view as they were when it was created. */
     public Schema schema(TableRef table) {
-        return connector(table.source()).catalog().schema(table);
+        Optional<ViewDefinition> view = catalog.view(table);
+        return view.isPresent() ? view.get().schema() : connector(table.source()).catalog().schema(table);
     }
 
     /** Returns a scan of all columns of a table. */
@@ -999,6 +1009,40 @@ public final class FyrQL implements AutoCloseable {
     }
 
     /**
+     * Creates a view of the builder in the session of the engine, as
+     * {@code CREATE VIEW} does.
+     *
+     * @throws SqlException if the name or the query is wrong, the query does
+     *         not bind, or there is a view or table of the name; the message
+     *         names the view, and the position is in its query
+     */
+    private void createView(Builder.ViewSpec view) {
+        try {
+            String sql = view.sql().strip();
+            while (sql.endsWith(";")) {
+                sql = sql.substring(0, sql.length() - 1).strip();
+            }
+            CreateView create = new CreateView(SqlParser.parseName(view.name()), view.columns(),
+                    SqlParser.parse(sql), sql, false, false, Position.UNKNOWN);
+            update(session.binder().bind(create), new QueryContext(), null, session);
+        } catch (SqlException e) {
+            throw new SqlException("View " + view.name() + ": " + e.reason(), e.position(), e);
+        }
+    }
+
+    /** Releases what the engine holds besides its sources, after a failure to build it. */
+    private void abandon(Throwable failure) {
+        try {
+            if (spill != null) {
+                spill.close();
+            }
+            timeouts.close();
+        } catch (RuntimeException e) {
+            failure.addSuppressed(e);
+        }
+    }
+
+    /**
      * Closes the sources, deletes the directory to which operators spilled
      * and stops the thread of the timeouts.
      */
@@ -1042,7 +1086,42 @@ public final class FyrQL implements AutoCloseable {
         private ClassLoader classLoader;
         private ZoneId timeZone = ZoneId.systemDefault();
 
+        private final List<ViewSpec> views = new ArrayList<>();
+
         private Builder() {
+        }
+
+        /** A view of the builder, see {@link #view(String, List, String)}. */
+        private record ViewSpec(String name, List<String> columns, String sql) {
+        }
+
+        /**
+         * Defines a view, as {@code CREATE VIEW name AS sql} does, which the
+         * engine creates when it is built, see {@link #view(String, List, String)}.
+         */
+        public Builder view(String name, String sql) {
+            return view(name, List.of(), sql);
+        }
+
+        /**
+         * Defines a view, as {@code CREATE VIEW name (columns) AS sql} does,
+         * which the engine creates when it is built, after the views defined
+         * before it, which its query may read. The engine keeps it until it
+         * closes, as it keeps the views of {@code CREATE VIEW}.
+         *
+         * @param name the name of the view, of one to three parts with dots
+         *        between, each as in SQL, unquoted or in double quotes; it
+         *        resolves as the name of a new table does
+         * @param columns the names of its columns, or none for the names its
+         *        query gives them
+         * @param sql its query
+         * @see #build()
+         */
+        public Builder view(String name, List<String> columns, String sql) {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(sql, "sql");
+            views.add(new ViewSpec(name, List.copyOf(columns), sql));
+            return this;
         }
 
         /** Registers a source under the connector's name. */
@@ -1322,6 +1401,8 @@ public final class FyrQL implements AutoCloseable {
          *         {@value Executor#THREADS_PROPERTY} has an unknown value
          * @throws IllegalStateException    if code generation is {@code ALWAYS} without a compiler, or an
          *         implicit source cannot be created
+         * @throws SqlException             if a view cannot be created; the message names the view, and the
+         *         position is in its query
          */
         public FyrQL build() {
             CodegenMode mode = codegenMode != null ? codegenMode : CodegenMode.fromSystemProperty();
@@ -1342,12 +1423,21 @@ public final class FyrQL implements AutoCloseable {
                 for (Connector c : sources.values()) {
                     c.fileStores(stores);
                 }
-                return new FyrQL(sources, new SearchPath(source, defaultSchema),
+                FyrQL engine = new FyrQL(sources, new SearchPath(source, defaultSchema),
                         functions != null ? functions : FunctionRegistry.standard(),
                         new MemoryBudget(memoryBudget), batchSize, codegen, options, engineThreads, preserveOrder,
                         !spill ? null : spillDirectory != null ? new SpillDirectory(spillDirectory)
                                 : SpillDirectory.temporary(),
                         timeZone, files, timeouts);
+                try {
+                    for (ViewSpec v : views) {
+                        engine.createView(v);
+                    }
+                } catch (RuntimeException | Error e) {
+                    engine.abandon(e);
+                    throw e;
+                }
+                return engine;
             } catch (RuntimeException | Error e) {
                 close(implicit, e);
                 throw e;

@@ -157,11 +157,12 @@ It refuses with `0A000`: `COPY` from `STDIN` or to `STDOUT` and `COPY ... PROGRA
 protocol prepares statements), `VACUUM`, `ANALYZE`, `GRANT`, `TRUNCATE` and the other
 statements of maintenance and rights, cursors with `SCROLL` and fetching backward. Every
 other statement goes to the engine: queries, `EXPLAIN`, the statements that
-[write](manual.md#writing-and-loading), and `COPY` to and from the files of the machine of
-the server, as far as its [file access](manual.md#file-access) allows. A text of the
-simple protocol may hold several statements between semicolons, which run in turn; an
-empty one is answered as empty. The tags of the answers are those of PostgreSQL, such as
-`SELECT 3`, `INSERT 0 3`, `CREATE TABLE` and `COPY 3`.
+[write](manual.md#writing-and-loading), `CREATE VIEW` and `DROP VIEW` (see
+[Views](manual.md#views)), and `COPY` to and from the files of the machine of the server,
+as far as its [file access](manual.md#file-access) allows. A text of the simple protocol
+may hold several statements between semicolons, which run in turn; an empty one is
+answered as empty. The tags of the answers are those of PostgreSQL, such as `SELECT 3`,
+`INSERT 0 3`, `CREATE TABLE`, `CREATE VIEW` and `COPY 3`.
 
 **Transactions.** FyrQL has no transactions, and each statement writes for itself.
 `BEGIN`, `COMMIT` and `ROLLBACK` only follow the state that PostgreSQL reports to its
@@ -198,9 +199,14 @@ due to statement timeout`.
 of PostgreSQL 18: `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`, `pg_database`,
 `pg_proc`, `pg_settings`, `pg_roles`, `pg_tables`, `pg_views`, `pg_stat_user_tables` and
 others, and `schemata`, `tables`, `columns`, `views`, `table_constraints`,
-`key_column_usage` and `referential_constraints`. The tables of things that FyrQL has
-none of, such as indexes, constraints, triggers and partitions, are there and empty, and
-so a table has no primary key there. The two catalogs are only in the sessions of the
+`key_column_usage` and `referential_constraints`. The [views](manual.md#views) of the
+engine in the source of the database are there as PostgreSQL has views: in `pg_class`
+with the kind `v`, with their columns in `pg_attribute` and `information_schema.columns`,
+in `pg_views` and `information_schema.views` with the text of their queries as written,
+and in `information_schema.tables` with the type `VIEW`, but not in `pg_tables`; a view
+created over the server has columns named as PostgreSQL names them. The tables of things
+that FyrQL has none of, such as indexes, constraints, triggers and partitions, are there
+and empty, and so a table has no primary key there. The two catalogs are only in the sessions of the
 server: the engine, the JDBC driver and the Flight SQL server do not see them, and they
 hide a schema of the same name of a source, such as the `information_schema` of H2. A
 snapshot is at most two seconds old, and new after a statement of the server that writes.
@@ -209,9 +215,10 @@ tables and columns of the sources numbers from a hash of their names, which stay
 while the names do. The owner of every object is `fyrql`. The functions that clients call
 over the catalogs are there as well: `format_type`, `pg_get_userbyid`, `to_regclass`,
 `has_table_privilege` and its kin, which always grant, the visibility of objects, which
-they always have, `obj_description` and `col_description`, which are `NULL`, the texts of
-definitions such as `pg_get_indexdef` and `pg_get_viewdef`, which are `NULL` too, the
-sizes of relations, which are 0, and `string_to_array` and `parse_ident`.
+they always have, `obj_description` and `col_description`, which are `NULL`,
+`pg_get_viewdef`, which gives the text of a view by its OID or name, the texts of other
+definitions such as `pg_get_indexdef`, which are `NULL`, the sizes of relations, which
+are 0, and `string_to_array` and `parse_ident`.
 
 **Rewriting.** The engine follows DuckDB, and the server rewrites the forms of PostgreSQL
 that it does not take before the engine sees a statement: casts to `regclass`, `regtype`,

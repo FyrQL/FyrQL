@@ -22,7 +22,9 @@ import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CopyFrom;
 import net.fyrql.sql.ast.CopyTo;
 import net.fyrql.sql.ast.CreateTable;
+import net.fyrql.sql.ast.CreateView;
 import net.fyrql.sql.ast.DropTable;
+import net.fyrql.sql.ast.DropView;
 import net.fyrql.sql.ast.Explain;
 import net.fyrql.sql.ast.ResetVariable;
 import net.fyrql.sql.ast.SetVariable;
@@ -64,6 +66,11 @@ import java.util.function.Supplier;
  * type is cast to the type of its column where a cast is allowed. A bare
  * {@code NULL} or a parameter in {@code VALUES} takes the type of its
  * column.</li>
+ * <li>{@code CREATE VIEW} binds its query once, so that an error shows at
+ * once, and keeps the query with the tables its names resolve to, see
+ * {@link ViewDefinition}; the names of its columns must be unique ignoring
+ * case. A view that would read itself, also through other views, is an
+ * error. A view is no table to write, create over or drop.</li>
  * </ul>
  */
 final class StatementBinder {
@@ -84,6 +91,8 @@ final class StatementBinder {
             case CreateTable c -> create(c);
             case InsertInto i -> insert(i);
             case DropTable d -> drop(d);
+            case CreateView v -> createView(v);
+            case DropView d -> dropView(d);
             case SetVariable s -> set(s);
             case ResetVariable r -> new BoundStatement.Set(setting(r.name(), r.position(), true), null);
             case Explain e -> new BoundStatement.Explain(e.analyze(), statement(e.statement()));
@@ -158,6 +167,10 @@ final class StatementBinder {
     private BoundStatement copyFrom(CopyFrom c) {
         String name = String.join(".", c.name());
         TableRef table = withPosition(() -> catalog.resolve(c.name()), c.position());
+        if (catalog.view(table).isPresent()) {
+            throw new SqlException("Cannot copy into view " + name + ": a view has no rows of its own",
+                    c.position());
+        }
         Schema target = catalog.schema(table);
         int[] columns = columns(target, c.columns(), name, "COPY", c.position());
         Map<String, String> options = new LinkedHashMap<>(c.options());
@@ -212,6 +225,10 @@ final class StatementBinder {
 
     private BoundStatement create(CreateTable c) {
         TableRef table = withPosition(() -> catalog.resolveNew(c.name()), c.position());
+        if (catalog.view(table).isPresent()) {
+            throw new SqlException("Cannot create table " + String.join(".", c.name()) + ": there is a view of"
+                    + " that name", c.position());
+        }
         BoundStatement.CreateMode mode = c.orReplace() ? BoundStatement.CreateMode.OR_REPLACE
                 : c.ifNotExists() ? BoundStatement.CreateMode.IF_NOT_EXISTS : BoundStatement.CreateMode.CREATE;
         List<Schema.Field> fields = new ArrayList<>();
@@ -239,6 +256,10 @@ final class StatementBinder {
     private BoundStatement insert(InsertInto i) {
         String name = String.join(".", i.name());
         TableRef table = withPosition(() -> catalog.resolve(i.name()), i.position());
+        if (catalog.view(table).isPresent()) {
+            throw new SqlException("Cannot insert into view " + name + ": a view has no rows of its own",
+                    i.position());
+        }
         Schema target = catalog.schema(table);
         int[] columns = columns(target, i.columns(), name, "INSERT", i.position());
         List<DataType> types = Arrays.stream(columns).mapToObj(target::type).toList();
@@ -353,12 +374,68 @@ final class StatementBinder {
     }
 
     private BoundStatement drop(DropTable d) {
-        if (!d.ifExists()) {
-            return new BoundStatement.Drop(withPosition(() -> catalog.resolve(d.name()), d.position()), d.name(),
-                    false);
+        Optional<TableRef> table = d.ifExists() ? withPosition(() -> catalog.find(d.name()), d.position())
+                : Optional.of(withPosition(() -> catalog.resolve(d.name()), d.position()));
+        if (table.isPresent() && catalog.view(table.get()).isPresent()) {
+            throw new SqlException(String.join(".", d.name()) + " is a view; drop it with DROP VIEW", d.position());
         }
-        Optional<TableRef> table = withPosition(() -> catalog.find(d.name()), d.position());
-        return new BoundStatement.Drop(table.orElse(null), d.name(), true);
+        return new BoundStatement.Drop(table.orElse(null), d.name(), d.ifExists());
+    }
+
+    private BoundStatement createView(CreateView c) {
+        String name = String.join(".", c.name());
+        TableRef view = withPosition(() -> catalog.resolveView(c.name()), c.position());
+        ViewCatalogs.Recording recording = new ViewCatalogs.Recording(catalog);
+        PlanNode plan = QueryBinder.rename(new QueryBinder(recording, context).query(c.query()), c.columns(), name,
+                c.position());
+        List<Schema.Field> fields = new ArrayList<>();
+        Set<String> names = new HashSet<>();
+        for (Schema.Field f : plan.schema().fields()) {
+            if (!names.add(f.name().toLowerCase(Locale.ROOT))) {
+                throw new SqlException("Column with name " + f.name() + " appears more than once in view " + name
+                        + "; give the columns names of their own", c.position());
+            }
+            fields.add(new Schema.Field(f.name(), f.type(), true));
+        }
+        ViewDefinition definition = new ViewDefinition(c.query(), c.text(), new Schema(fields), recording.names,
+                recording.paths, recording.postgresNames());
+        checkNotCircular(view, definition, name, c.position());
+        BoundStatement.CreateMode mode = c.orReplace() ? BoundStatement.CreateMode.OR_REPLACE
+                : c.ifNotExists() ? BoundStatement.CreateMode.IF_NOT_EXISTS : BoundStatement.CreateMode.CREATE;
+        return new BoundStatement.CreateView(view, definition, mode);
+    }
+
+    /**
+     * Fails if a view would read itself: if a table its query reads is the
+     * view, or a view whose query reads it, and so on; as with
+     * {@code CREATE OR REPLACE VIEW v AS SELECT * FROM v}.
+     */
+    private void checkNotCircular(TableRef view, ViewDefinition definition, String name, Position position) {
+        Set<TableRef> seen = new HashSet<>();
+        List<ViewDefinition> pending = new ArrayList<>(List.of(definition));
+        while (!pending.isEmpty()) {
+            for (TableRef table : pending.remove(pending.size() - 1).names().values()) {
+                if (table.equals(view)) {
+                    throw new SqlException("View " + name + " would read itself", position);
+                }
+                if (seen.add(table)) {
+                    catalog.view(table).ifPresent(pending::add);
+                }
+            }
+        }
+    }
+
+    private BoundStatement dropView(DropView d) {
+        Optional<TableRef> view = withPosition(() -> catalog.find(d.name()), d.position());
+        if (view.isEmpty() && !d.ifExists()) {
+            throw new SqlException("View with name " + String.join(".", d.name()) + " does not exist",
+                    d.position());
+        }
+        if (view.isPresent() && catalog.view(view.get()).isEmpty()) {
+            throw new SqlException(String.join(".", d.name()) + " is a table, not a view; drop it with DROP TABLE",
+                    d.position());
+        }
+        return new BoundStatement.DropView(view.orElse(null), d.name(), d.ifExists());
     }
 
     /** Asks the catalog, whose errors have no position, and gives an error the position of the name. */

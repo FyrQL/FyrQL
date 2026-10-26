@@ -173,6 +173,44 @@ class FyrQLConfigTest {
     }
 
     @Test
+    void theViewsOfTheFileComeWithTheEngineAndAViewThatFailsStopsIt() throws IOException {
+        String sources = Files.readString(config("{}"), StandardCharsets.UTF_8);
+        Path file = Files.writeString(dir.resolve("views.yaml"), sources + """
+                views:
+                  - name: files.main.big
+                    sql: SELECT * FROM orders WHERE qty > 1;
+                  - name: files.main.buyers
+                    columns: [name, units]
+                    sql: |
+                      SELECT c.name, sum(b.qty)
+                      FROM files.big b JOIN files.customers c ON c.id = b.customer_id
+                      GROUP BY c.name
+                """, StandardCharsets.UTF_8);
+        try (FyrQL engine = FyrQLConfig.open(file)) {
+            assertEquals(List.of("[Ann, 3]", "[Bob, 10]", "[Cid, 2]"), engine.rows(
+                    "SELECT name, units FROM files.buyers ORDER BY name").stream().map(Arrays::toString).toList());
+        }
+        int base = (int) sources.lines().count();
+        Path bad = Files.writeString(dir.resolve("bad.yaml"), sources + """
+                views:
+                  - name: files.main.ok
+                    sql: SELECT 1 AS a
+                  - name: files.main.bad
+                    sql: |
+                      SELECT *
+                      FROM nope
+                """, StandardCharsets.UTF_8);
+        assertEquals(bad + ": line " + (base + 4) + ": the view files.main.bad cannot be created: Table with name"
+                + " nope does not exist (line 2, column 6 of its sql)",
+                assertThrows(ConfigException.class, () -> FyrQLConfig.open(bad)).getMessage());
+        Path noSource = Files.writeString(dir.resolve("nosource.yaml"), sources + "views: [{name: v, sql: SELECT 1}]\n",
+                StandardCharsets.UTF_8);
+        assertEquals(noSource + ": line " + (base + 1) + ": the view v cannot be created: There is no default source"
+                + " for the table v; name its source, as in source.v",
+                assertThrows(ConfigException.class, () -> FyrQLConfig.open(noSource)).getMessage());
+    }
+
+    @Test
     void anApplicationMayAddToTheBuilder() throws IOException {
         try (FyrQL engine = FyrQLConfig.builder(config("{}")).defaultSource("docs").build()) {
             assertEquals(2, engine.rows("SELECT * FROM products").size());

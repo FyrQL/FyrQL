@@ -48,13 +48,15 @@ import java.util.Map;
  * The metadata the server answers with: the Arrow schemas of results and
  * tables with the column metadata of Flight SQL, the catalog of the
  * engine, the types and what the server supports. A catalog of Flight SQL
- * is a source of the engine, as in the JDBC driver; every table has the
- * type {@value #TABLE}.
+ * is a source of the engine, as in the JDBC driver; a table of a source has
+ * the type {@value #TABLE}, a view of the engine the type {@value #VIEW}.
  */
 final class Metadata {
 
-    /** The type of every table. */
+    /** The type of a table. */
     static final String TABLE = "TABLE";
+    /** The type of a view. */
+    static final String VIEW = "VIEW";
 
     private Metadata() {
     }
@@ -142,19 +144,25 @@ final class Metadata {
     /** Returns the rows of the tables a command asks for, with their schemas if it asks for them. */
     static List<Object[]> tables(FyrQL engine, FlightSql.CommandGetTables command) {
         List<Object[]> rows = new ArrayList<>();
-        if (command.getTableTypesCount() > 0 && command.getTableTypesList().stream()
-                .noneMatch(TABLE::equalsIgnoreCase)) {
+        boolean all = command.getTableTypesCount() == 0;
+        boolean tables = all || command.getTableTypesList().stream().anyMatch(TABLE::equalsIgnoreCase);
+        boolean views = all || command.getTableTypesList().stream().anyMatch(VIEW::equalsIgnoreCase);
+        if (!tables && !views) {
             return rows;
         }
         for (CatalogTables.TableInfo t : engine.catalogTables().tables(catalog(command.hasCatalog(),
                 command.getCatalog()), pattern(command.hasDbSchemaFilterPattern(), command.getDbSchemaFilterPattern()),
                 pattern(command.hasTableNameFilterPattern(), command.getTableNameFilterPattern()))) {
+            if (t.view() ? !views : !tables) {
+                continue;
+            }
             TableRef ref = t.table();
+            String type = t.view() ? VIEW : TABLE;
             if (command.getIncludeSchema()) {
-                rows.add(new Object[] {ref.source(), ref.schema(), ref.table(), TABLE,
+                rows.add(new Object[] {ref.source(), ref.schema(), ref.table(), type,
                     serialize(tableSchema(engine.schema(ref), ref))});
             } else {
-                rows.add(new Object[] {ref.source(), ref.schema(), ref.table(), TABLE});
+                rows.add(new Object[] {ref.source(), ref.schema(), ref.table(), type});
             }
         }
         return rows;

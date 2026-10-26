@@ -12,6 +12,7 @@
 package net.fyrql;
 
 import net.fyrql.catalog.EngineCatalog;
+import net.fyrql.catalog.Views;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.FileWriterProvider;
@@ -48,6 +49,10 @@ import java.util.function.Supplier;
  * {@code CREATE OR REPLACE} drops the table first and then creates it; if
  * its query reads the table, the engine reads all rows of the query
  * before it drops the table.
+ * <p>
+ * {@code CREATE VIEW} and {@code DROP VIEW} change the {@link Views} of the
+ * engine, not a source; a view may not take the name of a table that
+ * exists, and once it exists it hides a table of its name that appears.
  */
 final class Writes {
 
@@ -76,6 +81,8 @@ final class Writes {
             case BoundStatement.Create c -> create(c, context, session);
             case BoundStatement.Insert i -> insert(i, context, session);
             case BoundStatement.Drop d -> drop(d, session);
+            case BoundStatement.CreateView v -> createView(v, session);
+            case BoundStatement.DropView d -> dropView(d);
             case BoundStatement.Set s -> {
                 session.apply(s);
                 yield 0;
@@ -145,6 +152,38 @@ final class Writes {
             throw new SqlException("Table with name " + table + " does not exist", Position.UNKNOWN);
         }
         perform(() -> writer.drop(table));
+        return 0;
+    }
+
+    private long createView(BoundStatement.CreateView create, Session session) {
+        TableRef view = create.view();
+        Views views = engine.catalog().views();
+        synchronized (views) {
+            boolean table = views.get(view).isEmpty() && exists(session.connector(view.source()).catalog(), view);
+            if (views.get(view).isPresent() || table) {
+                switch (create.mode()) {
+                    case CREATE -> throw new SqlException((table ? "Table" : "View") + " with name " + view.table()
+                            + " already exists", Position.UNKNOWN);
+                    case IF_NOT_EXISTS -> {
+                        return 0;
+                    }
+                    case OR_REPLACE -> {
+                        if (table) {
+                            throw new SqlException("Table with name " + view.table() + " already exists; a view"
+                                    + " replaces only a view", Position.UNKNOWN);
+                        }
+                    }
+                }
+            }
+            views.put(view, create.definition());
+        }
+        return 0;
+    }
+
+    private long dropView(BoundStatement.DropView drop) {
+        if (drop.view() != null && !engine.catalog().views().remove(drop.view()) && !drop.ifExists()) {
+            throw new SqlException("View with name " + drop.view() + " does not exist", Position.UNKNOWN);
+        }
         return 0;
     }
 

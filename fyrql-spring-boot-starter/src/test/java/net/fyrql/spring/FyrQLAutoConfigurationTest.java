@@ -131,6 +131,35 @@ class FyrQLAutoConfigurationTest {
     }
 
     @Test
+    void theViewsOfTheYamlComeAfterThoseOfTheFile() throws IOException {
+        Files.writeString(dir.resolve("orders.csv"), "id,qty\n1,3\n2,5\n3,1\n", StandardCharsets.UTF_8);
+        Path file = Files.writeString(dir.resolve("fyrql.yaml"), """
+                sources:
+                  - {name: files, type: csv, tables: {orders: {file: orders.csv}}}
+                views:
+                  - {name: files.main.big, sql: SELECT * FROM files.orders WHERE qty > 1}
+                """, StandardCharsets.UTF_8);
+        runner.withInitializer(yaml("""
+                fyrql:
+                  config: %s
+                  views:
+                    - name: files.main.total
+                      columns: [units]
+                      sql: SELECT sum(qty) FROM files.big
+                """.formatted(path(file)))).run(context -> {
+                    FyrQL engine = context.getBean(FyrQL.class);
+                    assertThat(((Number) engine.rows("SELECT units FROM files.total").get(0)[0]).longValue())
+                            .isEqualTo(8L);
+                });
+        runner.withPropertyValues("fyrql.views[0].name=v").run(context -> assertThat(context).getFailure()
+                .hasStackTraceContaining("The view v has no sql"));
+        runner.withPropertyValues("fyrql.sources[0].name=p", "fyrql.sources[0].type=probe",
+                "fyrql.views[0].name=p.main.v", "fyrql.views[0].sql=SELECT * FROM nope").run(context -> assertThat(
+                        context).getFailure().hasStackTraceContaining("the view p.main.v cannot be created: Table"
+                                + " with name nope does not exist (line 1, column 15 of its sql)"));
+    }
+
+    @Test
     void everySettingOfTheEngineReachesIt() throws IOException {
         Path spill = Files.createDirectories(dir.resolve("spill"));
         Path data = Files.createDirectories(dir.resolve("data"));

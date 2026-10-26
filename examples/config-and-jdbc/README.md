@@ -3,10 +3,10 @@
 FyrQL through plain JDBC, with its sources in a configuration file. The application
 knows nothing of FyrQL but the URL `jdbc:fyrql:?config=fyrql.yaml`: for each connection,
 the driver builds an engine from the file, and the connection shows one database with
-the tables of all sources
+the tables of all sources and a view over two of them
 ([`ConfigAndJdbc.java`](src/main/java/net/fyrql/examples/configandjdbc/ConfigAndJdbc.java)).
 
-The file [`fyrql.yaml`](fyrql.yaml) names two sources and two settings:
+The file [`fyrql.yaml`](fyrql.yaml) names two sources, a view and two settings:
 
 ```yaml
 sources:
@@ -19,6 +19,13 @@ sources:
   - name: files
     type: csv
     directory: ${env:DATA_DIR:-data}
+
+views:
+  - name: sales.main.customer_revenue
+    sql: |
+      SELECT c.name, c.region, count(*) AS orders, sum(o.amount) AS revenue
+      FROM orders AS o JOIN files.customers AS c ON o.customer_id = c.id
+      GROUP BY c.name, c.region
 
 engine:
   defaultSource: sales
@@ -34,20 +41,24 @@ engine:
   `information_schema`.
 - `defaultSource: sales` lets a query name the orders `orders` instead of
   `sales.orders`.
+- `views` defines the view `customer_revenue` in the source `sales`, which joins the
+  orders of the database with the customers of the CSV files. The engine creates it as
+  it is built; a view whose query does not bind stops the connection with the line of
+  the view in the file.
 
 The example creates the database, an H2 file under `target/db`, then lists the tables
-over `DatabaseMetaData` and runs a query with a parameter twice:
+and views over `DatabaseMetaData` and runs a query of the view with a parameter twice:
 
 ```java
 try (Connection connection = DriverManager.getConnection("jdbc:fyrql:?config=fyrql.yaml")) {
-    try (ResultSet tables = connection.getMetaData().getTables(null, null, "%", new String[] {"TABLE"})) {
+    try (ResultSet tables = connection.getMetaData().getTables(null, null, "%",
+            new String[] {"TABLE", "VIEW"})) {
         ...
     }
     try (PreparedStatement statement = connection.prepareStatement("""
-            SELECT c.name, count(*) AS orders, sum(o.amount) AS revenue
-            FROM orders AS o JOIN files.customers AS c ON o.customer_id = c.id
-            WHERE c.region = ?
-            GROUP BY c.name
+            SELECT name, orders, revenue
+            FROM customer_revenue
+            WHERE region = ?
             ORDER BY revenue DESC""")) {
         statement.setString(1, "north");
         ...
@@ -78,8 +89,9 @@ password from the `pom.xml`: `./mvnw -Pexamples -pl examples/config-and-jdbc -am
 
 ```text
 == Tables
-sales.main.orders
-files.main.customers
+sales.main.customer_revenue VIEW
+sales.main.orders TABLE
+files.main.customers TABLE
 == Region north
 name VARCHAR
 orders BIGINT
@@ -97,6 +109,9 @@ A test of the example checks that it prints exactly this.
 
 - **The sources are catalogs** in the `DatabaseMetaData`, and the default schema of a
   database is `main`: `sales.main.orders` is the table `public.orders` of H2.
+- **The view** is a table of the type `VIEW` in the source `sales`, though H2 knows
+  nothing of it: the engine keeps it, and every client of the engine sees it. Its query
+  reads both sources, and a filter on it, such as the region, goes into that query.
 - **The parameter** goes into the text as a literal of its value before the text is
   parsed, so that the database sees the filters that a parameter makes.
 - **The columns** come from `statement.getMetaData()` before the parameter has a value,
@@ -112,7 +127,7 @@ The same file works in DBeaver, by hand:
 
 1. Build the JAR with the driver, the engine and all connectors from the root of the
    repository: `./mvnw -B -ntp clean package -pl fyrql-jdbc-all -am -DskipTests`. It is
-   `fyrql-jdbc-all/target/fyrql-jdbc-all-0.19.0.jar`.
+   `fyrql-jdbc-all/target/fyrql-jdbc-all-0.19.5.jar`.
 2. Run the example once, so that the database exists.
 3. In DBeaver, create a driver in the Driver Manager with the class name
    `net.fyrql.jdbc.FyrQLDriver`, the URL template `jdbc:fyrql:?config={file}`, no user and
@@ -123,8 +138,8 @@ The same file works in DBeaver, by hand:
    `jdbc:h2:/home/me/fyrql/examples/config-and-jdbc/target/db/sales;DATABASE_TO_LOWER=TRUE`,
    and start DBeaver with `SALES_PASSWORD` in its environment.
 5. Create a connection with that driver and the absolute path of `fyrql.yaml` as the
-   file. The navigator shows the sources `sales` and `files`, and the query above runs
-   in an SQL editor.
+   file. The navigator shows the sources `sales` and `files`, with the view under
+   `sales.main`, and the query above runs in an SQL editor.
 
 An H2 file is open in one process at a time: close DBeaver's connection before running
 the example again. More in the manual: [DBeaver](../../docs/manual.md#dbeaver), the

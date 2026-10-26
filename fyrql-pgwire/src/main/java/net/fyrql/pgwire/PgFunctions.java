@@ -84,6 +84,11 @@ final class PgFunctions {
 
         /** The names of the columns of a table by its OID, or an empty list. */
         List<String> columns(int oid);
+
+        /** The text of the query of a view by its OID, or {@code null} if it is no view. */
+        default String viewDefinition(int oid) {
+            return null;
+        }
     }
 
     /** Returns the functions of the engine and those of the server, in a registry of their own. */
@@ -93,6 +98,16 @@ final class PgFunctions {
             r.register(f);
         }
         Function<String, Integer> relations = lookups::relation;
+        // The text of a view by its OID or its name; PostgreSQL takes a flag for pretty printing besides.
+        r.register(new Fixed("pg_get_viewdef", 1, 2, DataType.VARCHAR, true, a -> {
+            Integer oid = a[0] instanceof Number n ? Integer.valueOf(n.intValue()) : relations.apply(a[0].toString());
+            return oid == null ? null : lookups.viewDefinition(oid);
+        }) {
+            @Override
+            public boolean foldable() {
+                return false;
+            }
+        });
         r.register(new Fixed("attribute_names", 2, 2, DataType.VARCHAR, true, a -> {
             List<String> names = lookups.columns(((Number) a[0]).intValue());
             List<String> picked = new ArrayList<>();
@@ -154,7 +169,6 @@ final class PgFunctions {
                 constant("pg_get_ruledef", 1, 2, DataType.VARCHAR, null),
                 constant("pg_get_triggerdef", 1, 2, DataType.VARCHAR, null),
                 constant("pg_get_partkeydef", 1, 1, DataType.VARCHAR, null),
-                constant("pg_get_viewdef", 1, 2, DataType.VARCHAR, null),
                 constant("pg_get_statisticsobjdef_columns", 1, 1, DataType.VARCHAR, null),
                 constant("pg_get_function_result", 1, 1, DataType.VARCHAR, null),
                 constant("pg_get_function_arguments", 1, 1, DataType.VARCHAR, null),

@@ -862,7 +862,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
 
     @Override
     public void getStreamTableTypes(CallContext context, ServerStreamListener listener) {
-        send(Schemas.GET_TABLE_TYPES_SCHEMA, listener, () -> List.<Object[]>of(new Object[] {Metadata.TABLE}));
+        send(Schemas.GET_TABLE_TYPES_SCHEMA, listener, () -> List.<Object[]>of(new Object[] {Metadata.TABLE},
+                new Object[] {Metadata.VIEW}));
     }
 
     @Override

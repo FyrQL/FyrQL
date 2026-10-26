@@ -337,6 +337,11 @@ final class Connection implements Runnable, PgSql.Context {
             public List<String> columns(int oid) {
                 return server.catalog().snapshot(database).columns().getOrDefault(oid, List.of());
             }
+
+            @Override
+            public String viewDefinition(int oid) {
+                return server.catalog().snapshot(database).views().get(oid);
+            }
         });
         if (source != null) {
             String schema = source.equals(engineDefault.defaultSource()) ? engineDefault.defaultSchema()
@@ -1108,7 +1113,7 @@ final class Connection implements Runnable, PgSql.Context {
     }
 
     /** The tag of a statement that writes, as PostgreSQL gives it. */
-    private static String writeTag(String sql, long count) {
+    static String writeTag(String sql, long count) {
         List<Token> t = SqlText.tokens(sql);
         String first = t.isEmpty() ? "" : t.get(0).upper();
         return switch (first) {
@@ -1116,13 +1121,16 @@ final class Connection implements Runnable, PgSql.Context {
             case "COPY" -> "COPY " + count;
             case "CREATE" -> {
                 for (Token k : t) {
+                    if (k.is("VIEW")) {
+                        yield "CREATE VIEW";
+                    }
                     if (k.is("AS")) {
                         yield "SELECT " + count;
                     }
                 }
                 yield "CREATE TABLE";
             }
-            case "DROP" -> "DROP TABLE";
+            case "DROP" -> t.size() > 1 && t.get(1).is("VIEW") ? "DROP VIEW" : "DROP TABLE";
             case "SET", "RESET", "USE" -> "SET";
             case "UPDATE", "DELETE" -> first + " " + count;
             default -> first;

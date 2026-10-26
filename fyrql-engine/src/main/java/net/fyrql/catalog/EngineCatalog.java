@@ -24,6 +24,7 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.Position;
 import net.fyrql.sql.bind.CatalogView;
+import net.fyrql.sql.bind.ViewDefinition;
 
 import java.io.UncheckedIOException;
 import java.nio.file.InvalidPathException;
@@ -35,12 +36,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
  * The catalog of an engine for the binder: names through the
- * {@link NameResolver}, and table functions from the connectors that offer
- * them. A function offered by several connectors is taken from the default
+ * {@link NameResolver}, the {@link Views} of the engine, and table
+ * functions from the connectors that offer them. A function offered by several connectors is taken from the default
  * source if it offers it, otherwise from the first one registered; so are
  * the writers and the readers of file formats. The locations that table
  * functions and {@code COPY} name are checked against the
@@ -54,6 +56,9 @@ public final class EngineCatalog implements CatalogView {
     private final Supplier<ZoneId> zone;
     private final FileAccessPolicy policy;
     private final NameResolver resolver;
+    private final Views views;
+    /** The sources of the engine, in which views may go, unlike the sources of a session alone. */
+    private final Set<String> viewSources;
     private final Map<String, TableFunctionProvider> functions = new LinkedHashMap<>();
     private final Map<String, FileWriterProvider> fileWriters = new LinkedHashMap<>();
     private final Map<String, FileReaderProvider> fileReaders = new LinkedHashMap<>();
@@ -92,15 +97,30 @@ public final class EngineCatalog implements CatalogView {
      */
     public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone,
             FileAccessPolicy policy) {
-        this(sources, searchPath, zone, policy, null);
+        this(sources, searchPath, zone, policy, new Views());
+    }
+
+    /**
+     * A catalog over sources by name, in the order of their registration,
+     * with views in them.
+     *
+     * @param zone the time zone of the session, see {@link #EngineCatalog(Map, SearchPath, Supplier)}
+     * @param policy which locations table functions and {@code COPY} may read and write
+     * @param views the views of the engine, in its sources
+     */
+    public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone,
+            FileAccessPolicy policy, Views views) {
+        this(sources, searchPath, zone, policy, null, views, Set.copyOf(sources.keySet()));
     }
 
     private EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone,
-            FileAccessPolicy policy, DatabasePath databasePath) {
+            FileAccessPolicy policy, DatabasePath databasePath, Views views, Set<String> viewSources) {
         this.zone = zone;
         this.policy = policy;
         this.sources = new LinkedHashMap<>(sources);
-        this.resolver = new NameResolver(sources, searchPath, databasePath);
+        this.views = views;
+        this.viewSources = viewSources;
+        this.resolver = new NameResolver(sources, searchPath, databasePath, views);
         Connector preferred = searchPath.defaultSource() == null ? null : sources.get(searchPath.defaultSource());
         if (preferred instanceof TableFunctionProvider p) {
             for (String f : p.tableFunctions()) {
@@ -149,7 +169,7 @@ public final class EngineCatalog implements CatalogView {
      */
     public EngineCatalog withSearchPath(SearchPath searchPath) {
         return searchPath.equals(searchPath()) ? this
-                : new EngineCatalog(sources, searchPath, zone, policy, databasePath());
+                : new EngineCatalog(sources, searchPath, zone, policy, databasePath(), views, viewSources);
     }
 
     /** Returns the path of the database along which names resolve as in PostgreSQL, or {@code null}. */
@@ -172,7 +192,8 @@ public final class EngineCatalog implements CatalogView {
      */
     public EngineCatalog withDatabasePath(DatabasePath databasePath) {
         return Objects.equals(databasePath, databasePath()) ? this
-                : new EngineCatalog(sources, searchPath(), zone, policy, databasePath);
+                : new EngineCatalog(sources, searchPath(), zone, policy, databasePath, views,
+                        viewSources);
     }
 
     /**
@@ -192,7 +213,7 @@ public final class EngineCatalog implements CatalogView {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public EngineCatalog withSession(SearchPath searchPath, Supplier<ZoneId> zone) {
-        return new EngineCatalog(sources, searchPath, zone, policy, databasePath());
+        return new EngineCatalog(sources, searchPath, zone, policy, databasePath(), views, viewSources);
     }
 
     /**
@@ -208,7 +229,7 @@ public final class EngineCatalog implements CatalogView {
                 throw new IllegalArgumentException("There is a source " + e.getKey() + " already");
             }
         }
-        return new EngineCatalog(all, searchPath(), zone, policy, databasePath());
+        return new EngineCatalog(all, searchPath(), zone, policy, databasePath(), views, viewSources);
     }
 
     /** Returns which locations table functions and {@code COPY} may read and write. */
@@ -360,8 +381,56 @@ public final class EngineCatalog implements CatalogView {
         return table;
     }
 
+    /**
+     * Returns where a new view goes, as a new table, see
+     * {@link NameResolver#resolveNew}, in a source of the engine, whether
+     * it writes tables or not.
+     *
+     * @throws SqlException if the name names no source or schema, or a source of a session alone
+     */
+    @Override
+    public TableRef resolveView(List<String> name) {
+        TableRef view = resolver.resolveNew(name);
+        if (!viewSources.contains(view.source())) {
+            throw new SqlException("Source " + view.source() + " belongs to this session alone; a view goes in a"
+                    + " source of the engine", Position.UNKNOWN);
+        }
+        return view;
+    }
+
+    @Override
+    public Optional<ViewDefinition> view(TableRef table) {
+        return views.get(table);
+    }
+
+    /** Returns the views of the engine. */
+    public Views views() {
+        return views;
+    }
+
+    /** Returns the lists of the sources of this catalog and of their views, for the metadata of tools. */
+    public CatalogTables catalogTables() {
+        return new CatalogTables(sources, views);
+    }
+
+    /** Tells whether a view of the name exists, or a table in a schema of a source of this catalog. */
+    @Override
+    public boolean exists(TableRef table) {
+        if (views.get(table).isPresent()) {
+            return true;
+        }
+        Connector c = sources.get(table.source());
+        return c != null && c.catalog().schemas().contains(table.schema())
+                && c.catalog().tables(table.schema()).contains(table.table());
+    }
+
+    /** Returns the columns of a table, or of a view as they were when it was created. */
     @Override
     public Schema schema(TableRef table) {
+        Optional<ViewDefinition> view = views.get(table);
+        if (view.isPresent()) {
+            return view.get().schema();
+        }
         Connector c = sources.get(table.source());
         if (c == null) {
             throw new SqlException("No source " + table.source(), Position.UNKNOWN);

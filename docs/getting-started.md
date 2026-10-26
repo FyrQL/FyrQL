@@ -41,22 +41,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.19.0</version>
+    <version>0.19.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.19.0</version>
+    <version>0.19.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.19.0</version>
+    <version>0.19.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.19.0</version>
+    <version>0.19.5</version>
 </dependency>
 ```
 
@@ -376,7 +376,18 @@ sources:
       events: s3://lake/events/*.parquet
 ```
 
-More: [Configuration file](manual.md#configuration-file) with the options of each type.
+The section `views` gives queries over the sources names that every client sees as
+tables, the JDBC driver, Flight SQL and psql alike; `CREATE VIEW` does the same in SQL,
+for as long as the engine runs:
+
+```yaml
+views:
+  - name: shop.public.big_orders
+    sql: SELECT * FROM orders WHERE amount > 1000
+```
+
+More: [Configuration file](manual.md#configuration-file) with the options of each type,
+and [Views](manual.md#views).
 
 ## Threads, memory and code generation
 
@@ -592,7 +603,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.19.0</version>
+    <version>0.19.5</version>
 </dependency>
 ```
 

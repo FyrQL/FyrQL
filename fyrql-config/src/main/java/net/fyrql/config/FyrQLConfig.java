@@ -19,6 +19,8 @@ import net.fyrql.connector.FileAccess;
 import net.fyrql.connector.FileStores;
 import net.fyrql.core.value.ZonedDates;
 import net.fyrql.exec.CodegenMode;
+import net.fyrql.sql.Position;
+import net.fyrql.sql.SqlException;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -66,7 +68,8 @@ public final class FyrQLConfig {
      * Builds an engine from a configuration file.
      *
      * @throws ConfigException if the file is no valid configuration, or a
-     *         source cannot be created; the sources created until then are closed
+     *         source or a view cannot be created; the sources created until
+     *         then are closed
      */
     public static FyrQL open(Path file) {
         return open(EngineConfig.read(file), Connectors.factories(), NOTHING, file.toString());
@@ -170,10 +173,32 @@ public final class FyrQLConfig {
         try {
             customizer.accept(prepared.builder());
             return prepared.builder().build();
+        } catch (SqlException e) {
+            close(prepared.connectors(), e);
+            throw new ConfigException(prefix(origin) + viewFailure(config.views(), e), e);
         } catch (RuntimeException e) {
             close(prepared.connectors(), e);
             throw new ConfigException(prefix(origin) + "Cannot build the engine: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Returns the message of a view that cannot be created, with its line in
+     * the file and the place in its query, such as {@code line 12: the view
+     * v cannot be created: Table with name t does not exist (line 2, column
+     * 6 of its sql)}.
+     */
+    private static String viewFailure(List<ViewConfig> views, SqlException e) {
+        for (ViewConfig v : views) {
+            String prefix = "View " + v.name() + ": ";
+            if (e.reason().startsWith(prefix)) {
+                Position p = e.position();
+                return (v.line() > 0 ? "line " + v.line() + ": " : "") + "the view " + v.name() + " cannot be"
+                        + " created: " + e.reason().substring(prefix.length())
+                        + (p.isKnown() ? " (line " + p.line() + ", column " + p.column() + " of its sql)" : "");
+            }
+        }
+        return "Cannot build the engine: " + e.getMessage();
     }
 
     /** A builder and the connectors it holds, which are closed if the engine cannot be built. */
@@ -197,6 +222,9 @@ public final class FyrQLConfig {
                 close(connectors, e);
                 throw new ConfigException(prefix(origin) + e.getMessage(), e);
             }
+        }
+        for (ViewConfig view : config.views()) {
+            builder.view(view.name(), view.columns(), view.sql());
         }
         return new Prepared(builder, connectors);
     }

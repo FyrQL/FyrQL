@@ -77,8 +77,26 @@ class MetadataTest {
         assertEquals(List.of(List.of("mem", "main")), rows(client.getSchemas("mem", "m%"),
                 FlightSqlProducer.Schemas.GET_SCHEMAS_SCHEMA));
         assertEquals(List.of(), rows(client.getSchemas("other", null), FlightSqlProducer.Schemas.GET_SCHEMAS_SCHEMA));
-        assertEquals(List.of(List.of("TABLE")), rows(client.getTableTypes(),
+        assertEquals(List.of(List.of("TABLE"), List.of("VIEW")), rows(client.getTableTypes(),
                 FlightSqlProducer.Schemas.GET_TABLE_TYPES_SCHEMA));
+    }
+
+    @Test
+    void aViewIsATableOfTheTypeView() throws Exception {
+        client.executeUpdate("CREATE VIEW mem.main.small AS SELECT * FROM tiny");
+        try {
+            assertEquals(List.of(List.of("mem", "main", "small", "VIEW")), rows(client.getTables(null, null, "s%",
+                    null, false), FlightSqlProducer.Schemas.GET_TABLES_SCHEMA_NO_SCHEMA));
+            assertEquals(List.of(List.of("mem", "main", "small", "VIEW")), rows(client.getTables(null, null, null,
+                    List.of("view"), false), FlightSqlProducer.Schemas.GET_TABLES_SCHEMA_NO_SCHEMA));
+            assertEquals(List.of(), rows(client.getTables(null, null, "small", List.of("TABLE"), false),
+                    FlightSqlProducer.Schemas.GET_TABLES_SCHEMA_NO_SCHEMA));
+            FlightInfo info = client.getTables(null, null, "small", null, true);
+            List<Object[]> withSchema = TestServer.rows(client, info);
+            assertEquals(1, withSchema.size());
+        } finally {
+            client.executeUpdate("DROP VIEW mem.main.small");
+        }
     }
 
     @Test

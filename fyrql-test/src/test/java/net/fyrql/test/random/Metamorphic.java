@@ -48,7 +48,8 @@ import java.util.function.Predicate;
  * {@link SqlGenerator.Kind}). NoREC counts the rows of a {@code FROM} that a
  * condition selects twice: as a filter, which the optimizer pushes down
  * into sources, splits and compiles, and as an expression of a
- * {@code CASE} over every row.
+ * {@code CASE} over every row. The check of views runs a query directly and
+ * through a view of it, which binds it again where it is read.
  * <p>
  * A check is skipped where either query fails as a query may, with an
  * {@link SqlException}, a {@link QueryException} or a
@@ -87,6 +88,8 @@ final class Metamorphic {
     }
 
     private static final Position P = Position.UNKNOWN;
+    /** The name of the view of the check of views, in the first schema of the first source of the engine. */
+    static final String VIEW = "metamorphic_view";
     private static final int SHRUNK = Integer.getInteger("fyrql.random.shrunk", 5);
     /** The share of skipped checks, in a hundred, above which the report warns. */
     private static final int SKIPPED_WARNING = 25;
@@ -102,6 +105,8 @@ final class Metamorphic {
     private int queries;
     private int checks;
     private int skipped;
+    /** The qualified name of the view of the check of views, once it is known. */
+    private String view;
 
     /**
      * @param title names the source and the configuration in the report
@@ -251,6 +256,24 @@ final class Metamorphic {
                 SqlPrinter.print(new Query(p.with(), evaluated, List.of(), null, null)));
     }
 
+    /**
+     * The queries of the check of views: the query of a partition without
+     * its order and limit, a view of it with the columns {@code c1},
+     * {@code c2} and so on, and a query of all rows of the view.
+     *
+     * @param columns the number of columns of the query
+     * @param view the qualified name of the view
+     */
+    static List<String> viewQueries(SqlGenerator.Partition p, int columns, String view) {
+        String query = SqlPrinter.print(new Query(p.with(), p.base(), List.of(), null, null));
+        List<String> names = new ArrayList<>();
+        for (int i = 1; i <= columns; i++) {
+            names.add("c" + i);
+        }
+        return List.of(query, "CREATE OR REPLACE VIEW " + view + " (" + String.join(", ", names) + ") AS " + query,
+                "SELECT * FROM " + view);
+    }
+
     // -------------------------------------------------------------- running
 
     /** The rows of a query with their columns, or the error it failed with. */
@@ -330,6 +353,57 @@ final class Metamorphic {
         return result;
     }
 
+    /**
+     * Runs the query of a partition and the query of all rows of a view of
+     * it, and compares their rows as multisets. A view that cannot be
+     * created, or whose query fails where it is read, differs: the query
+     * itself ran.
+     */
+    Check view(SqlGenerator.Partition p) {
+        String query = SqlPrinter.print(new Query(p.with(), p.base(), List.of(), null, null));
+        Run base = run(query);
+        if (base.error() != null) {
+            return failed(List.of(query), base.error());
+        }
+        List<String> sql = viewQueries(p, base.schema().size(), viewName());
+        try {
+            engine.update(sql.get(1));
+        } catch (RuntimeException e) {
+            return new Check(Result.DIFFERS, sql, "the view cannot be created: " + e, false);
+        }
+        try {
+            Run viewed = run(sql.get(2));
+            if (viewed.error() != null) {
+                return viewed.error() instanceof SqlException e && e.reason().startsWith("In view ")
+                        ? new Check(Result.DIFFERS, sql, "the view fails where it is read: " + e, false)
+                        : failed(sql, viewed.error());
+            }
+            if (!viewed.schema().types().equals(base.schema().types())) {
+                return new Check(Result.DIFFERS, sql, "types: " + base.schema().types() + " against "
+                        + viewed.schema().types(), false);
+            }
+            ResultComparison.Outcome same = ResultComparison.compare(base.schema(), normalized(base.rows()),
+                    normalized(viewed.rows()), false);
+            return new Check(same.same() ? Result.SAME : Result.DIFFERS, sql, same.report(), base.rows().isEmpty());
+        } finally {
+            engine.update("DROP VIEW IF EXISTS " + viewName());
+        }
+    }
+
+    /** Returns the qualified name of the view of the check of views. */
+    private String viewName() {
+        if (view == null) {
+            String source = engine.sources().get(0);
+            String schema = engine.connector(source).catalog().schemas().get(0);
+            view = quoted(source) + "." + quoted(schema) + "." + VIEW;
+        }
+        return view;
+    }
+
+    private static String quoted(String name) {
+        return "\"" + name.replace("\"", "\"\"") + "\"";
+    }
+
     /** Runs the two queries of NoREC over a partition and compares their counts. */
     Check norec(SqlGenerator.Partition p) {
         List<String> sql = norecQueries(p);
@@ -349,11 +423,12 @@ final class Metamorphic {
 
     // ------------------------------------------------------- recording
 
-    /** Runs both checks of a query and records how they ended. */
+    /** Runs the checks of a query and records how they ended. */
     void check(int query, SqlGenerator.Partition p) {
         queries++;
         record(query, "TLP " + p.kind(), p, tlp(p), this::tlp);
         record(query, "NoREC", p, norec(p), this::norec);
+        record(query, "VIEW", p, view(p), this::view);
     }
 
     private void record(int query, String form, SqlGenerator.Partition p, Check c,

@@ -126,7 +126,8 @@ public final class SqlParser {
 
     /**
      * Parses a statement: a query, {@code COPY ... TO}, {@code COPY ... FROM},
-     * {@code CREATE TABLE}, {@code INSERT INTO} or {@code DROP TABLE}, or
+     * {@code CREATE TABLE}, {@code CREATE VIEW}, {@code INSERT INTO},
+     * {@code DROP TABLE} or {@code DROP VIEW}, or
      * one of these after {@code EXPLAIN} or {@code EXPLAIN ANALYZE}, or a
      * statement of the settings of the session, {@code SET}, {@code RESET},
      * {@code SHOW} or {@code USE}; a trailing semicolon is allowed.
@@ -147,6 +148,73 @@ public final class SqlParser {
      */
     public static ParameterizedStatement parseStatementWithParameters(String sql) {
         return statement(sql, true, true);
+    }
+
+    /**
+     * Parses the name of a table or a view, of one to three parts with dots
+     * between, each written as in SQL: a word of letters, digits, {@code _}
+     * and {@code $} that starts with a letter or {@code _}, or anything in
+     * double quotes, where two of them stand for one. White space around the
+     * name is allowed.
+     *
+     * @throws SqlException if the text is no such name
+     */
+    public static List<String> parseName(String name) {
+        Objects.requireNonNull(name, "name");
+        String text = name.strip();
+        List<String> parts = new ArrayList<>();
+        int i = 0;
+        int n = text.length();
+        while (true) {
+            if (i < n && text.charAt(i) == '"') {
+                StringBuilder part = new StringBuilder();
+                i++;
+                while (true) {
+                    if (i == n) {
+                        throw notAName(name);
+                    }
+                    char c = text.charAt(i++);
+                    if (c != '"') {
+                        part.append(c);
+                    } else if (i < n && text.charAt(i) == '"') {
+                        part.append('"');
+                        i++;
+                    } else {
+                        break;
+                    }
+                }
+                if (part.isEmpty()) {
+                    throw notAName(name);
+                }
+                parts.add(part.toString());
+            } else {
+                int start = i;
+                while (i < n && (Character.isLetterOrDigit(text.charAt(i)) || text.charAt(i) == '_'
+                        || text.charAt(i) == '$')) {
+                    i++;
+                }
+                if (i == start || Character.isDigit(text.charAt(start)) || text.charAt(start) == '$') {
+                    throw notAName(name);
+                }
+                parts.add(text.substring(start, i));
+            }
+            if (i == n) {
+                break;
+            }
+            if (text.charAt(i) != '.') {
+                throw notAName(name);
+            }
+            i++;
+        }
+        if (parts.size() > 3) {
+            throw new SqlException("A table name has one to three parts: " + name, Position.UNKNOWN);
+        }
+        return parts;
+    }
+
+    private static SqlException notAName(String name) {
+        return new SqlException("Not a name of a table: " + name + "; write it as in SQL, as in source.schema.name"
+                + " or \"My Name\"", Position.UNKNOWN);
     }
 
     private static Parameterized parse(String sql, boolean parameters) {
@@ -189,6 +257,9 @@ public final class SqlParser {
         }
         JSqlParserAdapter adapter = new JSqlParserAdapter(source, parameters);
         net.fyrql.sql.ast.Statement statement = adapter.statement(statements.get(0), writes);
+        if (statement instanceof net.fyrql.sql.ast.CreateView && !adapter.parameters().isEmpty()) {
+            throw new SqlException("A view cannot have parameters", adapter.parameters().get(0).position());
+        }
         TreeMap<Integer, SqlExpr.Parameter> byIndex = new TreeMap<>();
         for (SqlExpr.Parameter p : adapter.parameters()) {
             byIndex.putIfAbsent(p.index(), p);

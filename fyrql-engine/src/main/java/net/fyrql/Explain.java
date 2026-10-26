@@ -101,6 +101,17 @@ final class Explain {
             case BoundStatement.Drop d -> d.table() == null
                     ? "Drop table if exists " + String.join(".", d.name()) + " [no such table]"
                     : "Drop table " + (d.ifExists() ? "if exists " : "") + d.table();
+            case BoundStatement.CreateView v -> "Create view " + v.view() + " ("
+                    + String.join(", ", v.definition().schema().fields().stream().map(Schema.Field::toString)
+                            .toList()) + ")"
+                    + switch (v.mode()) {
+                        case CREATE -> "";
+                        case OR_REPLACE -> " [or replace]";
+                        case IF_NOT_EXISTS -> " [if not exists]";
+                    };
+            case BoundStatement.DropView d -> d.view() == null
+                    ? "Drop view if exists " + String.join(".", d.name()) + " [no such view]"
+                    : "Drop view " + (d.ifExists() ? "if exists " : "") + d.view();
             case BoundStatement.Set s -> s.value() == null ? "Reset " + s.name()
                     : "Set " + s.name() + " = '" + s.value().replace("'", "''") + "'";
             case BoundStatement.Query q -> throw new IllegalArgumentException("A query has a plan, not a header");

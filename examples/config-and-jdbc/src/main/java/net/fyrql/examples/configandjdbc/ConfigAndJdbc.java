@@ -24,7 +24,7 @@ import java.util.List;
 /**
  * FyrQL through plain JDBC: the driver builds an engine from the configuration file {@code fyrql.yaml}, which takes
  * the password of the database from the environment, and the application sees one database with the tables of all
- * sources.
+ * sources and a view over two of them.
  */
 public final class ConfigAndJdbc {
 
@@ -49,19 +49,18 @@ public final class ConfigAndJdbc {
         try (Connection connection = DriverManager.getConnection(FYRQL_URL)) {
             DatabaseMetaData metaData = connection.getMetaData();
             System.out.println("== Tables");
-            try (ResultSet tables = metaData.getTables(null, null, "%", new String[] {"TABLE"})) {
+            try (ResultSet tables = metaData.getTables(null, null, "%", new String[] {"TABLE", "VIEW"})) {
                 while (tables.next()) {
                     System.out.println(tables.getString("TABLE_CAT") + "." + tables.getString("TABLE_SCHEM") + "."
-                            + tables.getString("TABLE_NAME"));
+                            + tables.getString("TABLE_NAME") + " " + tables.getString("TABLE_TYPE"));
                 }
             }
 
-            // orders is in the default source sales; the customers are in the CSV source files.
+            // The view of fyrql.yaml joins the orders of the database with the customers of the CSV files.
             String sql = """
-                    SELECT c.name, count(*) AS orders, sum(o.amount) AS revenue
-                    FROM orders AS o JOIN files.customers AS c ON o.customer_id = c.id
-                    WHERE c.region = ?
-                    GROUP BY c.name
+                    SELECT name, orders, revenue
+                    FROM customer_revenue
+                    WHERE region = ?
                     ORDER BY revenue DESC""";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 // The columns of the result are known before the parameter has a value.

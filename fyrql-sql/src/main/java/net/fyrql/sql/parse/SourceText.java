@@ -285,6 +285,19 @@ final class SourceText {
         return original.substring(begin, Math.max(begin, end));
     }
 
+    /**
+     * Returns the original text from where a token starts to the end,
+     * without the white space and semicolons that close it.
+     */
+    String originalFrom(Token token) {
+        String rest = original.substring(origin[offset(token.beginLine, token.beginColumn)]);
+        int end = rest.length();
+        while (end > 0 && (Character.isWhitespace(rest.charAt(end - 1)) || rest.charAt(end - 1) == ';')) {
+            end--;
+        }
+        return rest.substring(0, end);
+    }
+
     /** Returns the position in the original text of a line and column of the rewritten text. */
     Position position(int line, int column) {
         return originalPosition(origin[offset(line, column)]);

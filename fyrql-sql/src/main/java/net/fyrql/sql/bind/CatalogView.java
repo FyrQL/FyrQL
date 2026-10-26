@@ -23,8 +23,8 @@ import java.util.Optional;
 
 /**
  * What the binder needs to know of the tables: names resolved along the
- * search path, the columns of a table, and the tables of table function
- * calls and of files. The engine implements it. Errors are {@link SqlException}s without
+ * search path, the columns of a table, the views, and the tables of table
+ * function calls and of files. The engine implements it. Errors are {@link SqlException}s without
  * a position; the binder adds the position of the name in the query.
  */
 public interface CatalogView {
@@ -57,6 +57,36 @@ public interface CatalogView {
      */
     default TableRef resolveNew(List<String> name) {
         throw new SqlException("Not supported: writing tables", Position.UNKNOWN);
+    }
+
+    /**
+     * Returns where a new view of a name of one to three parts goes, for
+     * {@code CREATE VIEW}: as for a new table, see {@link #resolveNew}, but
+     * in any source of the engine, whether it writes tables or not. The
+     * default has no views.
+     *
+     * @throws SqlException if the name names no source or schema
+     */
+    default TableRef resolveView(List<String> name) {
+        throw new SqlException("Not supported: views", Position.UNKNOWN);
+    }
+
+    /**
+     * Returns the view of a resolved name, or nothing if the name is that
+     * of a table. A name resolves to a view as to a table; a view hides a
+     * table of the same name in its schema. The default has no views.
+     */
+    default Optional<ViewDefinition> view(TableRef table) {
+        return Optional.empty();
+    }
+
+    /**
+     * Tells whether a table or a view that a name resolved to still exists,
+     * for the names of a view, which resolved when the view was created.
+     * The default says yes.
+     */
+    default boolean exists(TableRef table) {
+        return true;
     }
 
     /**

@@ -13,6 +13,7 @@ package net.fyrql.spring;
 
 import net.fyrql.config.EngineConfig;
 import net.fyrql.config.SourceConfig;
+import net.fyrql.config.ViewConfig;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -43,11 +44,13 @@ final class EngineConfigs {
 
     /**
      * Returns the configuration of the keys: the sources of the file under
-     * {@code fyrql.config} and those under {@code fyrql.sources}, and the
-     * settings of the file, replaced by those under {@code fyrql.engine}.
+     * {@code fyrql.config} and those under {@code fyrql.sources}, the views
+     * of the file and those under {@code fyrql.views}, and the settings of
+     * the file, replaced by those under {@code fyrql.engine}.
      *
      * @throws net.fyrql.config.ConfigException if the file is no valid configuration
-     * @throws IllegalArgumentException if a source has no name or type, or two sources have the same name
+     * @throws IllegalArgumentException if a source has no name or type, two sources have the same name, or a
+     *         view has no name or sql
      */
     static EngineConfig of(FyrQLProperties properties) {
         EngineConfig file = properties.getConfig() == null
@@ -68,7 +71,19 @@ final class EngineConfigs {
         }
         Map<String, String> settings = new LinkedHashMap<>(file.settings());
         settings.putAll(properties.getEngine().settings());
-        return new EngineConfig(sources, settings, file.server(), file.pgwire(), file.directory());
+        List<ViewConfig> views = new ArrayList<>(file.views());
+        List<FyrQLProperties.View> keys = properties.getViews();
+        for (int i = 0; i < keys.size(); i++) {
+            FyrQLProperties.View v = keys.get(i);
+            if (v.getName() == null || v.getName().isBlank()) {
+                throw new IllegalArgumentException("The view fyrql.views[" + i + "] has no name");
+            }
+            if (v.getSql() == null || v.getSql().isBlank()) {
+                throw new IllegalArgumentException("The view " + v.getName() + " has no sql");
+            }
+            views.add(new ViewConfig(v.getName(), v.getColumns() == null ? List.of() : v.getColumns(), v.getSql()));
+        }
+        return new EngineConfig(sources, views, settings, file.server(), file.pgwire(), file.directory());
     }
 
     /** Returns a source of a map with its name, its type and its options, whose lists are joined by commas. */

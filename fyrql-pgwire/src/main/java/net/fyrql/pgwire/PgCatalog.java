@@ -12,6 +12,7 @@
 package net.fyrql.pgwire;
 
 import net.fyrql.FyrQL;
+import net.fyrql.catalog.Views;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
@@ -22,6 +23,7 @@ import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.sql.bind.ViewDefinition;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -32,6 +34,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.CRC32;
@@ -87,10 +90,11 @@ final class PgCatalog {
      *
      * @param classes the OIDs of the tables by their schema and name in lower case, {@code schema.table}
      * @param namespaces the OIDs of the schemas by their names
+     * @param views the texts of the queries of the views by their OIDs
      */
     record Snapshot(long built, MemoryConnector pgCatalog, MemoryConnector informationSchema,
             Map<String, Integer> classes, Map<String, Integer> namespaces, Map<Integer, String> classNames,
-            Map<Integer, List<String>> columns) {
+            Map<Integer, List<String>> columns, Map<Integer, String> views) {
     }
 
     /** Returns the current snapshot of a database, built now if the last is too old. */
@@ -551,11 +555,17 @@ final class PgCatalog {
         }
         List<String> catalogName = List.of(database == null ? "" : database);
 
-        // The tables of the source and their OIDs.
+        // The views and tables of the source and their OIDs; a view hides a table of its name.
+        Views views = engine.catalog().views();
         Map<String, List<String>> tables = new LinkedHashMap<>();
         List<String> relationNames = new ArrayList<>();
         for (String s : schemas) {
-            List<String> names = engine.connector(database).catalog().tables(s);
+            List<String> names = new ArrayList<>(views.names(database, s));
+            for (String t : engine.connector(database).catalog().tables(s)) {
+                if (!names.contains(t)) {
+                    names.add(t);
+                }
+            }
             tables.put(s, names);
             for (String t : names) {
                 relationNames.add("relation " + database + "." + s + "." + t);
@@ -571,6 +581,7 @@ final class PgCatalog {
         Map<String, Integer> classes = new HashMap<>();
         Map<Integer, String> classNames = new HashMap<>();
         Map<Integer, List<String>> columnNames = new HashMap<>();
+        Map<Integer, String> viewTexts = new HashMap<>();
 
         for (Map.Entry<String, Integer> n : namespaces.entrySet()) {
             pg.add("pg_namespace", n.getValue(), n.getKey(), OWNER, null);
@@ -593,23 +604,33 @@ final class PgCatalog {
             for (String table : e.getValue()) {
                 int oid = relationOids.get("relation " + database + "." + schema + "." + table);
                 TableRef ref = new TableRef(database, schema, table);
+                Optional<ViewDefinition> view = views.get(ref);
                 Schema columns;
                 try {
-                    columns = engine.connector(database).catalog().schema(ref);
+                    columns = view.isPresent() ? view.get().schema() : engine.connector(database).catalog().schema(ref);
                 } catch (RuntimeException ex) {
                     // A table whose columns the source cannot tell is left out.
                     continue;
                 }
-                relation(pg, oid, table, namespace, "r", columns.size(), -1);
+                relation(pg, oid, table, namespace, view.isPresent() ? "v" : "r", columns.size(), -1);
                 attributes(pg, oid, columns);
                 columnNames.put(oid, columns.fields().stream().map(Schema.Field::name).toList());
                 classes.put(schema.toLowerCase(Locale.ROOT) + "." + table.toLowerCase(Locale.ROOT), oid);
                 classNames.put(oid, quoteIdentifier(schema) + "." + quoteIdentifier(table));
-                pg.add("pg_tables", schema, table, "fyrql", null, false, false, false, false);
-                pg.add("pg_stat_user_tables", oid, schema, table, 0L, null, 0L, null, null, null, 0L, 0L, 0L, 0L, 0L,
-                        null, 0L, 0L, 0L, null, null, null, null, 0L, 0L, 0L, 0L);
-                info.add("tables", database, schema, table, "BASE TABLE", null, null, null, null, null, "YES", "NO",
-                        null);
+                if (view.isPresent()) {
+                    String text = view.get().text();
+                    viewTexts.put(oid, text);
+                    pg.add("pg_views", schema, table, "fyrql", text);
+                    info.add("tables", database, schema, table, "VIEW", null, null, null, null, null, "NO", "NO",
+                            null);
+                    info.add("views", database, schema, table, text, "NONE", "NO", "NO", "NO", "NO", "NO");
+                } else {
+                    pg.add("pg_tables", schema, table, "fyrql", null, false, false, false, false);
+                    pg.add("pg_stat_user_tables", oid, schema, table, 0L, null, 0L, null, null, null, 0L, 0L, 0L, 0L,
+                            0L, null, 0L, 0L, 0L, null, null, null, null, 0L, 0L, 0L, 0L);
+                    info.add("tables", database, schema, table, "BASE TABLE", null, null, null, null, null, "YES",
+                            "NO", null);
+                }
                 for (int i = 0; i < columns.size(); i++) {
                     Schema.Field f = columns.fields().get(i);
                     info.add("columns", columnRow(database, schema, table, i + 1, f));
@@ -663,7 +684,7 @@ final class PgCatalog {
         }
         Map<String, Integer> namespaceOids = new LinkedHashMap<>(namespaces);
         return new Snapshot(now, pgBuilder.build(), infoBuilder.build(), Map.copyOf(classes),
-                Map.copyOf(namespaceOids), Map.copyOf(classNames), Map.copyOf(columnNames));
+                Map.copyOf(namespaceOids), Map.copyOf(classNames), Map.copyOf(columnNames), Map.copyOf(viewTexts));
     }
 
     /** The rows of the tables of a catalog, by table. */

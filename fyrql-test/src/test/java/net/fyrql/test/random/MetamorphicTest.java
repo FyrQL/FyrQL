@@ -158,7 +158,7 @@ class MetamorphicTest {
         return new SqlGenerator.Partition(kind, q.with(), (QueryBody.Select) q.body(), p, p);
     }
 
-    /** The queries of each form of TLP and of NoREC over a fixed query. */
+    /** The queries of each form of TLP, of NoREC and of the check of views over a fixed query. */
     @Test
     void theFormsAreWrittenAsExpected() {
         Schema none = new Schema(List.of());
@@ -176,6 +176,7 @@ class MetamorphicTest {
         List<String> written = new ArrayList<>();
         written.addAll(Metamorphic.tlpQueries(where, none));
         written.addAll(Metamorphic.norecQueries(where));
+        written.addAll(Metamorphic.viewQueries(where, 1, "mem.main.v"));
         written.addAll(Metamorphic.tlpQueries(distinct, none));
         written.addAll(Metamorphic.tlpQueries(having, none));
         written.addAll(Metamorphic.norecQueries(having));
@@ -194,6 +195,9 @@ class MetamorphicTest {
                 UNION ALL SELECT (i + 1) AS x FROM p WHERE ((k > 2) AND (((v = 'a') OR b) IS NULL))
                 SELECT count(*) FROM p WHERE ((v = 'a') OR b)
                 SELECT coalesce(sum(CASE WHEN ((v = 'a') OR b) THEN 1 ELSE 0 END), 0) FROM p
+                SELECT (i + 1) AS x FROM p WHERE (k > 2)
+                CREATE OR REPLACE VIEW mem.main.v (c1) AS SELECT (i + 1) AS x FROM p WHERE (k > 2)
+                SELECT * FROM mem.main.v
                 SELECT DISTINCT v FROM p
                 SELECT DISTINCT v FROM p WHERE (i < 3) UNION SELECT DISTINCT v FROM p WHERE (NOT (i < 3)) \
                 UNION SELECT DISTINCT v FROM p WHERE ((i < 3) IS NULL)

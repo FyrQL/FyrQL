@@ -83,8 +83,8 @@ class StatementTest {
             assertTrue(e.getMessage().startsWith("Source shop does not write tables"), e.getMessage());
             e = assertThrows(SQLFeatureNotSupportedException.class, () -> s.execute("DELETE FROM t"));
             assertEquals("0A000", e.getSQLState());
-            assertTrue(e.getMessage().startsWith("Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are"
-                    + " supported, not DELETE"), e.getMessage());
+            assertTrue(e.getMessage().startsWith("Only queries, COPY, CREATE TABLE, CREATE VIEW, INSERT INTO, DROP"
+                    + " TABLE and DROP VIEW are supported, not DELETE"), e.getMessage());
             e = assertThrows(SQLException.class, () -> s.executeLargeUpdate("SELECT 1"));
             assertEquals("42809", e.getSQLState());
             assertEquals("A query returns rows, not a number of rows written; run it with executeQuery or execute",

@@ -46,6 +46,11 @@ warehouse first.
   and
   `CREATE TABLE ... AS` and `INSERT INTO` write into tables in memory and in databases.
   See [Writing and loading](docs/manual.md#writing-and-loading).
+- **Views over the sources.** `CREATE VIEW`, or a view in the YAML file, gives a query
+  over several sources a name and columns that every client sees as a table: the Java
+  API, the JDBC driver, Flight SQL and the PostgreSQL wire protocol, with the view in
+  their metadata. A query of a view is optimized together with the view, down into the
+  sources. See [Views](docs/manual.md#views).
 - **Embedded, with clients.** The engine runs inside the application and is set up with
   a builder, a YAML file or, with a starter, the `application.yml` of Spring Boot. A JDBC
   driver, also as one JAR, opens it to tools such as DBeaver; results come as Apache

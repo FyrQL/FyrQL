@@ -283,7 +283,7 @@ class MetadataTest {
             assertEquals(List.of("zeta", "alpha", "mid"), column(md.getCatalogs(), "TABLE_CAT"));
             assertEquals(0, zeta.catalogs.get() + alpha.catalogs.get(), "no source is touched");
             assertEquals("source", md.getCatalogTerm());
-            assertEquals(List.of("TABLE"), column(md.getTableTypes(), "TABLE_TYPE"));
+            assertEquals(List.of("TABLE", "VIEW"), column(md.getTableTypes(), "TABLE_TYPE"));
         }
     }
 
@@ -524,6 +524,31 @@ class MetadataTest {
                 assertTrue(rs.next());
                 assertEquals("0 rows", rs.getString("REMARKS"));
             }
+        }
+    }
+
+    @Test
+    void aViewIsATableOfTheTypeView() throws SQLException {
+        MemoryConnector memory = MemoryConnector.builder("mem").table("u", Schema.of(
+                new Schema.Field("k", DataType.VARCHAR, false), new Schema.Field("n", DataType.INTEGER)),
+                List.of()).build();
+        try (Connection c = connect(memory)) {
+            try (java.sql.Statement s = c.createStatement()) {
+                assertEquals(0, s.executeUpdate("CREATE VIEW mem.main.big (key, n2) AS SELECT k, n * 2 FROM u"));
+            }
+            DatabaseMetaData md = c.getMetaData();
+            List<String> all = new ArrayList<>();
+            try (ResultSet rs = md.getTables(null, null, "%", null)) {
+                while (rs.next()) {
+                    all.add(rs.getString("TABLE_NAME") + " " + rs.getString("TABLE_TYPE") + " "
+                            + rs.getString("REMARKS"));
+                }
+            }
+            assertEquals(List.of("big VIEW null", "u TABLE 0 rows"), all);
+            assertEquals(List.of("big"), column(md.getTables(null, null, "%", new String[] {"VIEW"}), "TABLE_NAME"));
+            assertEquals(List.of("u"), column(md.getTables(null, null, "%", new String[] {"table"}), "TABLE_NAME"));
+            assertEquals(List.of("key", "n2"), column(md.getColumns(null, null, "big", "%"), "COLUMN_NAME"));
+            assertEquals(List.of("INTEGER"), column(md.getColumns(null, null, "big", "n2"), "TYPE_NAME"));
         }
     }
 }

@@ -15,6 +15,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CreateTable.ColumnDefinition;
 import net.fyrql.sql.ast.DropTable;
+import net.fyrql.sql.ast.DropView;
 import net.fyrql.sql.ast.FromItem;
 import net.fyrql.sql.ast.InsertInto;
 import net.fyrql.sql.ast.OrderItem;
@@ -102,6 +103,10 @@ import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.create.table.CreateTable;
+import net.sf.jsqlparser.statement.create.view.AutoRefreshOption;
+import net.sf.jsqlparser.statement.create.view.CreateView;
+import net.sf.jsqlparser.statement.create.view.ForceOption;
+import net.sf.jsqlparser.statement.create.view.TemporaryOption;
 import net.sf.jsqlparser.statement.drop.Drop;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.AllColumns;
@@ -144,11 +149,16 @@ import java.util.Set;
  * from the tokens of the query text, since JSqlParser splits quoted names
  * that contain a dot.
  * <p>
- * Besides queries, it translates {@code CREATE TABLE}, {@code INSERT INTO}
- * and {@code DROP TABLE}, with the same care: a constraint, a default, a
- * clause of a conflict or a table option is an error, not dropped.
+ * Besides queries, it translates {@code CREATE TABLE}, {@code CREATE VIEW},
+ * {@code INSERT INTO}, {@code DROP TABLE} and {@code DROP VIEW}, with the
+ * same care: a constraint, a default, a clause of a conflict or an option of
+ * a table or a view is an error, not dropped.
  */
 final class JSqlParserAdapter {
+
+    /** The start of the message for a statement that is not supported. */
+    private static final String SUPPORTED = "Only queries, COPY, CREATE TABLE, CREATE VIEW, INSERT INTO, DROP TABLE"
+            + " and DROP VIEW are supported";
 
     private final SourceText source;
     /** The parameters met so far, or {@code null} for a query that takes none. */
@@ -184,12 +194,13 @@ final class JSqlParserAdapter {
         }
         return switch (statement) {
             case CreateTable c -> createTable(c);
+            case CreateView v -> createView(v);
             case Insert i -> insert(i);
             case Drop d when "TABLE".equalsIgnoreCase(d.getType()) -> drop(d);
-            case Drop d -> throw new SqlException("Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are"
-                    + " supported, not DROP " + d.getType().toUpperCase(Locale.ROOT), position(d.getName()));
-            default -> throw new SqlException("Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are"
-                    + " supported, not " + words(statement), position(statement));
+            case Drop d when "VIEW".equalsIgnoreCase(d.getType()) -> dropView(d);
+            case Drop d -> throw new SqlException(SUPPORTED + ", not DROP " + d.getType().toUpperCase(Locale.ROOT),
+                    position(d.getName()));
+            default -> throw new SqlException(SUPPORTED + ", not " + words(statement), position(statement));
         };
     }
 
@@ -259,6 +270,65 @@ final class JSqlParserAdapter {
         return new ColumnDefinition(name, type, nullable);
     }
 
+    /**
+     * {@code CREATE [OR REPLACE] VIEW [IF NOT EXISTS] name [(columns)] AS
+     * query}; a temporary, materialized or recursive view and the options of
+     * other dialects are errors.
+     */
+    private net.fyrql.sql.ast.CreateView createView(CreateView v) {
+        Table view = v.getView();
+        Position position = position(view);
+        reject(v.getTemporary() != null && v.getTemporary() != TemporaryOption.NONE,
+                v.getTemporary() + " VIEW", view);
+        reject(v.isMaterialized(), "MATERIALIZED VIEW", view);
+        reject(v.isRecursive(), "RECURSIVE VIEW", view);
+        reject(v.isSecure(), "SECURE VIEW", view);
+        reject(v.getForce() != null && v.getForce() != ForceOption.NONE, "FORCE", view);
+        reject(v.getAutoRefresh() != null && v.getAutoRefresh() != AutoRefreshOption.NONE, "AUTO REFRESH", view);
+        reject(v.getCheckOption(), "WITH CHECK OPTION", view);
+        reject(v.isWithReadOnly(), "WITH READ ONLY", view);
+        reject(v.getOptions(), "options of a view", view);
+        reject(v.getStorageParameters(), "options of a view", view);
+        reject(v.getAccessMethod(), "USING", view);
+        reject(v.getTableSpace(), "TABLESPACE", view);
+        reject(v.getWithData(), "WITH DATA", view);
+        reject(v.getBackup(), "BACKUP", view);
+        reject(v.getViewCommentOptions(), "COMMENT", view);
+        reject(view.getAlias(), "an alias of the view", view);
+        if (v.isOrReplace() && v.isIfNotExists()) {
+            throw new SqlException("OR REPLACE and IF NOT EXISTS cannot be used together", position);
+        }
+        List<String> columns = new ArrayList<>();
+        if (v.getColumnNames() != null) {
+            for (Column column : v.getColumnNames()) {
+                columns.add(simpleName(column));
+            }
+        }
+        Query query = query(v.getSelect());
+        Token start = queryStart(firstToken(view));
+        String text = start == null ? SqlPrinter.print(query) : source.originalFrom(start);
+        return new net.fyrql.sql.ast.CreateView(nameParts(view), columns, query, text, v.isOrReplace(),
+                v.isIfNotExists(), position);
+    }
+
+    /**
+     * Returns the first token of the query of {@code CREATE VIEW}, the one
+     * after the first {@code AS} outside parentheses, or {@code null}.
+     */
+    private static Token queryStart(Token name) {
+        int depth = 0;
+        for (Token t = name; t != null; t = t.next) {
+            if ("(".equals(t.image)) {
+                depth++;
+            } else if (")".equals(t.image)) {
+                depth--;
+            } else if (depth == 0 && "AS".equalsIgnoreCase(t.image)) {
+                return t.next;
+            }
+        }
+        return null;
+    }
+
     private InsertInto insert(Insert i) {
         Table table = i.getTable();
         reject(i.getWithItemsList(), "WITH before INSERT", table);
@@ -293,9 +363,21 @@ final class JSqlParserAdapter {
     }
 
     private DropTable drop(Drop d) {
+        checkDrop(d, "table");
+        return new DropTable(nameParts(d.getName()), d.isIfExists(), position(d.getName()));
+    }
+
+    private DropView dropView(Drop d) {
+        checkDrop(d, "view");
+        return new DropView(nameParts(d.getName()), d.isIfExists(), position(d.getName()));
+    }
+
+    /** Rejects the options of {@code DROP TABLE} or {@code DROP VIEW}, and more than one name. */
+    private void checkDrop(Drop d, String kind) {
         Table table = d.getName();
         if (d.getNames() != null && d.getNames().size() > 1) {
-            throw unsupported("DROP TABLE of more than one table", d.getNames().get(1));
+            throw unsupported("DROP " + kind.toUpperCase(Locale.ROOT) + " of more than one " + kind,
+                    d.getNames().get(1));
         }
         if (d.getParameters() != null && !d.getParameters().isEmpty()) {
             throw unsupported(String.join(" ", d.getParameters()).toUpperCase(Locale.ROOT), table);
@@ -303,7 +385,6 @@ final class JSqlParserAdapter {
         reject(d.getTypeToParameters(), "these options of DROP", table);
         reject(d.isUsingTemporary(), "DROP TEMPORARY", table);
         reject(d.isMaterialized(), "DROP MATERIALIZED", table);
-        return new DropTable(nameParts(table), d.isIfExists(), position(table));
     }
 
     // ---- queries

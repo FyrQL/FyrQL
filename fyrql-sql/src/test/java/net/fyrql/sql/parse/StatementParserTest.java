@@ -16,7 +16,9 @@ import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CreateTable;
 import net.fyrql.sql.ast.CreateTable.ColumnDefinition;
 import net.fyrql.sql.ast.CopyTo;
+import net.fyrql.sql.ast.CreateView;
 import net.fyrql.sql.ast.DropTable;
+import net.fyrql.sql.ast.DropView;
 import net.fyrql.sql.ast.Explain;
 import net.fyrql.sql.ast.InsertInto;
 import net.fyrql.sql.Position;
@@ -46,6 +48,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code USE} of the settings of the session.
  */
 class StatementParserTest {
+
+    private static final String SUPPORTED = "Only queries, COPY, CREATE TABLE, CREATE VIEW, INSERT INTO, DROP TABLE"
+            + " and DROP VIEW are supported";
 
     private static Statement parse(String sql) {
         return SqlParser.parseStatement(sql);
@@ -130,6 +135,53 @@ class StatementParserTest {
     }
 
     @Test
+    void createView() {
+        CreateView v = assertInstanceOf(CreateView.class, parse("CREATE VIEW v AS SELECT a FROM t WHERE a > 1"));
+        assertEquals(List.of("v"), v.name());
+        assertEquals(List.of(), v.columns());
+        assertEquals("SELECT a FROM t WHERE a > 1", v.text());
+        assertEquals("SELECT a FROM t WHERE (a > 1)", SqlPrinter.print(v.query()));
+        assertFalse(v.orReplace());
+        assertFalse(v.ifNotExists());
+        assertEquals(new Position(1, 13), v.position());
+
+        v = assertInstanceOf(CreateView.class, parse("create or replace view s.\"My View\" (x, \"Y\") as\n"
+                + "  select a, b\n  from t;  \n"));
+        assertEquals(List.of("s", "My View"), v.name());
+        assertEquals(List.of("x", "Y"), v.columns());
+        assertEquals("select a, b\n  from t", v.text());
+        assertTrue(v.orReplace());
+
+        v = assertInstanceOf(CreateView.class, parse("CREATE VIEW IF NOT EXISTS a.b.c AS WITH c AS (SELECT 1 AS \"as\")"
+                + " SELECT * FROM c -- the rows"));
+        assertEquals(List.of("a", "b", "c"), v.name());
+        assertTrue(v.ifNotExists());
+        assertEquals("WITH c AS (SELECT 1 AS \"as\") SELECT * FROM c -- the rows", v.text());
+
+        v = assertInstanceOf(CreateView.class, parse("CREATE VIEW v AS (SELECT 1 AS a) UNION ALL (SELECT 2)"));
+        assertEquals("(SELECT 1 AS a) UNION ALL (SELECT 2)", v.text());
+
+        Explain e = assertInstanceOf(Explain.class, parse("EXPLAIN CREATE VIEW v AS SELECT 1"));
+        assertEquals("SELECT 1", assertInstanceOf(CreateView.class, e.statement()).text());
+
+        SqlException x = assertThrows(SqlException.class,
+                () -> SqlParser.parseStatementWithParameters("CREATE VIEW v AS SELECT a FROM t WHERE a = ?"));
+        assertEquals("A view cannot have parameters", x.reason());
+        assertEquals(new Position(1, 44), x.position());
+        x = assertThrows(SqlException.class, () -> parse("CREATE OR REPLACE VIEW IF NOT EXISTS v AS SELECT 1"));
+        assertEquals("OR REPLACE and IF NOT EXISTS cannot be used together", x.reason());
+        x = assertThrows(SqlException.class, () -> SqlParser.parse("CREATE VIEW v AS SELECT 1"));
+        assertEquals("Only queries are supported, not CREATE VIEW", x.reason());
+    }
+
+    @Test
+    void dropView() {
+        assertEquals(new DropView(List.of("v"), false, new Position(1, 11)), parse("DROP VIEW v"));
+        assertEquals(new DropView(List.of("a", "b", "c"), true, new Position(1, 21)),
+                parse("drop view if exists a.b.c;"));
+    }
+
+    @Test
     void errors() {
         Map<String, String> cases = new LinkedHashMap<>();
         cases.put("CREATE TABLE t (a INTEGER PRIMARY KEY)",
@@ -148,15 +200,23 @@ class StatementParserTest {
         cases.put("INSERT INTO t VALUES (1) RETURNING a", "Not supported: RETURNING@1:13");
         cases.put("INSERT INTO t (t.a) VALUES (1)", "Syntax error: expected a name without a qualifier@1:16");
         cases.put("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", "Not supported: WITH before INSERT@1:34");
-        cases.put("INSERT OR REPLACE INTO t VALUES (1)",
-                "Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are supported, not UPSERT@0:0");
-        cases.put("UPDATE t SET a = 1",
-                "Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are supported, not UPDATE@0:0");
+        cases.put("INSERT OR REPLACE INTO t VALUES (1)", SUPPORTED + ", not UPSERT@0:0");
+        cases.put("UPDATE t SET a = 1", SUPPORTED + ", not UPDATE@0:0");
         cases.put("DROP TABLE t CASCADE", "Not supported: CASCADE@1:12");
         cases.put("DROP TABLE t, u", "Not supported: DROP TABLE of more than one table@1:15");
-        cases.put("DROP VIEW v",
-                "Only queries, COPY, CREATE TABLE, INSERT INTO and DROP TABLE are supported, not DROP VIEW@1:11");
+        cases.put("DROP INDEX i", SUPPORTED + ", not DROP INDEX@1:12");
         cases.put("CREATE TABLE t AS SELECT 1; DROP TABLE t", "Only one statement is supported@1:40");
+        cases.put("CREATE TEMP VIEW v AS SELECT 1", "Not supported: TEMP VIEW@1:18");
+        cases.put("CREATE TEMPORARY VIEW v AS SELECT 1", "Not supported: TEMPORARY VIEW@1:23");
+        cases.put("CREATE MATERIALIZED VIEW v AS SELECT 1", "Not supported: MATERIALIZED VIEW@1:26");
+        cases.put("CREATE RECURSIVE VIEW v (a) AS SELECT 1", "Not supported: RECURSIVE VIEW@1:23");
+        cases.put("CREATE VIEW v AS SELECT 1 WITH CHECK OPTION", "Not supported: WITH CHECK OPTION@1:13");
+        cases.put("CREATE VIEW v AS SELECT 1 WITH READ ONLY", "Not supported: WITH READ ONLY@1:13");
+        cases.put("CREATE VIEW v (v.a) AS SELECT 1", "Syntax error: expected a name without a qualifier@1:16");
+        cases.put("DROP VIEW v CASCADE", "Not supported: CASCADE@1:11");
+        cases.put("DROP VIEW v, w", "Not supported: DROP VIEW of more than one view@1:14");
+        cases.put("DROP MATERIALIZED VIEW v", "Not supported: DROP MATERIALIZED@1:24");
+        cases.put("ALTER VIEW v AS SELECT 1", SUPPORTED + ", not ALTER VIEW@0:0");
         for (Map.Entry<String, String> c : cases.entrySet()) {
             SqlException e = assertThrows(SqlException.class, () -> parse(c.getKey()), c.getKey());
             assertEquals(c.getValue(), e.reason() + "@" + e.position().line() + ":" + e.position().column(),

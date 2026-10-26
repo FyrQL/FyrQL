@@ -1,5 +1,5 @@
-# The sources and settings of the engine that the JDBC driver builds for each connection,
-# with the URL jdbc:fyrql:?config=fyrql.yaml
+# The sources, views and settings of the engine that the JDBC driver builds for each
+# connection, with the URL jdbc:fyrql:?config=fyrql.yaml
 
 sources:
   # The orders in a database, here an H2 file under target/db, which the example creates.
@@ -16,6 +16,15 @@ sources:
   - name: files
     type: csv
     directory: ${env:DATA_DIR:-data}
+
+views:
+  # The revenue of each customer over both sources, which every connection sees as a
+  # table of sales. orders resolves along the default source when the engine is built.
+  - name: sales.main.customer_revenue
+    sql: |
+      SELECT c.name, c.region, count(*) AS orders, sum(o.amount) AS revenue
+      FROM orders AS o JOIN files.customers AS c ON o.customer_id = c.id
+      GROUP BY c.name, c.region
 
 engine:
   defaultSource: sales

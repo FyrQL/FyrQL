@@ -33,8 +33,9 @@ import java.util.function.Supplier;
 /**
  * The metadata of a connection. The catalogs are the sources of the engine
  * in the order of their registration, and each source has its schemas and
- * tables; all tables are of the type {@code TABLE}, and the remarks of a
- * table give its number of rows if the source knows it. The names of the
+ * tables; the tables of the sources are of the type {@code TABLE}, the
+ * views of the engine of the type {@code VIEW}, and the remarks of a table
+ * give its number of rows if the source knows it. The names of the
  * sources are listed without touching a source; the schemas, tables and
  * columns read only the sources the catalog of the call matches, and an
  * error of a source fails only that call, with {@code 58030} unless it
@@ -49,8 +50,10 @@ import java.util.function.Supplier;
  */
 final class FyrQLDatabaseMetaData implements DatabaseMetaData {
 
-    /** The name of the only type of table. */
+    /** The type of a table. */
     private static final String TABLE = "TABLE";
+    /** The type of a view. */
+    private static final String VIEW = "VIEW";
 
     private final FyrQLConnection connection;
 
@@ -117,27 +120,33 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
     @Override
     public ResultSet getTableTypes() throws SQLException {
         connection.checkOpen();
-        return MetadataResultSets.of(MetadataResultSets.TABLE_TYPES, List.<Object[]>of(new Object[] {TABLE}));
+        return MetadataResultSets.of(MetadataResultSets.TABLE_TYPES, List.<Object[]>of(new Object[] {TABLE},
+                new Object[] {VIEW}));
     }
 
-    /** Returns the tables; a list of types without {@code TABLE} has none. */
+    /** Returns the tables and views; a list of types without {@code TABLE} and {@code VIEW} has none. */
     @Override
     public ResultSet getTables(String catalog, String schemaPattern, String tableNamePattern, String[] types)
             throws SQLException {
-        if (types != null && Arrays.stream(types).noneMatch(TABLE::equalsIgnoreCase)) {
+        boolean tables = types == null || Arrays.stream(types).anyMatch(TABLE::equalsIgnoreCase);
+        boolean views = types == null || Arrays.stream(types).anyMatch(VIEW::equalsIgnoreCase);
+        if (!tables && !views) {
             return empty(MetadataResultSets.TABLES);
         }
         return read(MetadataResultSets.TABLES, () -> {
             List<Object[]> rows = new ArrayList<>();
             for (CatalogTables.TableInfo t : tables().tables(NamePattern.name(catalog),
                     NamePattern.of(schemaPattern), NamePattern.of(tableNamePattern))) {
+                if (t.view() ? !views : !tables) {
+                    continue;
+                }
                 String remarks = null;
                 if (t.rowCount().isPresent()) {
                     long n = t.rowCount().getAsLong();
                     remarks = n + (n == 1 ? " row" : " rows");
                 }
-                rows.add(new Object[] {t.table().source(), t.table().schema(), t.table().table(), TABLE, remarks,
-                    null, null, null, null, null});
+                rows.add(new Object[] {t.table().source(), t.table().schema(), t.table().table(),
+                    t.view() ? VIEW : TABLE, remarks, null, null, null, null, null});
             }
             return rows;
         });

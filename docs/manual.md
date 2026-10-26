@@ -2,10 +2,10 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.19.0 in full: its Java API and settings, the connectors and
-what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
-the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it runs
-queries and how to observe them, with measurements. The [PostgreSQL wire protocol
+This manual describes FyrQL 0.19.5 in full: its Java API and settings, the connectors and
+what they push down, writing and loading, views, the configuration file, the JDBC
+driver, Arrow, the Flight SQL server, the SQL it takes and where it differs from DuckDB,
+how it runs queries and how to observe them, with measurements. The [PostgreSQL wire protocol
 server](pgwire.md) and the starter for [Spring Boot](spring-boot.md) have documents of
 their own. [Getting started](getting-started.md) is a shorter tour, and the
 [README](../README.md) an overview; the [examples](../examples/README.md) are programs
@@ -22,6 +22,7 @@ that run, each with its output.
   - [Formats](#formats)
   - [Loading](#loading)
   - [Tables](#tables)
+- [Views](#views)
 - [File access](#file-access)
 - [Configuration file](#configuration-file)
 - [JDBC driver](#jdbc-driver)
@@ -818,6 +819,80 @@ interval stored as text as a `VARCHAR`. A database through the generic dialect t
 4,000 characters. With MySQL, `rewriteBatchedStatements=true` in the URL sends a batch
 as one statement, which is much faster.
 
+## Views
+
+A view is a query under a name, which every query, session and client of the engine reads
+as a table: through the Java API, the [JDBC driver](#jdbc-driver), the [Flight SQL
+server](#flight-sql-server) and the [PostgreSQL wire protocol server](pgwire.md) alike.
+Over several sources, views give the data names and columns of their own, whatever the
+sources call their tables, and every client sees the same ones.
+
+```sql
+CREATE [OR REPLACE] VIEW [IF NOT EXISTS] name [(columns)] AS query
+DROP VIEW [IF EXISTS] name
+```
+
+With the sources of the [first example](#using-the-engine):
+
+```java
+engine.update("""
+        CREATE VIEW mem.main.revenue (region, orders, revenue) AS
+        SELECT c.region, count(*), sum(o.amount)
+        FROM orders AS o JOIN customers AS c ON o.customerId = c.id
+        GROUP BY ALL""");
+System.out.println(engine.rows("SELECT * FROM revenue WHERE orders > 1").stream()
+        .map(Arrays::toString).toList());
+```
+
+```
+[[north, 3, 15.75]]
+```
+
+A view goes into a schema of a source, as a new table does: a name of one part into the
+default source and schema, of two parts into the schema `main` of the source of that name
+or else into the schema of that name in the default source, and of three parts into
+`source.schema.view`. Any source takes views, also one that writes no tables, such as a
+source of CSV files or of HTTP; the source knows nothing of them, the engine keeps them.
+The columns of a view have the names of its column list, or else those its query gives
+them, which must be unique ignoring case. The statements give a `Count` of 0, and
+`explain` shows a line such as `Create view mem.main.revenue (region VARCHAR, orders
+BIGINT, revenue DECIMAL(38,2))` or `Drop view mem.main.revenue`.
+
+`CREATE VIEW` binds the query once, so that an error in it shows at once, and keeps it
+with the tables its names resolved to. They stay those tables, whatever the search path
+or the default source of a later query, as in PostgreSQL. A query that reads the view
+binds its query again, as part of its own plan: the optimizer pushes filters into it and
+into the sources below it as into any query, and the time zone and the other settings
+are those of the session that reads it. A view holds no rows and caches none.
+
+A view lasts until the engine closes. Views that every engine of an application should
+have go into the section `views` of the [configuration file](#configuration-file), or
+come from `FyrQL.Builder.view(name, sql)` and `view(name, columns, sql)`; the engine
+creates them in their order when it is built, so that a view may read those before it,
+and one that cannot be created stops the build with an `SqlException` that names it.
+
+A view hides a table of the same name in its schema. `CREATE VIEW` fails where a table of
+the name exists, with `Table with name orders already exists`, but a table that its source
+gets later stays behind the view until the view is dropped. A view is no table to write:
+`INSERT INTO` and `COPY ... FROM` fail with `Cannot insert into view revenue: a view has
+no rows of its own`, `CREATE TABLE` with the name of a view fails, and `DROP TABLE` of a
+view says to use `DROP VIEW`. `DROP TABLE` of a table that a view reads is allowed; the
+view then fails with `In view mem.main.revenue: Table with name ... does not exist` until
+there is a table of that name again, and once its tables give it another number of
+columns, it fails until it is created again. A view may not read itself, also not through
+other views: `View revenue would read itself`. Its query takes no parameters. Temporary,
+materialized and recursive views, `WITH CHECK OPTION` and `ALTER VIEW` are not supported.
+
+The [JDBC driver](#jdbc-driver) lists a view in `getTables` with the type `VIEW` and its
+columns in `getColumns`, as they were when it was created; the Flight SQL server does so
+in `GetTables` and `GetTableTypes`. Over the PostgreSQL wire protocol, a view is in
+`pg_class` with the kind `v`, in `pg_views` and `information_schema.views` with the text
+of its query as written, and `pg_get_viewdef` gives that text. In Java,
+`engine.catalogTables()` lists the tables with `view()` true for a view, and `views(...)`
+the views with their texts. The SQLStates are `42P07` for a view that exists, `42P01` for
+one that does not, `42809` for a view where a table belongs or the other way round, and
+`42P17` for a view that reads itself or whose tables have changed.
+
 ## File access
 
 Statements name files and objects of their own: `FROM 'data/orders.csv'`, the table
@@ -907,6 +982,15 @@ sources:
       trips: { url: "https://example.com/odata/v4/TripService/", trustFilters: true }
     user: ${env:ERP_USER}
     password: ${env:ERP_PASSWORD}
+views:
+  - name: shop.public.big_orders
+    sql: SELECT * FROM orders WHERE amount > 1000
+  - name: files.main.revenue
+    columns: [region, revenue]
+    sql: |
+      SELECT c.region, sum(o.amount)
+      FROM shop.public.big_orders AS o JOIN files.customers AS c ON o.customer = c.id
+      GROUP BY c.region
 engine:
   defaultSource: shop
   pushdown: true
@@ -929,6 +1013,14 @@ instead, so that an application can add sources of its own, such as tables in me
 third section, `server`, holds the settings of the [Flight SQL
 server](#flight-sql-server), and a fourth, `pgwire`, those of the [PostgreSQL wire
 protocol server](pgwire.md); the engine leaves both aside.
+
+The section `views` lists [views](#views), each with a `name`, its query under `sql` and
+optionally the names of its `columns`, as a list. The engine creates them in their order
+when it is built, so that a view may read the views before it; their queries are taken as
+written, without variables. A view that cannot be created stops the build with its line
+in the file and the place in its query, as in `fyrql.yaml: line 30: the view
+files.main.revenue cannot be created: Table with name shop.public.big_order does not
+exist (line 2, column 6 of its sql)`.
 
 A source of the type `csv` takes `directory`, whose `.csv` and `.tsv` files become tables,
 and `tables.<name>` or `tables.<name>.file` for single files, also in S3; and, for every
@@ -1100,6 +1192,7 @@ three parts are looked up, for this connection only. The
 `DatabaseMetaData` shows the sources as catalogs, with the term `source`, and their
 schemas, tables and columns, with the number of rows of a table, or an estimate, in
 `REMARKS` if the source has one; it reads only the sources the catalog in the call matches.
+The tables of the sources have the type `TABLE`, the [views](#views) the type `VIEW`.
 
 A statement runs one query: a `SELECT`, `WITH`, `VALUES` or set operation; or one
 statement that [writes](#writing-and-loading); or `EXPLAIN` or `EXPLAIN ANALYZE` followed by either,
@@ -1387,8 +1480,8 @@ the client asks for it, and its batches go out as the engine gives them, as fast
 client takes them; a client that cancels the query, or closes its stream before the end,
 stops it. A prepared statement tells the types of its parameters as their schema and takes
 one row of values. The calls for metadata give the sources as catalogs with their schemas,
-tables and columns, the table type `TABLE`, the name `FyrQL` and the version of the server,
-and the types. A statement that [writes](#writing-and-loading) runs as an update, whose
+tables and columns, the table types `TABLE` and `VIEW`, the name `FyrQL` and the version
+of the server, and the types. A statement that [writes](#writing-and-loading) runs as an update, whose
 answer is the number of rows written, or, sent as a query, when the client asks for its
 flight info, which then gives the row of `Count`. A prepared statement that writes has a
 result without columns, as the Flight SQL JDBC driver of Arrow expects, and runs once for
@@ -1494,8 +1587,9 @@ names of `getColumns` of its `DatabaseMetaData`.
 
 ## Supported SQL
 
-Queries, the statements of [Writing](#writing-and-loading), and `EXPLAIN` and `EXPLAIN ANALYZE`
-of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHOW` and
+Queries, the statements of [Writing](#writing-and-loading), `CREATE VIEW` and `DROP VIEW`
+(see [Views](#views)), and `EXPLAIN` and `EXPLAIN ANALYZE` of each, see [Observing
+queries](#observing-queries), and `SET`, `RESET`, `SHOW` and
 `USE`, see [Sessions](#sessions). Names, types and the meaning of the forms follow DuckDB
 1.5.6.
 
@@ -1906,6 +2000,10 @@ here; the random tests explain such differences by a ledger of their own, see
   `yyyy-mm-dd`.
 - DuckDB 1.5.6 finds no sheets in a workbook that Apache POI streams with its
   `SXSSFWorkbook`, which FyrQL reads.
+- A [view](#views) lasts until the engine closes, unless the configuration file or the
+  builder defines it, where DuckDB keeps it in its database file. The names in its query
+  resolve once, when it is created, as in PostgreSQL. `CREATE TEMP VIEW`, `ALTER VIEW`
+  and `DROP VIEW ... CASCADE` are not supported.
 
 ### Execution
 
@@ -2691,7 +2789,7 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | Package | Tier | Classes of another tier |
 | --- | --- | --- |
 | `net.fyrql` | API | `Overlay`, `SqlStates` (internal) |
-| `net.fyrql.catalog` | API | `DatabasePath`, `EngineCatalog` (internal) |
+| `net.fyrql.catalog` | API | `DatabasePath`, `EngineCatalog`, `Views` (internal) |
 | `net.fyrql.config` | API | `Connectors` (internal) |
 | `net.fyrql.jdbc` | API | - |
 | `net.fyrql.arrow` | API | `ArrowTypes` (internal) |

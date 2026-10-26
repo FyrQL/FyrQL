@@ -63,6 +63,9 @@ final class ZoneBinding {
                     c.input() == null ? null : plan(c.input(), zone), c.mode());
             case BoundStatement.Insert i -> new BoundStatement.Insert(i.table(), plan(i.input(), zone));
             case BoundStatement.Drop d -> d;
+            // A view keeps its query, which a query that reads it binds again in its own time zone.
+            case BoundStatement.CreateView v -> v;
+            case BoundStatement.DropView d -> d;
             case BoundStatement.Set s -> s;
             case BoundStatement.Explain e -> new BoundStatement.Explain(e.analyze(), statement(e.statement(), zone));
         };

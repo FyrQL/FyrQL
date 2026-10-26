@@ -9,7 +9,7 @@ can be copied out of here; it names the version of FyrQL in the property
 | --- | --- | --- |
 | [federated-query](federated-query/README.md) | One query over a database, a CSV file and a JSON file, with the plan, what the database took over and the statements it received | `fyrql-engine`, `fyrql-codegen`, `fyrql-connector-jdbc`, `-csv`, `-json` |
 | [move-data](move-data/README.md) | A database into a Parquet file and back with `COPY ... TO`, a query over the file and `CREATE TABLE ... AS`, and a CSV file into a table with `COPY ... FROM` | `fyrql-engine`, `fyrql-connector-jdbc`, `-parquet`, `-csv` |
-| [config-and-jdbc](config-and-jdbc/README.md) | Sources in `fyrql.yaml` with a password from the environment, used through plain JDBC with `DatabaseMetaData` and a `PreparedStatement`, and the setup in DBeaver | `fyrql-jdbc`, `fyrql-connector-jdbc`, `-csv` |
+| [config-and-jdbc](config-and-jdbc/README.md) | Sources and a view over two of them in `fyrql.yaml`, with a password from the environment, used through plain JDBC with `DatabaseMetaData` and a `PreparedStatement`, and the setup in DBeaver | `fyrql-jdbc`, `fyrql-connector-jdbc`, `-csv` |
 | [custom-connector](custom-connector/README.md) | A connector of its own through the SPI: a factory found by the `ServiceLoader`, filters taken over or declined as the rules of the SPI ask, parts read on several threads | `fyrql-connector-spi`, `fyrql-engine`, `fyrql-config` |
 | [spring-boot](spring-boot/README.md) | A REST application of Spring Boot 4 with the engine as a bean from `application.yml`, the database of the application as a source through a `FyrQLBuilderCustomizer`, a `JdbcTemplate` over `fyrqlDataSource` and the health of the sources | `fyrql-spring-boot-starter`, `fyrql-connector-csv`, `-jdbc` |
 

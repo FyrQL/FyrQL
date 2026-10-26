@@ -66,7 +66,7 @@ final class EngineFactory {
                 EngineConfig read = EngineConfig.read(file.get());
                 Map<String, String> merged = new LinkedHashMap<>(read.settings());
                 merged.putAll(settings.engineSettings());
-                config = new EngineConfig(read.sources(), merged, read.directory());
+                config = new EngineConfig(read.sources(), read.views(), merged, Map.of(), Map.of(), read.directory());
             } else {
                 List<SourceConfig> sources = new ArrayList<>();
                 for (String type : IMPLICIT_SOURCES) {

@@ -155,11 +155,48 @@ class EngineConfigTest {
     }
 
     @Test
+    void readsTheViewsInTheirOrderWithTheirLines() {
+        EngineConfig config = parse("""
+                sources:
+                  - {name: s, type: csv}
+                views:
+                  - name: s.main.big
+                    sql: SELECT * FROM t WHERE ${x} > 1
+                  - name: '"Total"'
+                    columns: [region, total]
+                    sql: |
+                      SELECT region, sum(amount)
+                      FROM s.big
+                      GROUP BY region
+                  - {name: one, columns: n, sql: SELECT 1}
+                """);
+        assertEquals(List.of(new ViewConfig("s.main.big", List.of(), "SELECT * FROM t WHERE ${x} > 1", 4),
+                new ViewConfig("\"Total\"", List.of("region", "total"),
+                        "SELECT region, sum(amount)\nFROM s.big\nGROUP BY region\n", 6),
+                new ViewConfig("one", List.of("n"), "SELECT 1", 12)), config.views());
+        assertEquals(List.of(), parse("views:\n").views());
+        assertTrue(config.toString().contains("views=[s.main.big, \"Total\", one]"), config.toString());
+
+        assertEquals("line 1: views must be a list of views, each with a name and its sql",
+                failure("views: {name: v}\n"));
+        assertEquals("line 2: a view must be a mapping with a name, its sql and optionally its columns",
+                failure("views:\n  - v\n"));
+        assertEquals("line 2: a view has no name", failure("views:\n  - sql: SELECT 1\n"));
+        assertEquals("line 2: the view v has no sql", failure("views:\n  - name: v\n"));
+        assertEquals("line 4: the key query of a view is unknown; known are name, columns and sql",
+                failure("views:\n  - name: v\n    sql: SELECT 1\n    query: x\n"));
+        assertEquals("line 3: the columns of a view must be a list of names",
+                failure("views:\n  - name: v\n    columns: {a: b}\n    sql: SELECT 1\n"));
+        assertEquals("line 3: the sql of a view must be a plain value",
+                failure("views:\n  - name: v\n    sql: [SELECT 1]\n"));
+    }
+
+    @Test
     void errorsNameTheLineAndNeverTheValue() {
         assertEquals("the configuration is empty", failure(""));
-        assertEquals("line 1: the configuration must be a mapping with the keys sources, engine, server and pgwire",
-                failure("- a\n- b\n"));
-        assertEquals("line 2: the key source is unknown; known are sources, engine, server and pgwire",
+        assertEquals("line 1: the configuration must be a mapping with the keys sources, views, engine, server and"
+                + " pgwire", failure("- a\n- b\n"));
+        assertEquals("line 2: the key source is unknown; known are sources, views, engine, server and pgwire",
                 failure("sources: []\nsource: []\n"));
         assertEquals("line 2: a source has no name", failure("sources:\n  - type: csv\n"));
         assertEquals("line 2: the source s has no type", failure("sources:\n  - name: s\n"));

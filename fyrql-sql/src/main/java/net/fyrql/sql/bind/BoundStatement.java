@@ -25,9 +25,10 @@ import java.util.Objects;
 /**
  * A statement, bound: a query as its plan, or a statement that writes with
  * the plan of the rows it writes, which the engine optimizes and runs as
- * the plan of any query, or a setting of the session, or {@code EXPLAIN} of
- * one of these. Whether a table to create exists, or one to write or drop,
- * is checked when the statement runs.
+ * the plan of any query, or the definition of a view, or a setting of the
+ * session, or {@code EXPLAIN} of one of these. Whether a table or a view to
+ * create exists, or one to write or drop, is checked when the statement
+ * runs.
  */
 public sealed interface BoundStatement {
 
@@ -108,7 +109,7 @@ public sealed interface BoundStatement {
         }
     }
 
-    /** What {@code CREATE TABLE} does with a table that exists. */
+    /** What {@code CREATE TABLE} does with a table that exists, or {@code CREATE VIEW} with a view. */
     enum CreateMode {
         /** Fails. */
         CREATE,
@@ -162,6 +163,38 @@ public sealed interface BoundStatement {
             name = List.copyOf(name);
             if (table == null && !ifExists) {
                 throw new IllegalArgumentException("Only DROP TABLE IF EXISTS may name no table");
+            }
+        }
+    }
+
+    /**
+     * {@code CREATE VIEW}; its result is a count of 0.
+     *
+     * @param view where the view goes
+     * @param definition the view
+     * @param mode what to do with a view of the name that exists; a table
+     *        of the name is always an error
+     */
+    record CreateView(TableRef view, ViewDefinition definition, CreateMode mode) implements BoundStatement {
+        public CreateView {
+            Objects.requireNonNull(view, "view");
+            Objects.requireNonNull(definition, "definition");
+            Objects.requireNonNull(mode, "mode");
+        }
+    }
+
+    /**
+     * {@code DROP VIEW}; its result is a count of 0.
+     *
+     * @param view the view, or {@code null} if there was none of the name
+     *        and {@code IF EXISTS} was given
+     * @param name the name as written
+     */
+    record DropView(TableRef view, List<String> name, boolean ifExists) implements BoundStatement {
+        public DropView {
+            name = List.copyOf(name);
+            if (view == null && !ifExists) {
+                throw new IllegalArgumentException("Only DROP VIEW IF EXISTS may name no view");
             }
         }
     }

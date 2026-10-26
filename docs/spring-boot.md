@@ -11,18 +11,18 @@ and the connectors of its sources; Spring Boot it brings itself, in its own vers
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.19.0</version>
+    <version>0.19.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-jdbc</artifactId>
-    <version>0.19.0</version>
+    <version>0.19.5</version>
 </dependency>
 ```
 
 The keys under `fyrql` take the form of the [configuration
-file](manual.md#configuration-file), with the settings under `engine` and the sources
-under `sources`:
+file](manual.md#configuration-file), with the settings under `engine`, the sources under
+`sources` and the [views](manual.md#views) under `views`:
 
 ```yaml
 fyrql:
@@ -39,6 +39,13 @@ fyrql:
     - name: files
       type: csv
       directory: data
+  views:
+    - name: sales.public.revenue_by_region
+      columns: [region, revenue]
+      sql: |
+        SELECT r.region, sum(o.amount)
+        FROM sales.orders AS o JOIN files.regions AS r ON o.region_id = r.id
+        GROUP BY r.region
 ```
 
 ```java
@@ -52,8 +59,7 @@ class Revenue {
     }
 
     List<Object[]> byRegion() {
-        return engine.rows("SELECT r.region, sum(o.amount) FROM sales.orders AS o"
-                + " JOIN files.regions AS r ON o.region_id = r.id GROUP BY r.region");
+        return engine.rows("SELECT region, revenue FROM sales.public.revenue_by_region");
     }
 }
 ```
@@ -69,6 +75,8 @@ keys joined by dots and lists by commas. Unlike the settings, the options keep t
 of their connector exactly, such as `recordStatements`, since Spring does not relax the
 keys of a map; for the same reason an option cannot come from an environment variable
 named after its key, which Spring reads in lower case, but from a placeholder in the YAML.
+The views under `fyrql.views` are those of the file too: a `name`, its query under `sql`
+and optionally its `columns`; the engine creates them in their order as it is built.
 
 Placeholders are those of Spring, such as `${DB_PASSWORD}`, which Spring resolves from
 environment variables, system properties and its other sources. The form
@@ -78,7 +86,8 @@ error.
 
 `fyrql.config` names a configuration file of FyrQL in addition. Its sources come first,
 with `${env:NAME}` as in any file and relative paths against its directory, then those
-under `fyrql.sources`; the settings under `fyrql.engine` replace those of the file.
+under `fyrql.sources`, and so do its views before those under `fyrql.views`; the
+settings under `fyrql.engine` replace those of the file.
 Relative paths under `fyrql.sources` and `fyrql.engine` are resolved against the working
 directory. Two sources with the same name, in any case, are an error.
 
@@ -97,7 +106,7 @@ FyrQLBuilderCustomizer products(ProductRepository repository) {
 ```
 
 If the engine cannot be built, the application does not start, and the message names the
-setting or the source at fault; the connectors opened until then are closed.
+setting, the source or the view at fault; the connectors opened until then are closed.
 
 With `fyrql.datasource.enabled: true`, there is a `DataSource` of the engine, the bean
 `fyrqlDataSource`, for code that wants JDBC, such as a `JdbcTemplate`. Its connections

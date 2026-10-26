@@ -48,6 +48,7 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
@@ -128,14 +129,20 @@ final class QueryBinder {
         }
     }
 
-    private final CatalogView catalog;
+    /** The catalog of the statement. */
+    private final CatalogView statementCatalog;
+    /** The catalog in which names resolve: that of the statement, or that of the view being bound. */
+    private CatalogView catalog;
     private final BindContext context;
     /** The bare NULLs of the select lists, by the plan of each select. */
     private final Map<PlanNode, BitSet> untypedNulls = new IdentityHashMap<>();
     /** The ids given to the common tables of the statement so far. */
     private int commonTables;
+    /** The views whose queries are being bound, inside one another. */
+    private final Set<TableRef> viewsInUse = new HashSet<>();
 
     QueryBinder(CatalogView catalog, BindContext context) {
+        this.statementCatalog = catalog;
         this.catalog = catalog;
         this.context = context;
     }
@@ -747,12 +754,49 @@ final class QueryBinder {
         } catch (SqlException e) {
             throw new SqlException(e.reason(), t.position(), e.getCause());
         }
-        PlanNode.Scan scan = scan(table);
+        Optional<ViewDefinition> view = catalog.view(table);
+        PlanNode plan = view.isPresent() ? view(table, view.get(), t.position()) : scan(table);
         List<String> path = t.alias() == null ? catalog.path(table) : List.of();
         String alias = t.alias() == null ? table.table() : t.alias().name();
-        List<String> names = aliasColumns(scan.schema().fields().stream().map(Schema.Field::name).toList(),
+        List<String> names = aliasColumns(plan.schema().fields().stream().map(Schema.Field::name).toList(),
                 t.alias(), alias, t.position());
-        return relation(scan, new Scope.Table(alias, path), names);
+        return relation(plan, new Scope.Table(alias, path), names);
+    }
+
+    /**
+     * Binds the query of a view where a query reads it: its names resolve
+     * to the tables they resolved to when it was created, and its columns
+     * have the names they had then. An error in it names the view, at the
+     * position of the name that reads it.
+     */
+    private PlanNode view(TableRef table, ViewDefinition view, Position position) {
+        if (!viewsInUse.add(table)) {
+            throw new SqlException("View " + table + " reads itself", position);
+        }
+        CatalogView outer = catalog;
+        catalog = view.catalog(statementCatalog);
+        PlanNode plan;
+        try {
+            plan = query(view.query(), Map.of());
+        } catch (SqlException e) {
+            String reason = e.reason().startsWith("In view ") ? e.reason() : "In view " + table + ": " + e.reason();
+            throw new SqlException(reason, position, e);
+        } finally {
+            catalog = outer;
+            viewsInUse.remove(table);
+        }
+        Schema schema = plan.schema();
+        if (schema.size() != view.schema().size()) {
+            throw new SqlException("View " + table + " has " + view.schema().size() + " columns, but its query now"
+                    + " gives " + schema.size() + "; its tables have changed, so create it again", position);
+        }
+        boolean same = true;
+        List<NamedExpression> columns = new ArrayList<>();
+        for (int i = 0; i < schema.size(); i++) {
+            same &= schema.name(i).equals(view.schema().name(i));
+            columns.add(new NamedExpression(view.schema().name(i), new Expression.Column(i, schema.type(i))));
+        }
+        return same ? plan : new PlanNode.Project(plan, columns);
     }
 
     private PlanNode.Scan scan(TableRef table) {
@@ -775,8 +819,8 @@ final class QueryBinder {
         return dot > 0 ? name.substring(0, dot) : name;
     }
 
-    /** Renames the first columns of a plan, as the column list of a common table expression does. */
-    private static PlanNode rename(PlanNode plan, List<String> names, String table, Position position) {
+    /** Renames the first columns of a plan, as the column list of a common table expression or a view does. */
+    static PlanNode rename(PlanNode plan, List<String> names, String table, Position position) {
         if (names.isEmpty()) {
             return plan;
         }

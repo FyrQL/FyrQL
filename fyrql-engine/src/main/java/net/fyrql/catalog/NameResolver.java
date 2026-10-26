@@ -43,16 +43,25 @@ import java.util.stream.Collectors;
  * <p>
  * With a {@link DatabasePath}, names resolve as in PostgreSQL instead,
  * as it describes; names of three parts still reach every source.
+ * <p>
+ * The {@link Views} count as tables of their schemas; a view hides a table
+ * of the same name.
  */
 final class NameResolver {
 
     private final Map<String, Connector> sources;
     private final SearchPath searchPath;
     private final DatabasePath database;
+    private final Views views;
 
     /** A resolver over sources by name, in the order of their registration. */
     public NameResolver(Map<String, Connector> sources, SearchPath searchPath) {
-        this(sources, searchPath, null);
+        this(sources, searchPath, null, new Views());
+    }
+
+    /** A resolver along the path of a database, see {@link #NameResolver(Map, SearchPath, DatabasePath, Views)}. */
+    public NameResolver(Map<String, Connector> sources, SearchPath searchPath, DatabasePath database) {
+        this(sources, searchPath, database, new Views());
     }
 
     /**
@@ -60,13 +69,16 @@ final class NameResolver {
      *
      * @param database the path of the database along which names resolve as
      *        in PostgreSQL, or {@code null} for the rules of FyrQL
+     * @param views the views, which count as tables
      * @throws IllegalArgumentException if the default source, the database
      *         or a catalog is not registered
      */
-    public NameResolver(Map<String, Connector> sources, SearchPath searchPath, DatabasePath database) {
+    public NameResolver(Map<String, Connector> sources, SearchPath searchPath, DatabasePath database,
+            Views views) {
         this.sources = new LinkedHashMap<>(sources);
         this.searchPath = searchPath;
         this.database = database;
+        this.views = views;
         if (searchPath.defaultSource() != null && !this.sources.containsKey(searchPath.defaultSource())) {
             throw new IllegalArgumentException("The default source " + searchPath.defaultSource()
                     + " is not registered; registered: " + this.sources.keySet());
@@ -320,7 +332,7 @@ final class NameResolver {
             default -> throw new SqlException("A table name has one to three parts: " + text, Position.UNKNOWN);
         }
         String table = name.get(name.size() - 1);
-        List<String> existing = match(sources.get(source).catalog().tables(schema), table);
+        List<String> existing = match(tableNames(source, schema), table);
         return new TableRef(source, schema, existing.size() == 1 ? existing.get(0) : table);
     }
 
@@ -347,11 +359,27 @@ final class NameResolver {
         var catalog = sources.get(source).catalog();
         List<TableRef> result = new ArrayList<>();
         for (String schema : match(catalog.schemas(), schemaName)) {
-            for (String table : match(catalog.tables(schema), tableName)) {
+            for (String table : match(tableNames(source, schema), tableName)) {
                 result.add(new TableRef(source, schema, table));
             }
         }
         return result;
+    }
+
+    /** Returns the names of the views of a schema, then those of its tables that no view hides. */
+    private List<String> tableNames(String source, String schema) {
+        List<String> tables = sources.get(source).catalog().tables(schema);
+        List<String> names = views.names(source, schema);
+        if (names.isEmpty()) {
+            return tables;
+        }
+        List<String> all = new ArrayList<>(names);
+        for (String t : tables) {
+            if (!names.contains(t)) {
+                all.add(t);
+            }
+        }
+        return all;
     }
 
     /**

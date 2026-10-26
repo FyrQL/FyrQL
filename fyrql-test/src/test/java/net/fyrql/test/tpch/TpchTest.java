@@ -259,6 +259,51 @@ class TpchTest {
                 Plans.print(plan));
     }
 
+    /** Q15 as the specification has it, with the view {@code revenue0}, gives the rows of its form with a CTE. */
+    @Test
+    void q15WithTheViewOfTheSpecification() {
+        TpchQueries.Query q15 = queries().stream().filter(q -> q.name().equals("q15")).findFirst().orElseThrow();
+        String source = engine.catalog().resolve(List.of("lineitem")).source();
+        engine.update("""
+                create view %s.main.revenue0 (supplier_no, total_revenue) as
+                    select
+                        l_suppkey,
+                        sum(l_extendedprice * (1 - l_discount))
+                    from
+                        lineitem
+                    where
+                        l_shipdate >= date '1996-01-01'
+                        and l_shipdate < date '1996-01-01' + interval '3' month
+                    group by
+                        l_suppkey;""".formatted(source));
+        try {
+            List<List<Object>> rows = engine.rows("""
+                    select
+                        s_suppkey,
+                        s_name,
+                        s_address,
+                        s_phone,
+                        total_revenue
+                    from
+                        supplier,
+                        revenue0
+                    where
+                        s_suppkey = supplier_no
+                        and total_revenue = (
+                            select
+                                max(total_revenue)
+                            from
+                                revenue0
+                        )
+                    order by
+                        s_suppkey""").stream().map(Arrays::asList).toList();
+            assertFalse(rows.isEmpty());
+            assertEquals(engine.rows(q15.sql()).stream().map(Arrays::asList).toList(), rows);
+        } finally {
+            engine.update("drop view " + source + ".main.revenue0");
+        }
+    }
+
     static List<TpchQueries.Query> joinsInTheDatabase() {
         return queries().stream().filter(q -> List.of("q03", "q05", "q07", "q08", "q10", "q22").contains(q.name()))
                 .toList();

@@ -170,6 +170,9 @@ class DriverTest {
                   - name: files
                     type: csv
                     directory: data
+                views:
+                  - name: files.main.big
+                    sql: SELECT * FROM t WHERE a > 1
                 engine:
                   pushdown: true
                   codegen: off
@@ -183,6 +186,7 @@ class DriverTest {
             assertFalse(engine.pushdown(), "the URL wins over the file");
             assertEquals(CodegenMode.OFF, engine.codegen());
             assertEquals(List.of(3L), first(c, "SELECT count(*) FROM t"));
+            assertEquals(List.of(2L), first(c, "SELECT count(*) FROM big"), "with the views of the file");
         }
         Properties p = new Properties();
         p.setProperty("config", path(config));

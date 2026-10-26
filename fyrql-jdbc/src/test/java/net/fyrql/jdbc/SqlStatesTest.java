@@ -69,8 +69,8 @@ class SqlStatesTest {
                 new String[] {"42803", "SELECT id, count(*) FROM shop.t", "column \"id\" must appear in the GROUP BY"},
                 new String[] {"42883", "SELECT nothing(1)", "Function with name nothing does not exist"},
                 new String[] {"42883", "SELECT substring(1)", "No function matches"},
-                new String[] {"0A000", "DELETE FROM shop.t", "Only queries, COPY, CREATE TABLE, INSERT INTO and"
-                        + " DROP TABLE are supported, not DELETE"},
+                new String[] {"0A000", "DELETE FROM shop.t", "Only queries, COPY, CREATE TABLE, CREATE VIEW, INSERT"
+                        + " INTO, DROP TABLE and DROP VIEW are supported, not DELETE"},
                 new String[] {"0A000", "WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r",
                         "WITH RECURSIVE is not supported"});
         try (Statement s = c.createStatement()) {
@@ -144,6 +144,15 @@ class SqlStatesTest {
         assertEquals("22018", SqlStates.stateOf("Could not convert string 'a' to INT32"));
         assertEquals("0A000", SqlStates.stateOf("Not supported: a subquery here"));
         assertEquals("0A000", SqlStates.stateOf("UNNEST not supported here"));
+        assertEquals("42P07", SqlStates.stateOf("View with name v already exists"));
+        assertEquals("42P07", SqlStates.stateOf("Table with name t already exists; a view replaces only a view"));
+        assertEquals("42P01", SqlStates.stateOf("View with name v does not exist"));
+        assertEquals("42P01", SqlStates.stateOf("In view s.main.v: In view s.main.w: Table with name s.main.t does"
+                + " not exist"));
+        assertEquals("42809", SqlStates.stateOf("v is a view; drop it with DROP VIEW"));
+        assertEquals("42809", SqlStates.stateOf("t is a table, not a view; drop it with DROP TABLE"));
+        assertEquals("42809", SqlStates.stateOf("Cannot insert into view v: a view has no rows of its own"));
+        assertEquals("42P17", SqlStates.stateOf("View v would read itself"));
         SQLException e = SqlStates.map(new IllegalStateException());
         assertEquals("java.lang.IllegalStateException", e.getMessage());
         IllegalStateException cause = new IllegalStateException("odd");

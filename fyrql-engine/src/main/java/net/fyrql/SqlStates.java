@@ -60,8 +60,12 @@ public final class SqlStates {
     public static final String UNDEFINED_TABLE = "42P01";
     /** An ambiguous table name. */
     public static final String AMBIGUOUS_TABLE = "42712";
-    /** A table to create that exists. */
+    /** A table or a view to create that exists. */
     public static final String DUPLICATE_TABLE = "42P07";
+    /** A view where a statement needs a table, or the other way round. */
+    public static final String WRONG_OBJECT_TYPE = "42809";
+    /** A view that reads itself, or whose query no longer fits its columns. */
+    public static final String INVALID_OBJECT_DEFINITION = "42P17";
     /** The memory budget of the engine is exceeded. */
     public static final String OUT_OF_MEMORY = "53200";
     /** The query is nested too deeply. */
@@ -133,6 +137,10 @@ public final class SqlStates {
     /** Returns the state of a query that cannot be parsed or bound, by the reason FyrQL gives. */
     public static String stateOf(String reason) {
         String r = reason == null ? "" : reason;
+        // An error in the query of a view is that of the query.
+        while (r.startsWith("In view ") && r.indexOf(": ") > 0) {
+            r = r.substring(r.indexOf(": ") + 2);
+        }
         if (r.startsWith("Syntax error") || r.startsWith("Unterminated") || r.equals("Empty query")
                 || r.startsWith("Only one statement")) {
             return SYNTAX_ERROR;
@@ -140,8 +148,20 @@ public final class SqlStates {
         if (r.startsWith("Query is nested too deeply")) {
             return STATEMENT_TOO_COMPLEX;
         }
-        if (r.startsWith("Table with name") && r.endsWith(" already exists")) {
+        if ((r.startsWith("Table with name") || r.startsWith("View with name")) && r.contains(" already exists")) {
             return DUPLICATE_TABLE;
+        }
+        if (r.startsWith("View with name")) {
+            return UNDEFINED_TABLE;
+        }
+        if (r.contains(" is a view; ") || r.contains(" is a table, not a view")
+                || r.startsWith("Cannot insert into view") || r.startsWith("Cannot copy into view")
+                || r.startsWith("Cannot create table") && r.endsWith("there is a view of that name")) {
+            return WRONG_OBJECT_TYPE;
+        }
+        if (r.startsWith("View ") && (r.contains(" read itself") || r.contains(" reads itself")
+                || r.contains(" columns, but its query now gives "))) {
+            return INVALID_OBJECT_DEFINITION;
         }
         if (r.startsWith("NOT NULL constraint failed")) {
             return NOT_NULL_VIOLATION;

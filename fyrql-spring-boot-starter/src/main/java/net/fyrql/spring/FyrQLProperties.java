@@ -35,11 +35,15 @@ import java.util.Map;
  *       type: jdbc
  *       url: jdbc:postgresql://db/sales
  *       password: ${DB_PASSWORD}
+ *   views:
+ *     - name: sales.public.big_orders
+ *       sql: SELECT * FROM orders WHERE amount > 1000
  * }</pre>
  * The keys under {@code engine} are the settings of the engine of the file,
- * the sources are those of the file, with their names, types and options;
- * a configuration file under {@code config} adds its own. Placeholders are
- * those of Spring, such as {@code ${DB_PASSWORD}}, not those of the file.
+ * the sources are those of the file, with their names, types and options,
+ * and so are the views; a configuration file under {@code config} adds its
+ * own, before them. Placeholders are those of Spring, such as
+ * {@code ${DB_PASSWORD}}, not those of the file.
  */
 @ConfigurationProperties("fyrql")
 public class FyrQLProperties {
@@ -63,6 +67,13 @@ public class FyrQLProperties {
      * against the working directory.
      */
     private List<Map<String, String>> sources = new ArrayList<>();
+
+    /**
+     * The views, each with a name, its sql and optionally the names of its
+     * columns, as under views in a configuration file; they come after the
+     * views of the file and may read them.
+     */
+    private List<View> views = new ArrayList<>();
 
     /** A DataSource of the engine. */
     private final DataSource datasource = new DataSource();
@@ -93,6 +104,51 @@ public class FyrQLProperties {
 
     public void setSources(List<Map<String, String>> sources) {
         this.sources = sources;
+    }
+
+    public List<View> getViews() {
+        return views;
+    }
+
+    public void setViews(List<View> views) {
+        this.views = views;
+    }
+
+    /** A view, as under views in a configuration file. */
+    public static class View {
+
+        /** The name of the view, of one to three parts with dots between, such as sales.public.big_orders. */
+        private String name;
+
+        /** The names of its columns; by default those its query gives them. */
+        private List<String> columns = new ArrayList<>();
+
+        /** Its query. */
+        private String sql;
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public List<String> getColumns() {
+            return columns;
+        }
+
+        public void setColumns(List<String> columns) {
+            this.columns = columns;
+        }
+
+        public String getSql() {
+            return sql;
+        }
+
+        public void setSql(String sql) {
+            this.sql = sql;
+        }
     }
 
     public DataSource getDatasource() {

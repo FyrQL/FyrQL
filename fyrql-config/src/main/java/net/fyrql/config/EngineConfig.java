@@ -74,36 +74,63 @@ import java.util.regex.Pattern;
  * PostgreSQL wire protocol server of the module {@code fyrql-pgwire}, each
  * read flat as the options of a source; the engine reads neither.
  * <p>
+ * The section {@code views} defines views over the sources, which every
+ * client of the engine sees as tables, in the order of the file, so that a
+ * view may read the views before it:
+ * <pre>{@code
+ * views:
+ *   - name: shop.public.big_orders
+ *     sql: SELECT * FROM orders WHERE amount > 1000
+ *   - name: revenue
+ *     columns: [region, total]
+ *     sql: |
+ *       SELECT c.region, sum(o.amount)
+ *       FROM shop.public.big_orders o JOIN files.customers c ON c.id = o.customer
+ *       GROUP BY c.region
+ * }</pre>
+ * Each view has a name, which resolves as that of a new table, a query, and
+ * optionally the names of its columns; its query is taken as written,
+ * without variables. A view that cannot be created stops the engine from
+ * being built, see {@link ViewConfig}.
+ * <p>
  * A file is YAML, or JSON if its name ends in {@code .json}. Relative paths
  * in the options are resolved against the directory of the file.
  *
  * @param sources the sources in the order of the file
+ * @param views the views in the order of the file
  * @param settings the settings of the engine, flat as the options of a source
  * @param server the settings of the Flight SQL server for the engine, flat as the options of a source
  * @param pgwire the settings of the PostgreSQL wire protocol server for the engine, flat as the options of a source
  * @param directory the directory against which relative paths are resolved
  */
-public record EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Map<String, String> server,
-        Map<String, String> pgwire, Path directory) {
+public record EngineConfig(List<SourceConfig> sources, List<ViewConfig> views, Map<String, String> settings,
+        Map<String, String> server, Map<String, String> pgwire, Path directory) {
 
     private static final Pattern VARIABLE = Pattern.compile("\\$\\$\\{|\\$\\{(?:([a-z]+):([^}]*)})?");
     private static final String DEFAULT = ":-";
 
     public EngineConfig {
         sources = List.copyOf(sources);
+        views = List.copyOf(views);
         settings = Collections.unmodifiableMap(new LinkedHashMap<>(settings));
         server = Collections.unmodifiableMap(new LinkedHashMap<>(server));
         pgwire = Collections.unmodifiableMap(new LinkedHashMap<>(pgwire));
         Objects.requireNonNull(directory, "directory");
     }
 
-    /** A configuration without settings of a PostgreSQL wire protocol server. */
+    /** A configuration without views. */
+    public EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Map<String, String> server,
+            Map<String, String> pgwire, Path directory) {
+        this(sources, List.of(), settings, server, pgwire, directory);
+    }
+
+    /** A configuration without views and settings of a PostgreSQL wire protocol server. */
     public EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Map<String, String> server,
             Path directory) {
         this(sources, settings, server, Map.of(), directory);
     }
 
-    /** A configuration without settings of a server. */
+    /** A configuration without views and settings of a server. */
     public EngineConfig(List<SourceConfig> sources, Map<String, String> settings, Path directory) {
         this(sources, settings, Map.of(), Map.of(), directory);
     }
@@ -112,19 +139,25 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
     public EngineConfig withSetting(String key, String value) {
         Map<String, String> with = new LinkedHashMap<>(settings);
         with.put(key, value);
-        return new EngineConfig(sources, with, server, pgwire, directory);
+        return new EngineConfig(sources, views, with, server, pgwire, directory);
+    }
+
+    /** Returns the configuration with other views. */
+    public EngineConfig withViews(List<ViewConfig> views) {
+        return new EngineConfig(sources, views, settings, server, pgwire, directory);
     }
 
     /**
-     * Names the sources as {@link SourceConfig#toString()} does, the
-     * settings of the engine, and the keys of the settings of the servers,
-     * but not their values, which hold the passwords of their users and the
-     * token.
+     * Names the sources as {@link SourceConfig#toString()} does, the views,
+     * the settings of the engine, and the keys of the settings of the
+     * servers, but not their values, which hold the passwords of their users
+     * and the token.
      */
     @Override
     public String toString() {
-        return "EngineConfig[sources=" + sources + ", settings=" + settings + ", server=" + server.keySet()
-                + ", pgwire=" + pgwire.keySet() + ", directory=" + directory + "]";
+        return "EngineConfig[sources=" + sources + ", views=" + views.stream().map(ViewConfig::name).toList()
+                + ", settings=" + settings + ", server=" + server.keySet() + ", pgwire=" + pgwire.keySet()
+                + ", directory=" + directory + "]";
     }
 
     /**
@@ -196,10 +229,11 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
                 throw new ConfigException(where(0) + "the configuration cannot be read: " + e, e);
             }
             if (!(root.value() instanceof Map<?, ?> top)) {
-                throw failure(root.line(), "the configuration must be a mapping with the keys sources, engine,"
-                        + " server and pgwire");
+                throw failure(root.line(), "the configuration must be a mapping with the keys sources, views,"
+                        + " engine, server and pgwire");
             }
             List<SourceConfig> sources = new ArrayList<>();
+            List<ViewConfig> views = new ArrayList<>();
             Map<String, String> settings = new LinkedHashMap<>();
             Map<String, String> server = new LinkedHashMap<>();
             Map<String, String> pgwire = new LinkedHashMap<>();
@@ -207,14 +241,68 @@ public record EngineConfig(List<SourceConfig> sources, Map<String, String> setti
                 Node n = e.getValue();
                 switch (e.getKey()) {
                     case "sources" -> sources = sources(n);
+                    case "views" -> views = views(n);
                     case "engine" -> section(n, settings, "engine", "the engine");
                     case "server" -> section(n, server, "server", "the server");
                     case "pgwire" -> section(n, pgwire, "pgwire", "the PostgreSQL wire protocol server");
                     default -> throw failure(n.line(), "the key " + e.getKey() + " is unknown; known are sources,"
-                            + " engine, server and pgwire");
+                            + " views, engine, server and pgwire");
                 }
             }
-            return new EngineConfig(sources, settings, server, pgwire, directory);
+            return new EngineConfig(sources, views, settings, server, pgwire, directory);
+        }
+
+        /** Reads the views: each a mapping of a name, a query and optionally the names of the columns. */
+        private List<ViewConfig> views(Node n) {
+            if (n.value() == null) {
+                return List.of();
+            }
+            if (!(n.value() instanceof List<?> list)) {
+                throw failure(n.line(), "views must be a list of views, each with a name and its sql");
+            }
+            List<ViewConfig> views = new ArrayList<>();
+            for (Object o : list) {
+                Node v = (Node) o;
+                if (!(v.value() instanceof Map<?, ?> map)) {
+                    throw failure(v.line(), "a view must be a mapping with a name, its sql and optionally its"
+                            + " columns");
+                }
+                String name = null;
+                String sql = null;
+                List<String> columns = List.of();
+                for (Map.Entry<String, Node> e : entries(map)) {
+                    switch (e.getKey()) {
+                        case "name" -> name = text(e.getValue(), "the name of a view");
+                        case "sql" -> sql = text(e.getValue(), "the sql of a view");
+                        case "columns" -> columns = columns(e.getValue());
+                        default -> throw failure(e.getValue().line(), "the key " + e.getKey() + " of a view is"
+                                + " unknown; known are name, columns and sql");
+                    }
+                }
+                if (name == null || name.isBlank()) {
+                    throw failure(v.line(), "a view has no name");
+                }
+                if (sql == null || sql.isBlank()) {
+                    throw failure(v.line(), "the view " + name + " has no sql");
+                }
+                views.add(new ViewConfig(name, columns, sql, v.line()));
+            }
+            return views;
+        }
+
+        /** Reads the names of the columns of a view: a list of plain values, or one. */
+        private List<String> columns(Node n) {
+            if (n.value() instanceof String s) {
+                return List.of(s);
+            }
+            if (!(n.value() instanceof List<?> list)) {
+                throw failure(n.line(), "the columns of a view must be a list of names");
+            }
+            List<String> columns = new ArrayList<>();
+            for (Object o : list) {
+                columns.add(text((Node) o, "the name of a column of a view"));
+            }
+            return columns;
         }
 
         /** Adds the settings of a section that is a mapping of settings, or empty. */
