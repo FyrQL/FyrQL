@@ -448,7 +448,8 @@ final class Explain {
     }
 
     private static String call(PlanNode.AggregateCall call) {
-        return aggregate(call) + " AS " + name(call.name());
+        String filter = call.filter() < 0 ? "" : " FILTER (WHERE #" + call.filter() + ")";
+        return aggregate(call) + filter + " AS " + name(call.name());
     }
 
     /** An aggregate call without its name. */

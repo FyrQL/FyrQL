@@ -141,6 +141,11 @@ public final class SqlPrinter {
 
     private static void select(StringBuilder b, QueryBody.Select s) {
         b.append("SELECT ").append(s.distinct() ? "DISTINCT " : "");
+        if (!s.distinctOn().isEmpty()) {
+            b.append("DISTINCT ON ");
+            exprs(b, s.distinctOn());
+            b.append(' ');
+        }
         for (int i = 0; i < s.items().size(); i++) {
             b.append(i > 0 ? ", " : "");
             switch (s.items().get(i)) {
@@ -181,7 +186,14 @@ public final class SqlPrinter {
         }
         if (s.groupBy() != null) {
             b.append(" GROUP BY ");
-            if (s.groupBy().all()) {
+            if (!s.groupBy().sets().isEmpty()) {
+                b.append("GROUPING SETS (");
+                for (int i = 0; i < s.groupBy().sets().size(); i++) {
+                    b.append(i > 0 ? ", " : "");
+                    exprs(b, s.groupBy().sets().get(i).stream().map(s.groupBy().expressions()::get).toList());
+                }
+                b.append(')');
+            } else if (s.groupBy().all()) {
                 b.append("ALL");
             } else {
                 list(b, s.groupBy().expressions());
@@ -375,6 +387,14 @@ public final class SqlPrinter {
                 query(b, x.query());
                 b.append("))");
             }
+            case SqlExpr.Quantified x -> {
+                b.append('(');
+                expr(b, x.value());
+                b.append(' ').append(x.op().symbol()).append(x.all() ? " ALL(" : " ANY(");
+                query(b, x.query());
+                b.append("))");
+            }
+            case SqlExpr.Row x -> exprs(b, x.values());
             case SqlExpr.Exists x -> {
                 b.append(x.negated() ? "(NOT EXISTS (" : "(EXISTS (");
                 query(b, x.query());
@@ -430,14 +450,13 @@ public final class SqlPrinter {
             case SqlExpr.FunctionCall f when f.arguments().isEmpty() && !f.star()
                     && SPECIAL_FUNCTIONS.contains(f.name().toUpperCase(Locale.ROOT)) ->
                 b.append(f.name().toUpperCase(Locale.ROOT));
-            case SqlExpr.FunctionCall f -> call(b, f, false);
+            case SqlExpr.FunctionCall f -> {
+                call(b, f, false);
+                filter(b, f.filter());
+            }
             case SqlExpr.Window w -> {
                 call(b, w.call(), w.ignoreNulls());
-                if (w.filter() != null) {
-                    b.append(" FILTER (WHERE ");
-                    expr(b, w.filter());
-                    b.append(')');
-                }
+                filter(b, w.filter());
                 b.append(" OVER ");
                 window(b, w.over());
             }
@@ -489,6 +508,14 @@ public final class SqlPrinter {
         b.append(ignoreNulls ? " IGNORE NULLS" : "");
         orderBy(b, f.orderBy());
         b.append(')');
+    }
+
+    private static void filter(StringBuilder b, SqlExpr filter) {
+        if (filter != null) {
+            b.append(" FILTER (WHERE ");
+            expr(b, filter);
+            b.append(')');
+        }
     }
 
     private static void qualified(StringBuilder b, List<String> parts) {

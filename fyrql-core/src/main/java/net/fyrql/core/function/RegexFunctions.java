@@ -117,6 +117,10 @@ final class RegexFunctions {
         if (what.equals("options") && value != null) {
             options((String) value, replace);
         }
+        // As DuckDB, which reads at most nine groups, checks the group before it reads a string, NULL too.
+        if (what.equals("group") && value instanceof Number n && (n.longValue() < 0 || n.longValue() > 9)) {
+            throw new IllegalArgumentException("Group index must be between 0 and 9!");
+        }
     }
 
     /** Tells whether the types are {@code VARCHAR}, from a minimum to a maximum count. */
@@ -225,7 +229,8 @@ final class RegexFunctions {
     /**
      * {@code regexp_extract(string, pattern [, group [, options]])}: the
      * group of the first match, by default the whole match; the empty
-     * string if nothing matches or the pattern has no such group.
+     * string if nothing matches or the pattern has no such group. The
+     * group is a constant from 0 to 9, as in DuckDB.
      */
     static final SimpleFunction EXTRACT = new SimpleFunction("regexp_extract",
             types -> types.size() == 2 && SimpleFunction.varchars(types, 2)

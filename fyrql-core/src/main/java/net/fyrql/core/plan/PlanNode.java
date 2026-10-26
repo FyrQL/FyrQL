@@ -24,6 +24,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.Function;
+import java.util.function.IntUnaryOperator;
 
 /**
  * A node of the logical plan. Every node knows its output {@link #schema()}
@@ -564,9 +565,13 @@ public sealed interface PlanNode {
      *        {@code DISTINCT} aggregate can only be ordered by its own column,
      *        a {@code string_agg} also by a column whose text its own is, as
      *        the binder orders the text of an instant by the instant
+     * @param filter the {@code BOOLEAN} column of the input whose rows the
+     *        call takes, those where it is true, or -1 for all rows; as in
+     *        DuckDB, {@code count(*)} of no row is 0 and the other functions
+     *        give {@code NULL}
      */
     record AggregateCall(AggregateFunction function, int column, boolean distinct, String name, String separator,
-            List<SortKey> orderBy) {
+            List<SortKey> orderBy, int filter) {
         public AggregateCall {
             Objects.requireNonNull(function, "function");
             Objects.requireNonNull(name, "name");
@@ -586,6 +591,15 @@ public sealed interface PlanNode {
                             "In a DISTINCT aggregate, ORDER BY expressions must appear in the argument list");
                 }
             }
+            if (filter < -1) {
+                throw new IllegalArgumentException("Filter column " + filter);
+            }
+        }
+
+        /** An aggregate over all rows. */
+        public AggregateCall(AggregateFunction function, int column, boolean distinct, String name, String separator,
+                List<SortKey> orderBy) {
+            this(function, column, distinct, name, separator, orderBy, -1);
         }
 
         /** An aggregate in the order of the input; {@code string_agg} separates by a comma. */
@@ -595,12 +609,27 @@ public sealed interface PlanNode {
 
         /** Returns the same aggregate with another separator. */
         public AggregateCall withSeparator(String newSeparator) {
-            return new AggregateCall(function, column, distinct, name, newSeparator, orderBy);
+            return new AggregateCall(function, column, distinct, name, newSeparator, orderBy, filter);
         }
 
         /** Returns the same aggregate with the values in another order. */
         public AggregateCall withOrderBy(List<SortKey> keys) {
-            return new AggregateCall(function, column, distinct, name, separator, keys);
+            return new AggregateCall(function, column, distinct, name, separator, keys, filter);
+        }
+
+        /** Returns the same aggregate taking the rows where a column is true, or all rows for -1. */
+        public AggregateCall withFilter(int newFilter) {
+            return new AggregateCall(function, column, distinct, name, separator, orderBy, newFilter);
+        }
+
+        /** Returns the same aggregate over other columns: each column it reads, also in order and filter, mapped. */
+        public AggregateCall remap(IntUnaryOperator mapping) {
+            List<SortKey> keys = new ArrayList<>();
+            for (SortKey k : orderBy) {
+                keys.add(new SortKey(mapping.applyAsInt(k.column()), k.ascending(), k.nullsFirst()));
+            }
+            return new AggregateCall(function, column < 0 ? -1 : mapping.applyAsInt(column), distinct, name,
+                    separator, keys, filter < 0 ? -1 : mapping.applyAsInt(filter));
         }
 
         /** Returns the type of the result, as DuckDB types it. */
@@ -641,6 +670,10 @@ public sealed interface PlanNode {
             }
             for (SortKey k : orderBy) {
                 checkColumn(input, k.column());
+            }
+            if (filter >= 0) {
+                checkColumn(input, filter);
+                TypeRules.require(DataType.BOOLEAN, input.type(filter), "The filter of " + function);
             }
         }
     }
@@ -1033,6 +1066,9 @@ public sealed interface PlanNode {
             if ((function == WindowFunction.AGGREGATE) != (aggregate != null)) {
                 throw new IllegalArgumentException(function + (aggregate == null ? " without" : " with")
                         + " an aggregate");
+            }
+            if (aggregate != null && aggregate.filter() >= 0) {
+                throw new IllegalArgumentException("An aggregate over a window filters with the filter of the call");
             }
             if (arguments.size() < function.minArguments || arguments.size() > function.maxArguments) {
                 throw new IllegalArgumentException(function + " with " + arguments.size() + " arguments");

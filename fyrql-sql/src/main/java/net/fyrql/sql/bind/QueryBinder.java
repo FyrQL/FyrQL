@@ -608,7 +608,7 @@ final class QueryBinder {
                 TableRef table = tableFunction(function, List.of(f.path()), Map.of(), f.position());
                 yield named(scan(table), f.alias(), fileAlias(f.path()), false, f.position());
             }
-            case FromItem.TableFunctionCall f when isUnnest(f) -> unnest(new Relation(oneRow(), List.of()),
+            case FromItem.TableFunctionCall f when unnests(f) -> unnest(new Relation(oneRow(), List.of()),
                     unnestList(f, Scope.none()), f);
             case FromItem.TableFunctionCall f -> {
                 ExpressionBinder binder = new ExpressionBinder(context, Scope.none(), Map.of(),
@@ -638,14 +638,40 @@ final class QueryBinder {
         return new PlanNode.Values(new Schema(List.of()), List.<Object[]>of(new Object[0]));
     }
 
-    private static boolean isUnnest(FromItem item) {
-        return item instanceof FromItem.TableFunctionCall f && SqlTrees.key(f.name()).equals("unnest");
+    /**
+     * Tells whether an item of {@code FROM} unnests a list: {@code unnest},
+     * and {@code range} and {@code generate_series}, which unnest the list
+     * their scalar functions give.
+     */
+    private static boolean unnests(FromItem item) {
+        return item instanceof FromItem.TableFunctionCall f && (SqlTrees.key(f.name()).equals("unnest") || series(f));
     }
 
-    /** The list of {@code unnest} in {@code FROM}, bound over the columns it may read. */
+    private static boolean series(FromItem.TableFunctionCall f) {
+        String name = SqlTrees.key(f.name());
+        return name.equals("range") || name.equals("generate_series");
+    }
+
+    /** The list of {@code unnest} or of a series in {@code FROM}, bound over the columns it may read. */
     private Expression unnestList(FromItem.TableFunctionCall f, Scope scope) {
         if (!f.namedArguments().isEmpty()) {
-            throw new SqlException("Not supported: named arguments of UNNEST", f.position());
+            String name = series(f) ? SqlTrees.key(f.name()) : "UNNEST";
+            throw new SqlException("Not supported: named arguments of " + name, f.position());
+        }
+        if (series(f)) {
+            ExpressionBinder binder = new ExpressionBinder(context, scope, Map.of(),
+                    "The arguments of a table function cannot contain aggregates", null);
+            Expression list = binder.bind(new SqlExpr.FunctionCall(f.name(), f.arguments(), f.position()));
+            // As a table, a series takes no step of 0, which as a list gives no values.
+            Expression step = f.arguments().size() == 3 ? binder.bind(f.arguments().get(2)) : null;
+            if (step != null && Expressions.isConstant(step)) {
+                Object value = Literals.evaluate(step, f.position());
+                if (value instanceof Number n && n.longValue() == 0 && !(value instanceof Double)
+                        || value instanceof Interval i && i.equals(Interval.ZERO)) {
+                    throw new SqlException("interval cannot be 0!", f.position());
+                }
+            }
+            return list;
         }
         if (f.arguments().size() != 1) {
             throw new SqlException("Wrong number of arguments for the function unnest", f.position());
@@ -661,15 +687,17 @@ final class QueryBinder {
     /**
      * {@code unnest} in {@code FROM}: the rows of the input, each once per
      * element of its list, with the elements as one more column. The column
-     * is called {@code unnest}, or by the first name of the alias; DuckDB
+     * is called by the function, {@code unnest}, {@code range} or
+     * {@code generate_series}, or by the first name of the alias; DuckDB
      * ignores any further names, and so does FyrQL.
      */
     private static Relation unnest(Relation input, Expression list, FromItem.TableFunctionCall f) {
         FromItem.Alias alias = f.alias();
-        String name = alias != null && !alias.columns().isEmpty() ? alias.columns().get(0) : "unnest";
+        String function = SqlTrees.key(f.name());
+        String name = alias != null && !alias.columns().isEmpty() ? alias.columns().get(0) : function;
         PlanNode.Unnest plan = new PlanNode.Unnest(input.plan(), list, name);
         List<Scope.Column> columns = new ArrayList<>(input.columns());
-        columns.add(new Scope.Column(new Scope.Table(alias != null ? alias.name() : "unnest", List.of()), name,
+        columns.add(new Scope.Column(new Scope.Table(alias != null ? alias.name() : function, List.of()), name,
                 new Expression.Column(input.plan().schema().size(), plan.elementType()), false));
         return new Relation(plan, columns);
     }
@@ -939,7 +967,7 @@ final class QueryBinder {
 
     private Relation join(FromItem.Join j, Map<String, Cte> ctes) {
         Relation left = from(j.left(), ctes);
-        if (isUnnest(j.right())) {
+        if (unnests(j.right())) {
             Expression list = unnestList((FromItem.TableFunctionCall) j.right(), left.scope());
             if (side(list, left.plan().schema().size()) != Side.NONE) {
                 return lateralUnnest(j, left, list);
@@ -1198,6 +1226,8 @@ final class QueryBinder {
             ExpressionBinder orderBinder = new ExpressionBinder(context, scope, aliases, null,
                     windowing.hook(windowArguments, unnesting.hook(windowArguments, null)));
             List<Order> orders = orders(orderBy, outputs, aliasOutputs, orderBinder);
+            int ordered = orders.size();
+            orders.addAll(orders(distinctOn(s, correlated), outputs, aliasOutputs, orderBinder));
             plan = subqueries.attach(plan);
             outputs.replaceAll(subqueries::resolve);
             plan = windowing.plan(plan, outputs, orders);
@@ -1222,10 +1252,16 @@ final class QueryBinder {
                 }
                 correlation.join(new Correlation.Join(keys, correlated.outer(), condition, null, n));
             }
-            plan = finish(plan, outputs, names, s.distinct(), orders);
+            plan = finish(plan, outputs, names, s.distinct(), orders.subList(0, ordered),
+                    orders.subList(ordered, orders.size()));
             untypedNulls.put(plan, untyped);
         } else {
-            plan = aggregate(s, plan, scope, items, aliases, aliasOutputs, orderBy, names, ctes, correlation,
+            Scope rowScope = whereScope;
+            Supplier<PlanNode> rows = () -> {
+                PlanNode r = s.from() == null ? oneRow() : from(s.from(), ctes).plan();
+                return s.where() == null ? r : where(s.where(), r, rowScope, aliases, ctes, null);
+            };
+            plan = aggregate(s, plan, rows, scope, items, aliases, aliasOutputs, orderBy, names, ctes, correlation,
                     correlated, windowing);
         }
         return limit(plan, limit, offset);
@@ -1334,6 +1370,11 @@ final class QueryBinder {
         return items;
     }
 
+    /** DuckDB's name of {@code count(*)}, with its filter. */
+    private static String countStar(SqlExpr.FunctionCall f) {
+        return "count_star()" + SqlPrinter.print(f).substring(SqlPrinter.print(f.withFilter(null)).length());
+    }
+
     /** The name of an unaliased item, after DuckDB: a column keeps its name, other expressions their text. */
     private static String name(SqlExpr e, Scope scope) {
         if (e instanceof SqlExpr.Identifier id) {
@@ -1346,7 +1387,10 @@ final class QueryBinder {
         }
         if (e instanceof SqlExpr.FunctionCall f && SqlTrees.key(f.name()).equals("count")
                 && (f.star() || f.arguments().isEmpty())) {
-            return "count_star()";
+            return countStar(f);
+        }
+        if (isGrouping(e)) {
+            return groupingName((SqlExpr.FunctionCall) e);
         }
         if (e instanceof SqlExpr.Unary u && u.op() == SqlExpr.UnaryOp.MINUS && u.operand() instanceof SqlExpr.Literal l
                 && l.kind() == SqlExpr.LiteralKind.NUMBER) {
@@ -1399,12 +1443,25 @@ final class QueryBinder {
     }
 
     /**
+     * The expressions of {@code DISTINCT ON}, as the keys of an order;
+     * rejected in a correlated subquery, whose join sits above them.
+     */
+    private static List<OrderItem> distinctOn(QueryBody.Select s, Correlated correlated) {
+        if (!s.distinctOn().isEmpty() && correlated != null) {
+            throw new SqlException("Not supported: DISTINCT ON in a correlated subquery", s.position());
+        }
+        return s.distinctOn().stream().map(e -> new OrderItem(e, true, false)).toList();
+    }
+
+    /**
      * Projects the outputs, then makes them distinct and sorts them. Without
      * {@code DISTINCT} a sort key may be any expression over the input; with
-     * it, an expression over the outputs.
+     * it, an expression over the outputs. With {@code DISTINCT ON}, the
+     * first row of each value of its keys in the order stays, numbered by
+     * {@code row_number()} over a window partitioned by them.
      */
     private static PlanNode finish(PlanNode input, List<Expression> outputs, List<String> names, boolean distinct,
-            List<Order> orders) {
+            List<Order> orders, List<Order> distinctOn) {
         int n = outputs.size();
         List<NamedExpression> columns = new ArrayList<>();
         for (int i = 0; i < n; i++) {
@@ -1413,6 +1470,7 @@ final class QueryBinder {
         List<Expression> extras = new ArrayList<>();
         List<SortKey> keys = new ArrayList<>();
         PlanNode plan;
+        boolean numbered = false;
         if (distinct) {
             plan = distinct(new PlanNode.Project(input, columns));
             Schema schema = plan.schema();
@@ -1441,13 +1499,27 @@ final class QueryBinder {
                 int column = o.output() >= 0 ? o.output() : extra(extras, o.expression(), n);
                 keys.add(new SortKey(column, o.ascending(), o.nullsFirst()));
             }
+            List<Integer> partition = new ArrayList<>();
+            for (Order o : distinctOn) {
+                partition.add(o.output() >= 0 ? o.output() : extra(extras, o.expression(), n));
+            }
             plan = new PlanNode.Project(input, withExtras(columns, extras));
-            if (keys.isEmpty()) {
+            if (!partition.isEmpty()) {
+                int width = plan.schema().size();
+                plan = new PlanNode.Window(plan, partition, keys, List.of(PlanNode.WindowCall.of(
+                        PlanNode.WindowFunction.ROW_NUMBER, List.of(), "#distinct_on")));
+                plan = new PlanNode.Filter(plan, new Expression.Comparison(Expression.ComparisonOp.EQ,
+                        new Expression.Column(width, DataType.BIGINT), new Expression.Literal(DataType.BIGINT, 1L)));
+                numbered = true;
+            }
+            if (keys.isEmpty() && !numbered) {
                 return plan;
             }
         }
-        plan = new PlanNode.Sort(plan, keys);
-        if (extras.isEmpty()) {
+        if (!keys.isEmpty()) {
+            plan = new PlanNode.Sort(plan, keys);
+        }
+        if (extras.isEmpty() && !numbered) {
             return plan;
         }
         Schema schema = plan.schema();
@@ -1523,6 +1595,9 @@ final class QueryBinder {
 
         private Expression call(SqlExpr.FunctionCall f, ExpressionBinder arguments) {
             Position p = f.position();
+            if (f.filter() != null) {
+                throw new SqlException(ExpressionBinder.scalarFilter("unnest"), p);
+            }
             if (f.distinct() || f.star() || !f.orderBy().isEmpty() || f.arguments().size() != 1) {
                 throw new SqlException("Wrong number of arguments for the function unnest", p);
             }
@@ -2027,8 +2102,7 @@ final class QueryBinder {
         private static PlanNode.WindowCall remap(PlanNode.WindowCall c, int[] mapping) {
             AggregateCall a = c.aggregate();
             if (a != null) {
-                a = new AggregateCall(a.function(), a.column() < 0 ? -1 : mapping[a.column()], a.distinct(), a.name(),
-                        a.separator(), remapKeys(a.orderBy(), mapping));
+                a = a.remap(i -> mapping[i]);
             }
             List<Integer> arguments = c.arguments().stream().map(i -> mapping[i]).toList();
             return new PlanNode.WindowCall(c.function(), a, arguments, c.ignoreNulls(),
@@ -2096,6 +2170,8 @@ final class QueryBinder {
         final List<Expression> groups;
         final List<Expression> arguments = new ArrayList<>();
         final List<AggregateCall> calls = new ArrayList<>();
+        /** The groups that each call of {@code grouping} reads, by the index of its placeholder among the calls. */
+        final Map<Integer, List<Integer>> groupings = new HashMap<>();
         final ExpressionBinder argumentBinder;
 
         Aggregation(List<Expression> groups, ExpressionBinder argumentBinder) {
@@ -2131,7 +2207,7 @@ final class QueryBinder {
         /** Binds a call of an aggregate and returns its column in the output of the aggregation. */
         Expression call(SqlExpr.FunctionCall f) {
             String name = SqlTrees.key(f.name());
-            String outputName = f.star() || name.equals("count") && f.arguments().isEmpty() ? "count_star()"
+            String outputName = f.star() || name.equals("count") && f.arguments().isEmpty() ? countStar(f)
                     : SqlPrinter.print(f);
             AggregateCall call = aggregateCall(f, outputName, argumentBinder, this::input, this::inputSchema,
                     false);
@@ -2143,24 +2219,102 @@ final class QueryBinder {
             return new Expression.Column(groups.size() + index, call.type(inputSchema()));
         }
 
+        /**
+         * A call of {@code grouping(a, ...)}: a placeholder among the calls,
+         * which each grouping set replaces by the number whose bits, the
+         * first argument the highest, tell the groups the set leaves out.
+         */
+        Expression grouping(SqlExpr.FunctionCall f, ExpressionBinder groupBinder) {
+            if (f.arguments().isEmpty() || f.distinct() || f.star() || !f.orderBy().isEmpty() || f.filter() != null) {
+                throw new SqlException("GROUPING takes the expressions of GROUP BY", f.position());
+            }
+            List<Integer> of = new ArrayList<>();
+            for (SqlExpr a : f.arguments()) {
+                int g = groups.indexOf(groupBinder.bind(a));
+                if (g < 0) {
+                    throw new SqlException("GROUPING child \"" + SqlPrinter.print(a) + "\" must be a grouping column",
+                            a.position());
+                }
+                of.add(g);
+            }
+            AggregateCall call = new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, groupingName(f));
+            int index = -1;
+            for (Map.Entry<Integer, List<Integer>> e : groupings.entrySet()) {
+                if (calls.get(e.getKey()).equals(call) && e.getValue().equals(of)) {
+                    index = e.getKey();
+                }
+            }
+            if (index < 0) {
+                calls.add(call);
+                index = calls.size() - 1;
+                groupings.put(index, of);
+            }
+            return new Expression.Column(groups.size() + index, DataType.BIGINT);
+        }
+
+        /** The projection below the aggregation, which computes the groups and what the calls read. */
+        PlanNode below(PlanNode input) {
+            if (groups.isEmpty() && arguments.isEmpty()) {
+                return input;
+            }
+            List<NamedExpression> columns = new ArrayList<>();
+            for (int i = 0; i < groups.size(); i++) {
+                columns.add(new NamedExpression("#group" + i, groups.get(i)));
+            }
+            for (int i = 0; i < arguments.size(); i++) {
+                columns.add(new NamedExpression("#argument" + i, arguments.get(i)));
+            }
+            return new PlanNode.Project(input, columns);
+        }
+
         /** The projection below the aggregation and the aggregation itself. */
         PlanNode plan(PlanNode input) {
-            PlanNode below = input;
-            if (!groups.isEmpty() || !arguments.isEmpty()) {
-                List<NamedExpression> columns = new ArrayList<>();
-                for (int i = 0; i < groups.size(); i++) {
-                    columns.add(new NamedExpression("#group" + i, groups.get(i)));
-                }
-                for (int i = 0; i < arguments.size(); i++) {
-                    columns.add(new NamedExpression("#argument" + i, arguments.get(i)));
-                }
-                below = new PlanNode.Project(input, columns);
-            }
             List<Integer> groupColumns = new ArrayList<>();
             for (int i = 0; i < groups.size(); i++) {
                 groupColumns.add(i);
             }
-            return new PlanNode.Aggregate(below, groupColumns, calls);
+            return new PlanNode.Aggregate(below(input), groupColumns, calls);
+        }
+
+        /**
+         * The union of an aggregation per grouping set, each over its own
+         * input of the projection below, in the columns of
+         * {@link #plan(PlanNode)}: a group the set leaves out is
+         * {@code NULL}, and each call of {@code grouping} the bits of the
+         * groups it reads that the set leaves out.
+         *
+         * @param sets the groups of each set, ascending
+         */
+        PlanNode plan(List<PlanNode> inputs, List<List<Integer>> sets) {
+            List<PlanNode> parts = new ArrayList<>();
+            for (int s = 0; s < sets.size(); s++) {
+                List<Integer> set = sets.get(s);
+                PlanNode aggregate = new PlanNode.Aggregate(inputs.get(s), set, calls);
+                Schema schema = aggregate.schema();
+                List<NamedExpression> columns = new ArrayList<>();
+                for (int g = 0; g < groups.size(); g++) {
+                    int at = set.indexOf(g);
+                    DataType type = groups.get(g).type();
+                    columns.add(new NamedExpression("#group" + g, at >= 0 ? new Expression.Column(at, type)
+                            : new Expression.Literal(type, null)));
+                }
+                for (int c = 0; c < calls.size(); c++) {
+                    List<Integer> of = groupings.get(c);
+                    Expression value;
+                    if (of == null) {
+                        value = new Expression.Column(set.size() + c, schema.type(set.size() + c));
+                    } else {
+                        long bits = 0;
+                        for (int g : of) {
+                            bits = bits << 1 | (set.contains(g) ? 0 : 1);
+                        }
+                        value = new Expression.Literal(DataType.BIGINT, bits);
+                    }
+                    columns.add(new NamedExpression(calls.get(c).name(), value));
+                }
+                parts.add(new PlanNode.Project(aggregate, columns));
+            }
+            return parts.size() == 1 ? parts.get(0) : new PlanNode.Union(parts);
         }
     }
 
@@ -2177,11 +2331,13 @@ final class QueryBinder {
             ToIntFunction<Expression> input, Supplier<Schema> schema, boolean window) {
         String name = SqlTrees.key(f.name());
         Position p = f.position();
+        // The filter is bound first, as a column of the input like the arguments.
+        int filter = f.filter() == null ? -1 : input.applyAsInt(binder.condition(f.filter()));
         if (name.equals("count") && (f.star() || f.arguments().isEmpty())) {
             if (f.distinct() || !f.orderBy().isEmpty()) {
                 throw new SqlException("Not supported: DISTINCT or ORDER BY in count(*)", p);
             }
-            return new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, outputName);
+            return new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, outputName).withFilter(filter);
         }
         if (f.star()) {
             throw new SqlException("Function \"" + name + "\" cannot be applied to a star expression", p);
@@ -2191,7 +2347,11 @@ final class QueryBinder {
         if (f.arguments().isEmpty() || f.arguments().size() > arity) {
             throw new SqlException("Wrong number of arguments for the aggregate " + name, p);
         }
-        Expression argument = binder.bind(f.arguments().get(0));
+        ExpressionBinder.Bound bound = binder.bound(f.arguments().get(0));
+        // As in DuckDB, a bare NULL is a BOOLEAN for bool_and and bool_or.
+        Expression argument = bound.isNull() && (function == AggregateFunction.BOOL_AND
+                || function == AggregateFunction.BOOL_OR) ? new Expression.Literal(DataType.BOOLEAN, null)
+                : bound.expression();
         Expression instant = null;
         if (function == AggregateFunction.STRING_AGG && Casts.mentions(argument.type(), DataType.Scalar.TIMESTAMPTZ)) {
             // The text of an instant depends on the time zone, which only a cast holds; it is ordered by the instant.
@@ -2215,7 +2375,7 @@ final class QueryBinder {
             order.add(new SortKey(keyColumn, o.ascending(), o.nullsFirst()));
         }
         AggregateCall call = ExpressionBinder.check(() -> new AggregateCall(function, column, f.distinct(),
-                outputName), p, null);
+                outputName).withFilter(filter), p, null);
         if (f.arguments().size() == 2) {
             call = call.withSeparator(separator(f.arguments().get(1), argument.type()));
         }
@@ -2228,10 +2388,19 @@ final class QueryBinder {
         }, p, "No function matches " + name + "(" + argument.type() + ")");
     }
 
-    private PlanNode aggregate(QueryBody.Select s, PlanNode input, Scope scope, List<Item> items,
-            Map<String, SqlExpr> aliases, Map<String, Integer> aliasOutputs, List<OrderItem> orderBy,
-            List<String> names, Map<String, Cte> ctes, Correlation correlation, Correlated correlated,
-            Windowing windowing) {
+    /**
+     * Binds a select that aggregates. With grouping sets, or a call of
+     * {@code grouping}, the aggregation is the union of one per set, see
+     * {@link Aggregation#plan(List, List)}; the rows they read run once as a
+     * common table if they compute something, see {@link #computes},
+     * otherwise each set reads them bound anew.
+     *
+     * @param rows binds the rows of {@code FROM} and {@code WHERE} again
+     */
+    private PlanNode aggregate(QueryBody.Select s, PlanNode input, Supplier<PlanNode> rows, Scope scope,
+            List<Item> items, Map<String, SqlExpr> aliases, Map<String, Integer> aliasOutputs,
+            List<OrderItem> orderBy, List<String> names, Map<String, Cte> ctes, Correlation correlation,
+            Correlated correlated, Windowing windowing) {
         ExpressionBinder groupBinder = new ExpressionBinder(context, scope, aliases,
                 "GROUP BY clause cannot contain aggregates!", null);
         List<Expression> groups = new ArrayList<>();
@@ -2251,22 +2420,28 @@ final class QueryBinder {
                     throw new SqlException("Cannot mix aggregates with non-aggregated columns!", item.position());
                 }
             }
-        } else if (groupBy != null) {
+        }
+        // The group of each expression of GROUP BY, which the grouping sets index.
+        List<Integer> groupOf = new ArrayList<>();
+        if (groupBy != null && !groupBy.all()) {
             for (SqlExpr g : groupBy.expressions()) {
                 if (g instanceof SqlExpr.Parameter p) {
                     throw new SqlException("Not supported: a parameter as a term of GROUP BY", p.position());
                 }
                 long position = SqlTrees.signedPosition(g);
+                Expression bound;
                 if (position != Long.MIN_VALUE) {
                     if (position < 1 || position > items.size()) {
                         throw new SqlException("GROUP BY term out of range - should be between 1 and " + items.size(),
                                 g.position());
                     }
                     Item item = items.get((int) position - 1);
-                    addGroup(groups, item.column() != null ? item.column() : groupBinder.bind(item.expression()));
+                    bound = item.column() != null ? item.column() : groupBinder.bind(item.expression());
                 } else {
-                    addGroup(groups, groupBinder.bind(g));
+                    bound = groupBinder.bind(g);
                 }
+                addGroup(groups, bound);
+                groupOf.add(groups.indexOf(bound));
             }
         }
         // A correlated subquery groups by its keys too; without GROUP BY, its value is computed after the join.
@@ -2295,9 +2470,13 @@ final class QueryBinder {
         ExpressionBinder argumentBinder = new ExpressionBinder(context, scope, aliases,
                 "aggregate function calls cannot be nested", null);
         Aggregation aggregation = new Aggregation(groups, argumentBinder);
+        boolean bySets = groupBy != null && !groupBy.sets().isEmpty();
         ExpressionBinder.Hook hook = e -> {
             if (SqlTrees.isAggregate(e)) {
                 return aggregation.call((SqlExpr.FunctionCall) e);
+            }
+            if (isGrouping(e)) {
+                return aggregation.grouping((SqlExpr.FunctionCall) e, groupBinder);
             }
             if (e instanceof SqlExpr.Identifier id) {
                 Scope.Resolved r = scope.resolve(id.parts(), id.position());
@@ -2316,7 +2495,8 @@ final class QueryBinder {
                 return groupBinder.fields(ExpressionBinder.Bound.typed(column), r.column().name(), r.fields(),
                         id.position()).expression();
             }
-            if (!(e instanceof SqlExpr.Literal) && !SqlTrees.containsAggregate(e)) {
+            // With grouping sets, a constant that is a group is NULL where a set leaves it out, as in DuckDB.
+            if ((!(e instanceof SqlExpr.Literal) || bySets) && !SqlTrees.containsAggregate(e)) {
                 try {
                     int g = groups.indexOf(groupBinder.bind(e));
                     if (g >= 0) {
@@ -2360,9 +2540,46 @@ final class QueryBinder {
         ExpressionBinder post = new ExpressionBinder(context, scope, aliases, null, hook);
         Expression qualify = qualify(s, windowing, new ExpressionBinder(context, scope, aliases, null,
                 windowing.hook(post, hook)));
-        List<Order> orders = orders(orderBy, outputs, aliasOutputs, new ExpressionBinder(context, scope, aliases, null,
-                windowing.hook(post, unnesting.hook(post, hook))));
-        PlanNode plan = subqueries.attach(aggregation.plan(input));
+        ExpressionBinder orderBinder = new ExpressionBinder(context, scope, aliases, null,
+                windowing.hook(post, unnesting.hook(post, hook)));
+        List<Order> orders = orders(orderBy, outputs, aliasOutputs, orderBinder);
+        int ordered = orders.size();
+        orders.addAll(orders(distinctOn(s, correlated), outputs, aliasOutputs, orderBinder));
+        // Each set by the groups it reads; a grouping without sets has the one set of all groups.
+        List<List<Integer>> sets = null;
+        if (groupBy != null && !groupBy.sets().isEmpty()) {
+            sets = new ArrayList<>();
+            for (List<Integer> set : groupBy.sets()) {
+                sets.add(set.stream().map(groupOf::get).distinct().sorted().toList());
+            }
+        } else if (!aggregation.groupings.isEmpty()) {
+            sets = List.of(java.util.stream.IntStream.range(0, groups.size()).boxed().toList());
+        }
+        if (sets != null && correlated != null) {
+            throw new SqlException("Not supported: grouping sets or GROUPING in a correlated subquery", s.position());
+        }
+        int shared = -1;
+        PlanNode below = null;
+        PlanNode aggregated;
+        if (sets == null) {
+            aggregated = aggregation.plan(input);
+        } else {
+            below = aggregation.below(input);
+            List<PlanNode> inputs = new ArrayList<>();
+            if (sets.size() > 1 && correlation == null && computes(below)) {
+                shared = ++commonTables;
+                for (int i = 0; i < sets.size(); i++) {
+                    inputs.add(PlanNode.CommonTableScan.all(shared, GROUPING_SETS, below));
+                }
+            } else {
+                inputs.add(below);
+                for (int i = 1; i < sets.size(); i++) {
+                    inputs.add(aggregation.below(rows.get()));
+                }
+            }
+            aggregated = aggregation.plan(inputs, sets);
+        }
+        PlanNode plan = subqueries.attach(aggregated);
         outputs.replaceAll(subqueries::resolve);
         if (having != null) {
             plan = new PlanNode.Filter(plan, subqueries.resolve(having));
@@ -2393,9 +2610,27 @@ final class QueryBinder {
             }
             correlation.join(new Correlation.Join(keys, correlated.outer(), correlated.condition(), null, n));
         }
-        PlanNode result = finish(plan, outputs, names, s.distinct(), orders);
+        PlanNode result = finish(plan, outputs, names, s.distinct(), orders.subList(0, ordered),
+                orders.subList(ordered, orders.size()));
+        if (shared >= 0) {
+            result = new PlanNode.CommonTable(shared, GROUPING_SETS, below, result);
+        }
         untypedNulls.put(result, untyped);
         return result;
+    }
+
+    /** The name of the common table of the rows that grouping sets read. */
+    private static final String GROUPING_SETS = "#groupingsets";
+
+    /** Tells whether an expression is a call of {@code grouping} or {@code grouping_id}. */
+    private static boolean isGrouping(SqlExpr e) {
+        return e instanceof SqlExpr.FunctionCall f && (SqlTrees.key(f.name()).equals("grouping")
+                || SqlTrees.key(f.name()).equals("grouping_id"));
+    }
+
+    /** DuckDB's name of a call of {@code grouping} or {@code grouping_id}. */
+    private static String groupingName(SqlExpr.FunctionCall f) {
+        return "GROUPING(" + String.join(", ", f.arguments().stream().map(SqlPrinter::print).toList()) + ")";
     }
 
     private static boolean isCount(AggregateCall call) {

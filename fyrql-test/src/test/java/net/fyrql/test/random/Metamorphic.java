@@ -147,7 +147,7 @@ final class Metamorphic {
     /** A {@code SELECT} with another {@code WHERE} and {@code HAVING}. */
     private static QueryBody.Select with(QueryBody.Select s, SqlExpr where, SqlExpr having) {
         return new QueryBody.Select(s.distinct(), s.items(), s.from(), where, s.groupBy(), having, s.windows(),
-                s.qualify(), s.position());
+                s.qualify(), s.distinctOn(), s.position());
     }
 
     /** The union of three bodies, without duplicates or with them. */

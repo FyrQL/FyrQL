@@ -18,6 +18,8 @@ import net.fyrql.core.type.DataType.ListType;
 import net.fyrql.core.type.DataType.MapType;
 import net.fyrql.core.type.TypeRules;
 import net.fyrql.core.value.ConversionException;
+import net.fyrql.core.value.Dates;
+import net.fyrql.core.value.Interval;
 import net.fyrql.core.value.Order;
 
 import java.math.BigInteger;
@@ -372,11 +374,17 @@ final class NestedFunctions {
      * {@code start} in steps of {@code step} (by default 1), up to
      * {@code stop} for {@code generate_series} and short of it for
      * {@code range}; with one argument from 0 to it. A step of 0, or one
-     * that leads away from {@code stop}, gives the empty list. Over dates and
-     * timestamps they are not supported.
+     * that leads away from {@code stop}, gives the empty list. Over
+     * timestamps, and dates as timestamps, with an interval as the step,
+     * which is added to each value in turn, as DuckDB does: the list of
+     * {@code TIMESTAMP}s; the parts of the interval must not differ in sign.
+     * Over timestamps with a time zone they are not supported.
      */
     private static SimpleFunction series(String name, boolean inclusive) {
         return new SimpleFunction(name, types -> {
+            if (timestamps(types)) {
+                return DataType.listOf(DataType.TIMESTAMP);
+            }
             if (types.isEmpty() || types.size() > 3) {
                 return null;
             }
@@ -386,9 +394,13 @@ final class NestedFunctions {
                 }
             }
             return DataType.listOf(DataType.BIGINT);
-        }, SimpleFunction.allTo(DataType.BIGINT)) {
+        }, types -> timestamps(types) ? List.of(DataType.TIMESTAMP, DataType.TIMESTAMP, DataType.INTERVAL)
+                : SimpleFunction.allTo(DataType.BIGINT).apply(types)) {
             @Override
             public Object evaluate(List<DataType> types, Object[] args) {
+                if (args.length == 3 && args[2] instanceof Interval step) {
+                    return timestampSeries(name, inclusive, (Long) args[0], (Long) args[1], step);
+                }
                 long start = args.length == 1 ? 0 : (Long) args[0];
                 long stop = args.length == 1 ? (Long) args[0] : (Long) args[1];
                 long step = args.length == 3 ? (Long) args[2] : 1;
@@ -415,6 +427,40 @@ final class NestedFunctions {
                 return result;
             }
         };
+    }
+
+    /** Tells whether the arguments are those of a series of timestamps: two timestamps or dates and an interval. */
+    private static boolean timestamps(List<DataType> types) {
+        if (types.size() != 3 || types.get(2) != DataType.INTERVAL) {
+            return false;
+        }
+        for (DataType t : types.subList(0, 2)) {
+            if (t != DataType.TIMESTAMP && t != DataType.DATE) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static List<Object> timestampSeries(String name, boolean inclusive, long start, long stop,
+            Interval step) {
+        int sign = Long.signum(step.months()) + Long.signum(step.days()) + Long.signum(step.micros());
+        int parts = (step.months() != 0 ? 1 : 0) + (step.days() != 0 ? 1 : 0) + (step.micros() != 0 ? 1 : 0);
+        if (Math.abs(sign) != parts) {
+            throw new IllegalArgumentException("Interval with mix of negative/positive entries not supported");
+        }
+        List<Object> result = new ArrayList<>();
+        if (sign == 0) {
+            return result;
+        }
+        for (long v = start; sign > 0 ? v < stop || inclusive && v == stop : v > stop || inclusive && v == stop; ) {
+            if (result.size() >= MAX_SERIES) {
+                throw new ArithmeticException(name + " would give more than " + MAX_SERIES + " values");
+            }
+            result.add(v);
+            v = Dates.add(v, step);
+        }
+        return result;
     }
 
     /** The common type of the elements of lists, or {@code null} if one is no list or they have none. */

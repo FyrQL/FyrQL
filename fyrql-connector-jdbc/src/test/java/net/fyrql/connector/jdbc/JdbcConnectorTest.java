@@ -200,9 +200,11 @@ class JdbcConnectorTest {
                     "SELECT t.\"s\", count(*) FROM " + table + " GROUP BY t.\"s\"",
                     "SELECT d, count(*) FROM all_types GROUP BY d ORDER BY d", "SELECT t.\"d\" FROM " + table,
                     "SELECT max(d) FROM all_types", "SELECT t.\"d\" FROM " + table,
-                    // A filter left to the engine keeps the aggregation there too, and so does DISTINCT.
+                    // A filter left to the engine keeps the aggregation there too, and so do DISTINCT and the
+                    // filter of an aggregate.
                     "SELECT count(*) FROM all_types WHERE f < 0", "SELECT t.\"f\" FROM " + table,
-                    "SELECT count(DISTINCT i) FROM all_types", "SELECT t.\"i\" FROM " + table);
+                    "SELECT count(DISTINCT i) FROM all_types", "SELECT t.\"i\" FROM " + table,
+                    "SELECT count(*) FILTER (WHERE b) FROM all_types", "SELECT t.\"b\" FROM " + table);
             for (Map.Entry<String, String> q : queries.entrySet()) {
                 on.clearStatements();
                 assertRows(plain.rows(q.getKey()), pushing.rows(q.getKey()));

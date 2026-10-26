@@ -186,6 +186,19 @@ public interface Dialect {
     }
 
     /**
+     * Renders a call of an aggregate that takes only the rows where a
+     * condition is true, e.g. {@code count(*) FILTER (WHERE t.c1)}. Only
+     * a dialect whose {@link #supportsAggregation} takes such a call is
+     * asked.
+     *
+     * @param aggregate the rendered call, from {@link #aggregate}
+     * @param condition the rendered condition
+     */
+    default String filtered(String aggregate, String condition) {
+        return aggregate + " FILTER (WHERE " + condition + ")";
+    }
+
+    /**
      * Renders a call of a window function other than an aggregate over
      * rendered arguments, e.g. {@code lag(t.c1, t.c2 IGNORE NULLS)}.
      *

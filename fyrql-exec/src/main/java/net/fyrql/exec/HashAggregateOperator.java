@@ -19,6 +19,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.BigIntVector;
+import net.fyrql.core.vector.BooleanVector;
 import net.fyrql.core.vector.IntVector;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
@@ -54,7 +55,8 @@ import java.util.function.LongConsumer;
  * <p>
  * Each aggregate keeps an {@link AggregateState} over all groups: one
  * without boxing where {@link AggregateState#of} has one, otherwise a
- * {@link ValueAccumulator} per group. The results are computed group by group,
+ * {@link ValueAccumulator} per group; an aggregate with a filter passes it
+ * only the rows the filter takes. The results are computed group by group,
  * so that the first group whose result fails is the one that fails the
  * query. The budget takes the bytes of the new groups of a batch at once.
  * <p>
@@ -206,17 +208,16 @@ final class HashAggregateOperator extends AbstractOperator {
             for (SortKey k : call.orderBy()) {
                 used.add(k.column());
             }
+            if (call.filter() >= 0) {
+                used.add(call.filter());
+            }
         }
         this.scatteredColumns = List.copyOf(used);
         this.scatteredSchema = inputSchema.select(scatteredColumns);
         this.scatteredKeys = keyColumnList.stream().map(scatteredColumns::indexOf).toList();
         // On workers, only mergeable aggregates scatter rows; the part that takes all rows does so for any.
         this.scatteredCalls = aggregate.aggregates().stream()
-                .map(c -> c.column() < 0 ? c
-                        : new AggregateCall(c.function(), scatteredColumns.indexOf(c.column()), c.distinct(),
-                                c.name(), c.separator(), c.orderBy().stream().map(k -> new SortKey(
-                                        scatteredColumns.indexOf(k.column()), k.ascending(), k.nullsFirst()))
-                                        .toList()))
+                .map(c -> c.remap(scatteredColumns::indexOf))
                 .toList();
         this.rawSchema = scatteredSchema.concat(Schema.of(new Schema.Field("$hash", DataType.INTEGER, false),
                 new Schema.Field("$place", DataType.BIGINT, false)));
@@ -583,6 +584,9 @@ final class HashAggregateOperator extends AbstractOperator {
         for (int i = 0; i < states.length; i++) {
             AggregateState state = unboxed ? AggregateState.of(calls.get(i), schema) : null;
             states[i] = state != null ? state : new Accumulators(calls.get(i), schema, reserve);
+            if (calls.get(i).filter() >= 0) {
+                states[i] = new Filtered(states[i], calls.get(i).filter());
+            }
         }
         return states;
     }
@@ -1625,6 +1629,87 @@ final class HashAggregateOperator extends AbstractOperator {
                 pieces[p] = new Piece(keysOf, own, scattered == null ? List.of() : scattered.get(p), hashesOf, at);
             }
             return pieces;
+        }
+    }
+
+    /** The state of an aggregate that takes only the rows where its filter column is true. */
+    private static final class Filtered extends AggregateState {
+        private final AggregateState state;
+        private final int filter;
+
+        Filtered(AggregateState state, int filter) {
+            this.state = state;
+            this.filter = filter;
+        }
+
+        /** Returns the rows the filter takes, or {@code null} if it takes all of them. */
+        private int[] taken(Batch b, int rows) {
+            Vector v = b.column(filter);
+            int[] taken = new int[rows];
+            int n = 0;
+            for (int r = 0; r < rows; r++) {
+                if (!v.isNull(r) && (v instanceof BooleanVector bv ? bv.getBoolean(r) : (Boolean) v.get(r))) {
+                    taken[n++] = r;
+                }
+            }
+            return n == rows ? null : Arrays.copyOf(taken, n);
+        }
+
+        private static int[] groupsOf(int[] groupOf, int[] taken) {
+            int[] result = new int[taken.length];
+            for (int i = 0; i < taken.length; i++) {
+                result[i] = groupOf[taken[i]];
+            }
+            return result;
+        }
+
+        @Override
+        void add(Batch b, int[] groupOf, int rows, int groups) {
+            int[] taken = taken(b, rows);
+            if (taken == null) {
+                state.add(b, groupOf, rows, groups);
+            } else {
+                state.add(b.select(taken), groupsOf(groupOf, taken), taken.length, groups);
+            }
+        }
+
+        @Override
+        void add(Batch b, int[] groupOf, int rows, int groups, long[] places, int from) {
+            int[] taken = taken(b, rows);
+            if (taken == null) {
+                state.add(b, groupOf, rows, groups, places, from);
+            } else {
+                long[] at = new long[taken.length];
+                for (int i = 0; i < taken.length; i++) {
+                    at[i] = places[from + taken[i]];
+                }
+                state.add(b.select(taken), groupsOf(groupOf, taken), taken.length, groups, at, 0);
+            }
+        }
+
+        @Override
+        boolean keepsPlaces() {
+            return state.keepsPlaces();
+        }
+
+        @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            state.combine(group, ((Filtered) other).state, otherGroup);
+        }
+
+        @Override
+        void startResult(int groups) {
+            state.startResult(groups);
+        }
+
+        @Override
+        void result(int group) {
+            state.result(group);
+        }
+
+        @Override
+        Vector finishResult() {
+            return state.finishResult();
         }
     }
 

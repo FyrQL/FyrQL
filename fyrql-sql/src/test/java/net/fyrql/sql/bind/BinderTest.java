@@ -297,6 +297,27 @@ class BinderTest {
     }
 
     @Test
+    void theFilterOfAnAggregateIsAColumnOfItsInput() {
+        PlanNode.Project top = assertInstanceOf(PlanNode.Project.class, bind("SELECT b, count(*) FILTER (WHERE a > 1),"
+                + " sum(a) FILTER (WHERE a > 1), sum(a), sum(a) FILTER (WHERE e) FROM t GROUP BY b"));
+        PlanNode.Aggregate aggregate = assertInstanceOf(PlanNode.Aggregate.class, top.input());
+        PlanNode.Project below = assertInstanceOf(PlanNode.Project.class, aggregate.input());
+        // The filter is read once by both calls that take it, and differs from the call without it.
+        List<PlanNode.AggregateCall> calls = aggregate.aggregates();
+        assertEquals(4, calls.size());
+        assertEquals(1, calls.get(0).filter());
+        assertEquals(1, calls.get(1).filter());
+        assertEquals(-1, calls.get(2).filter());
+        assertEquals(DataType.BOOLEAN, below.schema().type(calls.get(3).filter()));
+        assertEquals("[b VARCHAR, count_star() FILTER (WHERE (a > 1)) BIGINT, sum(a) FILTER (WHERE (a > 1)) HUGEINT,"
+                + " sum(a) HUGEINT, sum(a) FILTER (WHERE e) HUGEINT]", top.schema().fields().toString());
+        assertEquals("aggregate function calls cannot be nested",
+                error("SELECT sum(a) FILTER (WHERE sum(a) > 1) FROM t").reason());
+        assertEquals("Function \"abs\" is a Scalar Function. \"DISTINCT\", \"FILTER\", and \"ORDER BY\" are only"
+                + " applicable to aggregate functions.", error("SELECT abs(a) FILTER (WHERE a > 1) FROM t").reason());
+    }
+
+    @Test
     void orderByReadsColumnsThatAreNotSelected() {
         PlanNode.Project top = assertInstanceOf(PlanNode.Project.class, bind("SELECT a FROM t ORDER BY e DESC, 1"));
         PlanNode.Sort sort = assertInstanceOf(PlanNode.Sort.class, top.input());
@@ -525,6 +546,104 @@ class BinderTest {
         assertEquals("Not supported: UNNEST of more than one list in a select list",
                 error("SELECT unnest([a]), unnest([e]) FROM t").reason());
         assertEquals("UNNEST not supported here", error("SELECT a FROM t WHERE unnest([a]) = 1").reason());
+    }
+
+    @Test
+    void aSeriesInFromUnnestsTheListOfItsFunction() {
+        PlanNode.Unnest alone = assertInstanceOf(PlanNode.Unnest.class, assertInstanceOf(PlanNode.Project.class,
+                bind("SELECT range FROM range(1, 4)")).input());
+        assertInstanceOf(PlanNode.Values.class, alone.input());
+        assertEquals("range", alone.name());
+        assertEquals(DataType.BIGINT, alone.elementType());
+        assertEquals(List.of("i"), bind("SELECT * FROM generate_series(1, 3) g(i) WHERE g.i > 1").schema().fields()
+                .stream().map(Schema.Field::name).toList());
+        PlanNode.Unnest lateral = assertInstanceOf(PlanNode.Unnest.class, assertInstanceOf(PlanNode.Project.class,
+                bind("SELECT a, generate_series FROM t, LATERAL generate_series(1, t.e)")).input());
+        assertInstanceOf(PlanNode.Scan.class, lateral.input());
+        assertEquals(DataType.listOf(DataType.TIMESTAMP), assertInstanceOf(PlanNode.Unnest.class, bind(
+                "SELECT * FROM range(DATE '2024-01-01', DATE '2024-02-01', INTERVAL 1 WEEK)").children().get(0))
+                .list().type());
+        assertEquals("interval cannot be 0!", error("SELECT * FROM range(1, 5, 0)").reason());
+    }
+
+    @Test
+    void groupingSetsAreAUnionOfAnAggregationPerSet() {
+        PlanNode plan = bind("SELECT b, e, count(*), grouping(b, e) FROM t GROUP BY ROLLUP (b, e)");
+        PlanNode.Union union = nodes(plan, PlanNode.Union.class).get(0);
+        assertEquals(3, union.inputs().size());
+        List<List<Integer>> groups = new ArrayList<>();
+        List<Expression> bits = new ArrayList<>();
+        for (PlanNode input : union.inputs()) {
+            PlanNode.Project p = assertInstanceOf(PlanNode.Project.class, input);
+            groups.add(assertInstanceOf(PlanNode.Aggregate.class, p.input()).groupColumns());
+            bits.add(p.columns().get(3).expression());
+            // Each set reads the rows of the table anew.
+            assertInstanceOf(PlanNode.Scan.class, assertInstanceOf(PlanNode.Project.class,
+                    ((PlanNode.Aggregate) p.input()).input()).input());
+        }
+        assertEquals(List.of(List.of(0, 1), List.of(0), List.of()), groups);
+        assertEquals(List.of(new Expression.Literal(DataType.BIGINT, 0L), new Expression.Literal(DataType.BIGINT, 1L),
+                new Expression.Literal(DataType.BIGINT, 3L)), bits);
+        assertEquals(new Expression.Literal(DataType.TINYINT, null),
+                ((PlanNode.Project) union.inputs().get(1)).columns().get(1).expression());
+        assertEquals("[b VARCHAR, e TINYINT, count_star() BIGINT, GROUPING(b, e) BIGINT]",
+                plan.schema().fields().toString());
+        // Rows that compute something run once, as a common table of the query.
+        PlanNode joined = bind("SELECT t.b, count(*) FROM t JOIN u ON t.a = u.a GROUP BY CUBE (t.b)");
+        assertEquals(1, commonTables(joined).size());
+        assertEquals(2, nodes(joined, PlanNode.CommonTableScan.class).size());
+        assertEquals("GROUPING child \"a\" must be a grouping column",
+                error("SELECT b, grouping(a) FROM t GROUP BY ROLLUP (b)").reason());
+    }
+
+    /** The nodes of a plan of a type, from the top down. */
+    private static <T extends PlanNode> List<T> nodes(PlanNode plan, Class<T> type) {
+        return net.fyrql.core.plan.Plans.nodes(plan).stream().filter(type::isInstance).map(type::cast).toList();
+    }
+
+    @Test
+    void distinctOnNumbersTheRowsOfEachKeyInTheOrder() {
+        PlanNode plan = bind("SELECT DISTINCT ON (b) a, b FROM t ORDER BY b, e DESC");
+        assertEquals(2, plan.schema().size());
+        PlanNode.Window window = nodes(plan, PlanNode.Window.class).get(0);
+        assertEquals(List.of(1), window.partition());
+        assertEquals(List.of(PlanNode.SortKey.asc(1), PlanNode.SortKey.desc(2)), window.order());
+        assertEquals(PlanNode.WindowFunction.ROW_NUMBER, window.calls().get(0).function());
+        assertInstanceOf(PlanNode.Filter.class, nodes(plan, PlanNode.Sort.class).get(0).input());
+        assertEquals("Not supported: DISTINCT ON in a correlated subquery",
+                error("SELECT a FROM t WHERE EXISTS (SELECT DISTINCT ON (f) f FROM u WHERE u.a = t.a)").reason());
+    }
+
+    @Test
+    void anyAndAllAreJoinsAndRowsCompareByAllTheirValues() {
+        // An uncorrelated ordered comparison reads the counts and extremes of the subquery from one row.
+        PlanNode.Join single = nodes(bind("SELECT a > ANY (SELECT a FROM u) FROM t"), PlanNode.Join.class).get(0);
+        assertEquals(PlanNode.JoinType.SINGLE, single.type());
+        assertEquals(4, assertInstanceOf(PlanNode.Aggregate.class, single.right()).aggregates().size());
+        // = ANY is IN, <> ALL is NOT IN; a correlated comparison takes two MARK joins.
+        assertEquals(PlanNode.JoinType.SEMI, nodes(bind("SELECT a FROM t WHERE a = ANY (SELECT a FROM u)"),
+                PlanNode.Join.class).get(0).type());
+        List<PlanNode.Join> marks = nodes(bind("SELECT e < ALL (SELECT a FROM u WHERE u.f = t.b) FROM t"),
+                PlanNode.Join.class);
+        assertEquals(2, marks.size());
+        assertTrue(marks.stream().allMatch(j -> j.type() == PlanNode.JoinType.MARK && j.leftKeys().size() == 1
+                && j.condition() != null));
+        assertEquals(PlanNode.JoinType.ANTI, nodes(bind("SELECT a FROM t WHERE e < ALL (SELECT a FROM u"
+                + " WHERE u.f = t.b)"), PlanNode.Join.class).get(0).type());
+        // A row is a join on all its values.
+        PlanNode.Join semi = nodes(bind("SELECT a FROM t WHERE (a, b) IN (SELECT a, f FROM u)"),
+                PlanNode.Join.class).get(0);
+        assertEquals(PlanNode.JoinType.SEMI, semi.type());
+        assertEquals(2, semi.leftKeys().size());
+        PlanNode.Join mark = nodes(bind("SELECT (e, b) NOT IN (SELECT a, f FROM u) FROM t"), PlanNode.Join.class)
+                .get(0);
+        assertEquals(PlanNode.JoinType.MARK, mark.type());
+        assertEquals(List.of(0, 1), mark.rightKeys());
+        assertEquals("Subquery returns 1 columns - expected 2",
+                error("SELECT a FROM t WHERE (a, b) IN (SELECT a FROM u)").reason());
+        assertEquals("Correlated IN/ANY/ALL with multiple columns not yet supported",
+                error("SELECT a FROM t WHERE (a, b) IN (SELECT a, f FROM u WHERE u.a = t.a)").reason());
+        assertEquals("Not supported: row values", error("SELECT (a, b) FROM t").reason());
     }
 
     /** The common tables of a plan, from the outermost one on. */

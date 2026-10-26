@@ -20,19 +20,31 @@ import java.util.Objects;
 public sealed interface QueryBody {
 
     /**
-     * {@code SELECT [DISTINCT] items [FROM from] [WHERE where] [GROUP BY ...] [HAVING having]
-     * [WINDOW windows] [QUALIFY qualify]}; {@code from}, {@code where}, {@code groupBy},
-     * {@code having} and {@code qualify} are {@code null} when absent.
+     * {@code SELECT [DISTINCT [ON (distinctOn)]] items [FROM from] [WHERE where] [GROUP BY ...]
+     * [HAVING having] [WINDOW windows] [QUALIFY qualify]}; {@code from}, {@code where},
+     * {@code groupBy}, {@code having} and {@code qualify} are {@code null} when absent,
+     * {@code distinctOn} is empty, and with it {@code distinct} is false.
      */
     record Select(boolean distinct, List<SelectItem> items, FromItem from, SqlExpr where, GroupBy groupBy,
-            SqlExpr having, List<NamedWindow> windows, SqlExpr qualify, Position position) implements QueryBody {
+            SqlExpr having, List<NamedWindow> windows, SqlExpr qualify, List<SqlExpr> distinctOn, Position position)
+            implements QueryBody {
         public Select {
             items = List.copyOf(items);
             if (items.isEmpty()) {
                 throw new IllegalArgumentException("SELECT needs at least one item");
             }
             windows = List.copyOf(windows);
+            distinctOn = List.copyOf(distinctOn);
+            if (distinct && !distinctOn.isEmpty()) {
+                throw new IllegalArgumentException("DISTINCT ON is no DISTINCT");
+            }
             Objects.requireNonNull(position, "position");
+        }
+
+        /** A select without {@code DISTINCT ON}. */
+        public Select(boolean distinct, List<SelectItem> items, FromItem from, SqlExpr where, GroupBy groupBy,
+                SqlExpr having, List<NamedWindow> windows, SqlExpr qualify, Position position) {
+            this(distinct, items, from, where, groupBy, having, windows, qualify, List.of(), position);
         }
 
         /** A select without {@code WINDOW} and {@code QUALIFY}. */
@@ -54,13 +66,32 @@ public sealed interface QueryBody {
         }
     }
 
-    /** {@code GROUP BY expressions}, or {@code GROUP BY ALL} with no expressions. */
-    record GroupBy(boolean all, List<SqlExpr> expressions) {
+    /**
+     * {@code GROUP BY expressions}, {@code GROUP BY ALL} with no expressions,
+     * or grouping sets: each set the indexes of the expressions it groups by,
+     * none for the set of all rows, as {@code GROUPING SETS}, {@code ROLLUP},
+     * {@code CUBE} and {@code ()} give them; without sets, all expressions
+     * form the one set.
+     */
+    record GroupBy(boolean all, List<SqlExpr> expressions, List<List<Integer>> sets) {
         public GroupBy {
             expressions = List.copyOf(expressions);
-            if (all != expressions.isEmpty()) {
-                throw new IllegalArgumentException("GROUP BY needs either ALL or expressions");
+            sets = sets.stream().map(List::copyOf).toList();
+            if (all ? !expressions.isEmpty() || !sets.isEmpty() : expressions.isEmpty() && sets.isEmpty()) {
+                throw new IllegalArgumentException("GROUP BY needs either ALL, expressions or grouping sets");
             }
+            for (List<Integer> set : sets) {
+                for (int i : set) {
+                    if (i < 0 || i >= expressions.size()) {
+                        throw new IllegalArgumentException("No expression " + i + " to group by");
+                    }
+                }
+            }
+        }
+
+        /** {@code GROUP BY expressions}, or {@code GROUP BY ALL} with no expressions. */
+        public GroupBy(boolean all, List<SqlExpr> expressions) {
+            this(all, expressions, List.of());
         }
     }
 

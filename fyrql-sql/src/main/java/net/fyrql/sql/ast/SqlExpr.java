@@ -162,11 +162,41 @@ public sealed interface SqlExpr {
         }
     }
 
-    /** {@code value [NOT] IN (query)}, where the query returns one column. */
+    /**
+     * {@code value [NOT] IN (query)}, where the query returns one column, or
+     * as many as the value is a {@link Row} of.
+     */
     record InQuery(SqlExpr value, Query query, boolean negated, Position position) implements SqlExpr {
         public InQuery {
             Objects.requireNonNull(value, "value");
             Objects.requireNonNull(query, "query");
+            Objects.requireNonNull(position, "position");
+        }
+    }
+
+    /**
+     * {@code value op ANY (query)} or, when all, {@code value op ALL (query)},
+     * where the operator compares and the query returns one column;
+     * {@code SOME} is {@code ANY}.
+     */
+    record Quantified(BinaryOp op, SqlExpr value, Query query, boolean all, Position position) implements SqlExpr {
+        public Quantified {
+            Objects.requireNonNull(value, "value");
+            Objects.requireNonNull(query, "query");
+            Objects.requireNonNull(position, "position");
+            if (op.ordinal() < BinaryOp.EQUAL.ordinal() || op.ordinal() > BinaryOp.GREATER_EQUAL.ordinal()) {
+                throw new IllegalArgumentException("ANY and ALL with " + op);
+            }
+        }
+    }
+
+    /** A row of values, {@code (a, b, ...)}, as the value of {@code IN} and an element of its list. */
+    record Row(List<SqlExpr> values, Position position) implements SqlExpr {
+        public Row {
+            values = List.copyOf(values);
+            if (values.size() < 2) {
+                throw new IllegalArgumentException("A row has at least two values");
+            }
             Objects.requireNonNull(position, "position");
         }
     }
@@ -252,13 +282,14 @@ public sealed interface SqlExpr {
 
     /**
      * A call of a scalar or aggregate function by name: {@code f(args)},
-     * {@code f(DISTINCT args ORDER BY ...)}, or {@code f(*)} when star.
+     * {@code f(DISTINCT args ORDER BY ...)}, or {@code f(*)} when star, and
+     * {@code f(args) FILTER (WHERE filter)}; the filter may be {@code null}.
      * The special forms {@code EXTRACT}, {@code TRIM}, {@code SUBSTRING},
      * {@code POSITION}, {@code CURRENT_DATE} and so on are calls of the
      * functions of the same meaning.
      */
     record FunctionCall(String name, List<SqlExpr> arguments, boolean distinct, boolean star,
-            List<OrderItem> orderBy, Position position) implements SqlExpr {
+            List<OrderItem> orderBy, SqlExpr filter, Position position) implements SqlExpr {
         public FunctionCall {
             Objects.requireNonNull(name, "name");
             arguments = List.copyOf(arguments);
@@ -274,21 +305,36 @@ public sealed interface SqlExpr {
             Objects.requireNonNull(position, "position");
         }
 
-        /** A call without {@code DISTINCT}, {@code *} and {@code ORDER BY}. */
+        /** A call without a filter. */
+        public FunctionCall(String name, List<SqlExpr> arguments, boolean distinct, boolean star,
+                List<OrderItem> orderBy, Position position) {
+            this(name, arguments, distinct, star, orderBy, null, position);
+        }
+
+        /** A call without {@code DISTINCT}, {@code *}, {@code ORDER BY} and a filter. */
         public FunctionCall(String name, List<SqlExpr> arguments, Position position) {
-            this(name, arguments, false, false, List.of(), position);
+            this(name, arguments, false, false, List.of(), null, position);
+        }
+
+        /** Returns the same call with another filter, {@code null} for none. */
+        public FunctionCall withFilter(SqlExpr newFilter) {
+            return new FunctionCall(name, arguments, distinct, star, orderBy, newFilter, position);
         }
     }
 
     /**
      * A call of a window function or of an aggregate over a window:
      * {@code f(args [IGNORE NULLS]) [FILTER (WHERE filter)] OVER window}.
-     * The filter may be {@code null}.
+     * The filter may be {@code null}; it is that of the window function,
+     * not of its call, which has none.
      */
     record Window(FunctionCall call, WindowSpec over, boolean ignoreNulls, SqlExpr filter, Position position)
             implements SqlExpr {
         public Window {
             Objects.requireNonNull(call, "call");
+            if (call.filter() != null) {
+                throw new IllegalArgumentException("The filter of a window function belongs to the window");
+            }
             Objects.requireNonNull(over, "over");
             Objects.requireNonNull(position, "position");
         }

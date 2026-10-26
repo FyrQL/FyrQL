@@ -356,6 +356,9 @@ public final class SqlRenderer {
                 orderKeys.add(dialect.orderKey(columns.apply(k.column()), k.ascending(), k.nullsFirst()));
             }
             String rendered = dialect.aggregate(call.function(), call.distinct(), argument, separator, orderKeys);
+            if (call.filter() >= 0) {
+                rendered = dialect.filtered(rendered, columns.apply(call.filter()));
+            }
             if (call.function() == PlanNode.AggregateFunction.SUM && call.type(input) == DataType.HUGEINT) {
                 rendered = dialect.cast(rendered, DataType.HUGEINT, false);
             }
@@ -426,6 +429,9 @@ public final class SqlRenderer {
                 orderKeys.add(orderKey(k, t));
             }
             String rendered = dialect.aggregate(call.function(), call.distinct(), argument, separator, orderKeys);
+            if (call.filter() >= 0) {
+                rendered = dialect.filtered(rendered, t + "." + column(call.filter()));
+            }
             if (call.function() == PlanNode.AggregateFunction.SUM && call.type(a.input().schema()) == DataType.HUGEINT) {
                 rendered = dialect.cast(rendered, DataType.HUGEINT, false);
             }

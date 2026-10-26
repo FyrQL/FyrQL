@@ -131,12 +131,11 @@ final class ScanPushdown {
             List<SortKey> order = List.of();
             OptionalLong limitRows = OptionalLong.empty();
             if (aggregate != null) {
-                if (columnsOnly) {
+                // No source is offered an aggregate that takes only some rows.
+                if (columnsOnly && aggregate.aggregates().stream().allMatch(call -> call.filter() < 0)) {
                     List<AggregateCall> calls = new ArrayList<>();
                     for (AggregateCall call : aggregate.aggregates()) {
-                        calls.add(new AggregateCall(call.function(),
-                                call.column() < 0 ? -1 : mapping[call.column()], call.distinct(), call.name(),
-                                call.separator(), remapKeys(call.orderBy(), mapping)));
+                        calls.add(call.remap(c -> mapping[c]));
                     }
                     aggregation = Optional.of(new Aggregation(remap(aggregate.groupColumns(), mapping), calls));
                 }

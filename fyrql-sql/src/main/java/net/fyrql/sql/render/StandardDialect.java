@@ -330,8 +330,8 @@ abstract class StandardDialect implements Dialect {
      * {@code min} and {@code max} of integers, decimals, dates and
      * timestamps the dialect orders as FyrQL does, and {@code sum} of
      * integers where the dialect {@linkplain #sumsIntegers sums them};
-     * nothing {@code DISTINCT}, and not an aggregation without groups and
-     * calls, which has no flat statement.
+     * nothing {@code DISTINCT} or filtered, and not an aggregation without
+     * groups and calls, which has no flat statement.
      */
     @Override
     public boolean supportsAggregation(PlanNode.Aggregation aggregation, Schema schema) {
@@ -344,7 +344,8 @@ abstract class StandardDialect implements Dialect {
             }
         }
         for (PlanNode.AggregateCall call : aggregation.calls()) {
-            if (call.distinct() || !call.orderBy().isEmpty() || !aggregatesExactly(call, schema)) {
+            if (call.distinct() || !call.orderBy().isEmpty() || call.filter() >= 0
+                    || !aggregatesExactly(call, schema)) {
                 return false;
             }
         }

@@ -319,6 +319,21 @@ final class SqlGenerator {
                 return new Relation(new FromItem.Subquery(inner, new FromItem.Alias(alias, columnNames), P), renamed);
             }
         }
+        if (kind < 41) {
+            // A series of a few numbers, its column named after the function or by the alias.
+            String function = chance(50) ? "range" : "generate_series";
+            long start = random.nextInt(4);
+            List<SqlExpr> arguments = new ArrayList<>(List.of(number(start), number(start + random.nextInt(6))));
+            if (chance(30)) {
+                arguments.add(number(1 + random.nextInt(2)));
+            }
+            String alias = chance(50) ? "r" + names++ : null;
+            String column = alias != null && chance(50) ? "i" : function;
+            FromItem.Alias spelled = alias == null ? null
+                    : new FromItem.Alias(alias, column.equals(function) ? List.of() : List.of(column));
+            return new Relation(new FromItem.TableFunctionCall(function, arguments, Map.of(), spelled, P),
+                    List.of(new Column(alias != null ? alias : function, column, DataType.BIGINT)));
+        }
         String table = pick(new ArrayList<>(tables.keySet()));
         String alias = chance(50) ? (chance(20) ? "T" : "t") + names++ : null;
         String spelled = chance(15) ? table.toUpperCase(Locale.ROOT) : table;
@@ -570,6 +585,13 @@ final class SqlGenerator {
                     positions.add(number(i + 1));
                 }
                 groupBy = new QueryBody.GroupBy(false, positions);
+            } else if (form >= 85) {
+                groupBy = new QueryBody.GroupBy(false, groups, groupingSets(groups.size()));
+                if (chance(30)) {
+                    items.add(new SelectItem.ExpressionItem(new SqlExpr.FunctionCall(chance(70) ? "grouping"
+                            : "grouping_id", groups, P), named || chance(30) ? "g" + names++ : null));
+                    aliases.add(null);
+                }
             } else if (form < 70 && aliases.subList(0, groups.size()).stream().allMatch(a -> a != null)) {
                 List<SqlExpr> byAlias = new ArrayList<>();
                 for (int i = 0; i < groups.size(); i++) {
@@ -602,6 +624,26 @@ final class SqlGenerator {
         }
         QueryBody.Select body = new QueryBody.Select(chance(5), items, from.item(), where, groupBy, having, P);
         return new Select(body, items.size(), aliases);
+    }
+
+    /** The sets of ROLLUP, of CUBE, or of some of the subsets, over a number of groups. */
+    private List<List<Integer>> groupingSets(int n) {
+        List<List<Integer>> sets = new ArrayList<>();
+        int form = random.nextInt(3);
+        for (int mask = (1 << n) - 1; mask >= 0; mask--) {
+            List<Integer> set = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                if ((mask & (1 << (n - 1 - i))) != 0) {
+                    set.add(i);
+                }
+            }
+            // ROLLUP keeps the prefixes, CUBE every subset, GROUPING SETS some.
+            boolean prefix = set.equals(java.util.stream.IntStream.range(0, set.size()).boxed().toList());
+            if (form == 0 ? prefix : form == 1 || chance(60)) {
+                sets.add(set);
+            }
+        }
+        return sets.isEmpty() ? List.of(List.of()) : sets;
     }
 
     // ------------------------------------------------------------ partitions
@@ -797,8 +839,16 @@ final class SqlGenerator {
         return new SqlExpr.FunctionCall("count", List.of(), false, true, List.of(), P);
     }
 
-    /** An aggregate over a generated argument of a type it takes, ordered by it where the order matters. */
+    /**
+     * An aggregate over a generated argument of a type it takes, ordered by it where the order matters, now and
+     * then with a filter.
+     */
     private SqlExpr aggregateCall(ExpressionGenerator g, SqlText text) {
+        SqlExpr.FunctionCall call = unfilteredCall(g, text);
+        return chance(20) ? call.withFilter(text.of(g.condition(1))) : call;
+    }
+
+    private SqlExpr.FunctionCall unfilteredCall(ExpressionGenerator g, SqlText text) {
         for (int attempt = 0; attempt < 20; attempt++) {
             Expression argument = chance(60) ? g.leaf() : g.any(2);
             DataType t = argument.type();
@@ -1236,10 +1286,20 @@ final class SqlGenerator {
         }
         Column c = pick(inner.columns());
         SqlExpr value = text.of(g.like(c.type(), 1));
+        if (form < 60 && chance(15) && inner.columns().size() > 1) {
+            // A row of two values; DuckDB compares no row with a correlated subquery.
+            Column d = pick(inner.columns());
+            Query q = Query.of(new QueryBody.Select(chance(20), List.of(new SelectItem.ExpressionItem(qualified(c),
+                    null), new SelectItem.ExpressionItem(qualified(d), null)), inner.item(),
+                    innerWhere(inner, List.of(), false), null, null, P));
+            return new SqlExpr.InQuery(new SqlExpr.Row(List.of(value, text.of(g.like(d.type(), 1))), P), q,
+                    chance(40), P);
+        }
         if (form < 60) {
             Query q = Query.of(new QueryBody.Select(chance(20), List.of(new SelectItem.ExpressionItem(qualified(c),
                     null)), inner.item(), innerWhere(inner, outer, false), null, null, P));
-            return new SqlExpr.InQuery(value, q, chance(40), P);
+            return chance(25) ? new SqlExpr.Quantified(comparison(), value, q, chance(40), P)
+                    : new SqlExpr.InQuery(value, q, chance(40), P);
         }
         // A LIMIT keeps the subquery uncorrelated, and the order of the only column makes the first row unique.
         Query first = new Query(List.of(), new QueryBody.Select(false, List.of(new SelectItem.ExpressionItem(

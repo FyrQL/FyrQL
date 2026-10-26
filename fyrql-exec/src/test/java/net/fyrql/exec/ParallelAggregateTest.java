@@ -212,12 +212,19 @@ class ParallelAggregateTest {
                     call = random.nextBoolean() ? new AggregateCall(function, column, true, "a" + k)
                             : new AggregateCall(AggregateFunction.FIRST, column, false, "a" + k);
                 }
+                if (random.nextInt(4) == 0) {
+                    // The first value column is a BOOLEAN.
+                    call = call.withFilter(KEYS);
+                }
                 try {
                     call.check(SCHEMA);
                 } catch (IllegalArgumentException e) {
                     continue;
                 }
                 calls.add(call);
+            }
+            if (random.nextBoolean()) {
+                calls.add(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "nf").withFilter(KEYS));
             }
             PlanNode input = random.nextBoolean() ? scan
                     : new PlanNode.Filter(scan, gt(col(SCHEMA, 2), lit(0L)));
@@ -250,6 +257,33 @@ class ParallelAggregateTest {
         assertTrue(failures > 0, "no round failed");
         assertTrue(rawRounds > 0, "no round kept rows as they are");
         assertEquals(0, source.open.get(), "every reader is closed");
+    }
+
+    @Test
+    void anAggregateWithAFilterTakesTheRowsAFilterBelowTakes() {
+        SplittableRandom random = new SplittableRandom(20261026);
+        for (int round = 0; round < 60; round++) {
+            List<Object[]> rows = rows(random, random.nextInt(400));
+            PlanNode.Scan scan = source.table("f" + round, SCHEMA, rows, splits(random, rows.size()));
+            List<AggregateCall> plain = new ArrayList<>();
+            plain.add(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"));
+            for (int c = KEYS; c < SCHEMA.size(); c++) {
+                for (AggregateFunction function : List.of(AggregateFunction.COUNT, AggregateFunction.MIN,
+                        AggregateFunction.MAX, AggregateFunction.LIST, AggregateFunction.FIRST)) {
+                    plain.add(new AggregateCall(function, c, false, function + "" + c));
+                }
+                if (SCHEMA.type(c).isIntegral() || SCHEMA.type(c) instanceof DataType.Decimal) {
+                    plain.add(new AggregateCall(AggregateFunction.SUM, c, random.nextBoolean(), "s" + c));
+                }
+            }
+            List<AggregateCall> filtered = plain.stream().map(c -> c.withFilter(KEYS)).toList();
+            PlanNode below = new PlanNode.Aggregate(new PlanNode.Filter(scan, col(SCHEMA, KEYS)), List.of(), plain);
+            PlanNode inside = new PlanNode.Aggregate(scan, List.of(), filtered);
+            Object expected = run(below, 1, true, EXACT);
+            for (int threads : new int[] {1, 4}) {
+                assertSame(expected, run(inside, threads, true, EXACT), "round " + round + ", " + threads + " threads");
+            }
+        }
     }
 
     private static List<String> sorted(List<?> rows) {

@@ -48,6 +48,8 @@ final class SqlTrees {
                 yield result;
             }
             case SqlExpr.InQuery i -> List.of(i.value());
+            case SqlExpr.Quantified q -> List.of(q.value());
+            case SqlExpr.Row r -> r.values();
             case SqlExpr.Exists x -> List.of();
             case SqlExpr.ScalarSubquery s -> List.of();
             case SqlExpr.Like l -> List.of(l.value(), l.pattern());
@@ -72,6 +74,9 @@ final class SqlTrees {
                 List<SqlExpr> result = new ArrayList<>(f.arguments());
                 for (OrderItem o : f.orderBy()) {
                     result.add(o.expression());
+                }
+                if (f.filter() != null) {
+                    result.add(f.filter());
                 }
                 yield result;
             }
@@ -112,7 +117,8 @@ final class SqlTrees {
 
     /** Tells whether an expression contains a subquery. */
     static boolean containsSubquery(SqlExpr e) {
-        if (e instanceof SqlExpr.Exists || e instanceof SqlExpr.InQuery || e instanceof SqlExpr.ScalarSubquery) {
+        if (e instanceof SqlExpr.Exists || e instanceof SqlExpr.InQuery || e instanceof SqlExpr.ScalarSubquery
+                || e instanceof SqlExpr.Quantified) {
             return true;
         }
         for (SqlExpr c : children(e)) {

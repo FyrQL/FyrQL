@@ -141,8 +141,11 @@ final class ExpressionBinder {
         /** The value of {@code [NOT] EXISTS}. */
         Expression exists(SqlExpr.Exists e);
 
-        /** The value of {@code [NOT] IN} with a subquery, given its bound left side. */
-        Expression in(SqlExpr.InQuery e, Bound value, ExpressionBinder binder);
+        /** The value of {@code [NOT] IN} with a subquery, given its bound left side, one value or those of a row. */
+        Expression in(SqlExpr.InQuery e, List<Bound> values, ExpressionBinder binder);
+
+        /** The value of {@code op ANY} or {@code op ALL} with a subquery, given its bound left side. */
+        Expression quantified(SqlExpr.Quantified e, Bound value, ExpressionBinder binder);
 
         /** The value of a scalar subquery. */
         Expression scalar(SqlExpr.ScalarSubquery e);
@@ -220,7 +223,9 @@ final class ExpressionBinder {
             case SqlExpr.Unary u -> unary(u);
             case SqlExpr.Between b -> between(b);
             case SqlExpr.InList i -> in(i);
-            case SqlExpr.InQuery i -> Bound.typed(subqueries(i).in(i, bound(i.value()), this));
+            case SqlExpr.InQuery i -> Bound.typed(subqueries(i).in(i, values(i.value()), this));
+            case SqlExpr.Quantified q -> Bound.typed(subqueries(q).quantified(q, bound(q.value()), this));
+            case SqlExpr.Row r -> throw new SqlException("Not supported: row values", r.position());
             case SqlExpr.Exists x -> Bound.typed(subqueries(x).exists(x));
             case SqlExpr.ScalarSubquery s -> Bound.typed(subqueries(s).scalar(s));
             case SqlExpr.Like l -> like(l);
@@ -810,7 +815,45 @@ final class ExpressionBinder {
         return Bound.typed(b.negated() ? new Expression.Not(between) : between);
     }
 
+    /** The bound values of the left side of {@code IN}: one, or those of a row. */
+    List<Bound> values(SqlExpr e) {
+        List<Bound> result = new ArrayList<>();
+        for (SqlExpr v : e instanceof SqlExpr.Row r ? r.values() : List.of(e)) {
+            result.add(bound(v));
+        }
+        return result;
+    }
+
+    /**
+     * {@code (a, b) [NOT] IN ((x, y), ...)}: as in DuckDB, which compares
+     * rows as structs, true if a row of the list is not distinct from the
+     * value in each place, compared as by {@code =}; never {@code NULL}.
+     */
+    private Bound rowIn(SqlExpr.InList in, SqlExpr.Row value) {
+        Expression result = null;
+        for (SqlExpr e : in.list()) {
+            if (!(e instanceof SqlExpr.Row row)) {
+                throw new SqlException("Cannot compare a row with a value that is not a row in IN", e.position());
+            }
+            if (row.values().size() != value.values().size()) {
+                throw new SqlException("Cannot cast STRUCTs of different size", e.position());
+            }
+            Expression same = null;
+            for (int i = 0; i < row.values().size(); i++) {
+                Expression[] operands = equality(bound(value.values().get(i)), bound(row.values().get(i)),
+                        in.position());
+                Expression equal = new Expression.IsDistinct(operands[0], operands[1], true);
+                same = same == null ? equal : new Expression.And(same, equal);
+            }
+            result = result == null ? same : new Expression.Or(result, same);
+        }
+        return Bound.typed(in.negated() ? new Expression.Not(result) : result);
+    }
+
     private Bound in(SqlExpr.InList in) {
+        if (in.value() instanceof SqlExpr.Row row) {
+            return rowIn(in, row);
+        }
         List<Bound> operands = new ArrayList<>();
         operands.add(bound(in.value()));
         for (SqlExpr e : in.list()) {
@@ -1161,6 +1204,12 @@ final class ExpressionBinder {
         return new Expression.Cast(b.expression(), DataType.BOOLEAN);
     }
 
+    /** DuckDB's message for a filter on a call of a function that is no aggregate. */
+    static String scalarFilter(String name) {
+        return "Function \"" + name + "\" is a Scalar Function. \"DISTINCT\", \"FILTER\", and \"ORDER BY\" are only"
+                + " applicable to aggregate functions.";
+    }
+
     private Bound call(SqlExpr.FunctionCall f) {
         String name = SqlTrees.key(f.name());
         Position p = f.position();
@@ -1171,6 +1220,9 @@ final class ExpressionBinder {
         if (name.equals("unnest")) {
             // The select list unnests through its hook; anywhere else is no place for it.
             throw new SqlException("UNNEST not supported here", p);
+        }
+        if (f.filter() != null) {
+            throw new SqlException(scalarFilter(name), p);
         }
         if (f.distinct() || f.star() || !f.orderBy().isEmpty()) {
             throw new SqlException("Not supported: " + (f.star() ? "*" : f.distinct() ? "DISTINCT" : "ORDER BY")

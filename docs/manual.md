@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.17.5 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.18.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it runs
 queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -498,7 +498,7 @@ database takes over depends on how it compares and orders values:
 | `count(*)` and `count` of any column | yes | yes | yes | yes |
 | `min`, `max` on the integers, decimals, dates and times compared above | yes | integers | yes | yes |
 | `sum` on integers | yes | no | yes | yes |
-| `avg`, `DISTINCT`, other aggregates, or over `FLOAT` and `DOUBLE` | no | no | no | no |
+| `avg`, `DISTINCT`, `FILTER`, other aggregates, or over `FLOAT` and `DOUBLE` | no | no | no | no |
 
 SQLite stores decimals, dates and timestamps as numbers or text; H2 orders strings by
 their UTF-16 units and PostgreSQL by the collation of the database, where FyrQL orders
@@ -1500,7 +1500,9 @@ of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHO
 
 - `SELECT [DISTINCT]` with `*`, `t.*`, `* EXCLUDE (...)` and `* REPLACE (...)`; an alias
   of the select list can be used by later items, in `WHERE`, `GROUP BY`, `HAVING` and
-  `ORDER BY`.
+  `ORDER BY`. `SELECT DISTINCT ON (a, b) ...` keeps the first row of each value of its
+  expressions in the order of `ORDER BY`, after `QUALIFY`, and without `ORDER BY` any one
+  of them, as in DuckDB.
 - `FROM` with tables, subqueries, `VALUES`, the table functions `read_csv`,
   `read_csv_auto`, `read_json`, `read_json_auto`, `read_ndjson`, `read_ndjson_auto`,
   `read_parquet`, `parquet_scan`, `iceberg_scan`, `read_iceberg`,
@@ -1512,18 +1514,30 @@ of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHO
 - `WHERE`, `GROUP BY` with expressions, positions, aliases and `ALL`, `HAVING`, `ORDER BY`
   with expressions, positions, aliases and `ALL`, `ASC`/`DESC`, `NULLS FIRST`/`LAST`,
   `LIMIT` and `OFFSET`.
+- Grouping sets: `GROUP BY GROUPING SETS ((a, b), (a), ())`, `ROLLUP (a, b)`,
+  `CUBE (a, b)` and `GROUP BY ()`, also side by side, as in `GROUP BY a, ROLLUP (b, c)`,
+  which combines the sets of the items as their cross product; a set comes as often as it
+  is written, as in DuckDB. A group that a set leaves out is `NULL` in its rows, and
+  `grouping(a, b)` (or `grouping_id`) gives the bits of the groups the set leaves out, the
+  first argument the highest. The aggregation is the union of one per set; the rows they
+  read run once as a common table if they compute something, see [Optimizer](#optimizer),
+  and are read for each set otherwise.
 - Subqueries in `WHERE`, `HAVING` and the select list: `[NOT] EXISTS (...)`,
-  `x [NOT] IN (SELECT ...)` with `NULL`s as in DuckDB, and scalar subqueries, which are
-  `NULL` without a row and fail with `More than one row returned by a subquery used as
-  an expression` with more than one. A subquery may reference the columns of the query
-  around it in its `WHERE`, as TPC-H Q2, Q4, Q17, Q20, Q21 and Q22 do; one that
-  aggregates, only through equalities, and its `count` is 0 for a row it finds nothing
-  for.
+  `x [NOT] IN (SELECT ...)` with `NULL`s as in DuckDB, `x op ANY (SELECT ...)`, `SOME`
+  and `ALL` with any comparison, a row `(a, b) [NOT] IN (SELECT ...)`, which is `NULL`
+  when no row matches and a value of either side is `NULL`, as in DuckDB, and scalar
+  subqueries, which are `NULL` without a row and fail with `More than one row returned by
+  a subquery used as an expression` with more than one. A subquery may reference the
+  columns of the query around it in its `WHERE`, as TPC-H Q2, Q4, Q17, Q20, Q21 and Q22
+  do; one that aggregates, only through equalities, and its `count` is 0 for a row it
+  finds nothing for.
 - `UNION [ALL]`, `EXCEPT [ALL]`, `INTERSECT [ALL]`, `WITH`, also with `AS MATERIALIZED`
   and `AS NOT MATERIALIZED`; a common table read more than once runs once, see
   [Optimizer](#optimizer).
 - Expressions: arithmetic with `+ - * / % //`, comparisons, `AND`, `OR`, `NOT`, `BETWEEN`,
-  `IN (...)`, `LIKE`, `ILIKE`, `IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`, `CASE`, `CAST`,
+  `IN (...)`, also of rows as in `(a, b) IN ((1, 'x'), (2, 'y'))`, which compares them as
+  structs with `NULL` equal to `NULL`, as DuckDB does, `LIKE`, `ILIKE`, `IS [NOT] NULL`,
+  `IS [NOT] DISTINCT FROM`, `CASE`, `CAST`,
   `TRY_CAST`, `::`, `||` of strings and of lists, `~` and `!~`, which match the whole
   string with a regular expression as `regexp_full_match` does, `EXTRACT(... FROM ...)`,
   `AT TIME ZONE`; strings `E'...'` with the escapes of PostgreSQL after a backslash, such
@@ -1553,7 +1567,9 @@ of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHO
   `unnest(s)` of a struct becomes one column per field. In `FROM`,
   `FROM t, unnest(t.tags) AS u(tag)` (also with `LATERAL`, `CROSS JOIN` or
   `JOIN ... ON`) reads the items before it, and `FROM unnest([1, 2]) AS u(x)` stands
-  alone.
+  alone. So do `range` and `generate_series` in `FROM`, as in `FROM range(10)`,
+  `FROM generate_series(1, 3) AS g(i)` or `FROM t, range(t.n)`: a table of one column,
+  named after the function, of the values of the function of the same name.
 - Scalar functions: `coalesce`, `ifnull`, `nullif`, `if`, `greatest`, `least`, `typeof`;
   `abs`, `ceil`, `floor`, `trunc`, `round`, `sign`, `sqrt`, `ln`, `log10`, `log`, `log2`,
   `exp`, `power`, `pi`, `random`; `length`, `lower`, `upper`, `substring`, `trim`,
@@ -1568,13 +1584,16 @@ of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHO
   `make_timestamptz`, `to_timestamp`, `to_years` to `to_microseconds`, `timezone`,
   `strftime` (with `%z` and `%Z`), `strptime`, `try_strptime`; `list_value`,
   `list_extract`, `len`, `array_length`, `list_contains`, `list_sort`,
-  `list_reverse_sort`, `list_concat`, `array_to_string`, `generate_series`, `range`,
+  `list_reverse_sort`, `list_concat`, `array_to_string`, `generate_series` and `range`
+  (also of timestamps, and of dates as timestamps, with an interval as the step),
   `map`, `map_extract`, `map_extract_value`, `struct_extract`, `struct_pack`;
   `current_database`, `current_catalog`, `current_schema` and `version`; and DuckDB's
   aliases of these names. A function may be named with the qualifier `main.`, as in
   `main.lower(x)`.
 - Aggregates: `count`, `sum`, `avg`, `min`, `max`, `string_agg`, `list`, `first`, `last`,
-  `any_value`, `bool_and`, `bool_or`, with `DISTINCT` and `ORDER BY` in the call.
+  `any_value`, `bool_and`, `bool_or`, with `DISTINCT` and `ORDER BY` in the call, and
+  `FILTER (WHERE ...)` after it, which takes only the rows where its condition is true:
+  `count(*) FILTER (WHERE x > 1)` is 0 and any other aggregate `NULL` for none.
 - Window functions: `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`,
   `ntile`, `lag` and `lead` with an offset and a default, `first_value`, `last_value`,
   `nth_value`, and the aggregates above, also with `DISTINCT`, `ORDER BY` and
@@ -1634,20 +1653,26 @@ ORDER BY c.region
 with the rows `[north, 1]` and `[south, 2]`.
 
 *Not yet supported*: the type `TIME WITH TIME ZONE` (`TIMETZ`), an offset of a `RANGE`
-frame over a `TIME`, and one of days, months or years over a `TIMESTAMPTZ`, `PIVOT`, `SEMI JOIN` and `ANTI JOIN` in SQL,
-lambdas, slices such as `l[1:2]`, structs without names
-(`row(1, 'a')`), arrays of a fixed size (`INTEGER[3]`), and `WITH RECURSIVE`. Of the
-subqueries: those in `ORDER BY`, `GROUP BY`, `ON` and the arguments of aggregates;
-`ANY` and `ALL`; `IN` over more than one column. Of the correlated ones: a reference
-to the outer query outside the `WHERE` of the subquery or more than one level out; a
-condition that references the outer query and holds a subquery, or an `IN` whose value
-does; a correlated condition of an aggregating subquery that is not an equality;
-`EXISTS` and `IN` over a subquery that aggregates without `GROUP BY`; `LIMIT`, `OFFSET`,
-and `HAVING` without `GROUP BY`; `DISTINCT` in a scalar subquery. Of the window
-functions: `FILTER` without `OVER`, `WITHIN GROUP`, a window that adds to a named one,
-as in `OVER (w ORDER BY a)`, offsets of a frame that are no constants or `NULL`, an order
-in the arguments of a function that is no aggregate, as in `lag(a ORDER BY b)`, window
-functions in a correlated subquery, and subqueries or `unnest` inside window functions.
+frame over a `TIME`, and one of days, months or years over a `TIMESTAMPTZ`, `PIVOT`,
+`SEMI JOIN` and `ANTI JOIN` in SQL, lambdas, slices such as `l[1:2]`, structs without
+names (`row(1, 'a')`), a row outside `IN`, as in `(a, b) = (SELECT ...)` or
+`(a, b) = ANY (...)`, `x = ANY ([1, 2])` over a list, arrays of a fixed size
+(`INTEGER[3]`), series of `TIMESTAMPTZ`s, and `WITH RECURSIVE`. Of `GROUP BY`: items
+before `GROUPING SETS`, as in `GROUP BY a, GROUPING SETS ((b), ())`, which JSqlParser
+does not read, and `ROLLUP ((a, b))` with a single item in parentheses, which it reads as
+`ROLLUP (a, b)`. `FILTER (x > 1)` without `WHERE` is a syntax error. Of the subqueries:
+those in `ORDER BY`, `GROUP BY`, `ON` and the arguments of aggregates. Of the correlated
+ones: a reference to the outer query outside the `WHERE` of the subquery or more than
+one level out; a condition that references the outer query and holds a subquery, or an
+`IN` whose value does; a correlated condition of an aggregating subquery that is not an
+equality; `EXISTS` and `IN` over a subquery that aggregates without `GROUP BY`; `LIMIT`,
+`OFFSET`, and `HAVING` without `GROUP BY`; `DISTINCT` in a scalar subquery; `DISTINCT ON`,
+grouping sets and `grouping`; a row with `IN`, which DuckDB does not take either. Of the
+window functions: `WITHIN GROUP`, a window that adds to a named one, as in
+`OVER (w ORDER BY a)`, offsets of a frame that are no constants or `NULL`, an order in
+the arguments of a function that is no aggregate, as in `lag(a ORDER BY b)`, window
+functions in a correlated subquery, and subqueries or `unnest` inside window
+functions.
 
 ### Time zone
 
@@ -1765,7 +1790,10 @@ here; the random tests explain such differences by a ledger of their own, see
   `NULL`, unlike for the same `EXISTS` as a condition of `WHERE`; FyrQL finds none.
 - A select list unnests one list, which may appear in several items; DuckDB unnests
   several lists side by side. `unnest` in a `LEFT JOIN`, with named arguments such as
-  `recursive := true`, and of a struct that only an aggregate gives are not taken.
+  `recursive := true`, and of a struct that only an aggregate gives are not taken, and
+  neither are `range` and `generate_series` in a `LEFT JOIN`.
+- A series of `range` or `generate_series` in `FROM` is computed as one list before its
+  rows come, of at most 2,147,483,631 values; DuckDB gives them as they come.
 - A parameter `?` gets its type from its context when the query is prepared, as a bare
   `NULL` would; as the argument of a function, that is the first type the function takes
   of `BIGINT`, `DOUBLE`, `INTEGER` and so on, where DuckDB may choose another, and alone
@@ -1774,7 +1802,8 @@ here; the random tests explain such differences by a ledger of their own, see
   RE2: the syntax is mostly the same, but Java also takes back references and
   lookaround, which RE2 refuses, and a pattern may take more than linear time. Their
   options are those of DuckDB, `c`, `i`, `l`, `s`, `m`, `n` and `p`, and `g` for
-  `regexp_replace`; they and the group of `regexp_extract` are constants, as in DuckDB.
+  `regexp_replace`; they and the group of `regexp_extract`, from 0 to 9, are constants,
+  as in DuckDB.
 - `list_concat()` without arguments is an error; DuckDB gives `NULL`.
 - `version()` gives `FyrQL` and its version, DuckDB its own version. `current_database()`
   and `current_schema()` give the source and the schema of the search path of the
@@ -1906,7 +1935,9 @@ each read instead, so that every read keeps its own filters in the source.
 puts it in place of each read. A common table of a subquery in an expression, such as in
 `EXISTS (WITH ... SELECT ...)`, always takes the place of its reads. The optimizer moves no
 condition of a read into the definition, and the definition keeps the columns that any
-of the reads uses.
+of the reads uses. The rows that the aggregations of grouping sets read follow the same
+rule: if they compute something, they run once as a common table `#groupingsets`;
+otherwise each set reads them from the source, which may then aggregate it.
 
 Before a plan runs, the module `fyrql-optimizer` rewrites it in these steps; each step
 keeps the rows of the plan, and a second run changes nothing:

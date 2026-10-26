@@ -110,6 +110,12 @@ class SqlRendererTest {
         assertEquals("SELECT CAST(sum(t0.c0) AS HUGEINT) AS c0 FROM (SELECT \"id\" AS c0 FROM csv_main_customers) t0",
                 render(new PlanNode.Aggregate(new PlanNode.Scan(TableRef.of("csv", "customers"), customers, List.of(0)),
                         List.of(), List.of(new AggregateCall(AggregateFunction.SUM, 0, false, "s")))));
+        // A call with a filter takes it after the call.
+        Schema flags = Schema.of(new Schema.Field("id", DataType.INTEGER), new Schema.Field("ok", DataType.BOOLEAN));
+        assertEquals("SELECT count(*) FILTER (WHERE t0.c1) AS c0 FROM (SELECT \"id\" AS c0, \"ok\" AS c1 FROM"
+                + " mem_main_flags) t0", render(new PlanNode.Aggregate(PlanNode.Scan.all(TableRef.of("mem", "flags"),
+                        flags), List.of(), List.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n")
+                                .withFilter(1)))));
         PlanNode values = new PlanNode.Values(customers, List.of(new Object[] {1, "x"}, new Object[] {null, null}));
         assertEquals("SELECT t0.c0 AS c0, t0.c1 AS c1 FROM (VALUES (CAST(1 AS INTEGER), 'x'), "
                 + "(CAST(NULL AS INTEGER), CAST(NULL AS VARCHAR))) t0(c0, c1)", render(values));

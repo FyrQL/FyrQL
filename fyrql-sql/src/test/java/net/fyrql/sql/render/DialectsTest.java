@@ -392,7 +392,8 @@ class DialectsTest {
                 aggregation(List.of(), new AggregateCall(AggregateFunction.AVG, 0, false, "m")),
                 aggregation(List.of(), new AggregateCall(AggregateFunction.SUM, 1, false, "m")),
                 aggregation(List.of(), new AggregateCall(AggregateFunction.COUNT, 0, true, "m")),
-                aggregation(List.of(), new AggregateCall(AggregateFunction.STRING_AGG, 2, false, "m")));
+                aggregation(List.of(), new AggregateCall(AggregateFunction.STRING_AGG, 2, false, "m")),
+                aggregation(List.of(0), new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n").withFilter(3)));
 
         for (Dialect d : ALL) {
             boolean duck = d == DuckDbDialect.INSTANCE;

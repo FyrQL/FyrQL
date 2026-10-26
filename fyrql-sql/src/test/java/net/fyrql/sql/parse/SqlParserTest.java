@@ -494,9 +494,63 @@ class SqlParserTest {
     }
 
     @Test
+    void aggregatesTakeAFilter() {
+        assertEquals("SELECT sum(a) FILTER (WHERE (a > 1)), count(*) FILTER (WHERE b),"
+                + " string_agg(DISTINCT a, ',' ORDER BY a ASC NULLS LAST) FILTER (WHERE (a IS NOT NULL)) FROM t",
+                print("select sum(a) filter (where a > 1), count(*) filter (where b),"
+                        + " string_agg(distinct a, ',' order by a) filter (where a is not null) from t"));
+        String printed = "SELECT g, count(*) FILTER (WHERE (x = 1)) FROM t GROUP BY g"
+                + " HAVING (sum(x) FILTER (WHERE x) > 1)";
+        assertEquals(printed, print(printed));
+        SqlExpr.FunctionCall f = (SqlExpr.FunctionCall) items("SELECT max(a) FILTER (WHERE b) FROM t").get(0);
+        assertEquals(new Position(1, 29), f.filter().position());
+    }
+
+    @Test
+    void distinctOnAnyAllAndRowsInIn() {
+        assertEquals("SELECT DISTINCT ON (b, (a + 1)) a, b FROM t ORDER BY b ASC NULLS LAST",
+                print("select distinct on (b, a + 1) a, b from t order by b"));
+        assertEquals(List.of(), select("SELECT DISTINCT a FROM t").distinctOn());
+        assertTrue(select("SELECT DISTINCT a FROM t").distinct());
+        assertFalse(select("SELECT DISTINCT ON (a) a FROM t").distinct());
+        assertEquals("SELECT (a > ANY(SELECT 1)), (a <= ALL(SELECT b FROM u)), (a = ANY(SELECT 2)) FROM t",
+                print("select a > any (select 1), a <= all (select b from u), a = some (select 2) from t"));
+        SqlExpr.Quantified q = assertInstanceOf(SqlExpr.Quantified.class, items("SELECT a <> ALL (SELECT 1)").get(0));
+        assertEquals(SqlExpr.BinaryOp.NOT_EQUAL, q.op());
+        assertTrue(q.all());
+        assertEquals("SELECT a FROM t WHERE ((((a, b) IN (SELECT 1, 2)) AND ((a, b) NOT IN ((1, 2), (3, 4))))"
+                + " AND ((a, b) IN ((1, 2))))",
+                print("select a from t where (a, b) in (select 1, 2) and (a, b) not in ((1, 2), (3, 4))"
+                        + " and (a, b) in ((1, 2))"));
+        SqlExpr.InList in = assertInstanceOf(SqlExpr.InList.class, items("SELECT (a, b) IN ((1, 2))").get(0));
+        assertEquals(1, in.list().size());
+        assertEquals(2, assertInstanceOf(SqlExpr.Row.class, in.list().get(0)).values().size());
+    }
+
+    @Test
+    void groupingSetsAreTheCrossProductOfTheSetsOfTheItems() {
+        assertEquals("SELECT a, b FROM t GROUP BY GROUPING SETS ((a, b), (a), ())",
+                print("select a, b from t group by rollup (a, b)"));
+        assertEquals("SELECT a, b FROM t GROUP BY GROUPING SETS ((a, b), (a), (b), ())",
+                print("select a, b from t group by cube (a, b)"));
+        assertEquals("SELECT a, b, c FROM t GROUP BY GROUPING SETS ((a, b, c), (a, b), (a, c), (a))",
+                print("select a, b, c from t group by a, cube (b, c)"));
+        assertEquals("SELECT a, b, c FROM t GROUP BY GROUPING SETS ((a, b), (c), (b, c), (b), ())",
+                print("select a, b, c from t group by grouping sets ((a, b), c, rollup (b, c))"));
+        assertEquals("SELECT a, b, c FROM t GROUP BY GROUPING SETS ((a, b, c), (a, b), ())",
+                print("select a, b, c from t group by rollup ((a, b), c)"));
+        assertEquals("SELECT count(*) FROM t GROUP BY GROUPING SETS (())", print("select count(*) from t group by ()"));
+        QueryBody.GroupBy g = select("SELECT a FROM t GROUP BY CUBE (a, b, a)").groupBy();
+        assertEquals(2, g.expressions().size());
+        assertEquals(8, g.sets().size());
+        assertEquals(List.of(), select("SELECT a FROM t GROUP BY a, b").groupBy().sets());
+        assertEquals("Not supported: GROUP BY ALL with other items",
+                error("SELECT a FROM t GROUP BY ALL, ROLLUP (a)").reason());
+    }
+
+    @Test
     void unsupportedFormsAreRejectedWithTheirPosition() {
         Map<String, String> cases = Map.ofEntries(
-                Map.entry("SELECT sum(a) FILTER (WHERE a > 1) FROM t", "Not supported: FILTER without OVER@1:8"),
                 Map.entry("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY a) FROM t",
                         "Not supported: WITHIN GROUP@1:8"),
                 Map.entry("SELECT position('a' IN a) OVER () FROM t",
@@ -516,9 +570,6 @@ class SqlParserTest {
                 Map.entry("SELECT sum(a) OVER (RANGE BETWEEN 1 FOLLOWING AND 1 PRECEDING) FROM t",
                         "frame starting from following row cannot have preceding rows@1:8"),
                 Map.entry("SELECT a FROM t WINDOW w AS (), W AS ()", "window \"W\" is already defined@1:1"),
-                Map.entry("SELECT a FROM t WHERE (a, b) IN (SELECT 1, 2)", "Not supported: IN with more than one column@1:23"),
-                Map.entry("SELECT a FROM t WHERE a > ANY (SELECT 1)", "Not supported: ANY and ALL@1:31"),
-                Map.entry("SELECT a FROM t WHERE a <= ALL (SELECT 1)", "Not supported: ANY and ALL@1:32"),
                 Map.entry("SELECT INTERVAL '1' DAY TO SECOND", "Not supported: an interval with two fields@1:8"),
                 Map.entry("SELECT l[1:2] FROM t", "Not supported: slices@1:10"),
                 Map.entry("SELECT (l)[1:2] FROM t", "Not supported: slices@1:12"),
@@ -526,12 +577,9 @@ class SqlParserTest {
                 Map.entry("SELECT struct_pack()", "Can't pack nothing into a struct@1:8"),
                 Map.entry("SELECT f(a := 1)", "Not supported: named arguments@1:8"),
                 Map.entry("SELECT CAST(a AS INT[3])", "Arrays of a fixed size are not supported: INT[3]@1:8"),
-                Map.entry("SELECT DISTINCT ON (a) a FROM t", "Not supported: DISTINCT ON@1:1"),
                 Map.entry("SELECT * FROM a ASOF JOIN b ON a.t >= b.t", "Not supported: ASOF JOIN@1:17"),
                 Map.entry("SELECT * FROM t, LATERAL (SELECT 1)", "Not supported: LATERAL@1:18"),
                 Map.entry("WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r", "WITH RECURSIVE is not supported@1:21"),
-                Map.entry("SELECT a FROM t GROUP BY ROLLUP (a)", "Not supported: ROLLUP@1:26"),
-                Map.entry("SELECT a FROM t GROUP BY GROUPING SETS ((a), ())", "Not supported: GROUPING SETS@1:1"),
                 Map.entry("SELECT 1 MINUS SELECT 1", "Not supported: MINUS@1:10"),
                 Map.entry("SELECT a LIKE 'x' ESCAPE '!'", "Not supported: ESCAPE@1:8"),
                 Map.entry("SELECT a SIMILAR TO 'x'", "Not supported: SIMILAR_TO@1:8"),

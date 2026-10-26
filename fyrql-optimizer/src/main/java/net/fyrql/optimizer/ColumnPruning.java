@@ -270,6 +270,9 @@ final class ColumnPruning {
                         for (SortKey k : call.orderBy()) {
                             need.set(k.column());
                         }
+                        if (call.filter() >= 0) {
+                            need.set(call.filter());
+                        }
                     }
                     Pruned in = prune(a.input(), Need.whole(need));
                     List<AggregateCall> calls = new ArrayList<>();
@@ -699,8 +702,7 @@ final class ColumnPruning {
     }
 
     private static AggregateCall remap(AggregateCall call, int[] mapping) {
-        return new AggregateCall(call.function(), call.column() < 0 ? -1 : mapping[call.column()], call.distinct(),
-                call.name(), call.separator(), remapKeys(call.orderBy(), mapping));
+        return call.remap(c -> mapping[c]);
     }
 
     private static List<SortKey> remapKeys(List<SortKey> keys, int[] mapping) {

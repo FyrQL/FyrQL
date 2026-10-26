@@ -99,6 +99,30 @@ public class SqlCorpusTest {
                     + " FROM t",
             "SELECT generate_series(1, 3), range(1, 3), generate_series(3), range(0), generate_series(5, 1, -2),"
                     + " range(5, 1, -2), generate_series(1, 3, 0), range(1, 9, 3), generate_series(a, 3) FROM t",
+            // Series of timestamps, also from dates, with an interval as the step, which adds to each value in turn.
+            "SELECT range(DATE '2024-01-01', DATE '2024-01-04', INTERVAL 1 DAY) AS r,"
+                    + " generate_series(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-02', INTERVAL '6 hours') AS g,"
+                    + " range(TIMESTAMP '2024-01-31', TIMESTAMP '2024-06-01', INTERVAL 1 MONTH) AS m,"
+                    + " generate_series(TIMESTAMP '2024-01-03', TIMESTAMP '2024-01-01', INTERVAL '-12 hours') AS b,"
+                    + " range(TIMESTAMP '2024-01-01', CAST(NULL AS TIMESTAMP), INTERVAL 1 DAY) AS n,"
+                    + " range(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-03', INTERVAL 0 DAY) AS z,"
+                    + " range(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-03', INTERVAL '-1 day') AS w",
+            // A series in FROM is a table of one column, named after the function.
+            "SELECT * FROM range(5)",
+            "SELECT * FROM range(1, 10, 3), generate_series(1, 3) t(i) ORDER BY ALL",
+            "SELECT r.range, s.range FROM range(3) r, range(2) s ORDER BY ALL",
+            "SELECT t.* FROM range(1, 3) t",
+            "SELECT range.range FROM range(1, 3) WHERE range > 1",
+            "SELECT a, i FROM t, LATERAL generate_series(1, t.e % 3) g(i) ORDER BY ALL",
+            "SELECT a, range FROM t, range(t.a % 4) WHERE b IS NOT NULL ORDER BY ALL",
+            "SELECT a, range FROM t JOIN range(3) ON a = range ORDER BY ALL",
+            "SELECT (SELECT count(*) FROM range(0)) AS a, (SELECT count(*) FROM range(5, 1)) AS b,"
+                    + " (SELECT count(*) FROM range(5, 1, -2)) AS c, (SELECT count(*) FROM range(NULL)) AS d,"
+                    + " (SELECT count(*) FROM generate_series(2)) AS e",
+            "SELECT sum(range), count(*) FROM range(1, 101)",
+            "SELECT * FROM range(TIMESTAMP '2024-01-31', TIMESTAMP '2024-06-01', INTERVAL 1 MONTH)",
+            "SELECT * FROM generate_series(DATE '2024-02-27', DATE '2024-03-02', INTERVAL 1 DAY) d(day)",
+            "SELECT * FROM generate_series(TIMESTAMP '2024-01-03', TIMESTAMP '2024-01-01', INTERVAL '-12 hours')",
             "SELECT array_to_string([1, 2, NULL, 3], ','), array_to_string(['a', 'b'], '-'), array_to_string([], ','),"
                     + " array_to_string([1.5, 2.0], NULL), array_to_string([true, false], ''),"
                     + " array_to_string([DATE '2024-01-02'], ',')",
@@ -132,6 +156,99 @@ public class SqlCorpusTest {
             "SELECT count(*), sum(a), max(b) FROM t WHERE a > 10",
             "SELECT b, string_agg(CAST(a AS VARCHAR), '-' ORDER BY a DESC), string_agg(b) FROM t GROUP BY b",
             "SELECT list(a ORDER BY a), string_agg(b, NULL) FROM t",
+            // DISTINCT ON keeps the first row of each value of its keys in the order, after QUALIFY.
+            "SELECT DISTINCT ON (b) b, a, c FROM t ORDER BY b, a DESC",
+            "SELECT DISTINCT ON (k) a, c FROM t ORDER BY k, c NULLS FIRST, a",
+            "SELECT DISTINCT ON (a % 2) a, b FROM t ORDER BY a % 2, a",
+            "SELECT DISTINCT ON (1) b, a FROM t ORDER BY 1, a",
+            "SELECT DISTINCT ON (x) b AS x, a FROM t ORDER BY x, a DESC LIMIT 2",
+            "SELECT DISTINCT ON (k) k, count(*) AS n FROM t GROUP BY k, b ORDER BY k, n DESC, b",
+            "SELECT * FROM (SELECT DISTINCT ON (b) b, a FROM t ORDER BY b, a) s ORDER BY ALL",
+            "SELECT DISTINCT ON (b) b, a, row_number() OVER (ORDER BY a) AS rn FROM t ORDER BY b, a",
+            "SELECT DISTINCT ON (b) b, a FROM t QUALIFY row_number() OVER (ORDER BY a DESC) > 1 ORDER BY b, a",
+            "SELECT DISTINCT ON (b) b FROM t ORDER BY b",
+            // ANY and ALL, three-valued, with NULLs on both sides, empty, correlated, in WHERE and as values.
+            "SELECT a, a = ANY (SELECT a FROM u) AS eq, a > ANY (SELECT a FROM u) AS gt, a <= ALL (SELECT a FROM u)"
+                    + " AS le, a <> ALL (SELECT a FROM u) AS ne, a <> ANY (SELECT a FROM u) AS na,"
+                    + " a = ALL (SELECT a FROM u) AS ea, a < SOME (SELECT n FROM u) AS lt FROM t ORDER BY a",
+            "SELECT a, a > ANY (SELECT a FROM u WHERE false) AS g, a > ALL (SELECT a FROM u WHERE false) AS h,"
+                    + " c >= ALL (SELECT a FROM u WHERE a > 100) AS i FROM t ORDER BY a",
+            "SELECT a, c, c > ANY (SELECT a FROM u WHERE a IS NOT NULL) AS g,"
+                    + " c < ALL (SELECT a FROM u WHERE a IS NOT NULL) AS l FROM t ORDER BY a",
+            "SELECT a FROM t WHERE a > ANY (SELECT a FROM u) ORDER BY a",
+            "SELECT a FROM t WHERE a < ALL (SELECT n FROM u WHERE n < 10) ORDER BY a",
+            "SELECT a FROM t WHERE NOT (a >= ALL (SELECT a FROM u WHERE a IS NOT NULL)) ORDER BY a",
+            "SELECT a, k, k > ANY (SELECT n FROM u WHERE u.a = t.a) AS g, k <= ALL (SELECT n FROM u WHERE u.a = t.a)"
+                    + " AS l, k <> ANY (SELECT n FROM u WHERE u.a = t.a) AS d,"
+                    + " a = ANY (SELECT n FROM u WHERE u.a = t.a) AS e FROM t ORDER BY a",
+            "SELECT a FROM t WHERE k > ANY (SELECT n FROM u WHERE u.a = t.a) ORDER BY a",
+            "SELECT a FROM t WHERE k <= ALL (SELECT n FROM u WHERE u.a = t.a) ORDER BY a",
+            "SELECT k, max(a) > ANY (SELECT a FROM u) AS c FROM t GROUP BY k ORDER BY k",
+            "SELECT a, 'q' >= ANY (SELECT f FROM u) AS s, d > ANY (SELECT DATE '2024-01-01') AS dd FROM t ORDER BY a",
+            // A row with a subquery: NULL if no row matches and a value of either side is NULL, as in DuckDB.
+            "SELECT a, b, (a, b) IN (SELECT a, f FROM u) AS i, (a, b) NOT IN (SELECT a, f FROM u) AS n FROM t"
+                    + " ORDER BY a",
+            "SELECT a, (a, k) IN (SELECT a, n FROM u WHERE a IS NOT NULL AND n IS NOT NULL) AS i FROM t ORDER BY a",
+            "SELECT a FROM t WHERE (a, b) IN (SELECT a, 'x' FROM u) ORDER BY a",
+            "SELECT a FROM t WHERE (a, k) NOT IN (SELECT a, n FROM u WHERE a IS NOT NULL AND n IS NOT NULL)"
+                    + " ORDER BY a",
+            "SELECT a, (a, b) IN (SELECT a, f FROM u WHERE false) AS i FROM t ORDER BY a",
+            // A row with a list compares as a struct, NULL equal to NULL.
+            "SELECT a, b, (a, b) IN ((1, 'x'), (2, NULL)) AS i, (a, b) NOT IN ((2, NULL)) AS n FROM t ORDER BY a",
+            "SELECT a FROM t WHERE (a, k) IN ((1, 10), (3, 20), (5, NULL)) ORDER BY a",
+            // Grouping sets: the union of an aggregation per set, the groups a set leaves out NULL.
+            "SELECT b, k, count(*) AS n, sum(a) AS s FROM t GROUP BY ROLLUP (b, k) ORDER BY ALL",
+            "SELECT b, e, count(*) FROM t GROUP BY CUBE (b, e) ORDER BY ALL",
+            "SELECT b, k, count(*) FROM t GROUP BY GROUPING SETS ((b, k), (b), ()) ORDER BY ALL",
+            "SELECT b, count(*) FROM t GROUP BY GROUPING SETS ((b), (b)) ORDER BY ALL",
+            "SELECT b, k, grouping(b), grouping(k), grouping(b, k), grouping_id(b, k), count(*) FROM t"
+                    + " GROUP BY ROLLUP (b, k) ORDER BY ALL",
+            "SELECT b, grouping(b) FROM t GROUP BY b ORDER BY ALL",
+            "SELECT b, k, count(*) FROM t GROUP BY b, ROLLUP (k) ORDER BY ALL",
+            "SELECT b, k, e, count(*) FROM t GROUP BY ROLLUP (b), CUBE (k, e) ORDER BY ALL",
+            "SELECT count(*) FROM t GROUP BY ()",
+            "SELECT count(*), sum(a) FROM t GROUP BY GROUPING SETS (())",
+            "SELECT b, count(*) FROM t GROUP BY GROUPING SETS ((b), ()) HAVING count(*) > 1 ORDER BY ALL",
+            "SELECT b, count(*) FROM t GROUP BY GROUPING SETS ((b), ()) HAVING grouping(b) = 1",
+            "SELECT b, sum(a) FILTER (WHERE a > 1) AS f, count(DISTINCT k) AS d, avg(c) AS m FROM t"
+                    + " GROUP BY ROLLUP (b) ORDER BY ALL",
+            "SELECT b AS x, count(*) FROM t GROUP BY ROLLUP (x) ORDER BY ALL",
+            "SELECT b, count(*) FROM t GROUP BY ROLLUP (1) ORDER BY ALL",
+            "SELECT upper(b), count(*) FROM t GROUP BY ROLLUP (upper(b)) ORDER BY ALL",
+            "SELECT b, k, count(*), rank() OVER (ORDER BY count(*) DESC, b, k) AS r FROM t GROUP BY ROLLUP (b, k)"
+                    + " ORDER BY ALL",
+            "SELECT t.b, u.f, count(*) AS n FROM t JOIN u ON t.a = u.a GROUP BY ROLLUP (t.b, u.f) ORDER BY ALL",
+            "SELECT b, k, count(*) AS n FROM t GROUP BY CUBE (b, k) QUALIFY row_number() OVER"
+                    + " (PARTITION BY grouping_id(b, k) ORDER BY count(*) DESC, b, k) = 1 ORDER BY ALL",
+            "SELECT b, (SELECT count(*) FROM u) AS c, count(*) FROM t GROUP BY ROLLUP (b) ORDER BY ALL",
+            "SELECT b, k, count(*) FROM t WHERE a > 1 GROUP BY ROLLUP (b, k) ORDER BY ALL",
+            "SELECT * FROM (SELECT b, k, count(*) AS n FROM t GROUP BY ROLLUP (b, k)) s WHERE b IS NULL ORDER BY ALL",
+            "SELECT b, k, count(*) FROM t GROUP BY GROUPING SETS ((b), (k)) ORDER BY ALL",
+            "SELECT b, count(*) FROM t GROUP BY ROLLUP (b, b) ORDER BY ALL",
+            "SELECT b, k, count(*) FROM t GROUP BY CUBE (b, k, b) ORDER BY ALL",
+            "SELECT b, list(a ORDER BY a) AS l FROM t GROUP BY ROLLUP (b) ORDER BY ALL",
+            "WITH c AS (SELECT b, sum(a) AS s FROM t GROUP BY b) SELECT b, sum(s) FROM c GROUP BY ROLLUP (b)"
+                    + " ORDER BY ALL",
+            "SELECT b, count(*) FROM t WHERE a > 100 GROUP BY ROLLUP (b)",
+            "SELECT a FROM t WHERE k IN (SELECT count(*) * 10 FROM t GROUP BY ROLLUP (b)) ORDER BY a",
+            "SELECT bool_and(NULL), bool_or(NULL) FROM t",
+            "SELECT 'x' AS c, true AS d, count(*) FROM t GROUP BY GROUPING SETS (('x', true), ('x'), ()) ORDER BY ALL",
+            // An aggregate with a filter takes the rows where it is true.
+            "SELECT count(*) FILTER (WHERE a > 2), count(b) FILTER (WHERE a > 2), sum(a) FILTER (WHERE b = 'x'),"
+                    + " avg(c) FILTER (WHERE c > 0), max(d) FILTER (WHERE e IS NOT NULL) FROM t",
+            "SELECT b, count(*) FILTER (WHERE a % 2 = 0) AS even, sum(a) FILTER (WHERE a > 1), count(*), sum(a)"
+                    + " FROM t GROUP BY b ORDER BY b",
+            "SELECT k, count(DISTINCT b) FILTER (WHERE a > 1) AS cd, sum(DISTINCT a) FILTER (WHERE a < 5) AS sd"
+                    + " FROM t GROUP BY k ORDER BY k",
+            "SELECT b, list(a ORDER BY a) FILTER (WHERE a > 1) AS l, string_agg(b, ',' ORDER BY a)"
+                    + " FILTER (WHERE a IS NOT NULL) AS s FROM t GROUP BY b ORDER BY b",
+            "SELECT count(*) FILTER (WHERE false) AS n, sum(a) FILTER (WHERE false) AS s, list(a) FILTER (WHERE false)"
+                    + " AS l, count(*) FILTER (WHERE NULL) AS m, bool_or(a > 3) FILTER (WHERE b IS NULL) AS o FROM t",
+            "SELECT b FROM t GROUP BY b HAVING count(*) FILTER (WHERE a > 1) > 0 ORDER BY b",
+            "SELECT b, count(*) FILTER (WHERE a > 1) AS n FROM t GROUP BY ALL ORDER BY ALL",
+            "SELECT sum(a) FILTER (WHERE e) AS s, count(*) FILTER (WHERE a) AS n FROM t",
+            "SELECT b, sum(count(*) FILTER (WHERE a > 1)) OVER () AS s FROM t GROUP BY b ORDER BY b",
+            "SELECT a, (SELECT count(*) FILTER (WHERE n > 1) FROM u WHERE u.a = t.a) AS c FROM t ORDER BY a",
             "SELECT string_agg(b, CAST(NULL AS VARCHAR)), string_agg(b, '-' || '+'), string_agg(b, upper('x')) FROM t",
             // A constant NULL argument folds a call to NULL, and its other arguments are not evaluated.
             "SELECT NULL::INT + CAST('b' AS INT), log(-1) - NULL::DOUBLE, upper(CAST('b' AS INT)::VARCHAR) || NULL::VARCHAR,"
@@ -776,6 +893,28 @@ public class SqlCorpusTest {
             Map.entry("SELECT first(c) FILTER (WHERE a > 1) OVER (ORDER BY a) FROM t",
                     "FILTER is not implemented for non-aggregate window functions!"),
             Map.entry("SELECT ntile(0) OVER () FROM t", "Argument for ntile must be greater than zero"),
+            Map.entry("SELECT sum(a) FILTER (WHERE sum(a) > 1) FROM t", "aggregate function calls cannot be nested"),
+            Map.entry("SELECT * FROM range(1, 5, 0)", "interval cannot be 0!"),
+            Map.entry("SELECT b, grouping(k) FROM t GROUP BY ROLLUP (b)",
+                    "GROUPING child \"k\" must be a grouping column"),
+            Map.entry("SELECT b, a FROM t GROUP BY ROLLUP (b)", "column \"a\" must appear in the GROUP BY clause"),
+            Map.entry("SELECT b, count(*) FROM t GROUP BY ALL, ROLLUP (b)",
+                    "Not supported: GROUP BY ALL with other items"),
+            Map.entry("SELECT regexp_extract(NULL, NULL, -1)", "Group index must be between 0 and 9!"),
+            Map.entry("SELECT regexp_extract(b, 'x', 10) FROM t", "Group index must be between 0 and 9!"),
+            Map.entry("SELECT a FROM t WHERE a = ANY (SELECT a, f FROM u)", "Subquery returns 2 columns - expected 1"),
+            Map.entry("SELECT a FROM t WHERE c > ANY (SELECT f FROM u)",
+                    "Cannot compare values of type DOUBLE and VARCHAR in IN/ANY/ALL clause"),
+            Map.entry("SELECT a FROM t WHERE (a, b) IN (SELECT a FROM u)", "Subquery returns 1 columns - expected 2"),
+            Map.entry("SELECT a FROM t WHERE (a, b, c) IN ((1, 'x'))", "Cannot cast STRUCTs of different size"),
+            Map.entry("SELECT a FROM t WHERE (a, b) IN (SELECT u.a, u.f FROM u WHERE u.a = t.a)",
+                    "Correlated IN/ANY/ALL with multiple columns not yet supported"),
+            Map.entry("SELECT * FROM generate_series(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-03', INTERVAL 0 DAY)",
+                    "interval cannot be 0!"),
+            Map.entry("SELECT range(TIMESTAMP '2024-01-01', TIMESTAMP '2024-03-03', INTERVAL '1 month -1 day')",
+                    "Interval with mix of negative/positive entries not supported"),
+            Map.entry("SELECT abs(a) FILTER (WHERE a > 1) FROM t",
+                    "Function \"abs\" is a Scalar Function. \"DISTINCT\", \"FILTER\", and \"ORDER BY\" are only"),
             Map.entry("SELECT lag(a, 1, 'x') OVER (ORDER BY a) FROM t", "Could not convert string 'x'"));
 
     /** Texts DuckDB runs and FyrQL rejects on purpose, with the start of FyrQL's message. */
@@ -806,9 +945,15 @@ public class SqlCorpusTest {
             Map.entry("SELECT t.a FROM t JOIN u ON t.a = u.a AND u.a IN (SELECT 1)", "Not supported: a subquery here"),
             Map.entry("SELECT a IN (SELECT 1), count(*) FROM t GROUP BY 1", "Not supported: a subquery here"),
             Map.entry("SELECT sum((SELECT 1)) FROM t", "Not supported: a subquery here"),
-            Map.entry("SELECT a FROM t WHERE a > ANY (SELECT a FROM u)", "Not supported: ANY and ALL"),
-            Map.entry("SELECT a FROM t WHERE (a, b) IN (SELECT a, f FROM u)",
-                    "Not supported: IN with more than one column"),
+            // DuckDB also takes grouping sets in a correlated subquery, and items before GROUPING SETS, which
+            // JSqlParser does not read.
+            Map.entry("SELECT a FROM t WHERE EXISTS (SELECT f FROM u WHERE u.a = t.a GROUP BY ROLLUP (f))",
+                    "Not supported: grouping sets or GROUPING in a correlated subquery"),
+            Map.entry("SELECT b, k, count(*) FROM t GROUP BY b, GROUPING SETS ((k), ())", "Syntax error"),
+            // DuckDB also takes DISTINCT ON in a correlated subquery, and a row with = ANY.
+            Map.entry("SELECT a, (SELECT DISTINCT ON (a) n FROM u WHERE u.a = t.a ORDER BY a, n) FROM t",
+                    "Not supported: DISTINCT ON in a correlated subquery"),
+            Map.entry("SELECT a FROM t WHERE (a, b) = ANY (SELECT a, f FROM u)", "Not supported: row values"),
             Map.entry("SELECT (SELECT t.b FROM u LIMIT 1) FROM t",
                     "Not supported: a reference to the outer query outside the WHERE clause of a subquery"),
             Map.entry("SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE EXISTS (SELECT 1 FROM u x WHERE x.a = t.a))",
@@ -827,9 +972,17 @@ public class SqlCorpusTest {
                     "Not supported: a subquery in a condition that references the outer query"),
             Map.entry("SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE t.a IN (SELECT a FROM u))",
                     "Not supported: IN with a subquery whose value references the outer query"),
-            // The filter of an aggregate goes only with a window; JSqlParser reads a window that names another
-            // and adds to it as a syntax error.
-            Map.entry("SELECT sum(a) FILTER (WHERE a > 1) FROM t", "Not supported: FILTER without OVER"),
+            // JSqlParser reads a window that names another and adds to it as a syntax error, and a filter without
+            // WHERE.
+            Map.entry("SELECT count(a) FILTER (a > 1) FROM t", "Syntax error"),
+            // DuckDB also makes series of timestamps with a time zone, keeps the rows without elements in a LEFT
+            // JOIN with a lateral series, and lets a series in the FROM of a subquery read the outer query, as it
+            // does for unnest.
+            Map.entry("SELECT * FROM range(TIMESTAMPTZ '2024-01-01', TIMESTAMPTZ '2024-01-04', INTERVAL 1 DAY)",
+                    "No function matches range(TIMESTAMP WITH TIME ZONE"),
+            Map.entry("SELECT * FROM t LEFT JOIN range(t.a) ON true",
+                    "Not supported: a LEFT JOIN with a lateral UNNEST"),
+            Map.entry("SELECT (SELECT sum(range) FROM range(t.a)) FROM t", "Referenced table \"t\" not found!"),
             Map.entry("SELECT sum(a) OVER (w ORDER BY a) FROM t WINDOW w AS (PARTITION BY b)", "Syntax error"),
             // JSqlParser reads a partition in parentheses as the list of all; ((a % 2)), k it reads.
             Map.entry("SELECT count(*) OVER (PARTITION BY (a % 2), k) FROM t", "Syntax error"),

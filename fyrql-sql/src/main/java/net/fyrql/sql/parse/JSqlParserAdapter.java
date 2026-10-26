@@ -27,12 +27,14 @@ import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlExpr.BinaryOp;
 import net.fyrql.sql.ast.SqlExpr.LiteralKind;
 import net.fyrql.sql.ast.SqlExpr.UnaryOp;
+import net.fyrql.sql.ast.SqlPrinter;
 import net.fyrql.sql.ast.WindowSpec;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.AllValue;
 import net.sf.jsqlparser.expression.AnalyticExpression;
 import net.sf.jsqlparser.expression.AnalyticType;
 import net.sf.jsqlparser.expression.AnyComparisonExpression;
+import net.sf.jsqlparser.expression.AnyType;
 import net.sf.jsqlparser.expression.ArrayConstructor;
 import net.sf.jsqlparser.expression.ArrayExpression;
 import net.sf.jsqlparser.expression.BinaryExpression;
@@ -126,6 +128,7 @@ import net.sf.jsqlparser.statement.select.WithItem;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -448,12 +451,19 @@ final class JSqlParserAdapter {
         reject(p.getMySqlSqlCacheFlag(), "SQL_CACHE", p);
         reject(p.isEmitChanges(), "EMIT CHANGES", p);
         boolean distinct = false;
+        List<SqlExpr> distinctOn = new ArrayList<>();
         Distinct d = p.getDistinct();
         if (d != null) {
-            reject(d.getOnSelectItems(), "DISTINCT ON", p);
             reject(d.isUseUnique(), "UNIQUE", p);
             reject(d.isUseDistinctRow(), "DISTINCTROW", p);
-            distinct = true;
+            if (d.getOnSelectItems() != null && !d.getOnSelectItems().isEmpty()) {
+                for (net.sf.jsqlparser.statement.select.SelectItem<?> on : d.getOnSelectItems()) {
+                    reject(on.getAlias(), "an alias in DISTINCT ON", p);
+                    distinctOn.add(expr(on.getExpression()));
+                }
+            } else {
+                distinct = true;
+            }
         }
         List<SelectItem> items = new ArrayList<>();
         for (net.sf.jsqlparser.statement.select.SelectItem<?> item : p.getSelectItems()) {
@@ -466,7 +476,7 @@ final class JSqlParserAdapter {
             throw new SqlException("Syntax error: JOIN without FROM", position(p));
         }
         return new QueryBody.Select(distinct, items, from, exprOrNull(p.getWhere()), groupBy(p.getGroupBy(), p),
-                exprOrNull(p.getHaving()), windows(p), exprOrNull(p.getQualify()), position(p));
+                exprOrNull(p.getHaving()), windows(p), exprOrNull(p.getQualify()), distinctOn, position(p));
     }
 
     /** The {@code WINDOW} clause; JSqlParser keeps no position for its windows, so they have the one of the select. */
@@ -486,28 +496,137 @@ final class JSqlParserAdapter {
         return windows;
     }
 
+    /**
+     * {@code GROUP BY}: expressions, {@code ALL}, or grouping sets. Each item
+     * stands for a list of sets: an expression for the set of itself,
+     * {@code ROLLUP (a, b)} for (a, b), (a) and (), {@code CUBE (a, b)} for
+     * all subsets, {@code GROUPING SETS (...)} for the sets of its items,
+     * and {@code ()} for the set of all rows; the items combine as the cross
+     * product of their sets, as in DuckDB, which also keeps a set as often
+     * as it comes. A set indexes the expressions, one per text.
+     */
     private QueryBody.GroupBy groupBy(GroupByElement g, PlainSelect owner) {
         if (g == null) {
             return null;
         }
-        reject(g.getGroupingSets(), "GROUPING SETS", owner);
         reject(g.isMysqlWithRollup(), "WITH ROLLUP", owner);
         reject(g.hasGroupBySortDirections(), "ASC and DESC in GROUP BY", owner);
         ExpressionList<?> list = g.getGroupByExpressionList();
-        if (list == null || list.isEmpty()) {
-            throw unsupported("GROUP BY ()", owner);
-        }
-        if (list.size() == 1 && list.get(0) instanceof AllValue) {
+        List<ExpressionList<Expression>> groupingSets = g.getGroupingSets() == null ? List.of()
+                : g.getGroupingSets();
+        if (list != null && list.size() == 1 && list.get(0) instanceof AllValue && groupingSets.isEmpty()) {
             return new QueryBody.GroupBy(true, List.of());
         }
-        for (Expression e : list) {
-            // JSqlParser reads ROLLUP (a) and CUBE (a) as function calls.
-            if (e instanceof Function f && f.getName() != null
-                    && List.of("ROLLUP", "CUBE").contains(f.getName().toUpperCase(Locale.ROOT))) {
-                throw unsupported(f.getName().toUpperCase(Locale.ROOT), f);
+        boolean plain = groupingSets.isEmpty() && list != null && !list.isEmpty();
+        List<SqlExpr> expressions = new ArrayList<>();
+        Map<String, Integer> texts = new HashMap<>();
+        List<List<List<Integer>>> items = new ArrayList<>();
+        for (Expression e : list == null ? List.<Expression>of() : list) {
+            if (e instanceof AllValue) {
+                throw unsupported("GROUP BY ALL with other items", owner);
+            }
+            List<List<Integer>> sets = rollupOrCube(e, expressions, texts);
+            plain &= sets == null;
+            items.add(sets != null ? sets : List.of(List.of(group(e, expressions, texts))));
+        }
+        if (!groupingSets.isEmpty()) {
+            List<List<Integer>> union = new ArrayList<>();
+            for (ExpressionList<?> set : groupingSets) {
+                List<List<Integer>> nested = set.size() == 1 && !(set instanceof ParenthesedExpressionList<?>)
+                        ? rollupOrCube(set.get(0), expressions, texts) : null;
+                if (nested != null) {
+                    union.addAll(nested);
+                } else {
+                    List<Integer> one = new ArrayList<>();
+                    for (Expression e : set) {
+                        one.add(group(e, expressions, texts));
+                    }
+                    union.add(one);
+                }
+            }
+            items.add(union);
+        }
+        if (plain) {
+            return new QueryBody.GroupBy(false, exprs(list));
+        }
+        // The cross product of the sets of the items; GROUP BY () is the one set of all rows.
+        List<List<Integer>> sets = List.of(List.of());
+        for (List<List<Integer>> item : items) {
+            List<List<Integer>> product = new ArrayList<>();
+            for (List<Integer> left : sets) {
+                for (List<Integer> right : item) {
+                    List<Integer> both = new ArrayList<>(left);
+                    both.addAll(right);
+                    product.add(both);
+                }
+            }
+            if (product.size() > MAX_GROUPING_SETS) {
+                throw unsupported("more than " + MAX_GROUPING_SETS + " grouping sets", owner);
+            }
+            sets = product;
+        }
+        return new QueryBody.GroupBy(false, expressions, sets);
+    }
+
+    private static final int MAX_GROUPING_SETS = 4096;
+
+    /** The index of an expression to group by, the same for the same text. */
+    private int group(Expression e, List<SqlExpr> expressions, Map<String, Integer> texts) {
+        if (e instanceof Function f && f.getName() != null
+                && List.of("ROLLUP", "CUBE", "GROUPING").contains(f.getName().toUpperCase(Locale.ROOT))) {
+            throw unsupported(f.getName().toUpperCase(Locale.ROOT) + " here", f);
+        }
+        SqlExpr x = expr(e);
+        return texts.computeIfAbsent(SqlPrinter.print(x), k -> {
+            expressions.add(x);
+            return expressions.size() - 1;
+        });
+    }
+
+    /**
+     * The sets of {@code ROLLUP (...)} or {@code CUBE (...)}, which JSqlParser
+     * reads as function calls, or {@code null} for another expression; an
+     * item in parentheses stands for its expressions together.
+     */
+    private List<List<Integer>> rollupOrCube(Expression e, List<SqlExpr> expressions, Map<String, Integer> texts) {
+        if (!(e instanceof Function f) || f.getName() == null
+                || !List.of("ROLLUP", "CUBE").contains(f.getName().toUpperCase(Locale.ROOT))) {
+            return null;
+        }
+        checkFunction(f);
+        if (f.getParameters() == null || f.getParameters().isEmpty()) {
+            throw new SqlException("Syntax error: " + f.getName() + " needs items", position(f));
+        }
+        List<List<Integer>> parts = new ArrayList<>();
+        for (Expression p : f.getParameters()) {
+            List<Integer> part = new ArrayList<>();
+            for (Expression x : p instanceof ParenthesedExpressionList<?> l ? l : List.of(p)) {
+                part.add(group(x, expressions, texts));
+            }
+            parts.add(part);
+        }
+        List<List<Integer>> sets = new ArrayList<>();
+        if (f.getName().equalsIgnoreCase("ROLLUP")) {
+            for (int n = parts.size(); n >= 0; n--) {
+                List<Integer> set = new ArrayList<>();
+                parts.subList(0, n).forEach(set::addAll);
+                sets.add(set);
+            }
+        } else {
+            if (parts.size() > 12) {
+                throw unsupported("CUBE with more than 12 items", f);
+            }
+            for (int mask = (1 << parts.size()) - 1; mask >= 0; mask--) {
+                List<Integer> set = new ArrayList<>();
+                for (int i = 0; i < parts.size(); i++) {
+                    if ((mask & (1 << (parts.size() - 1 - i))) != 0) {
+                        set.addAll(parts.get(i));
+                    }
+                }
+                sets.add(set);
             }
         }
-        return new QueryBody.GroupBy(false, exprs(list));
+        return sets;
     }
 
     private QueryBody setOperations(SetOperationList l) {
@@ -721,8 +840,9 @@ final class JSqlParserAdapter {
             return new FromItem.TableName(nameParts(t), alias(t.getAlias(), t), position);
         }
         if (item instanceof TableFunction f) {
-            // unnest reads the items before it anyway; LATERAL changes nothing there.
-            boolean unnest = functionName(f.getFunction()).equalsIgnoreCase("unnest");
+            // unnest and the series read the items before them anyway; LATERAL changes nothing there.
+            boolean unnest = List.of("unnest", "range", "generate_series")
+                    .contains(functionName(f.getFunction()).toLowerCase(Locale.ROOT));
             reject(unnest && "LATERAL".equalsIgnoreCase(f.getPrefix()) ? null : f.getPrefix(), "LATERAL", f);
             reject(f.isRowsFrom(), "ROWS FROM", f);
             reject(f.getWithClause(), "WITH ORDINALITY", f);
@@ -915,7 +1035,7 @@ final class JSqlParserAdapter {
             return exists(x, x.isNot(), position);
         }
         if (e instanceof AnyComparisonExpression) {
-            throw unsupported("ANY and ALL", e);
+            throw unsupported("ANY and ALL outside a comparison", e);
         }
         if (e instanceof ParenthesedExpressionList<?> l) {
             // An expression in parentheses is a list of one.
@@ -935,16 +1055,24 @@ final class JSqlParserAdapter {
             reject(in.isGlobal(), "GLOBAL IN", in);
             reject(in.getOldOracleJoinSyntax() != 0, "(+)", in);
             Expression right = in.getRightExpression();
+            SqlExpr value = rowOrExpr(in.getLeftExpression());
             if (right instanceof ParenthesedSelect p) {
-                if (in.getLeftExpression() instanceof ParenthesedExpressionList<?> l && l.size() != 1) {
-                    throw unsupported("IN with more than one column", in.getLeftExpression());
-                }
-                return new SqlExpr.InQuery(expr(in.getLeftExpression()), parenthesized(p), in.isNot(), position);
+                return new SqlExpr.InQuery(value, parenthesized(p), in.isNot(), position);
             }
             if (!(right instanceof ParenthesedExpressionList<?> list) || list.isEmpty()) {
                 throw unsupported("IN without a list of values", right);
             }
-            return new SqlExpr.InList(expr(in.getLeftExpression()), exprs(list), in.isNot(), position);
+            List<SqlExpr> values = new ArrayList<>();
+            if (value instanceof SqlExpr.Row && list.size() > 1 && list.stream().noneMatch(
+                    v -> v instanceof ParenthesedExpressionList<?>)) {
+                // JSqlParser reads the one row of (a, b) IN ((1, 2)) as the list of its values.
+                values.add(rowOrExpr(list));
+            } else {
+                for (Expression v : list) {
+                    values.add(rowOrExpr(v));
+                }
+            }
+            return new SqlExpr.InList(value, values, in.isNot(), position);
         }
         if (e instanceof LikeExpression l) {
             if (l.getLikeKeyWord() != LikeExpression.KeyWord.LIKE && l.getLikeKeyWord() != LikeExpression.KeyWord.ILIKE) {
@@ -1164,6 +1292,14 @@ final class JSqlParserAdapter {
         return new SqlExpr.StructValue(names, values, position);
     }
 
+    /** An expression, or a row of two values or more in parentheses, which only {@code IN} takes. */
+    private SqlExpr rowOrExpr(Expression e) {
+        if (e instanceof ParenthesedExpressionList<?> l && l.size() > 1) {
+            return new SqlExpr.Row(exprs(l), position(e));
+        }
+        return expr(e);
+    }
+
     private SqlExpr binary(BinaryExpression b, Position position) {
         if (b instanceof OldOracleJoinBinaryExpression o) {
             reject(o.getOldOracleJoinSyntax() != 0, "(+)", b);
@@ -1212,6 +1348,14 @@ final class JSqlParserAdapter {
         } else {
             throw unsupported("the operator " + b.getStringExpression().strip(), b);
         }
+        if (b.getRightExpression() instanceof AnyComparisonExpression any) {
+            if (op.ordinal() < BinaryOp.EQUAL.ordinal() || op.ordinal() > BinaryOp.GREATER_EQUAL.ordinal()) {
+                throw unsupported("ANY and ALL with " + op.symbol(), any);
+            }
+            Query query = any.getSelect() instanceof ParenthesedSelect p ? parenthesized(p) : query(any.getSelect());
+            return new SqlExpr.Quantified(op, expr(b.getLeftExpression()), query, any.getAnyType() == AnyType.ALL,
+                    position);
+        }
         return new SqlExpr.Binary(op, expr(b.getLeftExpression()), expr(b.getRightExpression()), position);
     }
 
@@ -1251,10 +1395,8 @@ final class JSqlParserAdapter {
      * window function.
      */
     private SqlExpr window(AnalyticExpression a, Position position) {
-        if (a.getType() == AnalyticType.FILTER_ONLY) {
-            throw unsupported("FILTER without OVER", a);
-        }
-        if (a.getType() != AnalyticType.OVER) {
+        boolean filterOnly = a.getType() == AnalyticType.FILTER_ONLY;
+        if (!filterOnly && a.getType() != AnalyticType.OVER) {
             throw unsupported("WITHIN GROUP", a);
         }
         reject(a.getKeep(), "KEEP", a);
@@ -1296,6 +1438,12 @@ final class JSqlParserAdapter {
         }
         SqlExpr.FunctionCall call = new SqlExpr.FunctionCall(name, arguments, a.isDistinct(), star,
                 orderItems(a.getFuncOrderBy(), false), position);
+        if (filterOnly) {
+            if (ignoreNulls) {
+                throw unsupported("IGNORE NULLS without OVER", a);
+            }
+            return call.withFilter(expr(a.getFilterExpression()));
+        }
         WindowSpec over = a.getWindowName() != null ? WindowSpec.named(unquote(a.getWindowName(), a))
                 : windowSpec(a.getWindowDefinition(), a);
         return new SqlExpr.Window(call, over, ignoreNulls, exprOrNull(a.getFilterExpression()), position);

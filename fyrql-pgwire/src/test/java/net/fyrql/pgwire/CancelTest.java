@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 import static net.fyrql.pgwire.TestServer.value;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -69,6 +70,17 @@ class CancelTest {
         }
     }
 
+    /** Runs the long query on a statement until it is canceled, or refused. */
+    private static CompletableFuture<Void> runLong(Statement s) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                s.executeQuery(LONG);
+            } catch (SQLException e) {
+                // Canceled, or refused.
+            }
+        });
+    }
+
     @Test
     void theServerRunsAtMostMaxQueriesAtOnce() throws Exception {
         try (TestServer server = new TestServer(PgWireConfig.defaults().withPort(0).withMaxQueries(1),
@@ -76,15 +88,23 @@ class CancelTest {
             Connection a = server.connect();
             Connection b = server.connect();
             try (Statement s = a.createStatement()) {
-                CompletableFuture<Void> running = CompletableFuture.runAsync(() -> {
-                    try {
-                        s.executeQuery(LONG);
-                    } catch (SQLException e) {
-                        // Canceled below.
+                CompletableFuture<Void> running = runLong(s);
+                // Until the long query holds the only place, another one may still run; and while that one runs,
+                // the long query may be refused itself, and starts again.
+                PSQLException e = null;
+                for (long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10); e == null
+                        && System.nanoTime() < end; ) {
+                    if (running.isDone()) {
+                        running = runLong(s);
                     }
-                });
-                Thread.sleep(300);
-                PSQLException e = assertThrows(PSQLException.class, () -> value(b, "SELECT 1"));
+                    Thread.sleep(100);
+                    try {
+                        value(b, "SELECT 1");
+                    } catch (PSQLException refused) {
+                        e = refused;
+                    }
+                }
+                assertNotNull(e, "the second query is refused");
                 assertEquals("53000", e.getSQLState());
                 s.cancel();
                 running.get(10, TimeUnit.SECONDS);

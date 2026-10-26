@@ -41,7 +41,16 @@ import java.util.function.BiFunction;
  * <li>A scalar subquery is a {@code SINGLE} join, whose right column is the
  * value.</li>
  * <li>{@code x [NOT] IN (subquery)} is a {@code MARK} join on {@code x},
- * whose mark has the three-valued result of {@code IN}.</li>
+ * whose mark has the three-valued result of {@code IN}; a row
+ * {@code (a, b) [NOT] IN (subquery)} is one on all its values, whose mark is
+ * {@code NULL} if no row matches and a value of either side is
+ * {@code NULL}, as in DuckDB.</li>
+ * <li>{@code x = ANY (subquery)} is {@code x IN (subquery)}, and
+ * {@code x op ALL (subquery)} is {@code NOT (x op2 ANY (subquery))} with
+ * the opposite comparison {@code op2}. Any other
+ * {@code x op ANY (subquery)} is a {@code SINGLE} join with the count of
+ * the rows, of the values that are not {@code NULL}, and their least and
+ * greatest, which tell the three-valued result.</li>
  * <li>{@code [NOT] EXISTS (subquery)} is a {@code MARK} join with the first
  * row of the subquery.</li>
  * </ul>
@@ -55,7 +64,9 @@ import java.util.function.BiFunction;
  * It is joined as a whole then, as each row of the clause sees other rows
  * of it. A correlated {@code x [NOT] IN} that is a value takes two
  * {@code MARK} joins: one for the rows equal to {@code x}, one for those
- * that make the comparison {@code NULL}.
+ * that make the comparison {@code NULL}; so does a correlated
+ * {@code x op ANY}, the first for the rows for which the comparison is
+ * true. As in DuckDB, a row is not compared with a correlated subquery.
  */
 final class SubqueryJoiner implements ExpressionBinder.Subqueries {
 
@@ -133,11 +144,13 @@ final class SubqueryJoiner implements ExpressionBinder.Subqueries {
     }
 
     @Override
-    public Expression in(SqlExpr.InQuery e, ExpressionBinder.Bound value, ExpressionBinder binder) {
+    public Expression in(SqlExpr.InQuery e, List<ExpressionBinder.Bound> value, ExpressionBinder binder) {
         Expression result = values.get(e);
         if (result == null) {
-            checkValue(value.expression(), e.position());
-            Bound b = keyed(e, value, binder);
+            for (ExpressionBinder.Bound v : value) {
+                checkValue(v.expression(), e.position());
+            }
+            Bound b = keyed(e, e.query(), value, binder);
             Expression x = b.leftKeys().get(0);
             if (!b.correlated()) {
                 result = add(b, JoinType.MARK, List.of(), List.of(), null);
@@ -156,6 +169,109 @@ final class SubqueryJoiner implements ExpressionBinder.Subqueries {
             values.put(e, result);
         }
         return result;
+    }
+
+    @Override
+    public Expression quantified(SqlExpr.Quantified e, ExpressionBinder.Bound value, ExpressionBinder binder) {
+        Expression result = values.get(e);
+        if (result == null) {
+            SqlExpr.InQuery in = asIn(e);
+            if (in != null) {
+                result = in(in, List.of(value), binder);
+            } else if (e.all()) {
+                result = new Expression.Not(quantified(new SqlExpr.Quantified(opposite(e.op()), e.value(), e.query(),
+                        false, e.position()), value, binder));
+            } else {
+                result = any(e, value, binder);
+            }
+            values.put(e, result);
+        }
+        return result;
+    }
+
+    /** {@code x = ANY (S)} as {@code x IN (S)} and {@code x <> ALL (S)} as {@code x NOT IN (S)}, else {@code null}. */
+    private static SqlExpr.InQuery asIn(SqlExpr.Quantified e) {
+        if (e.op() == SqlExpr.BinaryOp.EQUAL && !e.all() || e.op() == SqlExpr.BinaryOp.NOT_EQUAL && e.all()) {
+            return new SqlExpr.InQuery(e.value(), e.query(), e.all(), e.position());
+        }
+        return null;
+    }
+
+    /** The comparison that is true where one is false, and the other way round. */
+    private static SqlExpr.BinaryOp opposite(SqlExpr.BinaryOp op) {
+        return switch (op) {
+            case EQUAL -> SqlExpr.BinaryOp.NOT_EQUAL;
+            case NOT_EQUAL -> SqlExpr.BinaryOp.EQUAL;
+            case LESS -> SqlExpr.BinaryOp.GREATER_EQUAL;
+            case LESS_EQUAL -> SqlExpr.BinaryOp.GREATER;
+            case GREATER -> SqlExpr.BinaryOp.LESS_EQUAL;
+            case GREATER_EQUAL -> SqlExpr.BinaryOp.LESS;
+            default -> throw new IllegalArgumentException("No comparison: " + op);
+        };
+    }
+
+    private static Expression compare(SqlExpr.BinaryOp op, Expression x, Expression y) {
+        Expression.ComparisonOp c = switch (op) {
+            case EQUAL -> Expression.ComparisonOp.EQ;
+            case NOT_EQUAL -> Expression.ComparisonOp.NE;
+            case LESS -> Expression.ComparisonOp.LT;
+            case LESS_EQUAL -> Expression.ComparisonOp.LE;
+            case GREATER -> Expression.ComparisonOp.GT;
+            case GREATER_EQUAL -> Expression.ComparisonOp.GE;
+            default -> throw new IllegalArgumentException("No comparison: " + op);
+        };
+        return new Expression.Comparison(c, x, y);
+    }
+
+    /**
+     * {@code x op ANY (S)} for an operator other than {@code =}: true if the
+     * comparison is true for a row, else {@code NULL} if it is {@code NULL}
+     * for one, else false. Over an uncorrelated subquery, from the count of
+     * its rows {@code n}, of its values {@code nn}, and their least and
+     * greatest: {@code CASE WHEN n = 0 THEN false WHEN x op least (or
+     * greatest) THEN true WHEN x IS NULL OR nn < n THEN NULL ELSE false END}.
+     */
+    private Expression any(SqlExpr.Quantified e, ExpressionBinder.Bound value, ExpressionBinder binder) {
+        checkValue(value.expression(), e.position());
+        Bound b = keyed(e, e.query(), List.of(value), binder);
+        Expression x = b.leftKeys().get(0);
+        Expression y = right(b, 0);
+        if (b.correlated()) {
+            Bound u = unkeyed(b);
+            Expression match = add(u, JoinType.MARK, List.of(), List.of(), compare(e.op(), x, y));
+            Expression unknown = add(u, JoinType.MARK, List.of(), List.of(),
+                    new Expression.Or(new Expression.IsNull(y, false), new Expression.IsNull(x, false)));
+            return new Expression.Case(List.of(
+                    new Expression.When(new Expression.Coalesce(List.of(match, no())), yes()),
+                    new Expression.When(new Expression.Coalesce(List.of(unknown, no())),
+                            new Expression.Literal(DataType.BOOLEAN, null))),
+                    no());
+        }
+        DataType t = y.type();
+        PlanNode counts = new PlanNode.Aggregate(b.plan(), List.of(), List.of(
+                new PlanNode.AggregateCall(PlanNode.AggregateFunction.COUNT_STAR, -1, false, "n"),
+                new PlanNode.AggregateCall(PlanNode.AggregateFunction.COUNT, 0, false, "nn"),
+                new PlanNode.AggregateCall(PlanNode.AggregateFunction.MIN, 0, false, "least"),
+                new PlanNode.AggregateCall(PlanNode.AggregateFunction.MAX, 0, false, "greatest")));
+        Expression n = new Expression.Column(RIGHT, DataType.BIGINT);
+        Expression nn = new Expression.Column(RIGHT + 1, DataType.BIGINT);
+        Expression least = new Expression.Column(RIGHT + 2, t);
+        Expression greatest = new Expression.Column(RIGHT + 3, t);
+        Expression holds = switch (e.op()) {
+            case GREATER, GREATER_EQUAL -> compare(e.op(), x, least);
+            case LESS, LESS_EQUAL -> compare(e.op(), x, greatest);
+            default -> new Expression.Or(compare(e.op(), x, least), compare(e.op(), x, greatest));
+        };
+        Expression zero = new Expression.Literal(DataType.BIGINT, 0L);
+        Expression result = new Expression.Case(List.of(
+                new Expression.When(new Expression.Comparison(Expression.ComparisonOp.EQ, n, zero), no()),
+                new Expression.When(holds, yes()),
+                new Expression.When(new Expression.Or(new Expression.IsNull(x, false),
+                        new Expression.Comparison(Expression.ComparisonOp.LT, nn, n)),
+                        new Expression.Literal(DataType.BOOLEAN, null))),
+                no());
+        return add(new Bound(counts, false, List.of(), List.of(), null, result, 4), JoinType.SINGLE, List.of(),
+                List.of(), null);
     }
 
     @Override
@@ -190,10 +306,34 @@ final class SubqueryJoiner implements ExpressionBinder.Subqueries {
                         null);
                 return true;
             }
-            case SqlExpr.InQuery e -> {
+            case SqlExpr.Quantified e when asIn(e) != null -> {
+                return filter(asIn(e), binder);
+            }
+            case SqlExpr.Quantified e -> {
+                // A correlated one is a join by the keys of its correlation, true for a row where the comparison is.
                 ExpressionBinder.Bound value = binder.bound(e.value());
                 checkValue(value.expression(), e.position());
-                Bound b = keyed(e, value, binder);
+                Bound b = keyed(e, e.query(), List.of(value), binder);
+                if (!b.correlated()) {
+                    return false;
+                }
+                Expression x = b.leftKeys().get(0);
+                Expression y = right(b, 0);
+                if (!e.all()) {
+                    add(unkeyed(b), JoinType.SEMI, List.of(), List.of(), compare(e.op(), x, y));
+                } else {
+                    add(unkeyed(b), JoinType.ANTI, List.of(), List.of(), new Expression.Or(new Expression.Or(
+                            compare(opposite(e.op()), x, y), new Expression.IsNull(y, false)),
+                            new Expression.IsNull(x, false)));
+                }
+                return true;
+            }
+            case SqlExpr.InQuery e -> {
+                List<ExpressionBinder.Bound> value = binder.values(e.value());
+                for (ExpressionBinder.Bound v : value) {
+                    checkValue(v.expression(), e.position());
+                }
+                Bound b = keyed(e, e.query(), value, binder);
                 if (!e.negated()) {
                     add(b, JoinType.SEMI, List.of(), List.of(), null);
                     return true;
@@ -266,7 +406,8 @@ final class SubqueryJoiner implements ExpressionBinder.Subqueries {
                 if (j.offset() < 0) {
                     throw new IllegalStateException("A subquery is not joined yet");
                 }
-                return at(j.value(), j.offset());
+                // A value may read the rows, and so subqueries joined before.
+                return resolve(at(j.value(), j.offset()));
             }
             return x;
         });
@@ -342,60 +483,78 @@ final class SubqueryJoiner implements ExpressionBinder.Subqueries {
     }
 
     /**
-     * The subquery of {@code IN}, with its column cast to the type in which
-     * it is compared with the value, as for {@code =}, and the value, cast
-     * to that type, as its first key. Unlike {@code =}, and as in DuckDB,
-     * the two types must have a {@linkplain TypeRules#common common type},
-     * unless the value is a string literal or a {@code NULL}.
+     * The subquery of {@code IN}, {@code ANY} or {@code ALL}, with each of
+     * its columns cast to the type in which it is compared with its value,
+     * as for {@code =}, and the values, cast to those types, as its first
+     * keys. Unlike {@code =}, and as in DuckDB, the two types must have a
+     * {@linkplain TypeRules#common common type}, unless the value is a
+     * string literal or a {@code NULL}.
      */
-    private Bound keyed(SqlExpr.InQuery e, ExpressionBinder.Bound value, ExpressionBinder binder) {
-        Bound b = oneColumn(bind(e, e.query(), Correlation.Kind.IN), e.position());
+    private Bound keyed(SqlExpr e, Query query, List<ExpressionBinder.Bound> values, ExpressionBinder binder) {
+        Bound b = bind(e, query, Correlation.Kind.IN);
+        int k = values.size();
+        if (k == 1) {
+            oneColumn(b, e.position());
+        } else if (b.columns() != k) {
+            throw new SqlException("Subquery returns " + b.columns() + " columns - expected " + k, e.position());
+        } else if (b.correlated()) {
+            throw new SqlException("Correlated IN/ANY/ALL with multiple columns not yet supported", e.position());
+        }
         PlanNode plan = b.plan();
         Schema schema = plan.schema();
-        boolean nullColumn = plan instanceof PlanNode.Project p && p.columns().get(0).expression()
-                instanceof Expression.Literal l && l.value() == null;
-        if (value.kind() != ExpressionBinder.Kind.STRING && !value.isNull() && !nullColumn) {
-            try {
-                TypeRules.common(value.type(), schema.type(0));
-            } catch (IllegalArgumentException x) {
-                throw new SqlException("Cannot compare values of type " + (value.kind()
-                        == ExpressionBinder.Kind.INTEGER ? "INTEGER_LITERAL" : value.type().sqlName()) + " and "
-                        + schema.type(0).sqlName() + " in IN/ANY/ALL clause - an explicit cast is required",
-                        e.position());
-            }
+        List<NamedExpression> columns = new ArrayList<>();
+        for (int i = 0; i < schema.size(); i++) {
+            columns.add(new NamedExpression(schema.name(i), new Expression.Column(i, schema.type(i))));
         }
-        Expression column = new Expression.Column(0, schema.type(0));
-        // A NULL selected by the subquery takes the type of the value, as a bare NULL does.
-        Expression[] operands = binder.equality(value, new ExpressionBinder.Bound(column, nullColumn
-                ? ExpressionBinder.Kind.NULL : ExpressionBinder.Kind.TYPED), e.position());
-        DataType t = TypeRules.common(operands[0].type(), operands[1].type());
-        Expression right = as(operands[1], t);
-        if (!right.equals(column)) {
-            List<NamedExpression> columns = new ArrayList<>();
-            columns.add(new NamedExpression(schema.name(0), right));
-            for (int i = 1; i < schema.size(); i++) {
-                columns.add(new NamedExpression(schema.name(i), new Expression.Column(i, schema.type(i))));
+        boolean cast = false;
+        List<Expression> leftKeys = new ArrayList<>();
+        List<Integer> rightKeys = new ArrayList<>();
+        for (int i = 0; i < k; i++) {
+            ExpressionBinder.Bound value = values.get(i);
+            int c = i;
+            boolean nullColumn = plan instanceof PlanNode.Project p && p.columns().get(c).expression()
+                    instanceof Expression.Literal l && l.value() == null;
+            if (value.kind() != ExpressionBinder.Kind.STRING && !value.isNull() && !nullColumn) {
+                try {
+                    TypeRules.common(value.type(), schema.type(i));
+                } catch (IllegalArgumentException x) {
+                    throw new SqlException("Cannot compare values of type " + (value.kind()
+                            == ExpressionBinder.Kind.INTEGER ? "INTEGER_LITERAL" : value.type().sqlName()) + " and "
+                            + schema.type(i).sqlName() + " in IN/ANY/ALL clause - an explicit cast is required",
+                            e.position());
+                }
             }
+            Expression column = new Expression.Column(i, schema.type(i));
+            // A NULL selected by the subquery takes the type of the value, as a bare NULL does.
+            Expression[] operands = binder.equality(value, new ExpressionBinder.Bound(column, nullColumn
+                    ? ExpressionBinder.Kind.NULL : ExpressionBinder.Kind.TYPED), e.position());
+            DataType t = TypeRules.common(operands[0].type(), operands[1].type());
+            Expression right = as(operands[1], t);
+            if (!right.equals(column)) {
+                columns.set(i, new NamedExpression(schema.name(i), right));
+                cast = true;
+            }
+            leftKeys.add(as(operands[0], t));
+            rightKeys.add(i);
+        }
+        if (cast) {
             plan = new PlanNode.Project(plan, columns);
         }
-        List<Expression> leftKeys = new ArrayList<>();
-        leftKeys.add(as(operands[0], t));
         leftKeys.addAll(b.leftKeys());
-        List<Integer> rightKeys = new ArrayList<>();
-        rightKeys.add(0);
         rightKeys.addAll(b.rightKeys());
         return new Bound(plan, b.correlated(), leftKeys, rightKeys, b.condition(), b.value(), b.columns());
     }
 
-    /** The subquery of {@code IN} without its first key, the value. */
+    /** The subquery of {@code IN}, {@code ANY} or {@code ALL} of one value without its first key, the value. */
     private static Bound unkeyed(Bound b) {
         return new Bound(b.plan(), b.correlated(), b.leftKeys().subList(1, b.leftKeys().size()),
                 b.rightKeys().subList(1, b.rightKeys().size()), b.condition(), b.value(), b.columns());
     }
 
     /**
-     * Rejects a value of {@code IN} that references the query around the
-     * query of the clause, whose join would need both.
+     * Rejects a value of {@code IN}, {@code ANY} or {@code ALL} that
+     * references the query around the query of the clause, whose join would
+     * need both.
      */
     private static void checkValue(Expression value, Position position) {
         if (Correlation.reads(value)) {

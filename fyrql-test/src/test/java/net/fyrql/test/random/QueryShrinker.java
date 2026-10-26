@@ -163,14 +163,14 @@ final class QueryShrinker {
                         ? new SelectItem.ExpressionItem(inline(x.expression(), window), x.alias()) : item);
             }
             result.add(new QueryBody.Select(s.distinct(), items, s.from(), s.where(), s.groupBy(), s.having(),
-                    windows, s.qualify() == null ? null : inline(s.qualify(), window), P));
+                    windows, s.qualify() == null ? null : inline(s.qualify(), window), s.distinctOn(), P));
         }
         if (s.qualify() != null) {
             result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), s.where(), s.groupBy(), s.having(),
-                    s.windows(), null, P));
+                    s.windows(), null, s.distinctOn(), P));
             for (SqlExpr e : expression(s.qualify())) {
                 result.add(new QueryBody.Select(s.distinct(), s.items(), s.from(), s.where(), s.groupBy(), s.having(),
-                        s.windows(), e, P));
+                        s.windows(), e, s.distinctOn(), P));
             }
         }
     }
@@ -178,7 +178,8 @@ final class QueryShrinker {
     /** The select with other clauses, keeping its {@code WINDOW} and {@code QUALIFY}. */
     private static QueryBody.Select with(QueryBody.Select s, boolean distinct, List<SelectItem> items, FromItem from,
             SqlExpr where, QueryBody.GroupBy groupBy, SqlExpr having) {
-        return new QueryBody.Select(distinct, items, from, where, groupBy, having, s.windows(), s.qualify(), P);
+        return new QueryBody.Select(distinct, items, from, where, groupBy, having, s.windows(), s.qualify(),
+                distinct ? List.of() : s.distinctOn(), P);
     }
 
     /** An expression with a window of the {@code WINDOW} clause written out wherever it names the window. */
@@ -255,6 +256,12 @@ final class QueryShrinker {
                     result.add(new SqlExpr.ScalarSubquery(q, P));
                 }
             }
+            case SqlExpr.Quantified x -> {
+                result.add(new SqlExpr.IsNull(x.value(), true, P));
+                for (Query q : query(x.query())) {
+                    result.add(new SqlExpr.Quantified(x.op(), x.value(), q, x.all(), P));
+                }
+            }
             // A window function may go for its call without the window, or lose a part of its window.
             case SqlExpr.Window w -> {
                 result.add(w.call());
@@ -277,6 +284,7 @@ final class QueryShrinker {
                     result.add(new SqlExpr.Window(w.call(), over, w.ignoreNulls(), null, P));
                 }
             }
+            case SqlExpr.FunctionCall f when f.filter() != null -> result.add(f.withFilter(null));
             default -> {
             }
         }
@@ -318,6 +326,8 @@ final class QueryShrinker {
                 c.addAll(in.list());
             }
             case SqlExpr.InQuery in -> c.add(in.value());
+            case SqlExpr.Quantified q -> c.add(q.value());
+            case SqlExpr.Row r -> c.addAll(r.values());
             case SqlExpr.Exists x -> {
             }
             case SqlExpr.ScalarSubquery s -> {
@@ -349,6 +359,9 @@ final class QueryShrinker {
                 for (OrderItem o : f.orderBy()) {
                     c.add(o.expression());
                 }
+                if (f.filter() != null) {
+                    c.add(f.filter());
+                }
             }
             case SqlExpr.Index x -> {
                 c.add(x.base());
@@ -372,6 +385,8 @@ final class QueryShrinker {
             case SqlExpr.Between b -> new SqlExpr.Between(c.get(0), c.get(1), c.get(2), b.negated(), P);
             case SqlExpr.InList in -> new SqlExpr.InList(c.get(0), c.subList(1, c.size()), in.negated(), P);
             case SqlExpr.InQuery in -> new SqlExpr.InQuery(c.get(0), in.query(), in.negated(), P);
+            case SqlExpr.Quantified q -> new SqlExpr.Quantified(q.op(), c.get(0), q.query(), q.all(), P);
+            case SqlExpr.Row r -> new SqlExpr.Row(c, P);
             case SqlExpr.Exists x -> x;
             case SqlExpr.ScalarSubquery s -> s;
             case SqlExpr.Like l -> new SqlExpr.Like(c.get(0), c.get(1), l.caseInsensitive(), l.negated(), P);
@@ -394,7 +409,8 @@ final class QueryShrinker {
                     OrderItem o = f.orderBy().get(i);
                     order.add(new OrderItem(c.get(n + i), o.ascending(), o.nullsFirst()));
                 }
-                yield new SqlExpr.FunctionCall(f.name(), c.subList(0, n), f.distinct(), f.star(), order, P);
+                SqlExpr filter = f.filter() == null ? null : c.get(n + f.orderBy().size());
+                yield new SqlExpr.FunctionCall(f.name(), c.subList(0, n), f.distinct(), f.star(), order, filter, P);
             }
             case SqlExpr.Index x -> new SqlExpr.Index(c.get(0), c.get(1), P);
             case SqlExpr.StructValue s -> new SqlExpr.StructValue(s.names(), c, P);

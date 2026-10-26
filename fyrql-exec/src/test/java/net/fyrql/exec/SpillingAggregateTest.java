@@ -99,7 +99,7 @@ class SpillingAggregateTest {
         return sizes.stream().mapToInt(Integer::intValue).toArray();
     }
 
-    /** Aggregates that merge, which workers compute each for their rows. */
+    /** Aggregates that merge, which workers compute each for their rows, two of them filtered. */
     private static List<AggregateCall> mergeable() {
         return List.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"),
                 new AggregateCall(AggregateFunction.COUNT, S, false, "cs"),
@@ -110,10 +110,12 @@ class SpillingAggregateTest {
                 new AggregateCall(AggregateFunction.MAX, D, false, "maxd"),
                 new AggregateCall(AggregateFunction.MAX, S, false, "maxs"),
                 new AggregateCall(AggregateFunction.BOOL_AND, B, false, "band"),
-                new AggregateCall(AggregateFunction.BOOL_OR, B, false, "bor"));
+                new AggregateCall(AggregateFunction.BOOL_OR, B, false, "bor"),
+                new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "nb").withFilter(B),
+                new AggregateCall(AggregateFunction.SUM, V, false, "svb").withFilter(B));
     }
 
-    /** Every other aggregate: with DISTINCT, with ORDER BY, lists and those of the first or last row. */
+    /** Every other aggregate: with DISTINCT, with ORDER BY, lists and those of the first or last row, filtered too. */
     private static List<AggregateCall> others() {
         List<AggregateCall> calls = new ArrayList<>(mergeable());
         calls.add(new AggregateCall(AggregateFunction.SUM, V, true, "sdv"));
@@ -128,6 +130,9 @@ class SpillingAggregateTest {
         calls.add(new AggregateCall(AggregateFunction.LAST, D, false, "ld2"));
         calls.add(new AggregateCall(AggregateFunction.ANY_VALUE, DEC, false, "anydec"));
         calls.add(new AggregateCall(AggregateFunction.MIN, D, false, "mind2", null, List.of(SortKey.asc(V))));
+        calls.add(new AggregateCall(AggregateFunction.LIST, V, false, "lvb").withFilter(B));
+        calls.add(new AggregateCall(AggregateFunction.STRING_AGG, S, true, "sadb", ",", List.of(SortKey.asc(S)))
+                .withFilter(B));
         return calls;
     }
 

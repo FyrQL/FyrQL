@@ -18,6 +18,8 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -88,6 +90,45 @@ class ExplainTest {
                     """, engine.explain(plan));
             // Two days back from the second date reach the first.
             assertEquals(List.of(List.of(2, 1L, 2L, 4L)), engine.rows(plan).stream().map(List::of).toList());
+        }
+    }
+
+    @Test
+    void anAggregateShowsItsFilter() {
+        try (FyrQL engine = FyrQL.builder().build()) {
+            String sql = "SELECT count(*) FILTER (WHERE k > 1) AS n, sum(k) AS s FROM (VALUES (1), (2), (3)) v(k)";
+            assertEquals("""
+                    Project #0 AS n, #1 AS s
+                      Aggregate count(*) FILTER (WHERE #0) AS "count_star() FILTER (WHERE (k > 1))", sum(#1) AS "sum(k)"
+                        Project (#0 > CAST(1 AS INTEGER)) AS "#argument0", #0 AS "#argument1"
+                          Values 3 rows (col0 INTEGER)
+                    """, engine.explain(sql));
+            assertEquals(List.of(List.of(2L, BigInteger.valueOf(6))), engine.rows(sql).stream().map(List::of).toList());
+        }
+    }
+
+    @Test
+    void groupingSetsAreAUnionOfAggregations() {
+        try (FyrQL engine = FyrQL.builder().build()) {
+            String sql = "SELECT k, count(*) AS n, grouping(k) AS g FROM (VALUES (1), (2), (2)) v(k)"
+                    + " GROUP BY ROLLUP (k) ORDER BY ALL";
+            // Each set reads the rows again; the call of grouping is a constant of the set.
+            assertEquals("""
+                    Sort #0, #1, #2
+                      Project #0 AS k, #1 AS n, #2 AS g
+                        Union ALL
+                          Project #0 AS "#group0", #1 AS "count_star()", CAST(0 AS BIGINT) AS "GROUPING(k)"
+                            Aggregate GROUP BY #0: count(*) AS "count_star()"
+                              Project #0 AS "#group0"
+                                Values 3 rows (col0 INTEGER)
+                          Project CAST(NULL AS INTEGER) AS "#group0", #0 AS "count_star()", CAST(1 AS BIGINT) \
+                    AS "GROUPING(k)"
+                            Aggregate count(*) AS "count_star()"
+                              Project #0 AS "#group0"
+                                Values 3 rows (col0 INTEGER)
+                    """, engine.explain(sql));
+            assertEquals(List.of(Arrays.asList(1, 1L, 0L), Arrays.asList(2, 2L, 0L), Arrays.asList(null, 3L, 1L)),
+                    engine.rows(sql).stream().map(Arrays::asList).toList());
         }
     }
 
