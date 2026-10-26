@@ -22,7 +22,9 @@ import de.siegmar.fastcsv.reader.CsvRecordHandler;
 import de.siegmar.fastcsv.reader.IndexedCsvReader;
 import de.siegmar.fastcsv.reader.RecordType;
 import net.fyrql.connector.BatchReader;
+import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
+import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.FileObject;
@@ -37,6 +39,8 @@ import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
+import net.fyrql.connector.files.HivePartitions;
+import net.fyrql.core.expr.Expression;
 import net.fyrql.core.function.DateFormats;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
@@ -60,6 +64,7 @@ import java.nio.file.attribute.FileTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -75,8 +80,14 @@ import java.util.zip.GZIPInputStream;
 
 /**
  * CSV and TSV files as tables in the schema {@code main}: every
- * {@code .csv} or {@code .tsv} file of a directory, or files added one by
- * one. The schema comes from the header and a sample of rows, as DuckDB
+ * {@code .csv} or {@code .tsv} file of a directory, and every subdirectory
+ * with such files, or files, directories and patterns added one by one, see
+ * {@link CsvFiles}. The files of a table share the columns of the first
+ * one, by position. Directories of the form {@code key=value} on the paths
+ * of the files add partition columns, see {@link HivePartitions}; a scan
+ * takes over the filters that read partition columns only and skips the
+ * files no row of which passes. The schema comes from the header and a
+ * sample of rows of the first file, as DuckDB
  * sniffs it ({@code BOOLEAN}, {@code BIGINT}, {@code DOUBLE}, {@code TIME},
  * {@code DATE}, {@code TIMESTAMP}, {@code TIMESTAMP WITH TIME ZONE} for
  * timestamps of which some have an offset or a time zone, otherwise
@@ -116,10 +127,10 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
 
     private final String name;
     private volatile FileStores stores = FileStores.local(Path.of(""));
-    private final Map<String, Table> tables;
-    /** The tables in another store than the local one by their names, looked up when first used. */
-    private final Map<String, Pending> pending;
-    private final Map<String, Table> found = new ConcurrentHashMap<>();
+    /** The registered tables by their names, in order: where their files are and how they are read. */
+    private final Map<String, Source> sources;
+    /** The registered tables found so far, the local ones when the connector was built. */
+    private final Map<String, CsvTable> tables;
     private final int batchSize;
     private final int sampleRows;
     private final Charset charset;
@@ -129,7 +140,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * The tables of table function calls and of files read with given
      * columns by their names, and the names by the calls and the files.
      */
-    private final Map<String, Table> callTables = new ConcurrentHashMap<>();
+    private final Map<String, CsvTable> callTables = new ConcurrentHashMap<>();
     private final Map<Object, String> calls = new ConcurrentHashMap<>();
     private final AtomicInteger callCount = new AtomicInteger();
     /** The index of each file read in splits, in the version it was built for. */
@@ -161,13 +172,93 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         }
     }
 
-    /** A table in another store than the local one, before it is looked up: its location and settings. */
-    private record Pending(String location, Boolean header, Schema schema) {
+    /** A file of a table: a local one, read through its path, or one of another store, read as a whole. */
+    record Part(Path file, FileObject remote, boolean gzip) {
+
+        static Part of(FileObject file) {
+            boolean gzip = file.name().toLowerCase(Locale.ROOT).endsWith(".gz");
+            return file.path().isPresent() ? new Part(file.path().get(), null, gzip) : new Part(null, file, gzip);
+        }
+
+        /** Returns where the file is, for messages. */
+        String location() {
+            return remote != null ? remote.location() : String.valueOf(file);
+        }
     }
 
-    /** A call of a table function: the file in its current version and how to read it. */
-    private record Call(String file, String version, long size, char delimiter, char quote, Boolean header,
-            String nullString, String dateFormat, String timestampFormat, ZoneId zone) {
+    /**
+     * A table of one or more files.
+     *
+     * @param format how the files are read: the first file, with its columns, which the others share
+     * @param parts the files, sorted by their locations
+     * @param partitions the partition columns and the values of each file
+     * @param columns the columns of the table: those of the files with the partition columns
+     * @param rows the number of rows, estimated from the first file and the sizes of the others; -1 if unknown
+     */
+    record CsvTable(Table format, List<Part> parts, HivePartitions.Partitions partitions,
+            HivePartitions.Columns columns, long rows) {
+
+        /** A table of one file without partitions. */
+        static CsvTable of(Table table) {
+            return new CsvTable(table, List.of(new Part(table.file(), table.remote(), table.gzip())),
+                    new HivePartitions.Partitions(HivePartitions.Layout.NONE, List.<Object[]>of(new Object[0])),
+                    HivePartitions.columns(table.schema(), HivePartitions.Layout.NONE), table.rows());
+        }
+
+        Schema schema() {
+            return columns.schema();
+        }
+
+        /** Returns how a file of the table is read. */
+        Table file(Part part) {
+            return new Table(part.file(), format.delimiter(), format.quote(), format.header(), format.nullString(),
+                    format.charset(), format.schema(), format.rows(), format.dateFormat(), format.timestampFormat(),
+                    part.gzip(), part.remote(), format.zone());
+        }
+
+        /** Returns the locations of the files. */
+        List<String> locations() {
+            return parts.stream().map(Part::location).toList();
+        }
+    }
+
+    /**
+     * How a table reads its files, before the first one is sniffed.
+     *
+     * @param delimiter the delimiter, or {@code null} for a tab in files
+     *        whose names end in {@code .tsv} or {@code .tsv.gz} and a comma
+     *        in others
+     * @param header whether the first line is a header, or {@code null} to detect it
+     * @param schema the columns of the files, or {@code null} to sniff them
+     */
+    record Settings(Character delimiter, char quote, Boolean header, String nullString, Charset charset,
+            String dateFormat, String timestampFormat, ZoneId zone, Schema schema, HivePartitions.Options options) {
+
+        Settings withSchema(Schema other) {
+            return new Settings(delimiter, quote, header, nullString, charset, dateFormat, timestampFormat, zone,
+                    other, options);
+        }
+
+        Settings withOptions(HivePartitions.Options other) {
+            return new Settings(delimiter, quote, header, nullString, charset, dateFormat, timestampFormat, zone,
+                    schema, other);
+        }
+    }
+
+    /** A registered table: where its files are and how they are read. */
+    private record Source(String location, Settings settings) {
+    }
+
+    /** A file in its current version. */
+    private record FileVersion(String file, String version, long size) {
+    }
+
+    /** A call of a table function: the files in their current versions and how to read them. */
+    private record Call(List<FileVersion> files, Settings settings) {
+    }
+
+    /** The split of a part of a file of a table: the file, and its pages or {@code null} for the whole file. */
+    private record FileSplit(CsvTable table, int part, PageRange range) {
     }
 
     /** A file in its current version read with given columns and options. */
@@ -186,11 +277,11 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     private record PageRange(CsvIndex index, int from, int to) {
     }
 
-    private CsvConnector(String name, Map<String, Table> tables, Map<String, Pending> pending, int batchSize,
+    private CsvConnector(String name, Map<String, Source> sources, Map<String, CsvTable> tables, int batchSize,
             int sampleRows, Charset charset, long splitSize) {
         this.name = name;
-        this.tables = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(tables));
-        this.pending = Map.copyOf(pending);
+        this.sources = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(sources));
+        this.tables = new ConcurrentHashMap<>(tables);
         this.batchSize = batchSize;
         this.sampleRows = sampleRows;
         this.charset = charset;
@@ -203,7 +294,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
 
             @Override
             public List<String> tables(String schema) {
-                return schema.equals(TableRef.MAIN) ? List.copyOf(CsvConnector.this.tables.keySet()) : List.of();
+                return schema.equals(TableRef.MAIN) ? List.copyOf(sources.keySet()) : List.of();
             }
 
             @Override
@@ -270,34 +361,97 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         return catalog;
     }
 
-    private Table table(TableRef ref) {
-        Table t = null;
+    private CsvTable table(TableRef ref) {
+        CsvTable t = null;
         if (ref.schema().equals(TableRef.MAIN)) {
-            t = ref.table().startsWith(CALL_PREFIX) ? callTables.get(ref.table()) : tables.get(ref.table());
+            if (ref.table().startsWith(CALL_PREFIX)) {
+                t = callTables.get(ref.table());
+            } else if (sources.containsKey(ref.table())) {
+                t = tables.computeIfAbsent(ref.table(), this::lookUp);
+            }
         }
         if (t == null) {
             throw new IllegalArgumentException("No table " + ref + " in the CSV source " + name);
         }
-        if (t.file() == null && t.remote() == null) {
-            t = found.computeIfAbsent(ref.table(), this::lookUp);
-        }
         return t;
     }
 
-    /** Looks up a table in another store than the local one and sniffs its schema unless it has one. */
-    private Table lookUp(String table) {
-        Pending p = pending.get(table);
-        Table t = tables.get(table);
+    /** Looks up a table in another store than the local one and sniffs its first file. */
+    private CsvTable lookUp(String table) {
+        Source s = sources.get(table);
         try {
-            Table sniffed = sniff(new Table(null, t.delimiter(), t.quote(), false, t.nullString(), t.charset(), null,
-                    -1, null, null, t.gzip(), remote(p.location()), t.zone()), p.header(), sampleRows);
-            return p.schema() == null ? sniffed : new Table(null, sniffed.delimiter(), sniffed.quote(),
-                    sniffed.header(), sniffed.nullString(), sniffed.charset(), p.schema(), sniffed.rows(), null, null,
-                    sniffed.gzip(), sniffed.remote(), sniffed.zone());
+            return table(s.location(), CsvFiles.list(stores, s.location(), s.location()), s.settings(), sampleRows);
         } catch (IllegalArgumentException | UncheckedIOException e) {
             throw new IllegalArgumentException("The table " + table + " of the CSV source " + name + ": "
                     + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Returns a table of files: sniffs the first one, unless the columns
+     * are given, and finds the partitions.
+     *
+     * @throws IllegalArgumentException if a file is compressed with zstd,
+     *         the files mix TSV files with others without a delimiter, the
+     *         first file is empty, or the partitions do not fit the options
+     */
+    static CsvTable table(String location, List<FileObject> files, Settings settings, int sampleRows) {
+        List<Part> parts = files.stream().map(Part::of).toList();
+        for (Part p : parts) {
+            if (p.location().toLowerCase(Locale.ROOT).endsWith(".zst")) {
+                throw new IllegalArgumentException("Files compressed with zstd are not supported: " + p.location());
+            }
+        }
+        char delimiter = settings.delimiter() != null ? settings.delimiter()
+                : CsvFiles.delimiter(files.stream().map(FileObject::name).toList(), location);
+        Part first = parts.get(0);
+        Table sniffed = sniff(new Table(first.file(), delimiter, settings.quote(), false, settings.nullString(),
+                settings.charset(), null, -1, settings.dateFormat(), settings.timestampFormat(), first.gzip(),
+                first.remote(), settings.zone()), settings.header(), sampleRows);
+        if (settings.schema() != null) {
+            sniffed = new Table(sniffed.file(), sniffed.delimiter(), sniffed.quote(), sniffed.header(),
+                    sniffed.nullString(), sniffed.charset(), settings.schema(), sniffed.rows(), sniffed.dateFormat(),
+                    sniffed.timestampFormat(), sniffed.gzip(), sniffed.remote(), sniffed.zone());
+        }
+        HivePartitions.Partitions partitions = HivePartitions.partitions(
+                files.stream().map(FileObject::location).toList(), settings.options());
+        long rows = sniffed.rows();
+        if (files.size() > 1) {
+            long size = files.get(0).size();
+            long total = files.stream().mapToLong(FileObject::size).sum();
+            boolean gzip = parts.stream().anyMatch(Part::gzip);
+            rows = rows < 0 || gzip || size <= 0 ? -1 : Math.round(rows * ((double) total / size));
+        }
+        return new CsvTable(sniffed, parts, partitions, HivePartitions.columns(sniffed.schema(),
+                partitions.layout()), rows);
+    }
+
+    /**
+     * Returns a registered table with its files as they are now: the same
+     * table while the files are the same, otherwise one of the files now,
+     * which must have the columns and partitions of the table.
+     */
+    private CsvTable current(TableRef ref) {
+        CsvTable known = table(ref);
+        Source s = ref.table().startsWith(CALL_PREFIX) ? null : sources.get(ref.table());
+        if (s == null) {
+            return known;
+        }
+        List<FileObject> files = CsvFiles.list(stores, s.location(), s.location());
+        if (files.stream().map(f -> Part.of(f).location()).toList().equals(known.locations())) {
+            return known;
+        }
+        CsvTable now = table(s.location(), files, s.settings(), sampleRows);
+        if (!now.format().schema().equals(known.format().schema())) {
+            throw new IllegalArgumentException("The files of the table " + ref + " changed their columns since they"
+                    + " were read: " + known.format().schema() + " and now " + now.format().schema());
+        }
+        if (!now.partitions().layout().equals(known.partitions().layout())) {
+            throw new IllegalArgumentException("The files of the table " + ref + " changed their partitions since"
+                    + " they were read: " + known.partitions().layout() + " and now " + now.partitions().layout());
+        }
+        tables.put(ref.table(), now);
+        return now;
     }
 
     @Override
@@ -307,9 +461,14 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
 
     /**
      * Binds {@code read_csv(path, ...)} and {@code read_csv_auto}, which are
-     * the same, to a table of the file in the schema {@code main} under a
-     * name of {@code #} and the text of the call, which does not appear among
-     * the tables of the catalog. The named arguments are those of DuckDB:
+     * the same, to a table of the files of the path in the schema
+     * {@code main} under a name of {@code #} and the text of the call, which
+     * does not appear among the tables of the catalog. The path is a file, a
+     * directory or a pattern, see {@link CsvFiles}; each file must be one the
+     * policy of the engine allows to read. The named arguments are those of
+     * DuckDB, {@code hive_partitioning}, {@code hive_types_autocast} and
+     * {@code hive_types} for the partitions, see
+     * {@link HivePartitions#options}, and:
      * {@code header} (a boolean, or a value that casts to one; detected by
      * default), {@code delim} or {@code sep} (one character, {@code '\t'}
      * for a tab; a comma, or a tab for {@code .tsv} files, by default),
@@ -321,8 +480,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * sniffed and read, instead of the forms of a cast). The schema is
      * sniffed as for registered files. A file whose name ends in
      * {@code .gz} is read through gzip; a tab is the delimiter by default
-     * also for {@code .tsv.gz}. The same call on an unchanged file gives the
-     * same table; a changed file is sniffed again.
+     * also for {@code .tsv.gz}. The same call on unchanged files gives the
+     * same table; a changed, added or removed file gives a new one.
      */
     @Override
     public TableRef bind(String function, List<Object> arguments, Map<String, Object> namedArguments) {
@@ -330,30 +489,11 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             throw new IllegalArgumentException("Unknown table function " + function);
         }
         if (arguments.size() != 1 || !(arguments.get(0) instanceof String path)) {
-            throw new IllegalArgumentException(function + " takes the path of one file as its argument");
+            throw new IllegalArgumentException(function + " takes the path of a file, a directory or a pattern"
+                    + " as its argument");
         }
-        if (path.indexOf('*') >= 0 || path.indexOf('?') >= 0) {
-            throw new IllegalArgumentException("Patterns of file names are not supported yet: " + path);
-        }
-        Path file = null;
-        FileObject remote = null;
-        if (FileStores.isLocal(path)) {
-            try {
-                file = local(path).toAbsolutePath().normalize();
-            } catch (IllegalArgumentException e) {
-                throw new IllegalArgumentException("Invalid path " + path, e);
-            }
-            if (!Files.isRegularFile(file)) {
-                throw new IllegalArgumentException("No files found that match the pattern \"" + path + "\"");
-            }
-        } else {
-            remote = remote(path);
-        }
-        String lower = path.toLowerCase(Locale.ROOT);
-        if (lower.endsWith(".zst")) {
-            throw new IllegalArgumentException("Files compressed with zstd are not supported: " + path);
-        }
-        char delimiter = lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
+        String location = CsvFiles.absolute(path, Path.of(""));
+        Character delimiter = null;
         char quote = '"';
         Boolean header = null;
         String nullString = "";
@@ -371,31 +511,27 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
                 case "timestampformat", "timestamp_format" -> timestampFormat = format(function, e.getKey(), value);
                 case FileWriterProvider.TIME_ZONE ->
                         zone = FileWriterProvider.timeZone(string(function, e.getKey(), value));
+                case "hive_partitioning", "hive_types_autocast", "hive_types" -> {
+                    // Read below.
+                }
                 default -> throw new IllegalArgumentException("Invalid named parameter \"" + e.getKey()
                         + "\" for function " + function + "; supported are header, delim, sep, quote, nullstr,"
-                        + " dateformat, timestampformat, timezone");
+                        + " dateformat, timestampformat, hive_partitioning, hive_types, hive_types_autocast,"
+                        + " timezone");
             }
         }
-        Call call;
-        if (remote != null) {
-            call = new Call(remote.location(), remote.version(), remote.size(), delimiter, quote, header, nullString,
-                    dateFormat, timestampFormat, zone);
-        } else {
-            try {
-                call = new Call(file.toString(), Files.getLastModifiedTime(file).toString(), Files.size(file),
-                        delimiter, quote, header, nullString, dateFormat, timestampFormat, zone);
-            } catch (IOException e) {
-                throw new IllegalArgumentException("Cannot read " + path + ": " + e.getMessage(), e);
-            }
+        HivePartitions.Options options = HivePartitions.options(function, namedArguments, HivePartitions.Options.AUTO);
+        List<FileObject> files = CsvFiles.list(stores, location, path);
+        List<FileVersion> versions = new ArrayList<>();
+        for (FileObject f : files) {
+            stores.policy().checkRead(f.location());
+            versions.add(new FileVersion(f.location(), f.version(), f.size()));
         }
-        boolean gzip = lower.endsWith(".gz");
-        Path local = file;
-        FileObject object = remote;
-        String table = calls.computeIfAbsent(call, k -> {
-            Table t = new Table(local, call.delimiter(), call.quote(), false, call.nullString(), charset, null,
-                    -1, call.dateFormat(), call.timestampFormat(), gzip, object, call.zone());
+        Settings settings = new Settings(delimiter, quote, header, nullString, charset, dateFormat, timestampFormat,
+                zone, null, options);
+        String table = calls.computeIfAbsent(new Call(versions, settings), k -> {
             return callName(TableFunctionProvider.callText(function, arguments, namedArguments),
-                    sniff(t, call.header(), sampleRows));
+                    table(location, files, settings, sampleRows));
         });
         return TableRef.of(name, table);
     }
@@ -524,8 +660,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
             return callName(TableFunctionProvider.callText("read_" + format, List.of(location), options),
-                    new Table(local, delimiter, quote, header, nullString, charset, schema, -1,
-                    dateFormat, timestampFormat, gzip, object, zone));
+                    CsvTable.of(new Table(local, delimiter, quote, header, nullString, charset, schema, -1,
+                    dateFormat, timestampFormat, gzip, object, zone)));
         });
         return TableRef.of(name, table);
     }
@@ -589,37 +725,69 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         return s.charAt(0);
     }
 
+    /**
+     * Reads whole columns, and takes over the filters that read partition
+     * columns only, which it evaluates for each file.
+     */
     @Override
     public ScanPlan plan(TableRef table, ScanRequest request) {
-        return ScanPlan.columnsOnly(table, table(table).schema(), request, null);
+        CsvTable t = table(table);
+        ScanRequest read = request.readsFields() ? request.withWholeColumns() : request;
+        return new Capabilities(HivePartitions.filter(read.columns(), t.columns()), false, o -> false, a -> false)
+                .plan(table, t.schema(), read, null);
     }
 
     /**
-     * Returns one split for a file of at most the split size, and otherwise
-     * a split for each part of about the split size. The parts are cut
-     * between the records that FastCSV's {@link IndexedCsvReader} finds in
-     * the bytes of the file, quoted line breaks included, and grouped from
-     * its pages of one batch each; the index is built once for each
+     * Returns, for each file of the table whose partitions pass the filters
+     * taken over, one split for a file of at most the split size, and
+     * otherwise a split for each part of about the split size. The parts are
+     * cut between the records that FastCSV's {@link IndexedCsvReader} finds
+     * in the bytes of the file, quoted line breaks included, and grouped
+     * from its pages of one batch each; the index is built once for each
      * version of a file. A file in a charset whose characters the index
      * cannot find by their bytes, which is any but UTF-8 and the charsets
-     * of one byte per character that keep ASCII as it is, is one split.
+     * of one byte per character that keep ASCII as it is, is one split. The
+     * files of a table of several files read and skipped count for the scan,
+     * see {@link SourceCounters}.
+     *
+     * @throws RuntimeException the error of the filters taken over, if they
+     *         fail on the partitions of a file
      */
     @Override
     public List<Split> splits(ScanPlan plan) {
-        CsvIndex index = splitSize > 0 ? index(table(plan.table())) : null;
-        if (index == null) {
-            return List.of(new Split(plan, 0, null));
-        }
-        List<CsvIndex.CsvPage> pages = index.pages();
+        CsvTable table = current(plan.table());
+        List<Expression> accepted = plan.acceptedFilters();
         List<Split> splits = new ArrayList<>();
-        int from = 0;
-        for (int p = 1; p <= pages.size(); p++) {
-            if (p == pages.size() || pages.get(p).offset() - pages.get(from).offset() >= splitSize) {
-                splits.add(new Split(plan, splits.size(), new PageRange(index, from, p)));
-                from = p;
+        int read = 0;
+        for (int f = 0; f < table.parts().size(); f++) {
+            Object[] values = table.partitions().values().get(f);
+            HivePartitions.Match match = HivePartitions.match(accepted, plan.columns(), table.columns(), values);
+            if (match == HivePartitions.Match.NONE) {
+                continue;
+            }
+            if (match == HivePartitions.Match.FAILS) {
+                HivePartitions.passes(accepted, plan.columns(), table.columns(), values);
+            }
+            read++;
+            CsvIndex index = splitSize > 0 ? index(table.file(table.parts().get(f))) : null;
+            List<CsvIndex.CsvPage> pages = index == null ? List.of() : index.pages();
+            int first = splits.size();
+            int from = 0;
+            for (int p = 1; p <= pages.size(); p++) {
+                if (p == pages.size() || pages.get(p).offset() - pages.get(from).offset() >= splitSize) {
+                    splits.add(new Split(plan, splits.size(), new FileSplit(table, f, new PageRange(index, from, p))));
+                    from = p;
+                }
+            }
+            if (splits.size() - first <= 1) {
+                splits.subList(first, splits.size()).clear();
+                splits.add(new Split(plan, splits.size(), new FileSplit(table, f, null)));
             }
         }
-        return splits.size() > 1 ? splits : List.of(new Split(plan, 0, null));
+        if (table.parts().size() > 1 || read < table.parts().size()) {
+            SourceCounters.current().files(read, table.parts().size() - read);
+        }
+        return splits;
     }
 
     /** Returns the index of a file larger than the split size, or {@code null} for one split. */
@@ -681,12 +849,26 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      */
     @Override
     public BatchReader open(Split split) {
-        Table table = table(split.plan().table());
-        RecordReader handler = new RecordReader(table, split.plan().wholeColumns(), split.plan().output(), batchSize);
-        if (table.remote() == null) {
-            counted(table, split.state() instanceof PageRange range ? range : null);
+        if (!(split.state() instanceof FileSplit part)) {
+            throw new IllegalArgumentException("Not a split of the CSV source " + name + ": " + split);
         }
-        if (split.state() instanceof PageRange range) {
+        ScanPlan plan = split.plan();
+        CsvTable t = part.table();
+        Table table = t.file(t.parts().get(part.part()));
+        HivePartitions.Projection projection = HivePartitions.project(plan.columns(), plan.output(), t.columns(),
+                t.partitions().values().get(part.part()));
+        RecordReader handler = new RecordReader(table, ColumnPath.indexes(projection.fileColumns()),
+                projection.fileOutput(), batchSize);
+        BatchReader reader = read(table, handler, part.range());
+        return projection.hasPartitions() ? HivePartitions.withPartitions(reader, plan.output(), projection) : reader;
+    }
+
+    /** Reads a file, or the pages of a part of it, into batches. */
+    private BatchReader read(Table table, RecordReader handler, PageRange range) {
+        if (table.remote() == null) {
+            counted(table, range);
+        }
+        if (range != null) {
             return pages(table, handler, range);
         }
         CsvReader<Boolean> reader = reader(table, handler, false);
@@ -1138,15 +1320,18 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     /** Collects the files of a CSV connector. */
     public static final class Builder {
         private final String name;
-        private final Map<String, Table> tables = new LinkedHashMap<>();
-        private final Map<String, Schema> schemas = new LinkedHashMap<>();
-        private final Map<String, Boolean> headers = new LinkedHashMap<>();
+        /** The locations of the tables by their names, and how they are read. */
         private final Map<String, String> locations = new LinkedHashMap<>();
+        private final Map<String, Settings> settings = new LinkedHashMap<>();
+        private final Map<String, Schema> schemas = new LinkedHashMap<>();
+        private final Map<String, Map<String, DataType>> hiveTypes = new HashMap<>();
         private Character delimiter;
         private char quote = '"';
         private Boolean header;
         private String nullString = "";
         private Charset charset = StandardCharsets.UTF_8;
+        private Boolean hivePartitioning;
+        private boolean hiveTypesAutocast = true;
         private int sampleRows = 1000;
         private int batchSize = 2048;
         private long splitSize = SPLIT_SIZE;
@@ -1214,54 +1399,83 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         }
 
         /**
-         * Adds a file as a table, read through gzip if its name ends in
-         * {@code .gz}; a name may not start with {@code #}.
+         * Sets whether the directories of the form {@code key=value} on the
+         * paths of the files of a table are partitions: {@code true} if the
+         * files of each table must have the same keys, {@code false} if they
+         * are no partitions, {@code null}, the default, if the files of a
+         * table have the same keys. See {@link HivePartitions}; it applies to
+         * the tables added after it.
          */
-        public Builder file(String table, Path file) {
-            if (table.startsWith(CALL_PREFIX)) {
-                throw new IllegalArgumentException("A table name may not start with " + CALL_PREFIX + ": " + table);
-            }
-            locations.remove(table);
-            String lower = file.toString().toLowerCase(Locale.ROOT);
-            char d = delimiter != null ? delimiter : lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
-            tables.put(table, new Table(file, d, quote, false, nullString, charset, null, -1, null, null,
-                    lower.endsWith(".gz"), null, ZoneOffset.UTC));
-            headers.put(table, header);
+        public Builder hivePartitioning(Boolean partitioning) {
+            this.hivePartitioning = partitioning;
             return this;
         }
 
         /**
-         * Adds a file as a table, a local one, relative to the working
-         * directory unless absolute, or one in a store of the engine such as
-         * {@code s3://bucket/key}, which is looked up when the table is first
-         * used and read in one part.
+         * Sets whether a partition column without a type of its own is a
+         * {@code DATE} or a {@code BIGINT} if all its values are, rather than
+         * {@code VARCHAR}; on by default. It applies to the tables added
+         * after it.
          */
-        public Builder file(String table, String location) {
-            if (FileStores.isLocal(location)) {
-                return file(table, local(location));
-            }
-            if (table.startsWith(CALL_PREFIX)) {
-                throw new IllegalArgumentException("A table name may not start with " + CALL_PREFIX + ": " + table);
-            }
-            String lower = location.toLowerCase(Locale.ROOT);
-            char d = delimiter != null ? delimiter : lower.endsWith(".tsv") || lower.endsWith(".tsv.gz") ? '\t' : ',';
-            tables.put(table, new Table(null, d, quote, false, nullString, charset, null, -1, null, null,
-                    lower.endsWith(".gz"), null, ZoneOffset.UTC));
-            headers.put(table, header);
-            locations.put(table, location);
+        public Builder hiveTypesAutocast(boolean autocast) {
+            this.hiveTypesAutocast = autocast;
             return this;
         }
 
-        /** Adds every {@code .csv} and {@code .tsv} file of a directory, named after the file. */
+        /** Sets the types of partition columns of a table by their keys. */
+        public Builder hiveTypes(String table, Map<String, DataType> types) {
+            hiveTypes.put(table, Map.copyOf(types));
+            return this;
+        }
+
+        /**
+         * Adds a file, or a directory with {@code .csv} and {@code .tsv}
+         * files at any depth, as a table; a file whose name ends in
+         * {@code .gz} is read through gzip. A name may not start with
+         * {@code #}.
+         */
+        public Builder file(String table, Path file) {
+            return file(table, file.toString());
+        }
+
+        /**
+         * Adds a file, a directory with {@code .csv} and {@code .tsv} files at
+         * any depth or a pattern with {@code *}, {@code ?} and {@code **} as a
+         * table, see {@link CsvFiles}: local, relative to the working
+         * directory unless absolute, or in a store of the engine such as
+         * {@code s3://bucket/key}, which is looked up when the table is first
+         * used and read in one part for each file. A name may not start with
+         * {@code #}.
+         */
+        public Builder file(String table, String location) {
+            if (table.startsWith(CALL_PREFIX)) {
+                throw new IllegalArgumentException("A table name may not start with " + CALL_PREFIX + ": " + table);
+            }
+            locations.put(table, location);
+            settings.put(table, new Settings(delimiter, quote, header, nullString, charset, null, null,
+                    ZoneOffset.UTC, null, new HivePartitions.Options(hivePartitioning, hiveTypesAutocast, Map.of())));
+            return this;
+        }
+
+        /**
+         * Adds every {@code .csv} and {@code .tsv} file of a directory as a
+         * table named after the file, and every subdirectory with such files
+         * at any depth as a table of these files named after the subdirectory.
+         */
         public Builder directory(Path directory) {
-            try (DirectoryStream<Path> files = Files.newDirectoryStream(directory,
-                    p -> Files.isRegularFile(p) && p.toString().toLowerCase(Locale.ROOT).matches(".*\\.(csv|tsv)"))) {
+            try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory)) {
                 List<Path> sorted = new ArrayList<>();
-                files.forEach(sorted::add);
+                entries.forEach(sorted::add);
                 sorted.sort(null);
                 for (Path p : sorted) {
                     String fileName = p.getFileName().toString();
-                    file(fileName.substring(0, fileName.lastIndexOf('.')), p);
+                    if (Files.isDirectory(p)) {
+                        if (CsvFiles.hasCsvFiles(p)) {
+                            file(fileName, p);
+                        }
+                    } else if (Files.isRegularFile(p) && fileName.toLowerCase(Locale.ROOT).matches(".*\\.(csv|tsv)")) {
+                        file(fileName.substring(0, fileName.lastIndexOf('.')), p);
+                    }
                 }
             } catch (IOException e) {
                 throw new UncheckedIOException("Cannot list " + directory, e);
@@ -1270,27 +1484,36 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         }
 
         /**
-         * Builds the connector, sniffing the schema of every local file
-         * without an explicit one; a file in another store is sniffed when
-         * its table is first used.
+         * Builds the connector, sniffing the first file of every local table
+         * without an explicit schema; a table in another store is looked up
+         * when it is first used.
+         *
+         * @throws IllegalArgumentException if a local location names no file
+         *         or the partitions of a table do not fit the options
          */
         public CsvConnector build() {
-            Map<String, Table> withSchemas = new LinkedHashMap<>();
-            Map<String, Pending> pending = new LinkedHashMap<>();
-            for (Map.Entry<String, Table> e : tables.entrySet()) {
-                String location = locations.get(e.getKey());
-                if (location != null) {
-                    withSchemas.put(e.getKey(), e.getValue());
-                    pending.put(e.getKey(), new Pending(location, headers.get(e.getKey()), schemas.get(e.getKey())));
-                    continue;
+            for (String table : hiveTypes.keySet()) {
+                if (!locations.containsKey(table)) {
+                    throw new IllegalArgumentException("The CSV source " + name + " has no table " + table
+                            + " for the types of its partitions");
                 }
-                Table t = sniff(e.getValue(), headers.get(e.getKey()), sampleRows);
-                Schema schema = schemas.getOrDefault(e.getKey(), t.schema());
-                withSchemas.put(e.getKey(), new Table(t.file(), t.delimiter(), t.quote(), t.header(), t.nullString(),
-                        t.charset(), schema, t.rows(), t.dateFormat(), t.timestampFormat(), t.gzip(), null,
-                        t.zone()));
             }
-            return new CsvConnector(name, withSchemas, pending, batchSize, sampleRows, charset, splitSize);
+            FileStores local = FileStores.local(Path.of(""));
+            Map<String, Source> sources = new LinkedHashMap<>();
+            Map<String, CsvTable> found = new LinkedHashMap<>();
+            for (Map.Entry<String, String> e : locations.entrySet()) {
+                String table = e.getKey();
+                Settings s = settings.get(table);
+                s = s.withSchema(schemas.get(table)).withOptions(s.options().withTypes(hiveTypes.getOrDefault(table,
+                        Map.of())));
+                String location = CsvFiles.absolute(e.getValue(), Path.of(""));
+                sources.put(table, new Source(location, s));
+                if (FileStores.isLocal(location)) {
+                    found.put(table, CsvConnector.table(location, CsvFiles.list(local, location, e.getValue()), s,
+                            sampleRows));
+                }
+            }
+            return new CsvConnector(name, sources, found, batchSize, sampleRows, charset, splitSize);
         }
     }
 
@@ -1299,7 +1522,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
      * name the plans show; a call whose text names another table already, as
      * after its file changed, gets a number as well.
      */
-    private String callName(String call, Table table) {
+    private String callName(String call, CsvTable table) {
         String generated = CALL_PREFIX + call;
         while (callTables.putIfAbsent(generated, table) != null) {
             generated = CALL_PREFIX + call + " #" + callCount.incrementAndGet();

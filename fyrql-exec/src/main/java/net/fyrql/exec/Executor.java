@@ -210,6 +210,9 @@ public final class Executor {
      * does, for a query that a context cancels; the caller closes it.
      */
     public Operator open(PlanNode plan, ToDoubleFunction<PlanNode> estimate, QueryContext context) {
+        if (context != QueryContext.NONE) {
+            context.budget(budget);
+        }
         return new Opening(plan, estimate, context).open(plan);
     }
 

@@ -283,10 +283,30 @@ abstract class S3RoundTrip {
         assertEquals(6, engine.update("COPY memory.t TO '" + location("parts/sub/t-3.parquet") + "'"));
         assertEquals(List.of(12L), engine.rows("SELECT count(*) FROM '" + location("parts/t-*.parquet") + "'")
                 .stream().map(r -> r[0]).toList());
-        assertEquals(List.of(12L), engine.rows("SELECT count(*) FROM read_parquet('" + location("parts/") + "')")
+        // A prefix holds the objects at any depth, as a directory does.
+        assertEquals(List.of(18L), engine.rows("SELECT count(*) FROM read_parquet('" + location("parts/") + "')")
                 .stream().map(r -> r[0]).toList());
-        assertEquals(List.of(12L), engine.rows("SELECT count(*) FROM parquet_scan('" + location("parts") + "')")
+        assertEquals(List.of(18L), engine.rows("SELECT count(*) FROM parquet_scan('" + location("parts") + "')")
                 .stream().map(r -> r[0]).toList());
+        assertEquals(List.of(18L), engine.rows("SELECT count(*) FROM '" + location("parts/**/t-?.parquet") + "'")
+                .stream().map(r -> r[0]).toList());
+        assertEquals(List.of(6L), engine.rows("SELECT count(*) FROM '" + location("*/sub/*.parquet") + "'")
+                .stream().map(r -> r[0]).toList());
+    }
+
+    @Test
+    void theDirectoriesOfAPrefixArePartitions() {
+        for (int year : List.of(2024, 2025)) {
+            for (String region : List.of("north", "south east")) {
+                assertEquals(6, engine.update("COPY (SELECT * FROM memory.t) TO '" + location("hive/year=" + year
+                        + "/region=" + region.replace(" ", "%20") + "/data.parquet") + "'"));
+            }
+        }
+        assertEquals(List.of(List.of("south east", 2025L, 6L)), engine.rows("SELECT region, year, count(*) FROM read_parquet('" + location("hive")
+                        + "') WHERE year = 2025 AND region LIKE 's%' GROUP BY ALL").stream()
+                        .map(java.util.Arrays::asList).toList());
+        String plan = engine.explain("SELECT * FROM read_parquet('" + location("hive") + "') WHERE year = 2024");
+        assertEquals(pushdown(), plan.contains("[pushed: WHERE (#7 = "), plan);
     }
 
     @Test

@@ -9,7 +9,7 @@
  * defined by the Mozilla Public License, v. 2.0.
  */
 
-package net.fyrql.sql.parse;
+package net.fyrql.core.value;
 
 import net.fyrql.core.type.DataType;
 import org.junit.jupiter.api.Test;

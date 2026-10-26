@@ -15,6 +15,7 @@ import net.fyrql.FyrQL;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.csv.CsvConnector;
+import net.fyrql.connector.files.HivePartitions;
 import net.fyrql.connector.http.HttpConnector;
 import net.fyrql.connector.iceberg.IcebergConnector;
 import net.fyrql.connector.iceberg.IcebergTestTables;
@@ -62,6 +63,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The random tables in other sources, for the {@linkplain Metamorphic
@@ -372,6 +375,103 @@ final class RandomSources {
         files.forEach((table, file) -> b.schema(table, RandomTables.SCHEMAS.get(table)).file(table, file));
         CsvConnector csv = b.build();
         return source("CSV", csv, List.copyOf(files.keySet()), engine -> splits(csv));
+    }
+
+    /** The columns by which the tables of the sources of partitioned files are partitioned. */
+    private static final Map<String, String> PARTITIONS = Map.of("p", "t", "q", "n");
+
+    /**
+     * Writes each random table with a query of the memory source: a table
+     * of {@link #PARTITIONS} into a directory of it, with a file for each
+     * value of its column in a directory of the form {@code column=value},
+     * without the column, as DuckDB writes a table with
+     * {@code PARTITION_BY}; any other table into a file.
+     *
+     * @return the directory or the file of each table
+     */
+    private static Map<String, Path> partitioned(Path dir, String extension, Map<String, String> queries,
+            String options) {
+        Map<String, Path> locations = new LinkedHashMap<>();
+        try (FyrQL memory = RandomTables.engine(RandomTables.rows(RandomRun.SEED))) {
+            for (Map.Entry<String, String> q : queries.entrySet()) {
+                String column = PARTITIONS.get(q.getKey());
+                if (column == null) {
+                    Path file = dir.resolve(q.getKey() + "." + extension);
+                    memory.update("COPY (" + q.getValue() + ") TO '" + path(file) + "'" + options);
+                    locations.put(q.getKey(), file);
+                    continue;
+                }
+                Path table = dir.resolve(q.getKey());
+                for (Object[] value : memory.rows("SELECT DISTINCT " + column + " FROM (" + q.getValue() + ") v")) {
+                    Path partition = table.resolve(column + "="
+                            + (value[0] == null ? HivePartitions.DEFAULT_PARTITION : value[0]));
+                    try {
+                        Files.createDirectories(partition);
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                    String where = value[0] == null ? column + " IS NULL" : column + " = " + value[0];
+                    memory.update("COPY (SELECT * EXCLUDE (" + column + ") FROM (" + q.getValue() + ") v WHERE "
+                            + where + ") TO '" + path(partition.resolve("part." + extension)) + "'" + options);
+                }
+                locations.put(q.getKey(), table);
+            }
+        }
+        return locations;
+    }
+
+    /**
+     * The check of partitioned files: where the engine pushes filters down,
+     * a condition on {@code t} reads the file of one value of it at most.
+     */
+    private static Runnable prunes(FyrQL engine) {
+        return () -> {
+            if (!engine.pushdown()) {
+                return;
+            }
+            String analyzed = engine.explainAnalyze("SELECT k FROM p WHERE t = 3");
+            Matcher m = Pattern.compile("(\\d+) of (\\d+) files").matcher(analyzed);
+            if (!m.find() || Integer.parseInt(m.group(1)) > 1 || Integer.parseInt(m.group(2)) < 3) {
+                throw new AssertionError("a condition on t reads more than the file of its value:\n" + analyzed);
+            }
+        };
+    }
+
+    /**
+     * The random tables as Parquet files as {@link #parquet} writes them,
+     * {@code p} and {@code q} in directories by the values of {@code t} and
+     * {@code n}, see {@link #partitioned}: {@code t} takes its type from
+     * {@code hive_types}, {@code n} from its values, and both follow the
+     * other columns. The check: a condition on {@code t} skips files.
+     */
+    static Source hiveParquet(Path dir) {
+        Map<String, Path> files = partitioned(dir, "parquet", parquetQueries(), " (ROW_GROUP_SIZE 8)");
+        ParquetConnector.Builder b = ParquetConnector.builder("files").batchSize(8)
+                .hiveTypes("p", Map.of("t", DataType.TINYINT));
+        files.forEach(b::path);
+        return source("Hive Parquet", b.build(), List.copyOf(files.keySet()), RandomSources::prunes);
+    }
+
+    /**
+     * The random tables as CSV files as {@link #csv} reads them, {@code p}
+     * and {@code q} in directories by the values of {@code t} and {@code n},
+     * as {@link #hiveParquet} has them.
+     */
+    static Source hiveCsv(Path dir) {
+        Map<String, Path> files = partitioned(dir, "csv", all(), "");
+        CsvConnector.Builder b = CsvConnector.builder("files").batchSize(8).splitSize(256)
+                .hiveTypes("p", Map.of("t", DataType.TINYINT));
+        files.forEach((table, file) -> {
+            Schema schema = RandomTables.SCHEMAS.get(table);
+            String column = PARTITIONS.get(table);
+            if (column != null) {
+                List<Schema.Field> fields = new ArrayList<>(schema.fields());
+                fields.removeIf(f -> f.name().equals(column));
+                schema = new Schema(fields);
+            }
+            b.schema(table, schema).file(table, file);
+        });
+        return source("Hive CSV", b.build(), List.copyOf(files.keySet()), RandomSources::prunes);
     }
 
     /**

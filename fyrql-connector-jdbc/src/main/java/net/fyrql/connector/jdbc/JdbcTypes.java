@@ -12,7 +12,7 @@
 package net.fyrql.connector.jdbc;
 
 import net.fyrql.core.type.DataType;
-import net.fyrql.sql.parse.TypeNames;
+import net.fyrql.core.value.TypeNames;
 
 import java.sql.Types;
 import java.util.Locale;

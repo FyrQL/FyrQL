@@ -25,12 +25,14 @@ warehouse first.
   database with a JDBC driver; CSV, JSON and Parquet files, Excel workbooks and Apache
   Iceberg tables, local or in S3 and MinIO; JSON from HTTP endpoints, OData services of
   versions 2 and 4, and Java collections. The columns of files and endpoints are inferred as DuckDB
-  infers them, nested `STRUCT`, `LIST` and `MAP` values included.
-  See [Connectors](docs/manual.md#connectors).
+  infers them, nested `STRUCT`, `LIST` and `MAP` values included. A Parquet or CSV table
+  may span a directory tree or a pattern such as `sales/**/*.parquet`, with Hive
+  partitions in directories such as `year=2024`. See [Connectors](docs/manual.md#connectors).
 - **Federation that lets each source do its part.** A source receives the columns,
   filters, sorts, limits and aggregations that it evaluates exactly as FyrQL would, a
-  database also the joins of its own tables, and a Parquet file skips the row groups and
-  pages no row of which can pass; what spans sources runs in the engine.
+  database also the joins of its own tables, a Parquet file skips the row groups and
+  pages no row of which can pass, and a partitioned table the files; what spans sources
+  runs in the engine.
   See [Optimizer](docs/manual.md#optimizer).
 - **Analytical SQL.** Joins, grouping, also by `ROLLUP`, `CUBE` and `GROUPING SETS`,
   aggregates with `FILTER`, subqueries that are turned into joins, also correlated ones
@@ -126,9 +128,9 @@ data, the plan of the query and what comes next.
 | What | Module | In the manual |
 | --- | --- | --- |
 | Java collections of records, beans or rows, and tables that SQL creates | `fyrql-connector-memory` | [Connectors](docs/manual.md#connectors) |
-| CSV and TSV files, also compressed with gzip | `fyrql-connector-csv` | [Connectors](docs/manual.md#connectors) |
+| CSV and TSV files, also compressed with gzip and partitioned | `fyrql-connector-csv` | [Connectors](docs/manual.md#connectors) |
 | JSON files and JSON lines | `fyrql-connector-json` | [Connectors](docs/manual.md#connectors) |
-| Parquet files | `fyrql-connector-parquet` | [Connectors](docs/manual.md#connectors) |
+| Parquet files, also partitioned | `fyrql-connector-parquet` | [Partitioned files](docs/manual.md#partitioned-files) |
 | Excel workbooks (`.xlsx`, `.xlsm`) | `fyrql-connector-xlsx` | [Connectors](docs/manual.md#connectors) |
 | Apache Iceberg tables | `fyrql-connector-iceberg` | [Connectors](docs/manual.md#connectors) |
 | Files in S3 and MinIO | `fyrql-connector-s3` | [Connectors](docs/manual.md#connectors) |
@@ -147,8 +149,8 @@ data, the plan of the query and what comes next.
 ## Performance
 
 All 22 TPC-H queries run at scale factor 1 over tables spread across Parquet, CSV, JSON,
-PostgreSQL and Java collections, on a laptop in about 21.5 s on one thread and 16 s on
-twelve with version 0.15.0, where DuckDB takes about 14.5 s and 9 s over the same sources,
+PostgreSQL and Java collections, on a laptop in about 19.8 s on one thread and 14 s on
+twelve with version 0.19.0, where DuckDB takes about 13.9 s and 8.3 s over the same sources,
 PostgreSQL included. The figures of each query, of one thread against twelve, of compiled
 code against the interpreter and of spilling are under
 [Performance](docs/manual.md#performance).

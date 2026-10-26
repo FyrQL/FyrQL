@@ -121,6 +121,11 @@ public final class FileStores {
         return store(location).list(location, extension);
     }
 
+    /** See {@link FileStore#listTree}. */
+    public List<FileObject> listTree(String location, String extension) throws IOException {
+        return store(location).listTree(location, extension);
+    }
+
     /** See {@link FileStore#object}. */
     public FileObject object(String location) throws IOException {
         return store(location).object(location);

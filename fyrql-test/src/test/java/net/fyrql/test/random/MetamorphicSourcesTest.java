@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * The {@linkplain Metamorphic metamorphic checks} over the
  * {@linkplain RandomSources other sources}: Parquet, CSV and JSON files,
+ * Parquet and CSV files in directories of partitions,
  * Excel workbooks, H2, SQLite and PostgreSQL, Derby and HSQLDB through the
  * generic dialect, Iceberg, Parquet and CSV files in S3, OData and JSON over
  * HTTP. The queries are generated over
@@ -59,6 +60,16 @@ class MetamorphicSourcesTest {
     @Test
     void csv(@TempDir Path dir) {
         check(RandomSources.csv(dir));
+    }
+
+    @Test
+    void hiveParquet(@TempDir Path dir) {
+        check(RandomSources.hiveParquet(dir));
+    }
+
+    @Test
+    void hiveCsv(@TempDir Path dir) {
+        check(RandomSources.hiveCsv(dir));
     }
 
     @Test

@@ -14,6 +14,7 @@ package net.fyrql.connector.parquet;
 import net.fyrql.connector.BatchReader;
 import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
+import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.FileAccessException;
 import net.fyrql.connector.FileAccessPolicy;
@@ -27,6 +28,7 @@ import net.fyrql.connector.SourceCounters;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
 import net.fyrql.connector.TableFunctionProvider;
+import net.fyrql.connector.files.HivePartitions;
 import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
@@ -45,6 +47,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,10 +58,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Parquet files as tables in the schema {@code main}, read in pure Java
- * without Hadoop. A table is a file, a directory of {@code .parquet} files
- * or a pattern with {@code *} and {@code ?} in the name of the file; all
- * files of a table have the same columns. The columns and their types come
- * from the footers, see {@link ParquetSchemas}; the number of rows is exact.
+ * without Hadoop. A table is a file, a directory with {@code .parquet}
+ * files at any depth or a pattern with {@code *}, {@code ?} and {@code **};
+ * all files of a table have the same columns. The columns and their types
+ * come from the footers, see {@link ParquetSchemas}; the number of rows is
+ * exact. Directories of the form {@code key=value} add partition columns,
+ * see {@link HivePartitions}.
  * <p>
  * The connector also offers the table functions {@code read_parquet} and
  * {@code parquet_scan} for any file; built without files it serves only
@@ -68,16 +73,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>
  * A scan reads each row group as a split of its own, see
  * {@link RowGroupReader}, of a {@code STRUCT} column only the fields in
- * use. It takes over a limit without filters, reading only the row groups
- * the limit needs, and {@code count(*)} without groups and filters, which
- * the footers answer. It takes over no filter, but skips by the filters
- * the row groups in which no row can pass, by their statistics,
- * dictionaries and Bloom filters, and the pages of a row group, by the
- * column index, see {@link FilterTranslation}; the engine evaluates the
- * filters on the rows read. The files of a table are looked up again for
- * each scan, so that it reads what is there; their columns must still be
- * those of the table. {@link Builder#recordReads} keeps what each scan
- * read.
+ * use. It takes over the filters that read partition columns only, which
+ * it evaluates for each file to skip the files no row of which passes. It
+ * takes over a limit when it takes over all filters, reading only the row
+ * groups the limit needs, and {@code count(*)} without groups under such
+ * filters, which the footers answer. It skips by the other filters the row
+ * groups in which no row can pass, by their statistics, dictionaries and
+ * Bloom filters, and the pages of a row group, by the column index, see
+ * {@link FilterTranslation}; the engine evaluates these filters on the rows
+ * read. The files of a table are looked up again for each scan, so that it
+ * reads what is there; their columns and partitions must still be those of
+ * the table. {@link Builder#recordReads} keeps what each scan read.
  * <p>
  * Files may also be in a store of the engine, such as
  * {@code s3://bucket/orders/*.parquet}, see {@link #fileStores}; such a
@@ -94,10 +100,6 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
 
     /** The prefix of the names of the tables of table function calls, which no registered table gets. */
     private static final String CALL_PREFIX = "#";
-
-    /** A limit without filters, {@code count(*)} without groups and filters, and fields inside columns. */
-    private static final Capabilities CAPABILITIES = new Capabilities(f -> false, true, o -> false,
-            ParquetConnector::countsRows).withFields(true);
 
     /**
      * A row group a scan read.
@@ -119,9 +121,19 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
 
     /**
      * The split of a row group: its index in the file, the rows to deliver
-     * of it, and the predicate to skip its pages by, or {@code null}.
+     * of it, the predicate to skip its pages by, or {@code null}, and the
+     * columns of the table with the values of the partitions of the file.
      */
-    private record RowGroup(ParquetFiles.Footer footer, int block, long rows, FilterPredicate predicate) {
+    private record RowGroup(ParquetFiles.Footer footer, int block, long rows, FilterPredicate predicate,
+            HivePartitions.Columns columns, Object[] values) {
+    }
+
+    /** A table of the builder: its location and how it finds its partitions. */
+    private record Source(String location, HivePartitions.Options options) {
+    }
+
+    /** A call of a table function: the files in their versions and how it finds partitions. */
+    private record CallKey(List<ParquetFiles.Version> versions, HivePartitions.Options options) {
     }
 
     /** The split of {@code count(*)}: the rows of all files. */
@@ -131,7 +143,7 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
     private final String name;
     private final ParquetFiles files;
     /** The locations of the tables by their names, and the tables found so far. */
-    private final Map<String, String> locations;
+    private final Map<String, Source> locations;
     private final Map<String, ParquetFiles.Table> tables;
     private final int batchSize;
     private final Catalog catalog;
@@ -140,11 +152,11 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * {@code COPY ... FROM} by their names, and the names by their files.
      */
     private final Map<String, ParquetFiles.Table> callTables = new ConcurrentHashMap<>();
-    private final Map<List<ParquetFiles.Version>, String> calls = new ConcurrentHashMap<>();
+    private final Map<CallKey, String> calls = new ConcurrentHashMap<>();
     private final AtomicInteger callCount = new AtomicInteger();
     private final List<Read> reads;
 
-    private ParquetConnector(String name, ParquetFiles files, Map<String, String> locations,
+    private ParquetConnector(String name, ParquetFiles files, Map<String, Source> locations,
             Map<String, ParquetFiles.Table> tables, int batchSize, boolean recordReads) {
         this.name = name;
         this.files = files;
@@ -242,13 +254,13 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
 
     /** Returns a table of the builder, looked up on first use if it is in a store other than the local one. */
     private ParquetFiles.Table registered(String table) {
-        String location = locations.get(table);
-        if (location == null) {
+        Source source = locations.get(table);
+        if (source == null) {
             return null;
         }
         return tables.computeIfAbsent(table, t -> {
             try {
-                return files.table(location);
+                return files.table(source.location(), source.options());
             } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException("The table " + t + " of the Parquet source " + name + ": "
                         + e.getMessage(), e);
@@ -315,9 +327,13 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
                     + String.join(", ", given));
         }
         FileObject file = files.object(location);
-        String table = calls.computeIfAbsent(List.of(ParquetFiles.Version.of(file)), v -> {
+        // The columns are those of the file alone; without partitions on its path, it is the table of read_parquet.
+        HivePartitions.Options partitions = HivePartitions.partitions(List.of(file.location()),
+                HivePartitions.Options.AUTO).layout().isEmpty() ? HivePartitions.Options.AUTO
+                        : new HivePartitions.Options(false, true, Map.of());
+        String table = calls.computeIfAbsent(new CallKey(List.of(ParquetFiles.Version.of(file)), partitions), v -> {
             return callName(TableFunctionProvider.callText("read_" + format, List.of(location), options),
-                    files.table(file.location(), List.of(file)));
+                    files.table(file.location(), List.of(file), partitions));
         });
         return TableRef.of(name, table);
     }
@@ -326,14 +342,17 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
      * Binds {@code read_parquet(path)} and {@code parquet_scan(path)}, which
      * are the same, to a table of the files of the path in the schema
      * {@code main} under a name of {@code #} and the text of the call,
-     * which does not appear among the tables of the catalog. The path is a file,
-     * a directory or a pattern with {@code *} and {@code ?} in the name of
-     * the file, local or in a store of the engine such as
-     * {@code s3://bucket/key}. The same call on unchanged files gives the same table; a
-     * changed, added or removed file gives a new one. Each file of a
-     * directory or pattern must be one the policy of the engine allows to
-     * read, see {@link FileStores#policy()}, so that a link in an allowed
-     * directory does not lead elsewhere.
+     * which does not appear among the tables of the catalog. The path is a
+     * file, a directory or a pattern with {@code *}, {@code ?} and
+     * {@code **}, local or in a store of the engine such as
+     * {@code s3://bucket/key}. The named arguments {@code hive_partitioning},
+     * {@code hive_types_autocast} and {@code hive_types} choose how the
+     * table finds its partitions, see {@link HivePartitions#options}. The
+     * same call on unchanged files gives the same table; a changed, added
+     * or removed file gives a new one. Each file of a directory or pattern
+     * must be one the policy of the engine allows to read, see
+     * {@link FileStores#policy()}, so that a link in an allowed directory
+     * does not lead elsewhere.
      *
      * @throws FileAccessException if the policy does not allow to read a file of the path
      */
@@ -347,11 +366,12 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
                     + " as its argument");
         }
         for (String key : namedArguments.keySet()) {
-            if (!key.equals(FileWriterProvider.TIME_ZONE)) {
+            if (!key.equals(FileWriterProvider.TIME_ZONE) && !HivePartitions.ARGUMENTS.contains(key)) {
                 throw new IllegalArgumentException("Invalid named parameter \"" + key + "\" for function " + function
-                        + "; it has only timezone");
+                        + "; it has only hive_partitioning, hive_types, hive_types_autocast and timezone");
             }
         }
+        HivePartitions.Options options = HivePartitions.options(function, namedArguments, HivePartitions.Options.AUTO);
         String location = ParquetFiles.absolute(path, Path.of(""));
         List<FileObject> found = files.resolve(location);
         FileAccessPolicy policy = files.stores().policy();
@@ -360,23 +380,27 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
             policy.checkRead(file.location());
             versions.add(ParquetFiles.Version.of(file));
         }
-        String table = calls.computeIfAbsent(versions, v -> {
+        String table = calls.computeIfAbsent(new CallKey(versions, options), v -> {
             return callName(TableFunctionProvider.callText(function, arguments, namedArguments),
-                    files.table(location, found));
+                    files.table(location, found, options));
         });
         return TableRef.of(name, table);
     }
 
     /**
-     * Takes over a limit unless there are filters, and {@code count(*)},
-     * once or more often, without groups and filters; reads the fields of
+     * Takes over the filters that read partition columns only, a limit
+     * when it takes over all filters, and {@code count(*)}, once or more
+     * often, without groups and under such filters; reads the fields of
      * {@code STRUCT} columns a scan asks for instead of the whole columns.
-     * Keeps the filters to skip row groups and pages by.
+     * Keeps the other filters to skip row groups and pages by.
      */
     @Override
     public ScanPlan plan(TableRef table, ScanRequest request) {
+        ParquetFiles.Table t = table(table);
         // The filters refer to the paths of the request, which the plan reads as they are, fields included.
-        return CAPABILITIES.plan(table, table(table).schema(), request, new State(request.limit(), request.filters()));
+        Capabilities capabilities = new Capabilities(HivePartitions.filter(request.columns(), t.columns()), true,
+                o -> false, ParquetConnector::countsRows).withFields(true);
+        return capabilities.plan(table, t.schema(), request, new State(request.limit(), request.filters()));
     }
 
     private static boolean countsRows(PlanNode.Aggregation aggregation) {
@@ -393,41 +417,73 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
 
     /**
      * Returns a split per row group of the files of the table as they are
-     * now, in the order of the files, without empty row groups and without
-     * those in which no row can pass the filters; under a limit only the
-     * row groups it needs. {@code count(*)} is one split. The row groups
-     * read and skipped count for the scan, see {@link SourceCounters}.
+     * now, in the order of the files, without the files whose partitions
+     * do not pass the filters taken over, without empty row groups and
+     * without those in which no row can pass the other filters; under a
+     * limit only the row groups it needs. {@code count(*)} is one split. The
+     * files and row groups read and skipped count for the scan, see
+     * {@link SourceCounters}.
      *
      * @throws IllegalArgumentException if the files no longer exist or no
-     *         longer have the columns of the table, or if a file cannot be
-     *         read
+     *         longer have the columns or partitions of the table, or if a
+     *         file cannot be read
+     * @throws RuntimeException the error of the filters taken over, if they
+     *         fail on the partitions of a file of which a row is read
      */
     @Override
     public List<Split> splits(ScanPlan plan) {
         ParquetFiles.Table table = current(plan.table());
-        if (plan.aggregationAccepted()) {
-            return List.of(new Split(plan, 0, new Count(table.rows())));
-        }
         State state = (State) plan.state();
+        List<Expression> accepted = plan.acceptedFilters();
+        List<Expression> hints = new ArrayList<>(state.filters());
+        hints.removeAll(accepted);
+        List<ColumnPath> filePaths = table.columns().filePaths(plan.columns());
         long left = plan.limitAccepted() ? state.limit().getAsLong() : Long.MAX_VALUE;
+        long counted = 0;
+        int filesRead = 0;
         List<Split> splits = new ArrayList<>();
-        for (ParquetFiles.Version version : table.files()) {
+        for (int f = 0; f < table.files().size(); f++) {
+            ParquetFiles.Version version = table.files().get(f);
+            Object[] values = table.partitions().values().get(f);
+            HivePartitions.Match match = HivePartitions.match(accepted, plan.columns(), table.columns(), values);
+            if (match == HivePartitions.Match.NONE || left <= 0) {
+                continue;
+            }
             ParquetFiles.Footer footer = files.footer(version.file());
-            FilterPredicate predicate = state.filters().isEmpty() ? null
-                    : FilterTranslation.translate(state.filters(), footer.schema(), plan.columns());
+            if (plan.aggregationAccepted()) {
+                if (match == HivePartitions.Match.FAILS && footer.rows() > 0) {
+                    HivePartitions.passes(accepted, plan.columns(), table.columns(), values);
+                }
+                counted += footer.rows();
+                filesRead++;
+                continue;
+            }
+            FilterPredicate predicate = hints.isEmpty() ? null
+                    : FilterTranslation.translate(hints, footer.schema(), filePaths);
             List<BlockMetaData> blocks = footer.metadata().getBlocks();
             List<BlockMetaData> passing = predicate == null ? blocks : files.passing(footer, predicate);
             int read = 0;
             for (int b = 0; b < blocks.size() && left > 0; b++) {
                 long rows = blocks.get(b).getRowCount();
                 if (rows > 0 && contains(passing, blocks.get(b))) {
+                    if (match == HivePartitions.Match.FAILS) {
+                        HivePartitions.passes(accepted, plan.columns(), table.columns(), values);
+                    }
                     long take = Math.min(rows, left);
                     left -= take;
-                    splits.add(new Split(plan, splits.size(), new RowGroup(footer, b, take, predicate)));
+                    splits.add(new Split(plan, splits.size(), new RowGroup(footer, b, take, predicate,
+                            table.columns(), values)));
                     read++;
                 }
             }
             SourceCounters.current().rowGroups(read, blocks.size() - read);
+            filesRead++;
+        }
+        if (table.files().size() > 1 || filesRead < table.files().size()) {
+            SourceCounters.current().files(filesRead, table.files().size() - filesRead);
+        }
+        if (plan.aggregationAccepted()) {
+            return List.of(new Split(plan, 0, new Count(counted)));
         }
         return splits;
     }
@@ -442,14 +498,18 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         return false;
     }
 
-    /** Returns the files of a table as they are now, with the columns of the table. */
+    /** Returns the files of a table as they are now, with the columns and partitions of the table. */
     private ParquetFiles.Table current(TableRef ref) {
         ParquetFiles.Table known = table(ref);
-        ParquetFiles.Table now = files.table(known.location());
-        if (!now.schema().equals(known.schema())) {
+        ParquetFiles.Table now = files.table(known.location(), known.options());
+        if (!now.fileSchema().equals(known.fileSchema())) {
             throw new IllegalArgumentException("The files of the table " + ref + " changed their columns since they"
-                    + " were read: " + ParquetFiles.columns(known.schema()) + " and now "
-                    + ParquetFiles.columns(now.schema()));
+                    + " were read: " + ParquetFiles.columns(known.fileSchema()) + " and now "
+                    + ParquetFiles.columns(now.fileSchema()));
+        }
+        if (!now.partitions().layout().equals(known.partitions().layout())) {
+            throw new IllegalArgumentException("The files of the table " + ref + " changed their partitions since"
+                    + " they were read: " + known.partitions().layout() + " and now " + now.partitions().layout());
         }
         return now;
     }
@@ -479,14 +539,20 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         if (!(split.state() instanceof RowGroup group)) {
             throw new IllegalArgumentException("Not a split of the Parquet source " + name + ": " + split);
         }
-        return new RowGroupReader(files, group.footer(), group.block(), group.rows(), group.predicate(),
-                plan.output(), plan.columns(), batchSize, reads == null ? null : this::record);
+        HivePartitions.Projection projection = HivePartitions.project(plan.columns(), plan.output(), group.columns(),
+                group.values());
+        BatchReader reader = new RowGroupReader(files, group.footer(), group.block(), group.rows(), group.predicate(),
+                projection.fileOutput(), projection.fileColumns(), batchSize, reads == null ? null : this::record);
+        return projection.hasPartitions() ? HivePartitions.withPartitions(reader, plan.output(), projection) : reader;
     }
 
     /** Collects the tables of a Parquet connector. */
     public static final class Builder {
         private final String name;
         private final Map<String, String> locations = new LinkedHashMap<>();
+        private final Map<String, Map<String, DataType>> hiveTypes = new HashMap<>();
+        private Boolean hivePartitioning;
+        private boolean hiveTypesAutocast = true;
         private int batchSize = 2048;
         private int readAhead = ParquetFiles.READ_AHEAD;
         private boolean recordReads;
@@ -516,22 +582,51 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
             return this;
         }
 
+        /**
+         * Sets whether the directories of the form {@code key=value} under the
+         * directory of a table are partitions: {@code true} if the files of
+         * each table must have the same keys, {@code false} if they are no
+         * partitions, {@code null}, the default, if the files of a table have
+         * the same keys. See {@link HivePartitions}.
+         */
+        public Builder hivePartitioning(Boolean partitioning) {
+            this.hivePartitioning = partitioning;
+            return this;
+        }
+
+        /**
+         * Sets whether a partition column without a type of its own takes
+         * the first of {@code BIGINT}, {@code DATE} and {@code TIMESTAMP}
+         * that all its values have, rather than {@code VARCHAR}; on by default.
+         */
+        public Builder hiveTypesAutocast(boolean autocast) {
+            this.hiveTypesAutocast = autocast;
+            return this;
+        }
+
+        /** Sets the types of partition columns of a table by their keys. */
+        public Builder hiveTypes(String table, Map<String, DataType> types) {
+            hiveTypes.put(table, Map.copyOf(types));
+            return this;
+        }
+
         /** Keeps every row group read, see {@link ParquetConnector#reads()}; off by default. */
         public Builder recordReads(boolean record) {
             this.recordReads = record;
             return this;
         }
 
-        /** Adds a file or a directory of {@code .parquet} files as a table; a name may not start with {@code #}. */
+        /** Adds a file or a directory with {@code .parquet} files as a table; a name may not start with {@code #}. */
         public Builder path(String table, Path path) {
             return path(table, path.toString());
         }
 
         /**
-         * Adds a file, a directory of {@code .parquet} files or a pattern with
-         * {@code *} and {@code ?} in the name of the file as a table, relative
-         * to the working directory unless absolute or in a store with a
-         * scheme such as {@code s3://}; a name may not start with {@code #}.
+         * Adds a file, a directory with {@code .parquet} files at any depth or
+         * a pattern with {@code *}, {@code ?} and {@code **} as a table,
+         * relative to the working directory unless absolute or in a store
+         * with a scheme such as {@code s3://}; a name may not start with
+         * {@code #}.
          */
         public Builder path(String table, String location) {
             if (table.startsWith(CALL_PREFIX)) {
@@ -544,7 +639,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         /**
          * Adds every {@code .parquet} file of a directory as a table named
          * after the file, and every subdirectory with {@code .parquet} files
-         * as a table of these files named after the subdirectory.
+         * at any depth as a table of these files named after the
+         * subdirectory.
          */
         public Builder directory(Path directory) {
             try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory)) {
@@ -553,7 +649,7 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
                 sorted.sort(null);
                 for (Path p : sorted) {
                     if (Files.isDirectory(p)) {
-                        if (!ParquetFiles.parquetFiles(p).isEmpty()) {
+                        if (ParquetFiles.hasParquetFiles(p)) {
                             path(p.getFileName().toString(), p);
                         }
                     } else if (ParquetFiles.isParquetFile(p)) {
@@ -572,19 +668,28 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
          * used, once the engine gave the connector its stores.
          *
          * @throws IllegalArgumentException if a local location names no file,
-         *         a file is not a Parquet file, or the files of a table differ
-         *         in their columns
+         *         a file is not a Parquet file, the files of a table differ
+         *         in their columns, or the partitions of a table do not fit
+         *         the options
          */
         public ParquetConnector build() {
             ParquetFiles files = new ParquetFiles(FileStores.local(Path.of("")), readAhead);
-            Map<String, String> absolute = new LinkedHashMap<>();
+            Map<String, Source> absolute = new LinkedHashMap<>();
             Map<String, ParquetFiles.Table> tables = new LinkedHashMap<>();
+            for (String table : hiveTypes.keySet()) {
+                if (!locations.containsKey(table)) {
+                    throw new IllegalArgumentException("The Parquet source " + name + " has no table " + table
+                            + " for the types of its partitions");
+                }
+            }
             for (Map.Entry<String, String> e : locations.entrySet()) {
                 try {
                     String location = ParquetFiles.absolute(e.getValue(), Path.of(""));
-                    absolute.put(e.getKey(), location);
+                    HivePartitions.Options options = new HivePartitions.Options(hivePartitioning, hiveTypesAutocast,
+                            hiveTypes.getOrDefault(e.getKey(), Map.of()));
+                    absolute.put(e.getKey(), new Source(location, options));
                     if (FileStores.isLocal(location)) {
-                        tables.put(e.getKey(), files.table(location));
+                        tables.put(e.getKey(), files.table(location, options));
                     }
                 } catch (IllegalArgumentException ex) {
                     throw new IllegalArgumentException("The table " + e.getKey() + " of the Parquet source " + name

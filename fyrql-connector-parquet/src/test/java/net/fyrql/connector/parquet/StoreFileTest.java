@@ -184,9 +184,12 @@ class StoreFileTest {
     void aLocationInAStoreIsAFileAPrefixOrAPattern() {
         MemoryStore store = store();
         ParquetConnector c = connector(store);
-        assertEquals(2 * ROWS, c.catalog().rowCount(c.bind("read_parquet", List.of("mem://b/data/"), Map.of()))
+        // A prefix holds the objects at any depth.
+        assertEquals(3 * ROWS, c.catalog().rowCount(c.bind("read_parquet", List.of("mem://b/data/"), Map.of()))
                 .getAsLong());
-        assertEquals(2 * ROWS, c.catalog().rowCount(c.bind("read_parquet", List.of("mem://b/data"), Map.of()))
+        assertEquals(3 * ROWS, c.catalog().rowCount(c.bind("read_parquet", List.of("mem://b/data"), Map.of()))
+                .getAsLong());
+        assertEquals(ROWS, c.catalog().rowCount(c.bind("read_parquet", List.of("mem://b/*/sub/*"), Map.of()))
                 .getAsLong());
         assertEquals(ROWS, c.catalog().rowCount(c.bind("read_parquet", List.of("mem://b/data/u*"), Map.of()))
                 .getAsLong());

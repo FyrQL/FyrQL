@@ -21,7 +21,8 @@ import java.util.List;
  * engine gives every connector all stores as {@link FileStores}.
  * <p>
  * A location names a file, a directory, or files by a pattern with
- * {@code *} and {@code ?} in its last part, see {@link Globs}.
+ * {@code *} and {@code ?} in its last part, see {@link Globs}; for
+ * {@link #listTree} also the files of a whole tree of directories.
  */
 public interface FileStore {
 
@@ -40,6 +41,28 @@ public interface FileStore {
      *         outside its last part or is no valid location of the store
      */
     List<FileObject> list(String location, String extension) throws IOException;
+
+    /**
+     * Returns the files a location names in a whole tree of directories,
+     * sorted by their locations: the file itself, the files anywhere under
+     * a directory whose names end with an extension in any case, or the
+     * files under the directory before the first part with a pattern whose
+     * paths below it match the pattern, where a part {@code **} stands for
+     * any number of directories; an empty list if there are none. A store
+     * that has no directories, such as S3, takes a prefix of keys as a
+     * directory.
+     * <p>
+     * The default is {@link #list}, for a store that cannot list trees.
+     *
+     * @param extension the extension of the files of a directory, such as
+     *        {@code .parquet}, or empty for all of them
+     * @throws IllegalArgumentException if the location has {@code **}
+     *         besides other characters in a part, or is no valid location
+     *         of the store
+     */
+    default List<FileObject> listTree(String location, String extension) throws IOException {
+        return list(location, extension);
+    }
 
     /**
      * Returns the file at a location.

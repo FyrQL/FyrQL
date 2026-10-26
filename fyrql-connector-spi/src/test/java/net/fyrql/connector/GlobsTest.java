@@ -51,4 +51,35 @@ class GlobsTest {
                 assertThrows(IllegalArgumentException.class, () -> Globs.checkPattern("s3://b/d*/x.parquet"))
                         .getMessage());
     }
+
+    @Test
+    void aTreePatternStartsAtItsFirstPartWithAPattern() {
+        assertEquals(-1, Globs.patternStart("s3://b/sales/x.parquet"));
+        assertEquals(13, Globs.patternStart("s3://b/sales/**/*.parquet"));
+        assertEquals(13, Globs.patternStart("s3://b/sales/y?ar=*/x.parquet"));
+        assertEquals(8, Globs.patternStart("C:\\data\\*\\x.csv"));
+        assertEquals(0, Globs.patternStart("*.csv"));
+        assertDoesNotThrow(() -> Globs.checkTreePattern("sales/**/x/**"));
+        assertDoesNotThrow(() -> Globs.checkTreePattern("sales\\**\\*.csv"));
+        assertEquals("The pattern ** must be a whole part of a location: sales/a**/x.csv",
+                assertThrows(IllegalArgumentException.class, () -> Globs.checkTreePattern("sales/a**/x.csv"))
+                        .getMessage());
+    }
+
+    @Test
+    void aTreePatternMatchesPathsPartByPart() {
+        Pattern any = Globs.pathRegex("**/*.parquet");
+        assertTrue(any.matcher("a.parquet").matches());
+        assertTrue(any.matcher("year=2024/month=1/a.parquet").matches());
+        assertFalse(any.matcher("year=2024/a.csv").matches());
+        Pattern middle = Globs.pathRegex("year=*/*.csv");
+        assertTrue(middle.matcher("year=2024/a.csv").matches());
+        assertFalse(middle.matcher("year=2024/month=1/a.csv").matches());
+        assertFalse(middle.matcher("a.csv").matches());
+        Pattern deep = Globs.pathRegex("a\\**\\b?/**");
+        assertTrue(deep.matcher("a/b1/x").matches());
+        assertTrue(deep.matcher("a/x/y/b2/z/w.csv").matches());
+        assertFalse(deep.matcher("a/b12/x").matches());
+        assertTrue(Globs.pathRegex("x+(1).csv").matcher("x+(1).csv").matches());
+    }
 }

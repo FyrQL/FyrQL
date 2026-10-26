@@ -41,22 +41,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.19.5</version>
+    <version>0.20.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.19.5</version>
+    <version>0.20.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.19.5</version>
+    <version>0.20.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.19.5</version>
+    <version>0.20.0</version>
 </dependency>
 ```
 
@@ -221,9 +221,15 @@ functions of DuckDB, as long as the module of the format is on the class path:
 ```sql
 SELECT region, count(*) FROM 'data/customers.csv' GROUP BY region;
 SELECT * FROM read_parquet('lake/events.parquet') LIMIT 10;
+SELECT region, sum(amount) FROM read_parquet('lake/sales') WHERE year = 2024 GROUP BY region;
 SELECT count(*) FROM iceberg_scan('warehouse/db/orders');
 SELECT snapshot_id, "timestamp_ms" FROM iceberg_snapshots('warehouse/db/orders');
 ```
+
+A directory, such as `lake/sales`, is a table of all its files, and directories of the
+form `year=2024` below it add columns, as DuckDB writes them with `PARTITION_BY`; the
+filter on `year` skips the files of other years without reading them, see [Partitioned
+files](manual.md#partitioned-files).
 
 More: [Connectors](manual.md#connectors) with what each source takes over,
 [Optimizer](manual.md#optimizer).
@@ -328,6 +334,7 @@ sources:
     type: parquet
     tables:
       events: lake/events/*.parquet
+      sales: { path: lake/sales, hiveTypes: "year INTEGER" }
   - name: api
     type: http
     tables:
@@ -603,7 +610,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.19.5</version>
+    <version>0.20.0</version>
 </dependency>
 ```
 

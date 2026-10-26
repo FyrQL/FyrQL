@@ -12,10 +12,12 @@
 package net.fyrql.test.random;
 
 import net.fyrql.FyrQL;
+import net.fyrql.QueryResult;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.value.ConversionException;
 import net.fyrql.core.value.Interval;
+import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.QueryException;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.FromItem;
@@ -51,6 +53,10 @@ import java.util.function.Predicate;
  * {@code CASE} over every row. The check of views runs a query directly and
  * through a view of it, which binds it again where it is read.
  * <p>
+ * A check is skipped, and counted apart, where a query gives more than
+ * {@link #MAX_ROWS} rows, such as a cross join of four tables, whose rows
+ * the checks would hold several times over.
+ * <p>
  * A check is skipped where either query fails as a query may, with an
  * {@link SqlException}, a {@link QueryException} or a
  * {@link ConversionException}: the engine evaluates a condition for every
@@ -75,10 +81,16 @@ final class Metamorphic {
     /** The known differences, none at present. */
     static final List<Known> KNOWN = List.of();
 
-    /** How a check ended; a query over the budget of the engine is skipped too, but counted apart. */
+    /**
+     * How a check ended; a query over the budget of the engine, or with more
+     * than {@link #MAX_ROWS} rows, is skipped too, but counted apart.
+     */
     enum Result {
-        SAME, SKIPPED, OUT_OF_BUDGET, DIFFERS, CRASHES
+        SAME, SKIPPED, OUT_OF_BUDGET, TOO_LARGE, DIFFERS, CRASHES
     }
+
+    /** The most rows a query of a check may give. */
+    static final int MAX_ROWS = 1_000_000;
 
     /**
      * The end of a check: how it ended, the queries it ran, what differs or
@@ -280,10 +292,32 @@ final class Metamorphic {
     private record Run(Schema schema, List<Object[]> rows, Throwable error) {
     }
 
+    /** The end of a query that gives more than {@link #MAX_ROWS} rows. */
+    @SuppressWarnings("serial")
+    private static final class TooLarge extends RuntimeException {
+        TooLarge() {
+            super("more than " + MAX_ROWS + " rows", null, false, false);
+        }
+    }
+
+    /**
+     * Runs a query and collects its rows as the vectors hold them, which
+     * {@link ResultComparison} renders as it renders the values of
+     * {@code rows()}; it stops at more than {@link #MAX_ROWS} rows.
+     */
     private Run run(String sql) {
         try {
             PlanNode plan = engine.plan(sql);
-            return new Run(plan.schema(), engine.rows(plan), null);
+            try (QueryResult result = engine.execute(plan)) {
+                List<Object[]> rows = new ArrayList<>();
+                for (Batch b = result.nextBatch(); b != null; b = result.nextBatch()) {
+                    if (rows.size() + b.rowCount() > MAX_ROWS) {
+                        return new Run(plan.schema(), null, new TooLarge());
+                    }
+                    rows.addAll(b.rows());
+                }
+                return new Run(plan.schema(), rows, null);
+            }
         } catch (RuntimeException | StackOverflowError e) {
             return new Run(null, null, e);
         }
@@ -298,6 +332,9 @@ final class Metamorphic {
      */
     private static Check failed(List<String> sql, Throwable e) {
         String message = e.getMessage() == null ? "" : e.getMessage().lines().findFirst().orElse("");
+        if (e instanceof TooLarge) {
+            return new Check(Result.TOO_LARGE, sql, message, false);
+        }
         if (e instanceof QueryException && message.startsWith("Memory budget")) {
             return new Check(Result.OUT_OF_BUDGET, sql, message, false);
         }
@@ -441,7 +478,7 @@ final class Metamorphic {
                     empty.merge(form, 1, Integer::sum);
                 }
             }
-            case OUT_OF_BUDGET -> {
+            case OUT_OF_BUDGET, TOO_LARGE -> {
             }
             case SKIPPED -> {
                 skipped++;

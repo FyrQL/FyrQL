@@ -13,9 +13,9 @@ package net.fyrql.jdbc;
 
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.core.value.TypeNames;
 import net.fyrql.jdbc.JdbcValues.Typed;
 import net.fyrql.sql.parse.Parameters;
-import net.fyrql.sql.parse.TypeNames;
 import net.fyrql.sql.render.DuckDbDialect;
 
 import java.io.ByteArrayOutputStream;

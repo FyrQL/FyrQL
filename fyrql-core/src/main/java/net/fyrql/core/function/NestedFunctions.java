@@ -378,7 +378,8 @@ final class NestedFunctions {
      * timestamps, and dates as timestamps, with an interval as the step,
      * which is added to each value in turn, as DuckDB does: the list of
      * {@code TIMESTAMP}s; the parts of the interval must not differ in sign.
-     * Over timestamps with a time zone they are not supported.
+     * Over timestamps with a time zone they are not supported. The list
+     * counts against the memory budget of the query, see {@link ValueBudget}.
      */
     private static SimpleFunction series(String name, boolean inclusive) {
         return new SimpleFunction(name, types -> {
@@ -419,6 +420,7 @@ final class NestedFunctions {
                     throw new ArithmeticException(name + " would give more than " + MAX_SERIES + " values");
                 }
                 long count = values.longValue();
+                ValueBudget.take(count * SERIES_VALUE_BYTES, name);
                 long v = start;
                 for (long i = 0; i < count; i++) {
                     result.add(v);
@@ -456,6 +458,9 @@ final class NestedFunctions {
         for (long v = start; sign > 0 ? v < stop || inclusive && v == stop : v > stop || inclusive && v == stop; ) {
             if (result.size() >= MAX_SERIES) {
                 throw new ArithmeticException(name + " would give more than " + MAX_SERIES + " values");
+            }
+            if (result.size() % SERIES_CHUNK == 0) {
+                ValueBudget.take(SERIES_CHUNK * SERIES_VALUE_BYTES, name);
             }
             result.add(v);
             v = Dates.add(v, step);
@@ -522,6 +527,12 @@ final class NestedFunctions {
 
     /** The most values a series gives, below the size of the largest array of Java. */
     private static final long MAX_SERIES = Integer.MAX_VALUE - 16;
+
+    /** The bytes a value of a series takes: a boxed long in the list, then a long in the vector. */
+    private static final long SERIES_VALUE_BYTES = 32;
+
+    /** The values of a series of timestamps whose bytes are taken at a time, as their number is not known before. */
+    private static final int SERIES_CHUNK = 4096;
 
     /**
      * {@code array_to_string(list, separator)}: the elements in their text

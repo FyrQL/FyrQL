@@ -95,7 +95,8 @@ final class FilterTranslation {
      *
      * @param filters conditions over the columns of the scan output
      * @param file the schema of the file
-     * @param columns the paths of the output columns in the file
+     * @param columns the paths of the output columns in the file, {@code null}
+     *        for a column that is not in the file
      */
     static FilterPredicate translate(List<Expression> filters, MessageType file, List<ColumnPath> columns) {
         FilterTranslation t = new FilterTranslation(file, columns);
@@ -312,9 +313,13 @@ final class FilterTranslation {
         STRING
     }
 
-    /** Returns the primitive column of the file that a column of the output reads, or {@code null}. */
+    /**
+     * Returns the primitive column of the file that a column of the output
+     * reads, or {@code null}, also for a column that is not in the file,
+     * such as a partition column.
+     */
     private Leaf leaf(Expression.Column c) {
-        if (c.index() >= columns.size()) {
+        if (c.index() >= columns.size() || columns.get(c.index()) == null) {
             return null;
         }
         ColumnPath p = columns.get(c.index());

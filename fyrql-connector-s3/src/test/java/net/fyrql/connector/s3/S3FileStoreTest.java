@@ -93,6 +93,18 @@ class S3FileStoreTest {
     }
 
     @Test
+    void aTreeHasTheObjectsAtAnyDepthUnderThePrefix() throws IOException {
+        List<String> parquet = List.of("s3://lake/events/2026-01.parquet", "s3://lake/events/2026-02.parquet",
+                "s3://lake/events/old/2025.parquet");
+        assertEquals(parquet, names(store.listTree("s3://lake/events", ".parquet")));
+        assertEquals(parquet, names(store.listTree("s3://lake/events/", ".parquet")));
+        assertEquals(parquet, names(store.listTree("s3://lake/events/**/*.parquet", "")));
+        assertEquals(List.of("s3://lake/events/old/2025.parquet"), names(store.listTree("s3://lake/*/o?d/*", "")));
+        assertEquals(List.of("s3://lake/single.parquet"), names(store.listTree("s3://lake/single.parquet", "")));
+        assertEquals(List.of(), store.listTree("s3://lake/none/**", ""));
+    }
+
+    @Test
     void aFileIsReadWholeOrInRanges() throws IOException {
         FileObject file = store.object("s3://lake/single.parquet");
         try (InputStream in = file.open()) {

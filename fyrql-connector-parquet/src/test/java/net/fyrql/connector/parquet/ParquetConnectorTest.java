@@ -125,8 +125,10 @@ class ParquetConnectorTest {
                 + dir.resolve("none.parquet").toAbsolutePath() + "\"", dir.resolve("none.parquet").toString());
         assertMessage("The table t of the Parquet source pq: No files found that match the pattern \""
                 + dir.toAbsolutePath() + java.io.File.separator + "x*.parquet\"", dir + "/x*.parquet");
-        assertMessage("The table t of the Parquet source pq: A pattern is only supported in the name of a file: ",
-                dir + "/p*/x.parquet");
+        assertMessage("The table t of the Parquet source pq: No files found that match the pattern \""
+                + dir.toAbsolutePath() + java.io.File.separator + "p*/x.parquet\"", dir + "/p*/x.parquet");
+        assertMessage("The table t of the Parquet source pq: The pattern ** must be a whole part of a location: ",
+                dir + "/p**/x.parquet");
         assertEquals("A table name may not start with #: #1", assertThrows(IllegalArgumentException.class,
                 () -> ParquetConnector.builder("pq").path("#1", dir)).getMessage());
     }
@@ -163,7 +165,8 @@ class ParquetConnectorTest {
 
         Map<String, Object> named = new LinkedHashMap<>();
         named.put("binary_as_string", true);
-        assertEquals("Invalid named parameter \"binary_as_string\" for function read_parquet; it has only timezone",
+        assertEquals("Invalid named parameter \"binary_as_string\" for function read_parquet; it has only"
+                + " hive_partitioning, hive_types, hive_types_autocast and timezone",
                 assertThrows(IllegalArgumentException.class, () -> c.bind("read_parquet", List.of(file.toString()),
                         named)).getMessage());
         assertEquals("read_parquet takes the path of a file, a directory or a pattern as its argument",
@@ -190,8 +193,9 @@ class ParquetConnectorTest {
         assertEquals(OptionalLong.of(10), c.catalog().rowCount(ref("both")));
         assertEquals(OptionalLong.of(4), c.catalog().rowCount(ref("first")));
         assertEquals(100, c.batchSize());
-        assertEquals("The Parquet source pq has an unknown option files; known are batchSize, readAhead, directory,"
-                + " tables.<name>, tables.<name>.path", assertThrows(IllegalArgumentException.class,
+        assertEquals("The Parquet source pq has an unknown option files; known are batchSize, readAhead,"
+                + " hivePartitioning, hiveTypesAutocast, directory, tables.<name>, tables.<name>.path,"
+                + " tables.<name>.hiveTypes", assertThrows(IllegalArgumentException.class,
                         () -> factory.create("pq", Map.of("files", "x"), dir)).getMessage());
         assertEquals(List.of(), factory.create("pq", Map.of(), dir).catalog().tables("main"));
     }

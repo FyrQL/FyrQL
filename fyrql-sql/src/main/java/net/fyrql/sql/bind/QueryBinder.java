@@ -628,8 +628,9 @@ final class QueryBinder {
                 Map<String, Object> named = new LinkedHashMap<>();
                 for (Map.Entry<String, SqlExpr> a : f.namedArguments().entrySet()) {
                     SqlTrees.noParameter(a.getValue(), "as an argument of a table function");
-                    named.put(SqlTrees.key(a.getKey()), Literals.evaluate(binder.bind(a.getValue()),
-                            a.getValue().position()));
+                    Expression value = binder.bind(a.getValue());
+                    named.put(SqlTrees.key(a.getKey()), namedArgument(value.type(),
+                            Literals.evaluate(value, a.getValue().position())));
                 }
                 TableRef table = tableFunction(SqlTrees.key(f.name()), arguments, named, f.position());
                 yield named(scan(table), f.alias(), SqlTrees.key(f.name()), false, f.position());
@@ -638,6 +639,23 @@ final class QueryBinder {
                     s.position());
             case FromItem.Join j -> join(j, ctes);
         };
+    }
+
+    /**
+     * Returns the value of a named argument of a table function as the
+     * connector gets it: a struct as a map from the names of its fields to
+     * their values, in the order of the fields, such as the types of
+     * {@code hive_types={'year': 'INTEGER'}}; any other value as it is.
+     */
+    private static Object namedArgument(DataType type, Object value) {
+        if (!(type instanceof DataType.Struct struct) || !(value instanceof List<?> fields)) {
+            return value;
+        }
+        Map<String, Object> map = new LinkedHashMap<>();
+        for (int i = 0; i < fields.size(); i++) {
+            map.put(struct.fields().get(i).name(), fields.get(i));
+        }
+        return map;
     }
 
     /** The one row without columns that a {@code SELECT} without {@code FROM} reads. */

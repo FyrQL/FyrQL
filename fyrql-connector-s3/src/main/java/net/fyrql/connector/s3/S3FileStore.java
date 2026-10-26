@@ -33,7 +33,8 @@ import java.util.regex.Pattern;
  * does not end with {@code /}, the objects directly under the prefix
  * {@code key/}, as for one that ends with {@code /}; a pattern in the last
  * part names the objects directly under the prefix before it whose names
- * match. Keys that end with {@code /}, which tools create as folders, are
+ * match; {@link #listTree} takes the objects at any depth under the
+ * prefix. Keys that end with {@code /}, which tools create as folders, are
  * no files. A file is read in the version of its entity tag; written, it
  * is uploaded in parts of a size and appears with the commit, see
  * {@link FileOutput}.
@@ -62,17 +63,45 @@ final class S3FileStore implements FileStore {
         Globs.checkPattern(location);
         S3Location at = S3Location.parse(location);
         String name = at.name();
-        List<FileObject> files = new ArrayList<>();
         if (Globs.isPattern(name)) {
-            Pattern pattern = Globs.regex(name);
-            for (S3Client.Listed o : client.list(at.bucket(), at.parent(), "/")) {
-                String n = o.key().substring(at.parent().length());
-                if (!o.key().endsWith("/") && pattern.matcher(n).matches()) {
-                    files.add(object(at.withKey(o.key()), o.size(), o.etag()));
-                }
-            }
-            return files;
+            return matching(at, at.parent(), Globs.regex(name), "/");
         }
+        return objects(at, extension, "/");
+    }
+
+    /**
+     * Returns the objects a location names under a prefix at any depth:
+     * the object itself, those whose keys end with the extension under the
+     * prefix {@code key/}, or those under the prefix before the first part
+     * with a pattern whose rest of the key matches it.
+     */
+    @Override
+    public List<FileObject> listTree(String location, String extension) throws IOException {
+        Globs.checkTreePattern(location);
+        S3Location at = S3Location.parse(location);
+        int start = Globs.patternStart(at.key());
+        if (start >= 0) {
+            return matching(at, at.key().substring(0, start), Globs.pathRegex(at.key().substring(start)), null);
+        }
+        return objects(at, extension, null);
+    }
+
+    /** Returns the objects under a prefix whose rest of the key matches a pattern. */
+    private List<FileObject> matching(S3Location at, String prefix, Pattern pattern, String delimiter)
+            throws IOException {
+        List<FileObject> files = new ArrayList<>();
+        for (S3Client.Listed o : client.list(at.bucket(), prefix, delimiter)) {
+            String n = o.key().substring(prefix.length());
+            if (!o.key().endsWith("/") && pattern.matcher(n).matches()) {
+                files.add(object(at.withKey(o.key()), o.size(), o.etag()));
+            }
+        }
+        return files;
+    }
+
+    /** Returns the object at a location, or the objects under the prefix {@code key/} with an extension. */
+    private List<FileObject> objects(S3Location at, String extension, String delimiter) throws IOException {
+        List<FileObject> files = new ArrayList<>();
         String prefix = at.key();
         if (!prefix.isEmpty() && !prefix.endsWith("/")) {
             try {
@@ -84,7 +113,7 @@ final class S3FileStore implements FileStore {
             }
         }
         String lower = extension.toLowerCase(Locale.ROOT);
-        for (S3Client.Listed o : client.list(at.bucket(), prefix, "/")) {
+        for (S3Client.Listed o : client.list(at.bucket(), prefix, delimiter)) {
             if (!o.key().endsWith("/") && o.key().toLowerCase(Locale.ROOT).endsWith(lower)) {
                 files.add(object(at.withKey(o.key()), o.size(), o.etag()));
             }

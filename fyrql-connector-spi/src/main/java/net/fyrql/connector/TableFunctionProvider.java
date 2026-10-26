@@ -39,7 +39,9 @@ public interface TableFunctionProvider {
      *        the first one is the location the call reads, which the engine
      *        has checked against its {@link FileAccessPolicy}
      * @param namedArguments the named arguments, with the names in lower
-     *        case, in the order of the call, and
+     *        case, in the order of the call, a struct such as
+     *        {@code {'year': 'INTEGER'}} as a map from the names of its
+     *        fields to their values, and
      *        {@link FileWriterProvider#TIME_ZONE} as a string at the end
      *        unless the call has it
      * @throws IllegalArgumentException with a message for the user if the

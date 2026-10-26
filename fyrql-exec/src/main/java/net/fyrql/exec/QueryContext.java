@@ -91,6 +91,7 @@ public final class QueryContext {
     private final LongAdder compileNanos = new LongAdder();
     private volatile PlanNode plan;
     private volatile long finished;
+    private volatile MemoryBudget budget;
 
     /** A context that is not canceled yet, with the timeout of the engine. */
     public QueryContext() {
@@ -199,6 +200,20 @@ public final class QueryContext {
     }
 
     /** Counts a part that an operator of the query spilled to disk, with its bytes. */
+    /** Sets the memory budget of the query, which the values of functions count against, see {@link #budget()}. */
+    void budget(MemoryBudget budget) {
+        this.budget = budget;
+    }
+
+    /**
+     * Returns the memory budget of the query against which the operators
+     * count the large values of functions, see
+     * {@link net.fyrql.core.function.ValueBudget}, or {@code null}.
+     */
+    MemoryBudget budget() {
+        return budget;
+    }
+
     void spilled(String operator, long bytes) {
         spilledParts.increment();
         spilledBytes.add(bytes);

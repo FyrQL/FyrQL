@@ -15,6 +15,7 @@ import net.fyrql.connector.FileObject;
 import net.fyrql.connector.FileStores;
 import net.fyrql.connector.Globs;
 import net.fyrql.connector.LocalFileStore;
+import net.fyrql.connector.files.HivePartitions;
 import net.fyrql.core.type.Schema;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.filter2.compat.FilterCompat;
@@ -27,7 +28,6 @@ import org.apache.parquet.io.InputFile;
 import org.apache.parquet.schema.MessageType;
 
 import java.io.IOException;
-import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.NoSuchFileException;
@@ -38,16 +38,20 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
 
 /**
  * The files of the tables of a connector: finds the files a location names
  * in the stores of files and keeps the footer of each file as long as its
  * size and version stay the same.
  * <p>
- * A location is a file, a directory, whose {@code .parquet} files make up
- * the table, or a pattern with {@code *} and {@code ?} in the name of the
- * file, such as {@code data/orders-*.parquet}, local or in a store such as
+ * A location is a file, a directory, whose {@code .parquet} files at any
+ * depth make up the table, or a pattern with {@code *}, {@code ?} and
+ * {@code **}, such as {@code data/orders-*.parquet} or
+ * {@code sales/**}{@code /*.parquet}, local or in a store such as
  * {@code s3://bucket/orders/}. The files are sorted by their locations.
+ * Directories of the form {@code key=value} on the paths of the files are
+ * partitions, see {@link HivePartitions}.
  */
 final class ParquetFiles {
 
@@ -94,14 +98,24 @@ final class ParquetFiles {
     }
 
     /**
-     * The files of a table, with the columns they share and their rows.
+     * The files of a table, with the columns they share, their partitions
+     * and their rows.
      *
      * @param location the location as given, for messages
+     * @param options how the table finds its partitions
      * @param files the files, sorted, each in the version that was read
-     * @param schema the columns; nullable if nullable in any file
+     * @param fileSchema the columns of the files; nullable if nullable in any file
      * @param rows the rows of all files
+     * @param partitions the partition columns and the values of each file
+     * @param columns the columns of the table: those of the files with the partition columns
      */
-    record Table(String location, List<Version> files, Schema schema, long rows) {
+    record Table(String location, HivePartitions.Options options, List<Version> files, Schema fileSchema, long rows,
+            HivePartitions.Partitions partitions, HivePartitions.Columns columns) {
+
+        /** Returns the columns of the table. */
+        Schema schema() {
+            return columns.schema();
+        }
     }
 
     private final Map<String, Footer> footers = new ConcurrentHashMap<>();
@@ -182,26 +196,27 @@ final class ParquetFiles {
 
     /**
      * Returns a location as an absolute one, relative local ones resolved
-     * against a directory, leaving a pattern in the name of the file and a
-     * location with a scheme as they are. A local location is resolved as
-     * {@link LocalFileStore#resolve} resolves it, also a URI of the scheme
-     * {@code file}, so that the file read is the one the policy of the
-     * engine checked.
+     * against a directory, leaving the parts from the first one with a
+     * pattern on and a location with a scheme as they are. A local location
+     * is resolved as {@link LocalFileStore#resolve} resolves it, also a URI
+     * of the scheme {@code file}, so that the file read is the one the
+     * policy of the engine checked.
+     *
+     * @throws IllegalArgumentException if the location has {@code **}
+     *         besides other characters in a part, or is no valid path
      */
     static String absolute(String location, Path directory) {
-        Globs.checkPattern(location);
+        Globs.checkTreePattern(location);
         if (FileStores.scheme(location).isPresent()) {
             return location;
         }
-        int slash = Globs.lastSeparator(location);
-        String name = location.substring(slash + 1);
-        String parent = slash < 0 ? "" : location.substring(0, slash + 1);
+        int start = Globs.patternStart(location);
         try {
-            if (!Globs.isPattern(name)) {
+            if (start < 0) {
                 return LocalFileStore.resolve(location, directory).toAbsolutePath().normalize().toString();
             }
-            return LocalFileStore.resolve(parent, directory).toAbsolutePath().normalize() + java.io.File.separator
-                    + name;
+            return LocalFileStore.resolve(location.substring(0, start), directory).toAbsolutePath().normalize()
+                    + java.io.File.separator + location.substring(start);
         } catch (InvalidPathException e) {
             throw new IllegalArgumentException("Invalid path " + location, e);
         }
@@ -211,12 +226,13 @@ final class ParquetFiles {
      * Returns the files of a location, sorted.
      *
      * @throws IllegalArgumentException if the location names no file, has
-     *         a pattern outside the name of the file, or cannot be listed
+     *         {@code **} besides other characters in a part, or cannot be
+     *         listed
      */
     List<FileObject> resolve(String location) {
         List<FileObject> files;
         try {
-            files = stores.list(location, EXTENSION);
+            files = stores.listTree(location, EXTENSION);
         } catch (IOException e) {
             throw new IllegalArgumentException("Cannot list " + location + ": " + e.getMessage(), e);
         }
@@ -260,14 +276,11 @@ final class ParquetFiles {
         }
     }
 
-    /** Returns the {@code .parquet} files directly in a directory, sorted. */
-    static List<Path> parquetFiles(Path directory) throws IOException {
-        List<Path> files = new ArrayList<>();
-        try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory, ParquetFiles::isParquetFile)) {
-            entries.forEach(files::add);
+    /** Tells whether there is a {@code .parquet} file anywhere under a directory. */
+    static boolean hasParquetFiles(Path directory) throws IOException {
+        try (Stream<Path> files = Files.walk(directory)) {
+            return files.anyMatch(ParquetFiles::isParquetFile);
         }
-        files.sort(null);
-        return files;
     }
 
     /** Tells whether a path is a file with the extension {@code .parquet}, in any case. */
@@ -309,19 +322,22 @@ final class ParquetFiles {
     }
 
     /**
-     * Reads the footers of the files of a location and checks that they
-     * share their columns.
+     * Reads the footers of the files of a location, checks that they share
+     * their columns, and finds their partitions.
      *
      * @throws IllegalArgumentException if no file matches, a file cannot be
-     *         read, or two files differ in the names or types of their
-     *         columns
+     *         read, two files differ in the names or types of their columns,
+     *         or the partitions do not fit the options
      */
-    Table table(String location) {
-        return table(location, resolve(location));
+    Table table(String location, HivePartitions.Options options) {
+        return table(location, resolve(location), options);
     }
 
-    /** Reads the footers of the files of a location found before, see {@link #table(String)}. */
-    Table table(String location, List<FileObject> files) {
+    /**
+     * Reads the footers of the files of a location found before, see
+     * {@link #table(String, HivePartitions.Options)}.
+     */
+    Table table(String location, List<FileObject> files, HivePartitions.Options options) {
         List<Version> versions = new ArrayList<>();
         Schema schema = null;
         String first = null;
@@ -343,7 +359,10 @@ final class ParquetFiles {
             versions.add(footer.version());
             rows += footer.rows();
         }
-        return new Table(location, versions, schema, rows);
+        HivePartitions.Partitions partitions = HivePartitions.partitions(
+                versions.stream().map(Version::location).toList(), options);
+        return new Table(location, options, versions, schema, rows, partitions,
+                HivePartitions.columns(schema, partitions.layout()));
     }
 
     /** Returns the columns two files share, nullable if nullable in either. */

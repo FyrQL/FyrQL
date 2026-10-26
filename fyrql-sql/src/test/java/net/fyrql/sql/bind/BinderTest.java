@@ -483,6 +483,10 @@ class BinderTest {
                 assertInstanceOf(PlanNode.Filter.class, top.input()).input());
         assertEquals(TableRef.of("s", "read_x[f.csv]{k=2, q=true}"), scan.table());
         assertTrue(error("SELECT * FROM read_x(a)").reason().startsWith("Referenced column \"a\" was not found"));
+        PlanNode.Project struct = assertInstanceOf(PlanNode.Project.class,
+                bind("SELECT * FROM read_x('f', t = {'year': 'INTEGER', 'Month': 'VARCHAR'}, l = [1, 2])"));
+        assertEquals(TableRef.of("s", "read_x[f]{t={year=INTEGER, Month=VARCHAR}, l=[1, 2]}"),
+                assertInstanceOf(PlanNode.Scan.class, struct.input()).table());
     }
 
     @Test

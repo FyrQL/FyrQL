@@ -34,7 +34,8 @@ import java.util.regex.Pattern;
 /**
  * A store of files in memory under the scheme {@code mem}, as an object
  * store without directories: a location such as {@code mem://b/dir/x}
- * names an object, one that ends with {@code /} the objects under it. It
+ * names an object, one that ends with {@code /} the objects under it, and
+ * {@link #listTree} the objects at any depth. It
  * records every range read, so that a test sees which bytes a reader asks
  * for.
  */
@@ -100,6 +101,26 @@ final class MemoryStore implements FileStore {
             String n = key.substring(prefix.length());
             if (pattern != null ? pattern.matcher(n).matches()
                     : n.toLowerCase(Locale.ROOT).endsWith(extension.toLowerCase(Locale.ROOT))) {
+                files.add(object(key));
+            }
+        }
+        return files;
+    }
+
+    @Override
+    public synchronized List<FileObject> listTree(String location, String extension) throws IOException {
+        Globs.checkTreePattern(location);
+        int start = Globs.patternStart(location);
+        List<FileObject> files = new ArrayList<>();
+        if (start < 0 && objects.containsKey(location)) {
+            files.add(object(location));
+            return files;
+        }
+        String prefix = start >= 0 ? location.substring(0, start) : location.endsWith("/") ? location : location + "/";
+        Pattern pattern = start >= 0 ? Globs.pathRegex(location.substring(start)) : null;
+        for (String key : objects.keySet()) {
+            if (key.startsWith(prefix) && (pattern != null ? pattern.matcher(key.substring(prefix.length())).matches()
+                    : key.toLowerCase(Locale.ROOT).endsWith(extension.toLowerCase(Locale.ROOT)))) {
                 files.add(object(key));
             }
         }

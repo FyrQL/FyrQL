@@ -11,6 +11,7 @@
 
 package net.fyrql.exec;
 
+import net.fyrql.core.function.ValueBudget;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 
@@ -104,6 +105,9 @@ abstract class AbstractOperator implements Operator {
 
     private Batch batch() {
         context.check(label);
+        MemoryBudget budget = context.budget();
+        Values values = budget == null ? null : new Values(budget, label);
+        ValueBudget.Account previous = values == null ? null : ValueBudget.enter(values);
         try {
             Batch b = compute();
             context.check(label);
@@ -121,6 +125,37 @@ abstract class AbstractOperator implements Operator {
             }
             throw new QueryException(label, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(),
                     e);
+        } finally {
+            if (values != null) {
+                ValueBudget.leave(previous);
+                values.release();
+            }
+        }
+    }
+
+    /**
+     * The bytes the functions take for their large values while an operator
+     * computes a batch, from the budget of the query until the batch is
+     * computed; the operators that keep the batch count it themselves.
+     */
+    private static final class Values implements ValueBudget.Account {
+        private final MemoryBudget budget;
+        private final String label;
+        private long taken;
+
+        Values(MemoryBudget budget, String label) {
+            this.budget = budget;
+            this.label = label;
+        }
+
+        @Override
+        public void take(long bytes, String what) {
+            budget.reserve(bytes, label);
+            taken += bytes;
+        }
+
+        void release() {
+            budget.release(taken);
         }
     }
 

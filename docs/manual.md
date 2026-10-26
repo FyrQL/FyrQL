@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.19.5 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.20.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, views, the configuration file, the JDBC
 driver, Arrow, the Flight SQL server, the SQL it takes and where it differs from DuckDB,
 how it runs queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -17,6 +17,7 @@ that run, each with its output.
   - [Engine settings](#engine-settings)
   - [Sessions](#sessions)
 - [Connectors](#connectors)
+  - [Partitioned files](#partitioned-files)
 - [Writing and loading](#writing-and-loading)
   - [Files](#files)
   - [Formats](#formats)
@@ -245,8 +246,9 @@ and JDBC write tables; see [Writing](#writing-and-loading).
 - `fyrql-connector-memory`: Java collections of records, beans or rows; records and
   nested collections become `STRUCT`, `LIST` and `MAP` values. The tables that SQL creates
   in it hold their rows as batches, until the engine closes.
-- `fyrql-connector-csv`: CSV and TSV files of a directory or one by one, with the types
-  inferred from a sample as DuckDB's `read_csv` infers them, a time of day such as
+- `fyrql-connector-csv`: CSV and TSV files, a table of a file, a directory or a pattern
+  with [partitions](#partitioned-files), with the types inferred from a sample of its
+  first file as DuckDB's `read_csv` infers them, a time of day such as
   `12:30:00` as a `TIME` and a timestamp with an offset or a zone, such as
   `2024-07-01 14:00:00+02`, as a `TIMESTAMPTZ`. A scan reads integers,
   decimals of up to 18 digits, dates, booleans and ASCII strings straight from the
@@ -254,9 +256,10 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   `+1`, `1e3` or ` 1`, is read as a string is cast, with the same value and error. A file
   whose name ends in `.gz` is read through gzip, in one part, and so is a file in S3. The
   table functions take `header`, `delim` or `sep`, `quote`, `nullstr`, `dateformat` and
-  `timestampformat`, also as `date_format` and `timestamp_format`, and `timezone`, the
-  time zone in which a timestamp without an offset is read as a `TIMESTAMPTZ`, by default
-  that of the session.
+  `timestampformat`, also as `date_format` and `timestamp_format`, `hive_partitioning`,
+  `hive_types` and `hive_types_autocast`, and `timezone`, the time zone in which a
+  timestamp without an offset is read as a `TIMESTAMPTZ`, by default that of the
+  session.
 - `fyrql-connector-json`: JSON files (`.json`, `.jsonl`, `.ndjson`, also with `.gz`) that
   hold an array of records or a sequence of them. The columns are inferred from a sample
   as DuckDB's `read_json` infers them, a time of day as a `TIME`; objects and arrays become `STRUCT`, `MAP` and `LIST`
@@ -270,17 +273,19 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   Hadoop and with codecs in pure Java (`SNAPPY`, `GZIP`, `ZSTD`, `LZ4_RAW` and none); the
   JAR of the module carries parquet-java renamed to `net.fyrql.internal`, so that an
   application may use a parquet-java or Hadoop of its own. A table is a file, a directory
-  of `.parquet` files or a pattern such as `data/orders-*.parquet`, whose files have the
-  same columns. The columns have the types that DuckDB's `read_parquet` gives them,
-  `STRUCT`, `LIST` and `MAP` to any depth, and the number of rows comes from the footers.
-  A scan reads each row group on its own, and only the columns and the fields of structs
-  in use; it takes over a limit without filters, reading only the row groups the limit
-  needs, and `count(*)` without groups and filters, which the footers answer. It takes
-  over no filter, but uses the filters to skip the row groups in which no row can pass, by
-  their statistics, dictionaries and Bloom filters, and the pages of a row group, by its
-  column index: comparisons, `BETWEEN`, `IN` and `IS NULL` on integers, decimals, dates,
-  times of day, timestamps with and without a time zone, strings and booleans, also on
-  fields of structs, under `AND`, `OR` and `NOT`. `explain` does not show these filters;
+  with `.parquet` files at any depth or a pattern such as `data/orders-*.parquet` or
+  `sales/**/*.parquet`, whose files have the same columns, with
+  [partitions](#partitioned-files). The columns have the types that DuckDB's
+  `read_parquet` gives them, `STRUCT`, `LIST` and `MAP` to any depth, and the number of
+  rows comes from the footers. A scan reads each row group on its own, and only the
+  columns and the fields of structs in use; it takes over the filters on partition
+  columns, a limit when it takes over all filters, reading only the row groups the limit
+  needs, and `count(*)` without groups under such filters, which the footers answer. The
+  other filters it uses to skip the row groups in which no row can pass, by their
+  statistics, dictionaries and Bloom filters, and the pages of a row group, by its column
+  index: comparisons, `BETWEEN`, `IN` and `IS NULL` on integers, decimals, dates, times
+  of day, timestamps with and without a time zone, strings and booleans, also on fields
+  of structs, under `AND`, `OR` and `NOT`. `explain` does not show these filters;
   `recordReads(true)` keeps the row groups and columns each scan read. parquet-java holds
   the column chunks of a row group in memory, compressed, outside the memory budget of the
   engine. The connector decodes the pages of primitive columns and of fields of structs
@@ -291,8 +296,9 @@ and JDBC write tables; see [Writing](#writing-and-loading).
   dictionary of their column chunk, which all its batches share, without a copy of each
   value. A file in S3 is read in ranges, see `fyrql-connector-s3`; the option `readAhead`
   (`1MB`) is the size of the reads of the headers of pages, of dictionaries and of indexes
-  there. `read_parquet` takes the named argument `timezone`, as the table functions of CSV
-  and JSON do, but a Parquet file holds its instants in UTC and needs none.
+  there. `read_parquet` takes the named arguments `hive_partitioning`, `hive_types` and
+  `hive_types_autocast`, and `timezone`, as the table functions of CSV and JSON do, but a
+  Parquet file holds its instants in UTC and needs none.
 - `fyrql-connector-xlsx`: the sheets of Excel workbooks (`.xlsx` and `.xlsm`), read and
   written with the zip and XML support of the JDK alone, without Apache POI. A table is a
   sheet, by default the first worksheet, read as DuckDB's `read_xlsx` reads it: it starts
@@ -601,6 +607,51 @@ fields. What the `$metadata` forbids, by the vocabulary `Capabilities` of versio
 the attributes `sap:filterable`, `sap:sortable`, `sap:pageable` and `sap:countable` of
 version 2, is not asked for.
 
+### Partitioned files
+
+The connectors of Parquet and CSV read a table from one file or from many: a directory,
+with its files at any depth (`.parquet`, or `.csv` and `.tsv`, also with `.gz`), or a
+pattern in which `*` and `?` stand for characters within one part of the path and a part
+`**` for any number of directories, such as `sales/**/*.parquet` or
+`sales/year=2024/*/*.csv`. The files are read in the order of their paths. The files of
+a CSV table share the columns of the first one, by position, and TSV files are not mixed
+with other ones unless the delimiter is given.
+
+Directories of the form `key=value` on the path of a file, as Hive, Spark and DuckDB's
+`COPY ... (PARTITION_BY ...)` write them, add columns of that value to the rows of the
+file, after its own columns and ordered by their keys, as DuckDB orders them; a column of
+the file with the name of a key, in any case, takes the value of the partition. `%xx` in a
+key or a value stands for a byte of UTF-8, and `__HIVE_DEFAULT_PARTITION__` for `NULL`.
+A partition column is a `DATE` or a `BIGINT` if all its values in all files are dates or
+integers that read back as they are written, such as `2024-03-01` or `42` but not `007`,
+and a `VARCHAR` otherwise.
+
+```sql
+SELECT region, sum(amount)
+FROM read_parquet('sales', hive_types = {'year': 'INTEGER'})
+WHERE year = 2024
+GROUP BY region
+```
+
+The options are named arguments of `read_parquet` and `read_csv`, and options of a source
+of the type `parquet` or `csv` in the [configuration file](#configuration-file):
+
+| Named argument | Option | Meaning |
+| --- | --- | --- |
+| `hive_partitioning` | `hivePartitioning` | `true`: the files must have the same keys; `false`: directories are no partitions; by default (`auto`) partitions if all files have the same keys |
+| `hive_types_autocast` | `hiveTypesAutocast` | `false`: a partition column without a type of its own is a `VARCHAR` |
+| `hive_types` | `tables.<name>.hiveTypes` | the types of partition columns by their keys, as `{'year': 'INTEGER'}`, or as `year INTEGER, region VARCHAR` in the configuration file; a key that is no partition is an error |
+
+A filter that reads partition columns only, such as `year = 2024` or
+`region IN ('north', 'south')`, is taken over by the scan: it is evaluated once for each
+file, and a file none of whose rows can pass is not read. `EXPLAIN` shows it as pushed,
+and `EXPLAIN ANALYZE` counts the files read of all. A filter that fails on the values of
+a file, such as `CAST(region AS INTEGER) = 1` on a region `north`, fails the scan once it
+reads a row of that file. A filter that also reads columns of the files, such as
+`year = 2024 OR amount > 10`, stays with the engine. The files of a table of a source are
+looked up again for each scan, so that a file added to its directory is read; their
+columns and partitions must still be those of the table.
+
 ## Writing and loading
 
 Five statements write, and each gives one row with the number of rows written in a
@@ -772,7 +823,7 @@ column, a number cast from a `DOUBLE`. In a CSV file of one column whose null st
 empty, an empty line is a `NULL`, as DuckDB writes and reads it; otherwise it is skipped.
 An object of S3 is loaded by its location, as in `COPY mem.archive FROM
 's3://lake/archive.csv'`. Files compressed with zstd, and several files at once, are not
-loaded.
+loaded; `INSERT INTO mem.archive SELECT * FROM read_csv('archive/**/*.csv')` loads many.
 
 ### Tables
 
@@ -918,7 +969,8 @@ The engine checks a location before a source gets it, also in `EXPLAIN` and when
 statement is prepared. A local location is resolved as the readers resolve it, a relative
 one against the working directory, and made absolute, without `.` and `..`, with the
 symbolic links followed as far as the path exists; for a pattern such as
-`data/*.parquet`, the directory before the pattern counts. A location lies under an
+`data/*.parquet` or `data/**/*.csv`, the directory before the first part with a pattern
+counts. A location lies under an
 allowed directory only by whole names, so that `data` allows `data/2026/orders.csv` but
 not `data2/orders.csv`, and a link in `data` that points elsewhere does not allow its
 target. A location with a scheme, such as `s3://lake/sales/q1.parquet`, is compared as
@@ -934,10 +986,11 @@ directory, can still lead a statement elsewhere, so that the allowed directories
 the operator alone.
 
 The same holds for the files the engine finds itself: a link among the files of a
-directory or pattern of `read_parquet`, or the metadata file of a table of
+directory or pattern of `read_parquet` or `read_csv`, or the metadata file of a table of
 `iceberg_scan`, that points outside the allowed locations fails the statement with the
 file it names, and the file `metadata/version-hint.text` of a table must name a version
-or a file of its directory, not a path. A location such as `file:/srv/data/x.csv` or
+or a file of its directory, not a path. Below the directory of a location, links to
+directories are not followed. A location such as `file:/srv/data/x.csv` or
 `file:///C:/data/x.csv` is a URI and read as the file it names, for the check and the
 read alike. On Windows, a path on another drive or share than all allowed directories,
 such as `\\host\share\x.csv`, is denied before the file system is asked about it, so
@@ -1022,10 +1075,13 @@ in the file and the place in its query, as in `fyrql.yaml: line 30: the view
 files.main.revenue cannot be created: Table with name shop.public.big_order does not
 exist (line 2, column 6 of its sql)`.
 
-A source of the type `csv` takes `directory`, whose `.csv` and `.tsv` files become tables,
-and `tables.<name>` or `tables.<name>.file` for single files, also in S3; and, for every
-file, `delimiter` (a comma, or a tab for `.tsv`), `quote` (`"`), `header` (detected as
-DuckDB detects it), `nullString` (empty), `charset` (`UTF-8`), `sampleSize` (the rows the
+A source of the type `csv` takes `directory`, whose `.csv` and `.tsv` files and
+subdirectories with such files become tables, and `tables.<name>` or
+`tables.<name>.file` for a file, a directory or a pattern, also in S3, with
+`tables.<name>.hiveTypes` for the types of its [partitions](#partitioned-files); and, for
+every table, `delimiter` (a comma, or a tab for `.tsv`), `quote` (`"`), `header`
+(detected as DuckDB detects it), `nullString` (empty), `charset` (`UTF-8`),
+`hivePartitioning` (`auto`), `hiveTypesAutocast` (`true`), `sampleSize` (the rows the
 types are inferred from, `1000`), `batchSize` (`2048`) and `splitSize` (the size of the
 parts in which a large file is read on several threads, `4MiB`, `0` for one part).
 
@@ -1038,9 +1094,11 @@ are inferred from, `20480`, `-1` for all), `mapInferenceThreshold` (`200`),
 with these names in snake case mean, and `batchSize` and `splitSize` as for CSV.
 
 A source of the type `parquet` takes `directory`, whose `.parquet` files and
-subdirectories of them become tables, and `tables.<name>` or `tables.<name>.path` for a
-file, a directory or a pattern such as `lake/events/*.parquet`; and `batchSize` and
-`readAhead` (`1MB`, see [Connectors](#connectors)).
+subdirectories with such files become tables, and `tables.<name>` or
+`tables.<name>.path` for a file, a directory or a pattern such as
+`lake/events/**/*.parquet`, with `tables.<name>.hiveTypes` for the types of its
+[partitions](#partitioned-files); and `hivePartitioning` (`auto`), `hiveTypesAutocast`
+(`true`), `batchSize` and `readAhead` (`1MB`, see [Connectors](#connectors)).
 
 A source of the type `xlsx` takes `directory`, whose `.xlsx` and `.xlsm` workbooks become
 tables of their first worksheets, and `tables.<name>` or `tables.<name>.file` for a
@@ -1602,7 +1660,7 @@ queries](#observing-queries), and `SET`, `RESET`, `SHOW` and
   `read_csv_auto`, `read_json`, `read_json_auto`, `read_ndjson`, `read_ndjson_auto`,
   `read_parquet`, `parquet_scan`, `iceberg_scan`, `read_iceberg`,
   `iceberg_snapshots` and `read_xlsx`, and file names such as `FROM 'data/orders.csv'`,
-  `FROM 'events.jsonl'`, `FROM 'lake/*.parquet'` or `FROM 'sales.xlsx'`, as far as the
+  `FROM 'events.jsonl'`, `FROM 'lake/**/*.parquet'` or `FROM 'sales.xlsx'`, as far as the
   [file access](#file-access) of the engine allows; `INNER`, `LEFT`,
   `RIGHT`, `FULL` and `CROSS JOIN` with `ON` and any condition without a subquery,
   `USING` or `NATURAL`; `SELECT` without `FROM`.
@@ -1954,8 +2012,14 @@ here; the random tests explain such differences by a ledger of their own, see
   `timestamp_ms` of `iceberg_snapshots` must be quoted, `"timestamp_ms"`, since the parser
   takes `TIMESTAMP_MS`, `TIMESTAMP_NS` and `TIMESTAMP_S` for types.
 - Files in S3 need a registered source of the type `s3`, rather than the extension
-  `httpfs` and `CREATE SECRET`. Locations of `gs://`, `az://`, `http://` and `https://`,
-  `**` in a pattern and a pattern before the last part of a location are not supported.
+  `httpfs` and `CREATE SECRET`. Locations of `gs://`, `az://`, `http://` and `https://`
+  are not supported, and patterns of `read_json` and `read_xlsx` neither.
+- `hive_types` takes the names of the types as texts, `{'year': 'INTEGER'}`, where
+  DuckDB also takes `{'year': INTEGER}`. A key or a value of a partition with `%xx` for
+  the bytes of a character beyond ASCII, such as `%C3%BC` for a u with umlaut, is decoded
+  as UTF-8, where DuckDB 1.5.6 takes each byte for a character of its own. The files of a
+  CSV table share the columns of the first file by position; `union_by_name` and
+  `filename` are not supported.
 - A JDBC source with `splitRows` reads the parts of a table in transactions of their
   own, each with its own state of the table; while others write to the table, a result
   may mix states, and a row whose key column changes may be missing or come twice.
@@ -2453,6 +2517,11 @@ driver and `RESOURCE_EXHAUSTED` in the Flight SQL server.
   to one file, the rest are appended to it, and every read reads the file from the
   start.
 - Joins, `EXCEPT` and `INTERSECT` do not spill.
+- The lists of the functions `range` and `generate_series` count against the budget
+  while the batch whose values they are is computed, so that a list such as
+  `range(1000000000)` fails the query rather than exhaust the heap. As a constant, such a
+  list is computed when the query runs, not when it is planned, if it takes more than
+  64 MiB.
 
 The files go to a directory of the engine under the setting `spillDirectory`, by default
 the temporary directory of the JVM, named `fyrql-spill-` and a random suffix; it is
@@ -2512,11 +2581,12 @@ Sort #2 DESC -- 2 rows, 1 batch, 56.5 us, 1 thread
   workers of a segment counts for no operator.
 - A scan, and a part of the plan that a source runs (`Remote`), adds what it read: its
   splits; the row groups of Parquet and Iceberg files it read of all, the others skipped
-  by their statistics and Bloom filters; the data files of an Iceberg table it read of
-  all; the requests to S3, an HTTP endpoint, an OData service or a database, with the time
-  until their answers came; and the bytes it read, of the answers or of local files (of a
-  CSV or JSON file, the bytes of the parts it opened). Each statement sent to a database
-  follows on a line of its own after `>`.
+  by their statistics and Bloom filters; the data files of an Iceberg table, and the
+  files of a Parquet or CSV table of several files, it read of all, the others skipped by
+  their partitions; the requests to S3, an HTTP endpoint, an OData service or a
+  database, with the time until their answers came; and the bytes it read, of the answers
+  or of local files (of a CSV or JSON file, the bytes of the parts it opened). Each
+  statement sent to a database follows on a line of its own after `>`.
 - An operator that spilled adds the bytes and parts it wrote and the bytes it read back.
 - The top of a compiled pipeline, `[codegen pipeline]`, has the numbers of the whole
   pipeline, and the nodes below it have none; the top of a segment, `[parallel]`, has
@@ -2808,6 +2878,7 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | `net.fyrql.connector.s3` | API | `S3ConnectorFactory` (internal) |
 | `net.fyrql.connector.xlsx` | API | `XlsxConnectorFactory` (internal) |
 | `net.fyrql.connector` | SPI | - |
+| `net.fyrql.connector.files` | Internal | - |
 | `net.fyrql.core.type` | SPI | - |
 | `net.fyrql.core.vector` | SPI | `SpillFormat` (internal) |
 | `net.fyrql.core.plan` | SPI | `Plans` (internal) |

@@ -18,17 +18,23 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileSystemLoopException;
+import java.nio.file.FileVisitOption;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
@@ -105,6 +111,68 @@ public final class LocalFileStore implements FileStore {
                 files.add(path);
             }
         }
+        return objects(files);
+    }
+
+    /**
+     * Returns the files a location names in a whole tree of directories,
+     * see {@link FileStore#listTree}. Links to files count as files; links
+     * to directories below the directory of the location are not followed.
+     */
+    @Override
+    public List<FileObject> listTree(String location, String extension) throws IOException {
+        Globs.checkTreePattern(location);
+        int start = Globs.patternStart(location);
+        List<Path> files = new ArrayList<>();
+        if (start >= 0) {
+            Path root = path(start == 0 ? "." : location.substring(0, start));
+            Pattern pattern = Globs.pathRegex(location.substring(start));
+            walk(root, p -> pattern.matcher(root.relativize(p).toString().replace('\\', '/')).matches(),
+                    files);
+        } else {
+            Path path = path(location);
+            if (Files.isDirectory(path)) {
+                String lower = extension.toLowerCase(Locale.ROOT);
+                walk(path, p -> p.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(lower), files);
+            } else if (Files.isRegularFile(path)) {
+                files.add(path);
+            }
+        }
+        return objects(files);
+    }
+
+    /** Adds the regular files under a directory that a predicate takes, without following links below it. */
+    private static void walk(Path root, Predicate<Path> take, List<Path> files) throws IOException {
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+        Files.walkFileTree(root, EnumSet.of(FileVisitOption.FOLLOW_LINKS), Integer.MAX_VALUE,
+                new SimpleFileVisitor<>() {
+                    @Override
+                    public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attributes) {
+                        return dir.equals(root) || !Files.isSymbolicLink(dir) ? FileVisitResult.CONTINUE
+                                : FileVisitResult.SKIP_SUBTREE;
+                    }
+
+                    @Override
+                    public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
+                        if (attributes.isRegularFile() && take.test(file)) {
+                            files.add(file);
+                        }
+                        return FileVisitResult.CONTINUE;
+                    }
+
+                    @Override
+                    public FileVisitResult visitFileFailed(Path file, IOException e) throws IOException {
+                        if (e instanceof FileSystemLoopException) {
+                            return FileVisitResult.CONTINUE;
+                        }
+                        throw e;
+                    }
+                });
+    }
+
+    private static List<FileObject> objects(List<Path> files) throws IOException {
         List<FileObject> objects = new ArrayList<>();
         for (Path f : files) {
             objects.add(object(f.toAbsolutePath().normalize()));

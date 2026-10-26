@@ -12,6 +12,7 @@
 package net.fyrql.sql.parse;
 
 import net.fyrql.core.type.DataType;
+import net.fyrql.core.value.TypeNames;
 import net.fyrql.sql.SqlException;
 import net.fyrql.sql.ast.CreateTable.ColumnDefinition;
 import net.fyrql.sql.ast.DropTable;

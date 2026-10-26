@@ -13,23 +13,30 @@ package net.fyrql.connector.csv;
 import net.fyrql.connector.ConfigOptions;
 import net.fyrql.connector.ConnectorFactory;
 import net.fyrql.connector.FileStores;
+import net.fyrql.connector.files.HivePartitions;
 
 import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
 /**
  * Creates CSV sources of the type {@code csv} from options:
- * {@code directory}, whose {@code .csv} and {@code .tsv} files become
- * tables, and {@code tables.<name>} or {@code tables.<name>.file} for single
- * files, both resolved against the directory of the configuration, or a
- * file in a store of the engine such as {@code s3://bucket/key}; and
- * {@code delimiter}, {@code quote}, {@code header}, {@code nullString},
- * {@code charset}, {@code sampleSize}, {@code batchSize} and
- * {@code splitSize} (a number of bytes, such as {@code 4MiB}), which apply to
- * every file. A source without files serves only the table functions.
+ * {@code directory}, whose {@code .csv} and {@code .tsv} files and
+ * subdirectories with such files become tables, and {@code tables.<name>}
+ * or {@code tables.<name>.file} for a file, a directory or a pattern, both
+ * resolved against the directory of the configuration, or in a store of the
+ * engine such as {@code s3://bucket/key}, with
+ * {@code tables.<name>.hiveTypes} for the types of its partitions, such as
+ * {@code year INTEGER, region VARCHAR}; and {@code delimiter},
+ * {@code quote}, {@code header}, {@code nullString}, {@code charset},
+ * {@code hivePartitioning} ({@code true}, {@code false} or {@code auto}, the
+ * default), {@code hiveTypesAutocast}, {@code sampleSize},
+ * {@code batchSize} and {@code splitSize} (a number of bytes, such as
+ * {@code 4MiB}), which apply to every file. A source without files serves
+ * only the table functions.
  * <p>
  * Its type and its options are keys of the configuration file, which the
  * compatibility promise covers; the class itself is internal.
@@ -60,18 +67,35 @@ public final class CsvConnectorFactory implements ConnectorFactory {
         o.integer("sampleSize").ifPresent(b::sampleSize);
         o.integer("batchSize").ifPresent(b::batchSize);
         o.bytes("splitSize").ifPresent(b::splitSize);
+        o.get("hivePartitioning", "true, false or auto", CsvConnectorFactory::partitioning)
+                .ifPresent(p -> b.hivePartitioning(p.equals("auto") ? null : Boolean.valueOf(p)));
+        o.bool("hiveTypesAutocast").ifPresent(b::hiveTypesAutocast);
         Optional<Path> files = o.path("directory");
-        Map<String, Map<String, String>> tables = o.tables("file");
+        Map<String, Map<String, String>> tables = o.tables("file", "hiveTypes");
         o.rejectUnknown();
         files.ifPresent(b::directory);
         tables.forEach((table, attributes) -> {
             String file = attributes.get("file");
-            if (FileStores.isLocal(file)) {
-                b.file(table, o.resolve(file));
-            } else {
-                b.file(table, file);
+            b.file(table, FileStores.isLocal(file) ? CsvFiles.absolute(file, o.directory()) : file);
+            String types = attributes.get("hiveTypes");
+            if (types != null) {
+                try {
+                    b.hiveTypes(table, HivePartitions.types(types));
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("The table " + table + " of the CSV source " + name
+                            + " has invalid hiveTypes: " + e.getMessage(), e);
+                }
             }
         });
         return b.build();
+    }
+
+    /** Returns {@code true}, {@code false} or {@code auto}, in any case. */
+    static String partitioning(String value) {
+        String v = value.strip().toLowerCase(Locale.ROOT);
+        if (!v.equals("true") && !v.equals("false") && !v.equals("auto")) {
+            throw new IllegalArgumentException(value);
+        }
+        return v;
     }
 }

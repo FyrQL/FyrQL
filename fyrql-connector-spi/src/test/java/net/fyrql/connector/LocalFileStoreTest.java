@@ -10,6 +10,7 @@
  */
 package net.fyrql.connector;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -64,6 +65,53 @@ class LocalFileStoreTest {
         assertEquals(dir.resolve("b.parquet").toAbsolutePath().normalize().toString(), b.location());
         assertEquals(1, b.size());
         assertEquals(Optional.of(dir.resolve("b.parquet").toAbsolutePath().normalize()), b.path());
+    }
+
+    @Test
+    void aTreeHasTheFilesAtAnyDepth() throws IOException {
+        Path sales = dir.resolve("sales");
+        Files.createDirectories(sales.resolve("year=2024").resolve("month=2"));
+        Files.createDirectories(sales.resolve("year=2025").resolve("month=1"));
+        Files.writeString(sales.resolve("year=2025").resolve("month=1").resolve("b.parquet"), "b");
+        Files.writeString(sales.resolve("year=2024").resolve("month=2").resolve("a.parquet"), "a");
+        Files.writeString(sales.resolve("year=2024").resolve("month=2").resolve("a.csv"), "c");
+        Files.writeString(sales.resolve("top.parquet"), "t");
+        LocalFileStore store = new LocalFileStore(dir);
+
+        List<FileObject> all = store.listTree("sales", ".parquet");
+        assertEquals(List.of("top.parquet", "a.parquet", "b.parquet"), names(all));
+        assertEquals(sales.resolve("year=2024").resolve("month=2").resolve("a.parquet").toAbsolutePath().normalize()
+                .toString(), all.get(1).location());
+        assertEquals(List.of("top.parquet", "a.parquet", "b.parquet"),
+                names(store.listTree("sales/**/*.parquet", "")));
+        assertEquals(List.of("a.parquet", "b.parquet"), names(store.listTree("sales/*/*/*.parquet", "")));
+        assertEquals(List.of("a.csv", "a.parquet"), names(store.listTree(sales + "/year=2024/**", "")));
+        assertEquals(List.of("b.parquet"), names(store.listTree("sales/year=2025/month=?/*", "")));
+        assertEquals(List.of("top.parquet"), names(store.listTree("sales/top.parquet", ".csv")));
+        assertEquals(List.of(), store.listTree("none/**/*.csv", ""));
+        assertEquals(List.of(), store.listTree("none", ""));
+        assertEquals("The pattern ** must be a whole part of a location: sales/x**/*.csv",
+                assertThrows(IllegalArgumentException.class, () -> store.listTree("sales/x**/*.csv", ""))
+                        .getMessage());
+    }
+
+    @Test
+    void aTreeDoesNotFollowLinksToDirectoriesBelowIt() throws IOException {
+        Path outside = dir.resolve("outside");
+        Files.createDirectories(outside);
+        Files.writeString(outside.resolve("o.csv"), "o");
+        Path tree = dir.resolve("tree");
+        Files.createDirectories(tree);
+        Files.writeString(tree.resolve("t.csv"), "t");
+        try {
+            Files.createSymbolicLink(tree.resolve("link"), outside);
+        } catch (IOException | UnsupportedOperationException e) {
+            Assumptions.abort("No symbolic links here: " + e);
+        }
+        LocalFileStore store = new LocalFileStore(dir);
+        assertEquals(List.of("t.csv"), names(store.listTree("tree", ".csv")));
+        assertEquals(List.of("t.csv"), names(store.listTree("tree/**/*.csv", "")));
+        assertEquals(List.of("o.csv"), names(store.listTree("tree/link", ".csv")));
     }
 
     @Test

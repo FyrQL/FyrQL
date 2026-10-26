@@ -16,6 +16,7 @@ import net.fyrql.core.expr.Expression.ComparisonOp;
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.function.ScalarFunction;
 import net.fyrql.core.function.StructExtract;
+import net.fyrql.core.function.ValueBudget;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
@@ -244,16 +245,34 @@ public final class Expressions {
 
     /**
      * Returns the value of an expression without columns, or throws if it
-     * has a column; {@code random} counts as a column.
+     * has a column; {@code random} counts as a column. A function may build
+     * a value of at most {@link #FOLDED_BYTES} here, see {@link ValueBudget},
+     * so that folding a constant never takes more memory than the query
+     * that evaluates it would be given.
      *
      * @throws IllegalArgumentException if the expression is not constant
+     * @throws ArithmeticException if a value would take more memory
      */
     public static Object constantValue(Expression e) {
         if (!isConstant(e)) {
             throw new IllegalArgumentException("Not a constant: " + e);
         }
-        return Evaluator.evalRow(e, ONE_ROW, 0);
+        long[] taken = new long[1];
+        ValueBudget.Account previous = ValueBudget.enter((bytes, what) -> {
+            taken[0] += bytes;
+            if (taken[0] > FOLDED_BYTES) {
+                throw new ArithmeticException(what + " would take more than " + FOLDED_BYTES + " bytes for a constant");
+            }
+        });
+        try {
+            return Evaluator.evalRow(e, ONE_ROW, 0);
+        } finally {
+            ValueBudget.leave(previous);
+        }
     }
+
+    /** The most bytes the functions take for the values of one {@link #constantValue}. */
+    static final long FOLDED_BYTES = 64L << 20;
 
     /** Tells whether a predicate holds for every node of an expression. */
     public static boolean allMatch(Expression e, Predicate<Expression> predicate) {

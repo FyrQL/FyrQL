@@ -272,17 +272,17 @@ class CsvConnectorTest {
                 Map.of("delim", "\\t")))));
 
         List<Map.Entry<String, Runnable>> errors = new ArrayList<>();
-        errors.add(Map.entry("read_csv takes the path of one file as its argument",
+        errors.add(Map.entry("read_csv takes the path of a file, a directory or a pattern as its argument",
                 () -> c.bind("read_csv", List.of(), Map.of())));
-        errors.add(Map.entry("read_csv takes the path of one file as its argument",
+        errors.add(Map.entry("read_csv takes the path of a file, a directory or a pattern as its argument",
                 () -> c.bind("read_csv", List.of(1L), Map.of())));
         errors.add(Map.entry("No files found that match the pattern \"nothere.csv\"",
                 () -> c.bind("read_csv", List.of("nothere.csv"), Map.of())));
-        errors.add(Map.entry("Patterns of file names are not supported yet: *.csv",
-                () -> c.bind("read_csv", List.of("*.csv"), Map.of())));
-        errors.add(Map.entry("Invalid named parameter \"foo\" for function read_csv; supported are header, delim, sep, quote,"
-                + " nullstr, dateformat, timestampformat, timezone", () -> c.bind("read_csv", List.of(tsv.toString()),
-                        Map.of("foo", 1L))));
+        errors.add(Map.entry("No files found that match the pattern \"none/**/*.csv\"",
+                () -> c.bind("read_csv", List.of("none/**/*.csv"), Map.of())));
+        errors.add(Map.entry("Invalid named parameter \"foo\" for function read_csv; supported are header, delim, sep,"
+                + " quote, nullstr, dateformat, timestampformat, hive_partitioning, hive_types, hive_types_autocast,"
+                + " timezone", () -> c.bind("read_csv", List.of(tsv.toString()), Map.of("foo", 1L))));
         errors.add(Map.entry("The argument delim of read_csv must be one character",
                 () -> c.bind("read_csv", List.of(tsv.toString()), Map.of("delim", ";;"))));
         errors.add(Map.entry("The argument header of read_csv must be a BOOLEAN",
@@ -320,7 +320,7 @@ class CsvConnectorTest {
                 e.getMessage());
         e = assertThrows(IllegalArgumentException.class,
                 () -> factory.create("files", Map.of("tables.b.url", "b.txt"), dir));
-        assertEquals("The table b of the CSV source files has an unknown attribute url; known are file",
+        assertEquals("The table b of the CSV source files has an unknown attribute url; known are file, hiveTypes",
                 e.getMessage());
     }
 
