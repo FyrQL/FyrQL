@@ -572,8 +572,10 @@ public final class JdbcConformance {
         JdbcDialect dialect = target.db().dialect();
         boolean generic = target.generic();
         UnaryOperator<String> q = connector.sql()::quoteIdentifier;
-        String select = "SELECT t." + q.apply("id") + ", t." + q.apply("i") + ", t." + q.apply("s") + " FROM ";
         boolean on = engine.pushdown();
+        // With the filters taken over, the columns only they read stay in the database.
+        String select = on ? "SELECT t." + q.apply("s") + " FROM "
+                : "SELECT t." + q.apply("id") + ", t." + q.apply("i") + ", t." + q.apply("s") + " FROM ";
         String filtered = sent(engine, connector, "SELECT s FROM items WHERE i > 0 AND id < 100");
         assertTrue(filtered.startsWith(select) && filtered.contains("." + q.apply("items") + " t"), filtered);
         assertEquals(on, filtered.contains(" WHERE ((t." + q.apply("i") + " > "), filtered);

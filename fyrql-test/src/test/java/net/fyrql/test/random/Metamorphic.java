@@ -150,6 +150,15 @@ final class Metamorphic {
                 s.qualify(), s.distinctOn(), s.position());
     }
 
+    /** A {@code SELECT} over an inner join whose condition takes a part of a partition as well. */
+    private static QueryBody.Select on(QueryBody.Select s, SqlExpr part) {
+        FromItem.Join j = (FromItem.Join) s.from();
+        FromItem join = new FromItem.Join(j.kind(), j.left(), j.right(), and(j.on(), part), j.using(), j.natural(),
+                j.position());
+        return new QueryBody.Select(s.distinct(), s.items(), join, s.where(), s.groupBy(), s.having(), s.windows(),
+                s.qualify(), s.distinctOn(), s.position());
+    }
+
     /** The union of three bodies, without duplicates or with them. */
     private static QueryBody union(List<QueryBody.Select> parts, boolean all) {
         QueryBody body = parts.get(0);
@@ -169,11 +178,14 @@ final class Metamorphic {
         QueryBody.Select base = p.base();
         List<QueryBody.Select> parts = new ArrayList<>();
         for (SqlExpr part : parts(p.predicate())) {
-            parts.add(p.kind() == SqlGenerator.Kind.HAVING ? with(base, base.where(), and(base.having(), part))
-                    : with(base, and(base.where(), part), base.having()));
+            parts.add(switch (p.kind()) {
+                case HAVING -> with(base, base.where(), and(base.having(), part));
+                case JOIN_ON -> on(base, part);
+                default -> with(base, and(base.where(), part), base.having());
+            });
         }
         QueryBody partitioned = switch (p.kind()) {
-            case WHERE, HAVING -> union(parts, true);
+            case WHERE, HAVING, JOIN_ON, WINDOW -> union(parts, true);
             case DISTINCT -> union(parts, false);
             case AGGREGATE -> combined(base, union(parts, true), schema);
         };
@@ -292,7 +304,8 @@ final class Metamorphic {
             return new Check(Result.DIFFERS, sql, "types: " + base.schema().types() + " against "
                     + partitioned.schema().types(), false);
         }
-        boolean exact = p.kind() == SqlGenerator.Kind.WHERE;
+        boolean exact = p.kind() == SqlGenerator.Kind.WHERE || p.kind() == SqlGenerator.Kind.JOIN_ON
+                || p.kind() == SqlGenerator.Kind.WINDOW;
         ResultComparison.Outcome same = ResultComparison.compare(base.schema(), exact ? base.rows()
                 : normalized(base.rows()), exact ? partitioned.rows() : normalized(partitioned.rows()), false);
         return new Check(same.same() ? Result.SAME : Result.DIFFERS, sql, same.report(), base.rows().isEmpty());
@@ -402,7 +415,9 @@ final class Metamorphic {
         }
         for (Query q : QueryShrinker.query(p.query())) {
             if (q.body() instanceof QueryBody.Select s && q.orderBy().isEmpty() && q.limit() == null
-                    && q.offset() == null && (p.kind() != SqlGenerator.Kind.DISTINCT || s.distinct())) {
+                    && q.offset() == null && (p.kind() != SqlGenerator.Kind.DISTINCT || s.distinct())
+                    && (p.kind() != SqlGenerator.Kind.JOIN_ON || s.from() instanceof FromItem.Join j
+                            && j.kind() == FromItem.JoinKind.INNER && j.on() != null)) {
                 result.add(new SqlGenerator.Partition(p.kind(), q.with(), s, p.predicate(), p.rows()));
             }
         }

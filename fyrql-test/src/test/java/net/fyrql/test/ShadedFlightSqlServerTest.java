@@ -424,6 +424,7 @@ class ShadedFlightSqlServerTest {
                     "grpc-NOTICE.txt", "netty-NOTICE.txt", "protobuf-LICENSE.txt", "commons-codec-NOTICE.txt")) {
                 assertTrue(names.contains("META-INF/licenses/" + license), license);
             }
+            assertTrue(names.contains("META-INF/LICENSE"), "the text of the MPL 2.0");
             String thirdParty = text(jar, "META-INF/licenses/THIRD-PARTY.txt");
             for (String library : List.of("Jackson", "SnakeYAML", "JSqlParser", "FastCSV", "Janino",
                     "Apache Parquet Java", "aircompressor", "JTS", "SLF4J", "Apache Arrow Java", "gRPC Java",

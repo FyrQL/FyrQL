@@ -69,8 +69,9 @@ class ShadedParquetTest {
                     DataType.INTEGER))), schema.types());
             assertEquals(List.of(DataType.BIGINT), engine.plan("SELECT count(*) FROM '" + path + "'").schema().types());
             String explain = engine.explain("SELECT count(*) FROM read_parquet('" + path + "')");
-            assertTrue(explain.contains("Scan pq.main.#1"), explain);
-            assertEquals(OptionalLong.of(1000), engine.connector("pq").catalog().rowCount(TableRef.of("pq", "#1")));
+            assertTrue(explain.contains("Scan read_parquet('" + path + "')"), explain);
+            assertEquals(OptionalLong.of(1000), engine.connector("pq").catalog().rowCount(TableRef.of("pq",
+                    "#read_parquet('" + path + "')")));
             Object[] row = engine.rows("SELECT sum(id), max(name), count(*) FROM '" + path + "' WHERE id % 2 = 1")
                     .get(0);
             assertEquals("[250000, n999, 500]", java.util.Arrays.toString(row));
@@ -108,6 +109,7 @@ class ShadedParquetTest {
                     "jts-LICENSE.txt", "slf4j-LICENSE.txt")) {
                 assertTrue(names.contains("META-INF/licenses/" + license), license);
             }
+            assertTrue(names.contains("META-INF/LICENSE"), "the text of the MPL 2.0");
             assertTrue(names.contains("META-INF/services/net.fyrql.connector.ConnectorFactory"));
             assertTrue(names.contains("net/fyrql/internal/hadoop/conf/Configuration.class"));
             assertTrue(names.contains("net/fyrql/internal/slf4j/impl/StaticLoggerBinder.class"), "the NOP binding");

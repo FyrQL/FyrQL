@@ -15,6 +15,7 @@ import net.fyrql.core.plan.TableRef;
 
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 /**
  * A {@link Connector} that also offers table functions, such as
@@ -45,4 +46,66 @@ public interface TableFunctionProvider {
      *         arguments do not fit or the table cannot be read
      */
     TableRef bind(String name, List<Object> arguments, Map<String, Object> namedArguments);
+
+    /**
+     * Returns the text of a call, for the name of the table it reads, such
+     * as {@code read_csv('orders.csv', delim = ';')}: the function, the
+     * positional arguments in their order and the named ones in the order
+     * of their names, each value as a literal of SQL, without the
+     * {@link FileWriterProvider#TIME_ZONE} that the engine adds. A table
+     * whose name is {@code #} and the text is printed as the call, see
+     * {@link TableRef#toString()}.
+     *
+     * @param name the function
+     * @param arguments the positional arguments
+     * @param namedArguments the named arguments
+     * @return the text
+     */
+    static String callText(String name, List<?> arguments, Map<String, ?> namedArguments) {
+        StringBuilder b = new StringBuilder(name).append('(');
+        String separator = "";
+        for (Object a : arguments) {
+            b.append(separator);
+            literal(b, a);
+            separator = ", ";
+        }
+        for (String key : new TreeSet<>(namedArguments.keySet())) {
+            if (!key.equals(FileWriterProvider.TIME_ZONE)) {
+                b.append(separator).append(key).append(" = ");
+                literal(b, namedArguments.get(key));
+                separator = ", ";
+            }
+        }
+        return b.append(')').toString();
+    }
+
+    private static void literal(StringBuilder b, Object value) {
+        switch (value) {
+            case null -> b.append("NULL");
+            case String s -> b.append('\'').append(s.replace("'", "''")).append('\'');
+            case Number n -> b.append(n);
+            case Boolean v -> b.append(v);
+            case List<?> list -> {
+                b.append('[');
+                for (int i = 0; i < list.size(); i++) {
+                    b.append(i > 0 ? ", " : "");
+                    literal(b, list.get(i));
+                }
+                b.append(']');
+            }
+            case Map<?, ?> map -> {
+                b.append('{');
+                String separator = "";
+                for (Map.Entry<?, ?> e : map.entrySet()) {
+                    b.append(separator);
+                    literal(b, String.valueOf(e.getKey()));
+                    b.append(": ");
+                    literal(b, e.getValue());
+                    separator = ", ";
+                }
+                b.append('}');
+            }
+            default -> literal(b, value.toString());
+        }
+    }
 }

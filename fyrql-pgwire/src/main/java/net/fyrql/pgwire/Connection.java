@@ -1494,7 +1494,7 @@ final class Connection implements Runnable, PgSql.Context {
 
     @Override
     public String setting(String name) {
-        return settings.find(name);
+        return name.equalsIgnoreCase(ServerSettings.SEARCH_PATH) ? searchPath : settings.find(name);
     }
 
     @Override

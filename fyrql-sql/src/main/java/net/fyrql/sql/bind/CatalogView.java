@@ -69,6 +69,15 @@ public interface CatalogView {
     default void checkFileWrite(String path) {
     }
 
+    /**
+     * Tells whether the items of a select list without an alias get the
+     * names PostgreSQL gives them, as {@code count} for {@code count(*)},
+     * rather than those of DuckDB. The default names them as DuckDB.
+     */
+    default boolean postgresNames() {
+        return false;
+    }
+
     /** Returns the columns of a resolved table. */
     Schema schema(TableRef table);
 

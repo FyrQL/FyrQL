@@ -41,22 +41,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.18.0</version>
+    <version>0.19.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.18.0</version>
+    <version>0.19.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.18.0</version>
+    <version>0.19.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.18.0</version>
+    <version>0.19.0</version>
 </dependency>
 ```
 
@@ -572,11 +572,12 @@ files->   WHERE o.amount > 6 GROUP BY ALL ORDER BY revenue DESC;
 (2 rows)
 ```
 
-psycopg, the JDBC driver of PostgreSQL, DBeaver with a connection of the type PostgreSQL
-and Metabase connect the same way, with host, port and the source as the database. Names
-resolve as in PostgreSQL, along the `search_path` in the database of the connection; with
-more sources, a query reaches the tables of the others by three parts, such as
-`shop.main.customers`.
+psycopg, the JDBC driver of PostgreSQL, DBeaver with a connection of the type PostgreSQL,
+Metabase, Grafana and Superset connect the same way, with host, port and the source as the
+database. Names resolve as in PostgreSQL, along the `search_path` in the database of the
+connection; with more sources, a query reaches the tables of the others by three parts,
+such as `shop.main.customers`. A column without an alias has the label PostgreSQL gives
+it, such as `count` for `count(*)`.
 
 More: [PostgreSQL wire protocol server](pgwire.md), [psql](pgwire.md#psql),
 [psycopg](pgwire.md#psycopg).
@@ -591,7 +592,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.18.0</version>
+    <version>0.19.0</version>
 </dependency>
 ```
 

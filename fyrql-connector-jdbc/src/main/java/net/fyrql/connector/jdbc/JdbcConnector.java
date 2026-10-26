@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.Set;
@@ -282,14 +283,20 @@ public final class JdbcConnector implements Connector {
                 sql.hint(f).ifPresent(hints::add);
             }
         }
+        // With every filter and the order taken over, the statement selects only the columns the engine needs.
+        boolean leaveOut = request.readsFilterColumns() && !request.filters().isEmpty()
+                && plan.acceptedFilters().size() == request.filters().size()
+                && (request.order().isEmpty() || plan.orderAccepted()) && !plan.aggregationAccepted();
         PlanNode.Pushed pushed = new PlanNode.Pushed(plan.acceptedFilters(),
                 plan.limitAccepted() ? request.limit() : OptionalLong.empty(),
                 plan.orderAccepted() ? request.order() : List.of(),
-                plan.aggregationAccepted() ? request.aggregation() : Optional.empty(), hints);
+                plan.aggregationAccepted() ? request.aggregation() : Optional.empty(), hints,
+                leaveOut ? OptionalInt.of(request.needed()) : OptionalInt.empty());
         PlanNode.Scan scan = new PlanNode.Scan(table, tableSchema, columns, pushed);
         BoundSql statement = renderer().renderScanBound(scan, null);
-        return new ScanPlan(plan.table(), plan.output(), plan.columns(), plan.acceptedFilters(), plan.limitAccepted(),
-                plan.orderAccepted(), plan.aggregationAccepted(), new ScanState(statement, scan));
+        return new ScanPlan(plan.table(), leaveOut ? scan.schema() : plan.output(), plan.columns(),
+                plan.acceptedFilters(), plan.limitAccepted(), plan.orderAccepted(), plan.aggregationAccepted(),
+                new ScanState(statement, scan));
     }
 
     private SqlRenderer renderer() {

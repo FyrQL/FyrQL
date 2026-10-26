@@ -15,6 +15,7 @@ import net.fyrql.catalog.CatalogTables;
 import net.fyrql.catalog.NamePattern;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
+import net.fyrql.sql.parse.SqlParser;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -487,9 +488,7 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
      */
     @Override
     public String getSQLKeywords() {
-        return "ABSENT,CONNECT_BY_ROOT,CSV,DISTINCTROW,ERRORS,EXCLUDES,EXTEND,FBV,FINAL,FORCE,ILIKE,IMPORT,INCLUDES,"
-                + "MINUS,NOCYCLE,OUTPUT,PIVOT,PREFERRING,PREWHERE,PRIOR,RETURNING,SAMPLE,SCRIPT,SEMI,SETTINGS,"
-                + "SQL_CACHE,SQL_CALC_FOUND_ROWS,SQL_NO_CACHE,STATEMENT,UNBOUNDED,UNPIVOT,USE,VERIFY,XMLSERIALIZE,XOR";
+        return String.join(",", SqlParser.reservedWords());
     }
 
     @Override

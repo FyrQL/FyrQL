@@ -26,8 +26,9 @@ import java.util.Objects;
  *
  * @param table the table
  * @param output the columns of the delivered batches, in order: the
- *        columns it reads, or the groups and aggregates when the
- *        aggregation is accepted
+ *        columns it reads, the first {@link ScanRequest#needed()} of them
+ *        when it leaves out those only the filters read, or the groups and
+ *        aggregates when the aggregation is accepted
  * @param columns the columns the connector reads: the requested ones, or,
  *        if it reads whole columns only and fields were requested, those
  *        of {@link ScanRequest#withWholeColumns()}
@@ -48,7 +49,7 @@ public record ScanPlan(TableRef table, Schema output, List<ColumnPath> columns, 
         Objects.requireNonNull(output, "output");
         columns = List.copyOf(columns);
         acceptedFilters = List.copyOf(acceptedFilters);
-        if (!aggregationAccepted && output.size() != columns.size()) {
+        if (!aggregationAccepted && output.size() > columns.size()) {
             throw new IllegalArgumentException(output.size() + " output columns for " + columns.size() + " paths");
         }
     }
@@ -60,6 +61,11 @@ public record ScanPlan(TableRef table, Schema output, List<ColumnPath> columns, 
     public static ScanPlan columnsOnly(TableRef table, Schema tableSchema, ScanRequest request, Object state) {
         ScanRequest read = request.readsFields() ? request.withWholeColumns() : request;
         return new ScanPlan(table, read.output(tableSchema), read.columns(), List.of(), false, false, false, state);
+    }
+
+    /** Tells whether the batches leave out columns at the end that only the filters read. */
+    public boolean leavesOutColumns() {
+        return !aggregationAccepted && output.size() < columns.size();
     }
 
     /**

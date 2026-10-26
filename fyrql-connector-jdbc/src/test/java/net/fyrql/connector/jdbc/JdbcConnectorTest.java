@@ -126,7 +126,9 @@ class JdbcConnectorTest {
             // The filter on the double stays with the engine, so the limit does too; the order goes to the database.
             assertEquals(List.of("SELECT t.\"id\", t.\"i\", t.\"d\", t.\"s\" FROM " + table + " t WHERE (t.\"i\" > "
                     + five + ") ORDER BY t.\"id\" ASC NULLS LAST"), connector.statements());
-            assertTrue(engine.explain("SELECT s FROM all_types WHERE i > -5 LIMIT 2").contains("[pushed: WHERE"));
+            // The column i only the filter reads, which stays in the database.
+            String explain = engine.explain("SELECT s FROM all_types WHERE i > -5 LIMIT 2");
+            assertTrue(explain.contains("[pushed: SELECT #0 WHERE"), explain);
         }
     }
 

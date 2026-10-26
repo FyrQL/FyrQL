@@ -42,9 +42,15 @@ import java.util.OptionalLong;
  *        over the output; to accept as a whole or not at all. The engine
  *        asks for it only without {@code limit} and {@code order}, and a
  *        connector may accept it only when it accepts all filters
+ * @param needed the number of the first columns the engine needs in the
+ *        batches; the columns after them only the filters read. A connector
+ *        that accepts every filter, and the order if one is requested, may
+ *        leave them out of its batches, which then have the first
+ *        {@code needed} columns, see {@link ScanPlan#output()}. The engine
+ *        needs fewer than all columns only without an aggregation
  */
 public record ScanRequest(List<ColumnPath> columns, List<Expression> filters, OptionalLong limit,
-        List<PlanNode.SortKey> order, Optional<PlanNode.Aggregation> aggregation) {
+        List<PlanNode.SortKey> order, Optional<PlanNode.Aggregation> aggregation, int needed) {
 
     public ScanRequest {
         columns = List.copyOf(columns);
@@ -52,6 +58,27 @@ public record ScanRequest(List<ColumnPath> columns, List<Expression> filters, Op
         Objects.requireNonNull(limit, "limit");
         order = List.copyOf(order);
         Objects.requireNonNull(aggregation, "aggregation");
+        if (needed < 0 || needed > columns.size() || needed < columns.size() && aggregation.isPresent()) {
+            throw new IllegalArgumentException(needed + " needed columns of " + columns.size()
+                    + (aggregation.isPresent() ? " with an aggregation" : ""));
+        }
+        for (PlanNode.SortKey k : order) {
+            if (k.column() >= needed) {
+                throw new IllegalArgumentException("An order by column " + k.column() + " of " + needed
+                        + " needed columns");
+            }
+        }
+    }
+
+    /** A request whose batches have all the columns. */
+    public ScanRequest(List<ColumnPath> columns, List<Expression> filters, OptionalLong limit,
+            List<PlanNode.SortKey> order, Optional<PlanNode.Aggregation> aggregation) {
+        this(columns, filters, limit, order, aggregation, columns.size());
+    }
+
+    /** Tells whether the engine needs fewer than all columns in the batches, see {@link #needed()}. */
+    public boolean readsFilterColumns() {
+        return needed < columns.size();
     }
 
     /** A request for whole columns only. */

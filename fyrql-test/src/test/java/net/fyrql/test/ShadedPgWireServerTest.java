@@ -330,6 +330,7 @@ class ShadedPgWireServerTest {
                     "parquet-java-NOTICE.txt", "jts-LICENSE.txt", "slf4j-LICENSE.txt")) {
                 assertTrue(names.contains("META-INF/licenses/" + license), license);
             }
+            assertTrue(names.contains("META-INF/LICENSE"), "the text of the MPL 2.0");
         }
     }
 

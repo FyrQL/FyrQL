@@ -75,7 +75,7 @@ Exported 10 orders to target/out/orders.parquet
 Create table shop.main.big_orders (id INTEGER, customer_id INTEGER, amount DECIMAL(10,2))
   Project #0 AS id, #1 AS customer_id, #2 AS amount [parallel]
     Filter (#2 >= CAST(100 AS INTEGER))
-      Scan parquet.main.#1 (id INTEGER, customer_id INTEGER, amount DECIMAL(10,2))
+      Scan read_parquet('target/out/orders.parquet') (id INTEGER, customer_id INTEGER, amount DECIMAL(10,2))
 Created shop.big_orders with 3 rows
 == shop.big_orders
 [2, 2, 149.00]

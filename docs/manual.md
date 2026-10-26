@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.18.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.19.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, the configuration file, the JDBC driver, Arrow,
 the Flight SQL server, the SQL it takes and where it differs from DuckDB, how it runs
 queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -527,7 +527,7 @@ parameter `?` of a prepared statement:
 | comparisons, `BETWEEN`, `IN`, `IS [NOT] NULL` of a column of integers or `DATE` | yes |
 | the same on `DECIMAL`, `FLOAT` and `DOUBLE`, `TIMESTAMP` or `BOOLEAN` | with `trust` |
 | `AND`, `OR`, `NOT` over the above | yes |
-| `=` and `IN` against strings that are not empty, `LIKE` without `\` and `[`, `IS NULL` | as a hint |
+| `=` and `IN` against strings that are not empty, `LIKE` without `\`, `[` and `_`, `IS NULL` | as a hint |
 | `<>`, `<`, `>` on strings, `IS DISTINCT FROM`, arithmetic, casts, functions | no |
 | `LIMIT` without `ORDER BY`, with `Statement.setMaxRows` or a clause | yes |
 | `ORDER BY`, `GROUP BY`, aggregates, joins | no |
@@ -1412,11 +1412,12 @@ the session with the names of the settings and their values as strings; a number
 as milliseconds for `statement_timeout`, an empty value resets a setting, and another name
 or a value that does not fit comes back as `INVALID_NAME` or `INVALID_VALUE`. The Flight
 SQL JDBC driver of Arrow keeps cookies by default, ADBC with the option
-`adbc.flight.sql.rpc.with_cookie_middleware` set to `"true"`, and pyarrow with
-`pyarrow.flight.ClientMiddlewareFactory` of its own. A client that keeps no cookies gets
-the settings of the engine in each call, so that its `SET` does not reach its next
-statement. A statement keeps the session it was bound in; a prepared statement binds in
-the session of the call that runs it.
+`adbc.flight.sql.rpc.with_cookie_middleware` set to `"true"` in the `db_kwargs` of
+`adbc_driver_flightsql.dbapi.connect` (tried with `adbc-driver-flightsql` 1.11.0), and
+pyarrow with `pyarrow.flight.ClientMiddlewareFactory` of its own. A client that keeps no
+cookies gets the settings of the engine in each call, so that its `SET` does not reach its
+next statement. A statement keeps the session it was bound in; a prepared statement binds
+in the session of the call that runs it.
 
 ### Python
 
@@ -1522,9 +1523,9 @@ of either, see [Observing queries](#observing-queries), and `SET`, `RESET`, `SHO
   first argument the highest. The aggregation is the union of one per set; the rows they
   read run once as a common table if they compute something, see [Optimizer](#optimizer),
   and are read for each set otherwise.
-- Subqueries in `WHERE`, `HAVING` and the select list: `[NOT] EXISTS (...)`,
-  `x [NOT] IN (SELECT ...)` with `NULL`s as in DuckDB, `x op ANY (SELECT ...)`, `SOME`
-  and `ALL` with any comparison, a row `(a, b) [NOT] IN (SELECT ...)`, which is `NULL`
+- Subqueries in `WHERE`, `HAVING`, the select list and the `ORDER BY` of a query that
+  does not aggregate: `[NOT] EXISTS (...)`, `x [NOT] IN (SELECT ...)` with `NULL`s as in
+  DuckDB, `x op ANY (SELECT ...)`, `SOME` and `ALL` with any comparison, a row `(a, b) [NOT] IN (SELECT ...)`, which is `NULL`
   when no row matches and a value of either side is `NULL`, as in DuckDB, and scalar
   subqueries, which are `NULL` without a row and fail with `More than one row returned by
   a subquery used as an expression` with more than one. A subquery may reference the
@@ -1755,8 +1756,10 @@ here; the random tests explain such differences by a ledger of their own, see
 
 - The parser takes some words for keywords that SQL:2003 does not reserve, such as
   `csv`, `import`, `sample`, `settings` and `use`. As a name, such a word needs double
-  quotes, as in `SELECT * FROM "csv".customer`. The JDBC driver lists these words in
-  `getSQLKeywords()`, from which tools such as DBeaver know to quote them.
+  quotes, as in `SELECT * FROM "csv".customer`. Without them, the error names the word:
+  `Syntax error at or near "csv": csv is a reserved word; quote it as "csv"`. The JDBC
+  driver lists these words in `getSQLKeywords()`, from which tools such as DBeaver know
+  to quote them.
 - `SELECT DISTINCT` cannot be ordered by a column that is not selected.
 - A string literal is not converted to the type of a function argument, as in
   `sqrt('4')`.
@@ -2435,9 +2438,12 @@ its first line. `engine.explainAnalyze(plan)` and
 `engine.statement(sql)` in a context with a timeout, see [Time limits](#time-limits).
 
 The counters cost each operator two readings of the clock per batch, about 60 ns on the
-laptop of the measurements, and twice that while all twelve threads are busy. In the
-queries of TPC-H Q1 and Q6 over four million rows in memory, the difference was within
-the noise of the runs (3 %); only a scan that does nothing with its batches shows it.
+laptop of the measurements, and twice that while all twelve threads are busy. With
+version 0.19.0, `ParallelBenchmark` in `fyrql-bench` with `counting` set runs the filter of
+TPC-H Q6 over four million rows in memory in 197 ms instead of 194 ms on one thread and in
+83 ms instead of 85 ms on twelve, and the aggregation in the shape of Q1 in 199 ms instead
+of 224 ms and in 77 ms instead of 76 ms: within the noise of the runs. Only a scan that
+does nothing with its batches shows the counters.
 
 A connector reports what it reads to `SourceCounters.current()`, on the thread the
 engine calls it on, and a request through `SourceRequest`, which also makes the event
@@ -2484,7 +2490,7 @@ the same sources: the same files, and `orders` and `customer` from the same Post
 database through its extension `postgres`. The profile `tpch-compare` runs them at scale
 factor 1, see [Building and testing](#building-and-testing).
 
-The files take about 0.6 GB in `fyrql-test/target/tpch` and are written once; loading
+The files take about 540 MB in `fyrql-test/target/tpch` and are written once; loading
 PostgreSQL takes 15 to 30 s. FyrQL runs with pushdown and code generation; both engines
 run on one thread and on twelve, DuckDB with a memory limit of 4 GB beside a heap of
 8 GB. Each run is timed from the text of the query to the last row as Java objects,
@@ -2492,92 +2498,93 @@ parsing and planning included, after a collection of the heap that is not timed.
 query runs in each of the four ways once to warm up and then five times in a row, the
 four ways in the order of the columns and in the opposite order for every other query,
 so that a slower processor hits all four alike. In seconds, the median of the five runs,
-with version 0.15.0:
+with version 0.19.0:
 
 | Query | FyrQL, 1 thread | DuckDB, 1 thread | FyrQL, 12 threads | DuckDB, 12 threads |
 | --- | ---: | ---: | ---: | ---: |
-| Scan of `lineitem` | 0.18 | 0.04 | 0.07 | 0.02 |
-| Q1 | 0.83 | 0.37 | 0.49 | 0.22 |
-| Q2 | 0.64 | 0.67 | 0.52 | 0.40 |
-| Q3 | 0.72 | 0.63 | 0.68 | 0.43 |
-| Q4 | 0.47 | 0.30 | 0.57 | 0.20 |
-| Q5 | 0.76 | 3.20 | 0.57 | 1.75 |
-| Q6 | 0.33 | 0.18 | 0.15 | 0.06 |
-| Q7 | 1.69 | 0.77 | 1.46 | 0.46 |
-| Q8 | 1.22 | 0.68 | 0.92 | 0.39 |
-| Q9 | 1.68 | 1.07 | 1.15 | 0.74 |
-| Q10 | 0.97 | 0.51 | 0.73 | 0.38 |
-| Q11 | 0.41 | 0.56 | 0.24 | 0.33 |
-| Q12 | 1.51 | 0.60 | 1.18 | 0.42 |
-| Q13 | 1.90 | 0.73 | 1.63 | 0.67 |
-| Q14 | 0.48 | 0.26 | 0.21 | 0.12 |
-| Q15 | 0.66 | 0.14 | 0.33 | 0.07 |
-| Q16 | 0.45 | 0.44 | 0.26 | 0.29 |
-| Q17 | 0.83 | 0.26 | 0.55 | 0.14 |
-| Q18 | 1.78 | 1.17 | 1.61 | 0.70 |
-| Q19 | 1.05 | 0.34 | 0.57 | 0.18 |
-| Q20 | 0.83 | 0.49 | 0.46 | 0.27 |
-| Q21 | 1.27 | 0.76 | 1.00 | 0.52 |
-| Q22 | 0.97 | 0.45 | 0.91 | 0.34 |
-| All 22 queries | 21.4 | 14.6 | 16.2 | 9.1 |
+| Scan of `lineitem` | 0.12 | 0.04 | 0.07 | 0.02 |
+| Q1 | 0.78 | 0.34 | 0.40 | 0.19 |
+| Q2 | 0.64 | 0.63 | 0.50 | 0.36 |
+| Q3 | 0.72 | 0.64 | 0.60 | 0.40 |
+| Q4 | 0.44 | 0.29 | 0.49 | 0.17 |
+| Q5 | 0.76 | 3.00 | 0.55 | 1.60 |
+| Q6 | 0.35 | 0.16 | 0.13 | 0.05 |
+| Q7 | 1.66 | 0.69 | 1.51 | 0.44 |
+| Q8 | 1.17 | 0.64 | 0.89 | 0.39 |
+| Q9 | 1.61 | 1.03 | 1.12 | 0.68 |
+| Q10 | 0.81 | 0.49 | 0.60 | 0.30 |
+| Q11 | 0.41 | 0.55 | 0.23 | 0.29 |
+| Q12 | 1.12 | 0.63 | 0.83 | 0.39 |
+| Q13 | 1.95 | 0.74 | 1.36 | 0.59 |
+| Q14 | 0.46 | 0.24 | 0.18 | 0.11 |
+| Q15 | 0.33 | 0.12 | 0.15 | 0.07 |
+| Q16 | 0.44 | 0.39 | 0.26 | 0.26 |
+| Q17 | 0.80 | 0.24 | 0.48 | 0.17 |
+| Q18 | 1.64 | 1.13 | 1.38 | 0.65 |
+| Q19 | 0.71 | 0.34 | 0.33 | 0.17 |
+| Q20 | 0.84 | 0.46 | 0.39 | 0.24 |
+| Q21 | 1.26 | 0.77 | 0.86 | 0.46 |
+| Q22 | 0.87 | 0.45 | 0.84 | 0.32 |
+| All 22 queries | 19.8 | 13.9 | 14.1 | 8.3 |
 
-All 22 queries take FyrQL 1.5 times as long as DuckDB on one thread and 1.8 times as long
-on twelve. FyrQL is faster in Q5, in which, as in Q3, Q7, Q8 and Q10, PostgreSQL joins the
-customers and orders for FyrQL, and on one thread in Q2 and Q11, and close in Q16; these
-three read only the smaller tables. DuckDB is furthest ahead where a query reads much of
-`lineitem`, such as Q1, Q12, Q15, Q17 and Q19: in Q6, about three quarters of the time of
-FyrQL on one thread go to reading the Parquet file. Since version 0.14.0, the connector
-decodes the pages of the file itself; on the same day, with the column readers of
-parquet-java, Q6 took 0.61 s on one thread and Q1 1.61 s. Since version 0.15.0, strings
+All 22 queries take FyrQL 1.4 times as long as DuckDB on one thread and 1.7 times as long
+on twelve; with version 0.15.0, they took 21.4 and 16.2 s against 14.6 and 9.1 s. FyrQL is
+faster in Q5, in which, as in Q3, Q7, Q8 and Q10, PostgreSQL joins the customers and
+orders for FyrQL, and in Q11, and close in Q2 and Q16; these three read only the smaller
+tables. Since version 0.19.0, a database leaves out the columns that only the filters it
+takes over read, such as `o_orderdate` in Q4. DuckDB is furthest ahead where a query reads
+much of `lineitem`, such as Q1, Q12, Q15, Q17 and Q19: in Q6, about three quarters of the
+time of FyrQL on one thread go to reading the Parquet file. Since version 0.14.0, the
+connector decodes the pages of the file itself; on the same day, with the column readers
+of parquet-java, Q6 took 0.61 s on one thread and Q1 1.61 s. Since version 0.15.0, strings
 from a dictionary keep its codes; with version 0.14.0, Q1 took 0.98 s on one thread. Q17
 and Q18 read `lineitem` twice, once for the subquery, and Q21 three times, as DuckDB does.
 Since version 0.17.5, Q15 computes `revenue` once for both its reads, see
-[Optimizer](#optimizer): Q15 took 0.37 s on one thread and 0.18 s on twelve, where
-version 0.17.0 took 0.91 s and 0.40 s on the same day. On twelve threads, Q6 takes FyrQL
-less than half the time of one thread, and most other queries half to four fifths; Q7 and
-Q18 gain little, Q4 and Q22 nothing, Q22 since PostgreSQL runs its `NOT EXISTS` over the
-customers and orders on one core. The profile `tpch` checks that all 22 queries give the
-rows of DuckDB, in the interpreter and compiled, on one thread and on all. With version
-0.5.5, timed from the plan and with DuckDB reading `orders` and `customer` from CSV files,
-the 22 queries took 34.4 s in the interpreter on one thread and 19.4 s on twelve.
+[Optimizer](#optimizer): Q15 took 0.37 s on one thread and 0.18 s on twelve, where version
+0.17.0 took 0.91 s and 0.40 s on the same day. On twelve threads, Q6 takes FyrQL less than
+half the time of one thread, and most other queries half to four fifths; Q7 and Q18 gain
+little, Q4 and Q22 nothing, Q22 since PostgreSQL runs its `NOT EXISTS` over the customers
+and orders on one core. The profile `tpch` checks that all 22 queries give the rows of
+DuckDB, in the interpreter and compiled, on one thread and on all. With version 0.5.5,
+timed from the plan and with DuckDB reading `orders` and `customer` from CSV files, the 22
+queries took 34.4 s in the interpreter on one thread and 19.4 s on twelve.
 
 ### Compiled code and scans
 
 The module `fyrql-bench` measures the operators with [JMH](https://github.com/openjdk/jmh)
 over four million rows in the shape of TPC-H `lineitem`, held in memory as batches of
-2048 rows (`java -jar fyrql-bench/target/benchmarks.jar`). On the laptop, in
-milliseconds per run (two forks, five measurements each),
-with compiled code from the first row on:
+2048 rows (`java -jar fyrql-bench/target/benchmarks.jar`). On the laptop, with version
+0.19.0, in milliseconds per run (two forks, five measurements each), with compiled code
+from the first row on:
 
 | Benchmark | Interpreted | Compiled |
 | --- | ---: | ---: |
-| Filter of TPC-H Q6 | 190 | 26 |
-| Projection of four computed columns | 528 | 30 |
-| A filter and the four columns, one pipeline | 595 | 41 |
-| The same as two compiled operators | 483 | 100 |
-| Hash join with 100,000 keys, one pipeline | 282 | 167 |
-| Left join with 50,000 keys, one pipeline | 330 | 234 |
-| Aggregation in 100,000 groups | 231 | 187 |
-| Aggregation in the shape of TPC-H Q1 | 207 | 178 |
-| Filter, projection, join and aggregation | 527 | 138 |
-| The same with compiled operators, no pipeline | 569 | 198 |
-| Scan only, the control | 0.4 | 0.3 |
+| Filter of TPC-H Q6 | 218 | 27 |
+| Projection of four computed columns | 493 | 27 |
+| A filter and the four columns, one pipeline | 561 | 43 |
+| The same as two compiled operators | 496 | 90 |
+| Hash join with 100,000 keys, one pipeline | 249 | 150 |
+| Left join with 50,000 keys, one pipeline | 321 | 208 |
+| Aggregation in 100,000 groups | 216 | 207 |
+| Aggregation in the shape of TPC-H Q1 | 256 | 217 |
+| Filter, projection, join and aggregation | 404 | 111 |
+| The same with compiled operators, no pipeline | 403 | 182 |
+| Scan only, the control | 0.3 | 0.3 |
 
 Joins and aggregations keep their values in primitive arrays in both modes, and the
 aggregation is not compiled: it takes the batches of the pipeline below it. A pipeline
 gains over compiled operators since it writes only the rows that leave it, where each
-operator copies the rows it passes on. Compiling the filter of Q6 takes about 1.8 ms, a
-pipeline of a filter, a projection and a join about 3.3 ms; with the class in the cache,
-generating the source and creating an instance takes about 12 and 24 microseconds.
+operator copies the rows it passes on. Compiling the filter of Q6 takes about 1.5 ms, a
+pipeline of a filter, a projection and a join about 2.9 ms; with the class in the cache,
+generating the source and creating an instance takes about 12 and 18 microseconds.
 A scan of one million rows in the shape of `lineitem` reads a file into batches, from a
 CSV file and from a Parquet file that DuckDB writes with its defaults (Snappy, row groups
-of 122,880 rows), in milliseconds per run, the CSV file with version 0.14.0 and the
-Parquet file with version 0.15.0:
+of 122,880 rows), in milliseconds per run, with version 0.19.0:
 
 | Scan | CSV | Parquet |
 | --- | ---: | ---: |
-| The four columns of TPC-H Q6 | 345 | 43 |
-| All 16 columns | 555 | 206 |
+| The four columns of TPC-H Q6 | 364 | 39 |
+| All 16 columns | 560 | 180 |
 
 The connector decodes the pages of the Parquet file a page at a time. Through the column
 readers of parquet-java, value by value with several calls for each value of each column,
@@ -2589,47 +2596,47 @@ long as the CSV file. With version 0.14.0, which copied each string from a dicti
 
 `ParallelBenchmark` in `fyrql-bench` runs operators over the four million rows of the
 benchmarks of code generation, in memory and in splits of about 65,000 rows,
-interpreted. On the laptop, in milliseconds per run:
+interpreted. On the laptop, with version 0.19.0, in milliseconds per run:
 
 | Benchmark | 1 thread | 4 threads | 12 threads |
 | --- | ---: | ---: | ---: |
-| The filter of TPC-H Q6, its rows in the order of the splits | 218 | 111 | 109 |
-| Aggregation in the shape of TPC-H Q1, in six groups | 207 | 93 | 103 |
-| Aggregation in 100,000 groups | 209 | 171 | 228 |
-| Hash join with 100,000 keys and an aggregation by its nations | 378 | 162 | 168 |
-| Sort of all rows by a decimal | 4,805 | 2,543 | 1,848 |
-| Window with `row_number` and a moving sum in 100,000 partitions | 6,987 | 3,371 | 2,699 |
+| The filter of TPC-H Q6, its rows in the order of the splits | 194 | 92 | 85 |
+| Aggregation in the shape of TPC-H Q1, in six groups | 224 | 93 | 76 |
+| Aggregation in 10,000 groups | 148 | 63 | 58 |
+| Aggregation in 100,000 groups | 217 | 106 | 115 |
+| Aggregation in 1,000,000 groups | 1,163 | 321 | 349 |
+| Hash join with 100,000 keys and an aggregation by its nations | 352 | 147 | 127 |
+| Sort of all rows by a decimal | 4,744 | 2,166 | 1,542 |
+| Window with `row_number` and a moving sum in 100,000 partitions | 6,339 | 3,053 | 2,345 |
 
 Batches that are already in memory are read as fast as the memory delivers them, so
-that the cores gain little beyond four threads. The figures are those of version 0.5.5,
-in which each worker held a table of nearly all of 100,000 groups in random order, twelve
-such tables no longer fitted into the caches, and the aggregation in 100,000 groups
-gained nothing on twelve threads. Since then a worker passes such rows on into the
-partitions, as described above: in runs of the old and the new version in turn, that
-aggregation took 136 to 167 ms on twelve threads instead of about 200 ms. It still does
-not take half the time of one thread, since the merge compares the keys of every group
-once more.
+that the cores gain little beyond four threads. With many groups, a worker passes the
+rows of the groups it holds no room for on into the partitions, as described above; with
+version 0.5.5, in which each worker held a table of nearly all of 100,000 groups in
+random order, that aggregation took 228 ms on twelve threads, more than on one. It still
+does not gain beyond four threads, since the merge compares the keys of every group once
+more.
 
 ### Spilling
 
-On the laptop, with version 0.9.0, at
-scale factor 1, compiled on twelve threads with a budget of 256 MB, the fastest of three
-runs: Q17 spills 139 MB and takes 1.24 s instead of 0.83 s without a limit, Q18 spills
-74 MB and takes 2.25 s instead of 1.60 s, and the other queries spill nothing and take
-the same time, except Q21, whose joins need 315 MB for their hash tables and fail; with
-512 MB, nothing spills. `SpillBenchmark` in `fyrql-bench` sorts, aggregates and windows
-the four million rows of `ParallelBenchmark` without a limit and with a budget of a
-quarter of their bytes, in milliseconds per run:
+On the laptop, with version 0.19.0, at scale factor 1, compiled on twelve threads with a
+budget of 256 MB, the fastest of three runs: Q17 spills 139 MB and takes 0.78 s instead of
+0.31 s without a limit, Q18 spills 74 MB and takes 1.47 s instead of 1.12 s, and the other
+queries spill nothing and take the same time, except Q21, whose joins need 315 MB for
+their hash tables and fail; with 512 MB, nothing spills. `SpillBenchmark` in `fyrql-bench`
+sorts, aggregates and windows the four million rows of `ParallelBenchmark` without a limit
+and with a budget of a quarter of their bytes, with version 0.19.0, in milliseconds per
+run (one fork, four measurements, which vary by up to a third on twelve threads):
 
 | Benchmark | 1 thread | 1 thread, budget | 12 threads | 12 threads, budget |
 | --- | ---: | ---: | ---: | ---: |
-| Sort of all rows by a decimal | 4,516 | 5,746 | 1,899 | 3,496 |
-| Aggregation in about 980,000 groups | 1,175 | 1,070 | 496 | 1,262 |
-| Window with `row_number` in 100,000 partitions | 6,097 | 7,443 | 2,114 | 3,407 |
+| Sort of all rows by a decimal | 4,338 | 5,371 | 1,532 | 2,440 |
+| Aggregation in about 980,000 groups | 1,141 | 925 | 320 | 886 |
+| Window with `row_number` in 100,000 partitions | 5,708 | 7,021 | 2,057 | 3,359 |
 
 On one thread, the sort and the window take a fifth to a quarter longer and the
 aggregation about as long; on twelve, where the merge of the runs and partitions runs on
-one thread, they take up to two and a half times as long. On
+one thread, they take up to almost three times as long. On
 Windows, creating and deleting a file takes about a millisecond, since the virus scanner
 looks at it, so that a query that spills into thousands of small files, with a budget of
 a few kilobytes, spends most of its time on them.
@@ -2638,20 +2645,21 @@ a few kilobytes, spends most of its time on them.
 
 The profile `tpch` also measures how rows leave the engine: `ArrowTransferScale1Test`
 reads all 16 columns of the 6,001,215 rows of `lineitem` at scale factor 1, 953 MB as
-Arrow vectors, from one engine on all threads, in four ways in turn, and writes the
+Arrow vectors, from one engine on all threads, in several ways in turn, and writes the
 fastest run of each into `fyrql-test/target/arrow-report.md`:
 
 ```
 ./mvnw -B -ntp verify -P tpch -Dtest=ArrowTransferScale1Test -Dsurefire.failIfNoSpecifiedTests=false -Dfyrql.tpch.runs=5
 ```
 
-On the laptop, with version 0.6.5, they took 0.99 s as the batches of the engine,
-1.17 s through an `ArrowReader`, 2.69 s through the Flight SQL server on localhost, read
-with the `FlightSqlClient` of Arrow Java, and 4.67 s through the JDBC driver with
-`getObject` for every value. `ArrowBenchmark` in `fyrql-bench` converts four million rows
-on one thread: into Arrow in 40 ms with four columns of fixed width, in 116 ms with nine
-columns of which three are strings, and in 102 ms with a list and a struct; back from
-Arrow in 80, 344 and 467 ms.
+On the laptop, with version 0.19.0, they took 0.47 s as the batches of the engine, 1.02 s
+through an `ArrowReader`, 1.75 s through the Flight SQL server on localhost, read with the
+`FlightSqlClient` of Arrow Java, and 2.96 s through the JDBC driver with `getObject` for
+every value, 2.49 s with the typed getters; with version 0.6.5, before the connector
+decoded the Parquet file itself, they took 0.99, 1.17, 2.69 and 4.67 s. `ArrowBenchmark`
+in `fyrql-bench` converts four million rows on one thread, with version 0.19.0: into Arrow
+in 41 ms with four columns of fixed width, in 118 ms with nine columns of which three are
+strings, and in 103 ms with a list and a struct; back from Arrow in 84, 354 and 552 ms.
 
 ## Compatibility
 
@@ -2672,7 +2680,8 @@ covers
   version may reserve more words, as the parser reserves `csv` today: a name in double
   quotes stays valid, and `getSQLKeywords()` of the JDBC driver lists the words;
 - the list of [Differences from DuckDB](#differences-from-duckdb): FyrQL behaves as it
-  says, and an entry goes in a minor version only when FyrQL then behaves as DuckDB.
+  says, and an entry goes in a minor version only when FyrQL then behaves as DuckDB;
+- the names of the Java modules of the JARs, which [Modules](#modules) describes.
 
 The SPI changes within a major version only so that a connector written for one minor
 version keeps working with the next:
@@ -2766,6 +2775,18 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | `fyrql-spring-boot-starter` | an engine as a bean of Spring Boot 4, configured in `application.yml`, with a health indicator and, on request, a `DataSource` |
 | `fyrql-test` | the differential test harness against DuckDB and the tests that use it |
 | `fyrql-bench` | JMH benchmarks of the interpreter against compiled code, of the operators on one and on several threads, of the scans of CSV and Parquet files, and of the conversion to and from Arrow; not published |
+
+Each JAR names its module in the entry `Automatic-Module-Name` of its manifest, such as
+`net.fyrql` for `fyrql-engine` and `net.fyrql.jdbc` for `fyrql-jdbc`, and no two modules
+share a package; the JARs have no `module-info`. On the module path they are automatic
+modules, which cannot name the modules they need, so an application starts with
+`--add-modules ALL-MODULE-PATH`, or adds the three libraries that are named modules:
+`com.fasterxml.jackson.core`, `de.siegmar.fastcsv` and `net.sf.jsqlparser`. A JAR with
+everything, such as `fyrql-jdbc-all`, is a module that needs nothing else. A later version
+with a `module-info` keeps the names and exports only the packages of the API and the SPI.
+
+Each JAR carries the text of the MPL 2.0 as `META-INF/LICENSE`; a JAR that carries other
+libraries has their licenses under `META-INF/licenses/`.
 
 ## Building and testing
 

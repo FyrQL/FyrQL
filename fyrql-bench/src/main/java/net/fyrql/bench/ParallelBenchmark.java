@@ -66,7 +66,10 @@ import static net.fyrql.core.expr.Expressions.rem;
  * rows of {@link CodegenBenchmark} in splits of 32 batches, about 65,000
  * rows each, as a Parquet file has them in row groups, interpreted. The
  * 100,000 customers that {@link #joinProbe} joins are one split, so that
- * one thread builds the hash table and all of them probe it.
+ * one thread builds the hash table and all of them probe it. With
+ * {@code counting}, the query counts what its operators do, as for
+ * {@code EXPLAIN ANALYZE}, which reads the clock twice per batch and
+ * operator.
  * <p>
  * Run with {@code java -jar fyrql-bench/target/benchmarks.jar ParallelBenchmark}.
  */
@@ -82,6 +85,9 @@ public class ParallelBenchmark {
 
     @Param({"1", "4", "12"})
     public int threads;
+
+    @Param({"false", "true"})
+    public boolean counting;
 
     private Executor executor;
     private PlanNode scanFilter;
@@ -210,7 +216,8 @@ public class ParallelBenchmark {
 
     private long run(PlanNode plan, Blackhole bh) {
         long rows = 0;
-        try (Operator op = executor.open(plan)) {
+        try (Operator op = executor.open(plan, node -> Double.NaN,
+                counting ? new QueryContext() : QueryContext.NONE)) {
             for (Batch b = op.next(); b != null; b = op.next()) {
                 bh.consume(b);
                 rows += b.rowCount();

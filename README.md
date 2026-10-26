@@ -51,8 +51,9 @@ warehouse first.
   driver, also as one JAR, opens it to tools such as DBeaver; results come as Apache
   Arrow vectors, in the process or from a Flight SQL server in one executable JAR, which
   Python reads through ADBC into pyarrow and pandas. A server that speaks the wire
-  protocol of PostgreSQL, also in one executable JAR, lets psql, psycopg, DBeaver and
-  Metabase query it as they query PostgreSQL, the other sources by `source.schema.table`.
+  protocol of PostgreSQL, also in one executable JAR, lets psql, psycopg, DBeaver,
+  Metabase, Grafana and Superset query it as they query PostgreSQL, the other sources by
+  `source.schema.table`.
   Rules for the files that statements may read and write, which the servers close by
   default, time limits for queries, and sessions with their own time zone, search path
   and timeout for each connection and client let others use an engine.
@@ -135,7 +136,7 @@ data, the plan of the query and what comes next.
 | A JDBC driver, also in one JAR for tools | `fyrql-jdbc`, `fyrql-jdbc-all` | [JDBC driver](docs/manual.md#jdbc-driver) |
 | Results as Apache Arrow vectors | `fyrql-arrow` | [Arrow](docs/manual.md#arrow) |
 | An Arrow Flight SQL server, also as one executable JAR | `fyrql-flight-sql`, `fyrql-flight-sql-all` | [Flight SQL server](docs/manual.md#flight-sql-server) |
-| A server over the wire protocol of PostgreSQL, for psql, psycopg, DBeaver and Metabase, also as one executable JAR | `fyrql-pgwire`, `fyrql-pgwire-all` | [PostgreSQL wire protocol server](docs/pgwire.md) |
+| A server over the wire protocol of PostgreSQL, for psql, psycopg, DBeaver, Metabase, Grafana and Superset, also as one executable JAR | `fyrql-pgwire`, `fyrql-pgwire-all` | [PostgreSQL wire protocol server](docs/pgwire.md) |
 | An engine as a bean of Spring Boot 4, configured in `application.yml` | `fyrql-spring-boot-starter` | [Spring Boot](docs/spring-boot.md) |
 
 ## Performance

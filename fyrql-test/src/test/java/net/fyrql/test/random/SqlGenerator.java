@@ -660,7 +660,17 @@ final class SqlGenerator {
          * An aggregation of aggregates that combine, partitioned in {@code WHERE}; the aggregates of the parts are
          * aggregated again. Its groups are named {@code g0}, {@code g1}, its aggregates {@code a0}, {@code a1}.
          */
-        AGGREGATE
+        AGGREGATE,
+        /**
+         * A select list over an inner join, partitioned in its {@code ON}: the parts join {@code ON c AND p},
+         * {@code ON c AND NOT p} and {@code ON c AND p IS NULL}; a cross join is one {@code ON true}.
+         */
+        JOIN_ON,
+        /**
+         * A select list over a subquery with window functions {@code w0} and {@code w1}, partitioned in
+         * {@code WHERE} over the columns of the subquery: a condition must not move below the windows.
+         */
+        WINDOW
     }
 
     /**
@@ -677,16 +687,18 @@ final class SqlGenerator {
     }
 
     /**
-     * Generates a query to partition: in {@link Kind#WHERE} form 40 times in
-     * a hundred, {@link Kind#DISTINCT} 15, {@link Kind#HAVING} 20 and
-     * {@link Kind#AGGREGATE} 25. A query that does not bind is drawn again,
-     * up to five times.
+     * Generates a query to partition: in {@link Kind#WHERE} form 30 times in
+     * a hundred, {@link Kind#DISTINCT} 12, {@link Kind#HAVING} 18,
+     * {@link Kind#AGGREGATE} 20, {@link Kind#JOIN_ON} 10 and
+     * {@link Kind#WINDOW} 10. A query that does not bind is drawn again, up
+     * to five times.
      */
     Partition partition() {
         Partition last = null;
         for (int attempt = 0; attempt < 5; attempt++) {
             int k = random.nextInt(100);
-            Kind kind = k < 40 ? Kind.WHERE : k < 55 ? Kind.DISTINCT : k < 75 ? Kind.HAVING : Kind.AGGREGATE;
+            Kind kind = k < 30 ? Kind.WHERE : k < 42 ? Kind.DISTINCT : k < 60 ? Kind.HAVING : k < 80 ? Kind.AGGREGATE
+                    : k < 90 ? Kind.JOIN_ON : Kind.WINDOW;
             Partition p = partition(kind);
             if (p != null) {
                 if (schema(p.query()) != null) {
@@ -701,7 +713,14 @@ final class SqlGenerator {
     /** A query of a kind to partition, or {@code null} where an aggregation does not bind. */
     private Partition partition(Kind kind) {
         commonTables();
-        Relation from = from(2);
+        Relation from = switch (kind) {
+            case JOIN_ON -> innerJoin();
+            case WINDOW -> windowed();
+            default -> from(2);
+        };
+        if (from == null) {
+            return null;
+        }
         List<Column> scope = from.columns();
         ExpressionGenerator g = generator(scope);
         SqlText text = new SqlText(random, references(scope, scope));
@@ -713,7 +732,7 @@ final class SqlGenerator {
         }
         SqlExpr rows = text.of(g.condition(2));
         return switch (kind) {
-            case WHERE, DISTINCT -> {
+            case WHERE, DISTINCT, JOIN_ON, WINDOW -> {
                 List<SelectItem> items = new ArrayList<>();
                 if (chance(10)) {
                     items.add(star(from));
@@ -733,6 +752,61 @@ final class SqlGenerator {
             case HAVING -> having(from, g, text, where, rows);
             case AGGREGATE -> combining(from, g, text, where, rows);
         };
+    }
+
+    /**
+     * An inner join of two relations {@code ON} an equality of two columns,
+     * mostly of one type, or {@code ON true} for a cross join, whose
+     * condition a partition of {@link Kind#JOIN_ON} extends.
+     */
+    private Relation innerJoin() {
+        Relation left = relation(1);
+        Relation right = relation(1);
+        List<Column> columns = new ArrayList<>(left.columns());
+        columns.addAll(right.columns());
+        SqlExpr on;
+        if (left.columns().isEmpty() || right.columns().isEmpty() || chance(20)) {
+            on = new SqlExpr.Literal(LiteralKind.BOOLEAN, "true", P);
+        } else {
+            Column l = pick(left.columns());
+            List<Column> same = right.columns().stream().filter(x -> x.type().equals(l.type())).toList();
+            Column r = !same.isEmpty() && chance(80) ? pick(same) : pick(right.columns());
+            on = new SqlExpr.Binary(SqlExpr.BinaryOp.EQUAL, reference(l, columns), reference(r, columns), P);
+        }
+        return new Relation(new FromItem.Join(FromItem.JoinKind.INNER, left.item(), right.item(), on, List.of(),
+                false, P), columns);
+    }
+
+    /**
+     * A subquery over a relation with its columns and one or two window
+     * functions {@code w0} and {@code w1} over them, for
+     * {@link Kind#WINDOW}; {@code null} if it does not bind.
+     */
+    private Relation windowed() {
+        Relation over = relation(0);
+        List<Column> scope = over.columns();
+        if (scope.isEmpty()) {
+            return null;
+        }
+        ExpressionGenerator g = generator(scope);
+        SqlText text = new SqlText(random, references(scope, scope));
+        List<SelectItem> items = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (Column c : scope) {
+            if (seen.add(c.name().toLowerCase(Locale.ROOT))) {
+                items.add(new SelectItem.ExpressionItem(reference(c, scope), null));
+            }
+        }
+        List<QueryBody.NamedWindow> named = new ArrayList<>();
+        Map<String, Spec> specs = new LinkedHashMap<>();
+        for (int i = 0, n = random.nextInt(1, 3); i < n; i++) {
+            items.add(new SelectItem.ExpressionItem(window(scope, g, text, named, specs), "w" + i));
+        }
+        String alias = "s" + names++;
+        Query inner = new Query(List.of(), new QueryBody.Select(false, items, over.item(), null, null, null, named,
+                null, List.of(), P), List.of(), null, null);
+        List<Column> columns = columns(inner, alias);
+        return columns == null ? null : new Relation(new FromItem.Subquery(inner, alias(alias), P), columns);
     }
 
     /** A grouping key: mostly a column, else a shallow expression. */

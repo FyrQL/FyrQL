@@ -151,4 +151,133 @@ class CatalogQueriesTest {
         assertTrue(strings(c.createStatement().executeQuery("SELECT * FROM pg_catalog.pg_type WHERE typname"
                 + " = 'int4'")).size() == 1);
     }
+
+    /**
+     * The forms of the PostgreSQL data source of Grafana 13, which lists the tables and their columns along the
+     * search path, and of the dialect of SQLAlchemy 1.4, which Superset 6 reads the columns and the keys of a table
+     * with and whose bounds of a time range are calls of {@code to_date}.
+     */
+    @Test
+    void theFormsOfGrafanaAndSqlAlchemy() throws SQLException {
+        Connection c = server.connect("shop", "");
+        // The tables on the search path without their schema, the others with it.
+        assertEquals(List.of(List.of("customers"), List.of("sales.orders")), query(c, TABLES));
+        assertEquals(List.of(List.of("id", "integer"), List.of("customer", "integer"), List.of("amount", "numeric")),
+                query(c, FIELDS.replace("%s", "'sales.orders'")));
+        assertEquals(List.of(List.of("id", "integer"), List.of("name", "text")),
+                query(c, FIELDS.replace("%s", "'customers'")));
+        assertEquals(List.of(), query(c, FIELDS.replace("%s", "'orders'")));
+        List<List<String>> columns = query(c, COLUMNS);
+        assertEquals(List.of("id", "customer", "amount"), columns.stream().map(r -> r.get(0)).toList());
+        assertEquals(Arrays.asList("integer", null), Arrays.asList(columns.get(0).get(1), columns.get(0).get(7)));
+        assertEquals(List.of(), query(c, KEYS));
+        assertEquals(List.of(List.of("2026-02-03", "2026-02-03 04:05:06.000007")), query(c, "SELECT"
+                + " TO_DATE('2026-02-03', 'YYYY-MM-DD'),"
+                + " TO_TIMESTAMP('2026-02-03 04:05:06.000007', 'YYYY-MM-DD HH24:MI:SS.US')"));
+    }
+
+    private static final String TABLES = """
+                SELECT
+                CASE WHEN
+                quote_ident(table_schema) IN (
+                SELECT
+                CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+                FROM
+                generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+                ) as i,
+                string_to_array(current_setting('search_path'),',') s
+                )
+                THEN quote_ident(table_name)
+                ELSE quote_ident(table_schema) || '.' || quote_ident(table_name)
+                END AS "table"
+                FROM information_schema.tables
+                WHERE quote_ident(table_schema) NOT IN ('information_schema',
+                'pg_catalog',
+                '_timescaledb_cache',
+                '_timescaledb_catalog',
+                '_timescaledb_internal',
+                '_timescaledb_config',
+                'timescaledb_information',
+                'timescaledb_experimental')
+                ORDER BY CASE WHEN
+                quote_ident(table_schema) IN (
+                SELECT
+                CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+                FROM
+                generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+                ) as i,
+                string_to_array(current_setting('search_path'),',') s
+                ) THEN 0 ELSE 1 END, 1""";
+
+    private static final String FIELDS = """
+                SELECT quote_ident(column_name) AS "column", data_type AS "type"
+                FROM information_schema.columns
+                WHERE
+                CASE WHEN array_length(parse_ident(%s),1) = 2
+                THEN quote_ident(table_schema) = (parse_ident(%s))[1]
+                AND quote_ident(table_name) = (parse_ident(%s))[2]
+                ELSE quote_ident(table_name) = %s
+                AND
+                quote_ident(table_schema) IN (
+                SELECT
+                CASE WHEN trim(s[i]) = '"$user"' THEN user ELSE trim(s[i]) END
+                FROM
+                generate_series(
+                array_lower(string_to_array(current_setting('search_path'),','),1),
+                array_upper(string_to_array(current_setting('search_path'),','),1)
+                ) as i,
+                string_to_array(current_setting('search_path'),',') s
+                )
+                END""";
+
+    private static final String COLUMNS = """
+                SELECT a.attname,
+                pg_catalog.format_type(a.atttypid, a.atttypmod),
+                (
+                SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+                FROM pg_catalog.pg_attrdef d
+                WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum
+                AND a.atthasdef
+                ) AS DEFAULT,
+                a.attnotnull,
+                a.attrelid as table_oid,
+                pgd.description as comment,
+                a.attgenerated as generated,
+                (SELECT json_build_object(
+                'always', a.attidentity = 'a',
+                'start', s.seqstart,
+                'increment', s.seqincrement,
+                'minvalue', s.seqmin,
+                'maxvalue', s.seqmax,
+                'cache', s.seqcache,
+                'cycle', s.seqcycle)
+                FROM pg_catalog.pg_sequence s
+                JOIN pg_catalog.pg_class c on s.seqrelid = c."oid"
+                WHERE c.relkind = 'S'
+                AND a.attidentity != ''
+                AND s.seqrelid = pg_catalog.pg_get_serial_sequence(
+                a.attrelid::regclass::text, a.attname
+                )::regclass::oid
+                ) as identity_options
+                FROM pg_catalog.pg_attribute a
+                LEFT JOIN pg_catalog.pg_description pgd ON (
+                pgd.objoid = a.attrelid AND pgd.objsubid = a.attnum)
+                WHERE a.attrelid = (SELECT oid FROM pg_catalog.pg_class WHERE relname = 'orders')
+                AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attnum""";
+
+    private static final String KEYS = """
+                SELECT a.attname
+                FROM pg_attribute a JOIN (
+                SELECT unnest(ix.indkey) attnum,
+                generate_subscripts(ix.indkey, 1) ord
+                FROM pg_index ix
+                WHERE ix.indrelid = 16400 AND ix.indisprimary
+                ) k ON a.attnum=k.attnum
+                WHERE a.attrelid = 16400
+                ORDER BY k.ord""";
 }

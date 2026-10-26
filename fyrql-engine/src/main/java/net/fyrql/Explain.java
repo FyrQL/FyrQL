@@ -399,6 +399,14 @@ final class Explain {
     /** What a connector took over of the plan above a scan, in the order it applies. */
     private static String pushed(PlanNode.Pushed pushed) {
         List<String> parts = new ArrayList<>();
+        pushed.delivered().ifPresent(n -> {
+            // The columns that come back, when those only the filters read stay with the source.
+            List<String> columns = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                columns.add("#" + i);
+            }
+            parts.add("SELECT " + (columns.isEmpty() ? "1" : String.join(", ", columns)));
+        });
         if (!pushed.filters().isEmpty()) {
             parts.add("WHERE " + expression(pushed.condition()));
         }

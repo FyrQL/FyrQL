@@ -98,6 +98,7 @@ class NamesTest {
         Connection c = server.connect("shop", "");
         execute(c, "CREATE TABLE sales.customers AS SELECT 7 AS id");
         execute(c, "SET search_path = sales, main");
+        assertEquals("sales, main", value(c, "SELECT current_setting('search_path')"));
         assertEquals("{sales,main}", value(c, "SELECT current_schemas(false)"));
         assertEquals("{pg_catalog,sales,main}", value(c, "SELECT current_schemas(true)"));
         assertEquals("sales", value(c, "SELECT current_schema"));

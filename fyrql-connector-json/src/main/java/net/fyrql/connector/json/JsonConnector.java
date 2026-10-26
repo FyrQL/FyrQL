@@ -297,8 +297,8 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
      * Binds {@code read_json(path, ...)} and {@code read_json_auto}, which
      * are the same, and {@code read_ndjson} and {@code read_ndjson_auto},
      * which read a sequence of records by default, to a table of the file in
-     * the schema {@code main} under a generated name that starts with
-     * {@code #} and does not appear among the tables of the catalog. The
+     * the schema {@code main} under a name of {@code #} and the text of
+     * the call, which does not appear among the tables of the catalog. The
      * named arguments are those of DuckDB: {@code format} ({@code 'auto'},
      * {@code 'array'} or {@code 'newline_delimited'}), {@code sample_size}
      * (-1 for all records), {@code ignore_errors},
@@ -372,12 +372,11 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         Path local = file;
         FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
             boolean gzip = path.toLowerCase(Locale.ROOT).endsWith(".gz");
             JsonLayout layout = object != null ? JsonSchemaInference.infer(open(object, gzip), call.options(),
                     object.location()) : infer(local, call.options());
-            callTables.put(generated, new Table(local, call.options(), layout, gzip, object));
-            return generated;
+            return callName(TableFunctionProvider.callText(function, arguments, namedArguments),
+                    new Table(local, call.options(), layout, gzip, object));
         });
         return TableRef.of(name, table);
     }
@@ -496,9 +495,8 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
         Path local = absolute;
         FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, new Table(local, read, JsonLayout.of(schema, parser(read)), gzip, object));
-            return generated;
+            return callName(TableFunctionProvider.callText("read_" + format, List.of(location), options),
+                    new Table(local, read, JsonLayout.of(schema, parser(read)), gzip, object));
         });
         return TableRef.of(name, table);
     }
@@ -1077,5 +1075,18 @@ public final class JsonConnector implements Connector, TableFunctionProvider, Fi
             }
             return new JsonConnector(name, tables, locations, options, batchSize, splitSize);
         }
+    }
+
+    /**
+     * Keeps the table of a call under {@code #} and the text of the call, the
+     * name the plans show; a call whose text names another table already, as
+     * after its file changed, gets a number as well.
+     */
+    private String callName(String call, Table table) {
+        String generated = CALL_PREFIX + call;
+        while (callTables.putIfAbsent(generated, table) != null) {
+            generated = CALL_PREFIX + call + " #" + callCount.incrementAndGet();
+        }
+        return generated;
     }
 }

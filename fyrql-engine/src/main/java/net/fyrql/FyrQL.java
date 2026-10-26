@@ -958,7 +958,7 @@ public final class FyrQL implements AutoCloseable {
         List<Expression> filters = new ArrayList<>(pushed.filters());
         filters.addAll(pushed.hints());
         ScanRequest request = new ScanRequest(ColumnPath.of(scan), filters, pushed.limit(), pushed.order(),
-                pushed.aggregation());
+                pushed.aggregation(), pushed.delivered().orElse(scan.columns().size()));
         ScanPlan plan = connector.plan(scan.table(), request);
         if (!plan.columns().equals(request.columns())) {
             throw new IllegalStateException("The connector " + connector.name() + " reads " + plan.columns()

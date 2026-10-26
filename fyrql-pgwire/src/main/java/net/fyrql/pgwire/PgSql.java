@@ -120,8 +120,17 @@ final class PgSql {
      */
     static String rewrite(String sql, Context context) {
         String s = psql(sql);
+        s = emptySubqueries(s);
         s = tokens(s, context);
-        s = operators(s);
+        // An operator inside the operand of another, as a cast to regclass inside one, is rewritten in a round of
+        // its own, since a round keeps only the outer of two edits that overlap.
+        for (int round = 0; round < 8; round++) {
+            String rewritten = operators(s);
+            if (rewritten.equals(s)) {
+                break;
+            }
+            s = rewritten;
+        }
         return from(s);
     }
 
@@ -190,6 +199,113 @@ final class PgSql {
         return false;
     }
 
+    /**
+     * The fields of the patterns of {@code to_date} and {@code to_timestamp}, in any case, those that start alike
+     * longest first, with their forms in strptime.
+     */
+    private static final List<String[]> PATTERN_FIELDS = List.of(new String[] {"HH24", "%H"},
+            new String[] {"HH12", "%I"}, new String[] {"HH", "%I"}, new String[] {"YYYY", "%Y"},
+            new String[] {"YY", "%y"}, new String[] {"MONTH", "%B"}, new String[] {"MON", "%b"},
+            new String[] {"MM", "%m"}, new String[] {"MI", "%M"}, new String[] {"MS", "%g"}, new String[] {"DD", "%d"},
+            new String[] {"SS", "%S"}, new String[] {"US", "%f"}, new String[] {"AM", "%p"}, new String[] {"PM", "%p"});
+
+    /**
+     * Rewrites {@code to_date(text, pattern)} and {@code to_timestamp(text, pattern)} of PostgreSQL, as Superset
+     * writes the bounds of a time range, into {@code strptime} with the pattern in its form, a date for
+     * {@code to_date}. A pattern with a field strptime does not have stays as it is.
+     *
+     * @return whether the call is rewritten
+     */
+    private static boolean parse(String sql, List<Token> t, int i, List<Edit> edits) {
+        int close = closing(t, i + 1);
+        if (close < 4 || t.get(close - 1).kind() != Kind.STRING || !t.get(close - 2).isSymbol(",")) {
+            return false;
+        }
+        for (int j = i + 2, depth = 0; j < close - 2; j++) {
+            if (t.get(j).isSymbol("(")) {
+                depth++;
+            } else if (t.get(j).isSymbol(")")) {
+                depth--;
+            } else if (depth == 0 && t.get(j).isSymbol(",")) {
+                return false;
+            }
+        }
+        String pattern = t.get(close - 1).value();
+        StringBuilder format = new StringBuilder();
+        for (int p = 0; p < pattern.length(); ) {
+            String[] field = null;
+            for (String[] f : PATTERN_FIELDS) {
+                if (pattern.regionMatches(true, p, f[0], 0, f[0].length())) {
+                    field = f;
+                    break;
+                }
+            }
+            char c = pattern.charAt(p);
+            if (field != null) {
+                format.append(field[1]);
+                p += field[0].length();
+            } else if (Character.isLetterOrDigit(c)) {
+                return false;
+            } else {
+                format.append(c == '%' ? "%%" : String.valueOf(c));
+                p++;
+            }
+        }
+        String parsed = "strptime(" + text(sql, t, i + 2, close - 3) + ", " + literal(format.toString()) + ")";
+        boolean date = t.get(i).is("TO_DATE");
+        edits.add(named(t, i, close, date ? "CAST(" + parsed + " AS DATE)" : parsed,
+                date ? "to_date" : "to_timestamp"));
+        return true;
+    }
+
+    /** The catalogs that have no rows, as FyrQL has no sequences. */
+    private static final Set<String> EMPTY_CATALOGS = Set.of("PG_SEQUENCE");
+
+    /**
+     * Replaces a scalar subquery that reads first from a catalog without
+     * rows by {@code NULL}, its value, as the one with which SQLAlchemy
+     * reads the identity of a column from {@code pg_sequence}; such a
+     * subquery may reference the outer query where FyrQL does not take it.
+     * A count is left alone, as it is 0.
+     */
+    private static String emptySubqueries(String sql) {
+        List<Token> t = SqlText.tokens(sql);
+        List<Edit> edits = new ArrayList<>();
+        for (int i = 0; i + 1 < t.size(); i++) {
+            if (!t.get(i).isSymbol("(") || !t.get(i + 1).is("SELECT")
+                    || i > 0 && t.get(i - 1).is("EXISTS", "IN", "ANY", "SOME", "ALL", "ARRAY")) {
+                continue;
+            }
+            int close = closing(t, i);
+            int from = -1;
+            boolean counts = false;
+            for (int j = i + 1, depth = 0; close > 0 && j < close && from < 0; j++) {
+                Token k = t.get(j);
+                if (k.isSymbol("(")) {
+                    depth++;
+                } else if (k.isSymbol(")")) {
+                    depth--;
+                } else if (depth == 0 && k.is("FROM")) {
+                    from = j;
+                } else if (k.is("COUNT")) {
+                    counts = true;
+                }
+            }
+            if (from < 0 || counts) {
+                continue;
+            }
+            int name = from + 1;
+            if (name + 2 < close && t.get(name).is("PG_CATALOG") && t.get(name + 1).isSymbol(".")) {
+                name += 2;
+            }
+            if (name < close && t.get(name).kind() == Kind.WORD && EMPTY_CATALOGS.contains(t.get(name).upper())) {
+                edits.add(new Edit(i, close, "NULL"));
+                i = close;
+            }
+        }
+        return apply(sql, t, edits);
+    }
+
     private static String tokens(String sql, Context context) {
         List<Token> t = SqlText.tokens(sql);
         List<Edit> edits = new ArrayList<>();
@@ -244,6 +360,14 @@ final class PgSql {
                     oid = null;
                 }
                 edits.add(named(t, i, i + 3, oid == null ? "CAST(NULL AS INTEGER)" : oid.toString(), "to_regclass"));
+            } else if (call && !qualified && k.is("TO_DATE", "TO_TIMESTAMP") && parse(sql, t, i, edits)) {
+                i = closing(t, i + 1);
+            } else if (call && !qualified && k.is("GENERATE_SUBSCRIPTS") && closing(t, i + 1) > 0) {
+                // The arrays that clients number are those of pg_index, as SQLAlchemy reads the keys of a table
+                // with; it has no rows, as FyrQL has no indexes.
+                int close = closing(t, i + 1);
+                edits.add(named(t, i, close, "CAST(NULL AS INTEGER)", "generate_subscripts"));
+                i = close;
             } else if (k.is("COLLATE") && i + 1 < t.size()) {
                 int end = i + 1;
                 while (end + 2 < t.size() && t.get(end + 1).isSymbol(".")) {
@@ -257,7 +381,7 @@ final class PgSql {
                     && t.get(i + 3).is("AS") && t.get(i + 5).isSymbol(")")
                     && t.get(i + 4).is("REGCLASS", "REGTYPE", "REGPROC", "OID")) {
                 String value = regLiteral(t.get(i + 4).value(), t.get(i + 2).value(), context);
-                edits.add(new Edit(i, i + 5, value));
+                edits.add(named(t, i, i + 5, value, t.get(i + 4).value()));
                 i += 5;
             } else if (k.is("CAST") && call) {
                 castAs(t, i, edits);
@@ -305,6 +429,9 @@ final class PgSql {
     private static final Set<String> NOT_IN_ITEMS = Set.of("FROM", "WHERE", "BY", "HAVING", "WINDOW", "LIMIT",
             "OFFSET", "ON", "USING", "JOIN", "VALUES", "SET", "RETURNING", "INTO", "PARTITION");
 
+    /** The label PostgreSQL gives an item it cannot name, such as an operator. */
+    private static final String UNNAMED = "?column?";
+
     /**
      * Replaces the tokens from {@code from} to {@code to} with a text, which
      * gets the label PostgreSQL gives the expression when it is a whole item
@@ -348,9 +475,13 @@ final class PgSql {
         return false;
     }
 
-    /** Tells whether the engine holds a setting of the name. */
+    /**
+     * Tells whether the engine holds a setting of the name. The search path
+     * is the one of the connection, in the names of PostgreSQL, as
+     * {@code SHOW} gives it.
+     */
     private static boolean engineSetting(String name) {
-        return name.equalsIgnoreCase(ServerSettings.TIME_ZONE) || name.equalsIgnoreCase(ServerSettings.SEARCH_PATH)
+        return name.equalsIgnoreCase(ServerSettings.TIME_ZONE)
                 || name.equalsIgnoreCase(ServerSettings.STATEMENT_TIMEOUT);
     }
 
@@ -379,7 +510,7 @@ final class PgSql {
         Token operand = t.get(i - 1);
         boolean literal = i > 0 && operand.kind() == Kind.STRING && !(i > 1 && t.get(i - 2).isSymbol("::"));
         if (literal && !array && Set.of("regclass", "regtype", "regproc", "oid").contains(name)) {
-            edits.add(new Edit(i - 1, typeAt, regLiteral(name, operand.value(), context)));
+            edits.add(named(t, i - 1, typeAt, regLiteral(name, operand.value(), context), name));
             return typeAt;
         }
         if (literal && (array || name.startsWith("_"))) {
@@ -591,8 +722,8 @@ final class PgSql {
                 int left = operandStart(t, i - 1);
                 int right = operandEnd(t, i + 1);
                 if (left >= 0 && right >= 0) {
-                    edits.add(new Edit(left, right, (k.isSymbol("&") ? "bitwise_and(" : "bitwise_or(")
-                            + text(sql, t, left, i - 1) + ", " + text(sql, t, i + 1, right) + ")"));
+                    edits.add(named(t, left, right, (k.isSymbol("&") ? "bitwise_and(" : "bitwise_or(")
+                            + text(sql, t, left, i - 1) + ", " + text(sql, t, i + 1, right) + ")", UNNAMED));
                     i = right;
                 }
                 continue;
@@ -600,7 +731,9 @@ final class PgSql {
             if (k.isSymbol("::") && t.get(i + 1).is("REGCLASS")) {
                 int left = operandStart(t, i - 1);
                 if (left >= 0) {
-                    edits.add(new Edit(left, i + 1, "to_regclass(" + text(sql, t, left, i - 1) + ")"));
+                    // PostgreSQL names the cast of a column by the column, and that of anything else by its type.
+                    String label = isQualifiedName(t, left, i - 1) ? t.get(i - 1).value() : "regclass";
+                    edits.add(named(t, left, i + 1, "to_regclass(" + text(sql, t, left, i - 1) + ")", label));
                     i++;
                 }
                 continue;
@@ -614,7 +747,7 @@ final class PgSql {
                 String l = text(sql, t, left, i - 1);
                 String r = text(sql, t, opEnd + 1, right);
                 String match = "regexp_matches(" + l + ", " + r + (op.contains("*") ? ", 'i')" : ")");
-                edits.add(new Edit(left, right, op.startsWith("!") ? "(NOT " + match + ")" : match));
+                edits.add(named(t, left, right, op.startsWith("!") ? "(NOT " + match + ")" : match, UNNAMED));
                 i = right;
                 continue;
             }
@@ -631,7 +764,7 @@ final class PgSql {
                 String l = text(sql, t, left, i - 1);
                 String list = text(sql, t, i + 3, close - 1);
                 String contains = "list_contains(" + list + ", " + l + ")";
-                edits.add(new Edit(left, close, all ? "(NOT " + contains + ")" : contains));
+                edits.add(named(t, left, close, all ? "(NOT " + contains + ")" : contains, UNNAMED));
                 i = close;
             }
         }
@@ -670,6 +803,16 @@ final class PgSql {
 
     private static boolean isName(Token k) {
         return k.kind() == Kind.WORD || k.kind() == Kind.QUOTED;
+    }
+
+    /** Tells whether the tokens from {@code from} to {@code to} are a name with qualifiers, as {@code c.oid}. */
+    private static boolean isQualifiedName(List<Token> t, int from, int to) {
+        for (int j = from; j <= to; j++) {
+            if ((j - from) % 2 == 0 ? !isName(t.get(j)) : !t.get(j).isSymbol(".")) {
+                return false;
+            }
+        }
+        return (to - from) % 2 == 0;
     }
 
     private static final Set<String> KEYWORDS = Set.of("AND", "OR", "NOT", "WHERE", "ON", "WHEN", "THEN", "ELSE",
@@ -744,7 +887,8 @@ final class PgSql {
     /**
      * Rewrites the functions in {@code FROM} that return sets in PostgreSQL:
      * {@code generate_series(a, b) AS s(n)} unnests the list of the engine,
-     * {@code pg_get_keywords()} is the table of the server, and
+     * {@code string_to_array} and {@code parse_ident} are a row of their
+     * value, {@code pg_get_keywords()} is the table of the server, and
      * {@code _pg_expandarray} of {@code information_schema}, which pgjdbc
      * reads the keys of indexes with, gives no rows, as FyrQL has no indexes.
      */
@@ -777,11 +921,24 @@ final class PgSql {
                         i = close;
                     }
                 }
+            } else if (inFrom && call && name.is("STRING_TO_ARRAY", "PARSE_IDENT")) {
+                int close = closing(t, nameAt + 1);
+                if (close > 0) {
+                    // A function of one value in FROM is a relation of one row, its column named as the relation.
+                    int aliasAt = close + 1 < t.size() && t.get(close + 1).is("AS") ? close + 2 : close + 1;
+                    boolean alias = aliasAt < t.size() && isName(t.get(aliasAt)) && !KEYWORDS.contains(
+                            t.get(aliasAt).upper()) && !t.get(aliasAt).is("WHERE", "GROUP", "ORDER", "LIMIT", "UNION")
+                            && !(aliasAt + 1 < t.size() && t.get(aliasAt + 1).isSymbol("("));
+                    String relation = alias ? t.get(aliasAt).text() : name.value();
+                    edits.add(new Edit(i, alias ? aliasAt : close, "(SELECT " + text(sql, t, nameAt, close) + " AS "
+                            + relation + ") AS " + relation));
+                    i = alias ? aliasAt : close;
+                }
             } else if (k.is("ARRAY") && i + 2 < t.size() && t.get(i + 1).isSymbol("(") && t.get(i + 2).is("SELECT")) {
                 int close = closing(t, i + 1);
                 String list = close < 0 ? null : arrayOfQuery(sql, t, i + 2, close);
                 if (list != null) {
-                    edits.add(new Edit(i, close, list));
+                    edits.add(named(t, i, close, list, "array"));
                     i = close;
                 }
             } else if (inFrom && call && name.is("PG_PARTITION_ANCESTORS")) {

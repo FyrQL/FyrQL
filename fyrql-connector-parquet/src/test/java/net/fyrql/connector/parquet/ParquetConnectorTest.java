@@ -144,7 +144,7 @@ class ParquetConnectorTest {
         assertEquals(List.of("read_parquet", "parquet_scan"), c.tableFunctions());
         assertEquals(List.of(), c.catalog().tables("main"));
         TableRef a = c.bind("read_parquet", List.of(file.toString()), Map.of());
-        assertEquals("#1", a.table());
+        assertEquals("#read_parquet('" + file.toString().replace("'", "''") + "')", a.table());
         assertEquals(a, c.bind("parquet_scan", List.of(file.toString()), Map.of()));
         assertEquals(OptionalLong.of(7), c.catalog().rowCount(a));
         assertEquals(List.of(), c.catalog().tables("main"));

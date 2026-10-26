@@ -263,7 +263,8 @@ class JsonConnectorTest {
         JsonConnector c = JsonConnector.builder("js").build();
         assertEquals(List.of("read_json", "read_json_auto", "read_ndjson", "read_ndjson_auto"), c.tableFunctions());
         TableRef t = c.bind("read_json", List.of(path), Map.of());
-        assertEquals("#1", t.table());
+        assertEquals("#read_json('" + path.replace("'", "''") + "')", t.table());
+        assertEquals("read_json('" + path.replace("'", "''") + "')", t.toString());
         assertEquals(List.of(), c.catalog().tables("main"));
         assertEquals("a BIGINT, b VARCHAR", JsonSchemaInferenceTest.describe(c.catalog().schema(t)));
         assertEquals(t, c.bind("read_json_auto", List.of(path), Map.of()));

@@ -217,7 +217,8 @@ public final class SqlRenderer {
      * over the table, for the connector that sends it to the source:
      * {@code SELECT t."a", t."b" FROM table t WHERE ... ORDER BY ... LIMIT n}.
      * The columns of the result are those of the scan, in order, under
-     * their names in the table; a scan of no columns selects a constant,
+     * their names in the table, without those at the end that it leaves
+     * out, see {@link PlanNode.Pushed}; a scan of no columns selects a constant,
      * which the reader skips. Unlike {@link #render}, which nests a
      * {@code SELECT} per node, the statement reads the table itself, as a
      * database plans it best.
@@ -305,10 +306,13 @@ public final class SqlRenderer {
                         + "rendered flat");
             }
             b.append(aggregation(pushed.aggregation().get(), s.columnSchema(), columns));
-        } else if (s.columns().isEmpty()) {
+        }
+        // The columns that only the filters read stay out of the select list when the scan leaves them out.
+        int selected = pushed.delivered().orElse(s.columns().size());
+        if (pushed.aggregation().isEmpty() && selected == 0) {
             b.append('1');
         }
-        for (int i = 0; pushed.aggregation().isEmpty() && i < s.columns().size(); i++) {
+        for (int i = 0; pushed.aggregation().isEmpty() && i < selected; i++) {
             b.append(i > 0 ? ", " : "").append(columns.apply(i));
         }
         b.append(" FROM ").append(tableNames.apply(s.table())).append(' ').append(t);

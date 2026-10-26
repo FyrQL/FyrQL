@@ -183,6 +183,10 @@ class MetamorphicTest {
             written.addAll(Metamorphic.tlpQueries(aggregate, engine.plan(SqlPrinter.print(aggregate.query()))
                     .schema()));
         }
+        written.addAll(Metamorphic.tlpQueries(partition(SqlGenerator.Kind.JOIN_ON,
+                "SELECT a.k, b.v FROM p AS a JOIN q AS b ON a.k = b.k", "a.i > b.n"), none));
+        written.addAll(Metamorphic.tlpQueries(partition(SqlGenerator.Kind.WINDOW,
+                "SELECT * FROM (SELECT k, i, sum(i) OVER (ORDER BY k) AS w0 FROM p) AS s", "w0 > 3"), none));
         assertEquals("""
                 SELECT (i + 1) AS x FROM p WHERE (k > 2)
                 SELECT (i + 1) AS x FROM p WHERE ((k > 2) AND ((v = 'a') OR b)) \
@@ -208,6 +212,17 @@ class MetamorphicTest {
                 UNION ALL SELECT k AS g0, count(*) AS a0, sum(i) AS a1, min(v) AS a2, bool_or((i > 2)) AS a3 FROM w0 \
                 WHERE (NOT (dt IS NULL)) GROUP BY k \
                 UNION ALL SELECT k AS g0, count(*) AS a0, sum(i) AS a1, min(v) AS a2, bool_or((i > 2)) AS a3 FROM w0 \
-                WHERE ((dt IS NULL) IS NULL) GROUP BY k) AS u GROUP BY g0""", String.join("\n", written));
+                WHERE ((dt IS NULL) IS NULL) GROUP BY k) AS u GROUP BY g0
+                SELECT a.k, b.v FROM p AS a INNER JOIN q AS b ON (a.k = b.k)
+                SELECT a.k, b.v FROM p AS a INNER JOIN q AS b ON ((a.k = b.k) AND (a.i > b.n)) \
+                UNION ALL SELECT a.k, b.v FROM p AS a INNER JOIN q AS b ON ((a.k = b.k) AND (NOT (a.i > b.n))) \
+                UNION ALL SELECT a.k, b.v FROM p AS a INNER JOIN q AS b ON ((a.k = b.k) AND ((a.i > b.n) IS NULL))
+                SELECT * FROM (SELECT k, i, sum(i) OVER (ORDER BY k ASC NULLS LAST) AS w0 FROM p) AS s
+                SELECT * FROM (SELECT k, i, sum(i) OVER (ORDER BY k ASC NULLS LAST) AS w0 FROM p) AS s \
+                WHERE (w0 > 3) \
+                UNION ALL SELECT * FROM (SELECT k, i, sum(i) OVER (ORDER BY k ASC NULLS LAST) AS w0 FROM p) AS s \
+                WHERE (NOT (w0 > 3)) \
+                UNION ALL SELECT * FROM (SELECT k, i, sum(i) OVER (ORDER BY k ASC NULLS LAST) AS w0 FROM p) AS s \
+                WHERE ((w0 > 3) IS NULL)""", String.join("\n", written));
     }
 }

@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.function.Function;
 import java.util.function.IntUnaryOperator;
@@ -92,10 +93,12 @@ public sealed interface PlanNode {
      * conjuncts it did not take over, which the engine evaluates above the
      * scan; the connector sees them again when the scan is opened and may
      * use them to skip data in which no row can satisfy them, but they are
-     * not taken over.
+     * not taken over. When the connector takes over all filters, it may
+     * leave out of its batches the columns at the end that only the filters
+     * read: the batches then carry the first {@code delivered} columns.
      */
     record Pushed(List<Expression> filters, OptionalLong limit, List<SortKey> order,
-            Optional<Aggregation> aggregation, List<Expression> hints) {
+            Optional<Aggregation> aggregation, List<Expression> hints, OptionalInt delivered) {
 
         /** Nothing taken over. */
         public static final Pushed NONE = new Pushed(List.of(), OptionalLong.empty(), List.of(), Optional.empty());
@@ -106,6 +109,17 @@ public sealed interface PlanNode {
             order = List.copyOf(order);
             Objects.requireNonNull(aggregation, "aggregation");
             hints = List.copyOf(hints);
+            Objects.requireNonNull(delivered, "delivered");
+            if (delivered.isPresent() && (filters.isEmpty() || aggregation.isPresent() || !hints.isEmpty())) {
+                throw new IllegalArgumentException("Columns are left out only of a scan whose filters are all taken "
+                        + "over, without an aggregation");
+            }
+        }
+
+        /** The parts taken over with hints, in batches of all columns. */
+        public Pushed(List<Expression> filters, OptionalLong limit, List<SortKey> order,
+                Optional<Aggregation> aggregation, List<Expression> hints) {
+            this(filters, limit, order, aggregation, hints, OptionalInt.empty());
         }
 
         /** The parts taken over, without hints. */
@@ -142,6 +156,14 @@ public sealed interface PlanNode {
             }
             for (SortKey k : order) {
                 checkColumn(columns, k.column());
+                if (delivered.isPresent() && k.column() >= delivered.getAsInt()) {
+                    throw new IllegalArgumentException("The order of a scan by column " + k.column()
+                            + ", which its batches leave out");
+                }
+            }
+            if (delivered.isPresent() && (delivered.getAsInt() < 0 || delivered.getAsInt() > columns.size())) {
+                throw new IllegalArgumentException(delivered.getAsInt() + " delivered of " + columns.size()
+                        + " columns");
             }
             aggregation.ifPresent(a -> a.check(columns));
         }
@@ -249,9 +271,17 @@ public sealed interface PlanNode {
             return scanColumns(tableSchema, columns, fields);
         }
 
+        /**
+         * Returns the columns of the batches: the groups and aggregates of the
+         * aggregation taken over, or the columns the scan reads, without those
+         * at the end that the connector leaves out.
+         */
         @Override
         public Schema schema() {
             Schema s = columnSchema();
+            if (pushed.delivered().isPresent()) {
+                return new Schema(s.fields().subList(0, pushed.delivered().getAsInt()));
+            }
             return pushed.aggregation().map(a -> a.output(s)).orElse(s);
         }
 
@@ -259,7 +289,8 @@ public sealed interface PlanNode {
          * Returns the same plan with nothing taken over: the scan of the
          * whole columns and, above it, the fields taken out of them as a
          * projection, and the filter, aggregation, sort and limit the
-         * connector carries out.
+         * connector carries out, with a projection to the columns of its
+         * batches when it leaves some out.
          */
         public PlanNode logical() {
             PlanNode node;
@@ -282,6 +313,14 @@ public sealed interface PlanNode {
             }
             if (!pushed.filters().isEmpty()) {
                 node = new Filter(node, pushed.condition());
+            }
+            if (pushed.delivered().isPresent()) {
+                Schema s = node.schema();
+                List<NamedExpression> kept = new ArrayList<>();
+                for (int i = 0; i < pushed.delivered().getAsInt(); i++) {
+                    kept.add(new NamedExpression(s.name(i), new Expression.Column(i, s.type(i))));
+                }
+                node = new Project(node, kept);
             }
             if (pushed.aggregation().isPresent()) {
                 Aggregation a = pushed.aggregation().get();

@@ -15,26 +15,38 @@ import net.fyrql.FyrQL;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.csv.CsvConnector;
+import net.fyrql.connector.http.HttpConnector;
 import net.fyrql.connector.iceberg.IcebergConnector;
 import net.fyrql.connector.iceberg.IcebergTestTables;
 import net.fyrql.connector.jdbc.JdbcConnector;
 import net.fyrql.connector.jdbc.JdbcDialect;
 import net.fyrql.connector.json.JsonConnector;
 import net.fyrql.connector.json.JsonFormat;
+import net.fyrql.connector.odata.FakeODataServer;
+import net.fyrql.connector.odata.ODataConnector;
+import net.fyrql.connector.odata.ODataVersion;
 import net.fyrql.connector.parquet.ParquetConnector;
+import net.fyrql.connector.s3.FakeS3Server;
+import net.fyrql.connector.s3.S3Connector;
 import net.fyrql.connector.xlsx.XlsxConnector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.test.db.TestDatabase;
 
+import com.sun.net.httpserver.HttpServer;
+
 import javax.sql.DataSource;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.UncheckedIOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -44,6 +56,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Logger;
@@ -56,7 +71,9 @@ import java.util.logging.Logger;
  * files read in small splits; loaded into a database and read in splits
  * over ranges of {@code k}; and the test tables of Iceberg, with
  * partitions, deletes and a changed schema. The file sources read batches
- * of 8 rows. Each source comes in an engine
+ * of 8 rows. The same files lie in a bucket of the fake S3 of the tests,
+ * the tables are entity sets of a fake OData service read in pages, and
+ * JSON that a small HTTP server answers. Each source comes in an engine
  * whose default source it is, so that the queries name the tables without
  * it, with the columns it reads them with, and with a check that it did its
  * part of the work.
@@ -78,13 +95,20 @@ final class RandomSources {
 
     /**
      * A source of tables: its name, an engine over it, the tables with
-     * their columns as the engine reads them, and the check that it did its
-     * part of the work, to run after the queries.
+     * their columns as the engine reads them, the check that it did its
+     * part of the work, to run after the queries, and a server it reads
+     * from, closed after the engine.
      */
-    record Source(String name, FyrQL engine, Map<String, Schema> tables, Runnable check) implements AutoCloseable {
+    record Source(String name, FyrQL engine, Map<String, Schema> tables, Runnable check, AutoCloseable server)
+            implements AutoCloseable {
         @Override
         public void close() {
             engine.close();
+            try {
+                server.close();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
         }
     }
 
@@ -97,13 +121,25 @@ final class RandomSources {
      */
     private static Source source(String name, Connector connector, List<String> names,
             Function<FyrQL, Runnable> check) {
-        FyrQL engine = FyrQL.builder().register(connector).defaultSource(connector.name()).batchSize(16)
-                .timeZone(RandomTables.ZONE).memoryBudget(BUDGET).build();
+        return source(name, connector, List.of(), names, check, () -> {
+        });
+    }
+
+    /**
+     * An engine over a source as {@link #source(String, Connector, List, Function)} makes it, with further
+     * sources, such as the one of S3 that holds its files, and a server to close after it.
+     */
+    private static Source source(String name, Connector connector, List<Connector> others, List<String> names,
+            Function<FyrQL, Runnable> check, AutoCloseable server) {
+        FyrQL.Builder b = FyrQL.builder().register(connector);
+        others.forEach(b::register);
+        FyrQL engine = b.defaultSource(connector.name()).batchSize(16).timeZone(RandomTables.ZONE)
+                .memoryBudget(BUDGET).build();
         Map<String, Schema> tables = new LinkedHashMap<>();
         for (String table : names) {
             tables.put(table, engine.plan("SELECT * FROM " + table).schema());
         }
-        return new Source(name, engine, tables, check.apply(engine));
+        return new Source(name, engine, tables, check.apply(engine), server);
     }
 
     private static String path(Path file) {
@@ -147,16 +183,26 @@ final class RandomSources {
      * a condition on {@code k} reads, where the engine pushes filters down.
      */
     static Source parquet(Path dir) {
+        Map<String, Path> files = write(dir, "parquet", parquetQueries(), " (ROW_GROUP_SIZE 8)");
+        ParquetConnector.Builder b = ParquetConnector.builder("files").batchSize(8).recordReads(true);
+        files.forEach(b::path);
+        ParquetConnector parquet = b.build();
+        return source("Parquet", parquet, List.copyOf(files.keySet()), engine -> rowGroups(engine, parquet));
+    }
+
+    /** The queries of the tables of the Parquet files. */
+    private static Map<String, String> parquetQueries() {
         Map<String, String> queries = new LinkedHashMap<>();
         queries.put("p", "SELECT * EXCLUDE (iv) FROM memory.p ORDER BY k");
         queries.put("q", "SELECT * FROM memory.q ORDER BY k");
         queries.put("e", "SELECT * EXCLUDE (eiv) FROM memory.e WHERE eh IS NULL OR eh BETWEEN -" + MAX_38_DIGITS
                 + " AND " + MAX_38_DIGITS + " ORDER BY k");
-        Map<String, Path> files = write(dir, "parquet", queries, " (ROW_GROUP_SIZE 8)");
-        ParquetConnector.Builder b = ParquetConnector.builder("files").batchSize(8).recordReads(true);
-        files.forEach(b::path);
-        ParquetConnector parquet = b.build();
-        return source("Parquet", parquet, List.copyOf(files.keySet()), engine -> () -> {
+        return queries;
+    }
+
+    /** The check of the Parquet files: a condition on {@code k} reads some of the row groups. */
+    private static Runnable rowGroups(FyrQL engine, ParquetConnector parquet) {
+        return () -> {
             if (!engine.pushdown()) {
                 return;
             }
@@ -167,6 +213,140 @@ final class RandomSources {
             if (read == 0 || read >= 5) {
                 throw new AssertionError("a condition on k reads " + read + " of 5 row groups");
             }
+        };
+    }
+
+    /** The bucket of the random tables in the fake S3. */
+    private static final String BUCKET = "random";
+
+    /** Puts files into a bucket of a new fake S3 under their names, and returns their locations by table. */
+    private static Map<String, String> upload(FakeS3Server server, Map<String, Path> files) {
+        server.createBucket(BUCKET);
+        Map<String, String> locations = new LinkedHashMap<>();
+        try {
+            for (Map.Entry<String, Path> f : files.entrySet()) {
+                String key = f.getValue().getFileName().toString();
+                server.put(BUCKET, key, Files.readAllBytes(f.getValue()));
+                locations.put(f.getKey(), "s3://" + BUCKET + "/" + key);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return locations;
+    }
+
+    private static S3Connector s3(FakeS3Server server) {
+        return S3Connector.builder("s3").endpoint(server.endpoint()).useEnvironment(false).build();
+    }
+
+    /**
+     * The Parquet files of {@link #parquet} in a bucket of the fake S3 of the
+     * tests, read through a source of S3 in ranges of the objects; the check
+     * is that of the local files.
+     */
+    static Source s3Parquet(Path dir) {
+        Map<String, Path> files = write(dir, "parquet", parquetQueries(), " (ROW_GROUP_SIZE 8)");
+        FakeS3Server server = FakeS3Server.anonymous();
+        ParquetConnector.Builder b = ParquetConnector.builder("files").batchSize(8).recordReads(true);
+        upload(server, files).forEach(b::path);
+        ParquetConnector parquet = b.build();
+        return source("Parquet in S3", parquet, List.of(s3(server)), List.copyOf(files.keySet()),
+                engine -> rowGroups(engine, parquet), server);
+    }
+
+    /**
+     * The CSV files of {@link #csv} in a bucket of the fake S3 of the tests,
+     * read with their schemas, each object in one part; the check: the
+     * fake answered requests for the objects.
+     */
+    static Source s3Csv(Path dir) {
+        Map<String, Path> files = write(dir, "csv", all(), "");
+        FakeS3Server server = FakeS3Server.anonymous();
+        CsvConnector.Builder b = CsvConnector.builder("files").batchSize(8).splitSize(256);
+        upload(server, files).forEach((table, location) -> b.schema(table, RandomTables.SCHEMAS.get(table))
+                .file(table, location));
+        CsvConnector csv = b.build();
+        return source("CSV in S3", csv, List.of(s3(server)), List.copyOf(files.keySet()), engine -> () -> {
+            if (server.requests().stream().noneMatch(r -> r.startsWith("GET /" + BUCKET + "/"))) {
+                throw new AssertionError("S3 got no GET of an object in " + server.requests().size() + " requests");
+            }
+        }, server);
+    }
+
+    /**
+     * The random tables as the entity sets of a fake OData service of
+     * version 4, keyed by {@code k}, answered in pages of 16 entities. OData
+     * has no type for a {@code HUGEINT} and no duration of months, so that
+     * the columns of these types stay out. The check
+     * looks for a {@code $filter} among the requests.
+     */
+    static Source odata() {
+        FakeODataServer server = FakeODataServer.start();
+        FakeODataServer.Service service = server.service("random", ODataVersion.V4).pageSize(16);
+        Map<String, List<Object[]>> rows = RandomTables.rows(RandomRun.SEED);
+        for (String table : RandomTables.SCHEMAS.keySet()) {
+            Schema schema = RandomTables.SCHEMAS.get(table);
+            List<Integer> kept = new ArrayList<>();
+            for (int c = 0; c < schema.size(); c++) {
+                if (schema.type(c) != DataType.HUGEINT && schema.type(c) != DataType.INTERVAL) {
+                    kept.add(c);
+                }
+            }
+            List<Object[]> values = new ArrayList<>();
+            for (Object[] row : rows.get(table)) {
+                values.add(kept.stream().map(c -> row[c]).toArray());
+            }
+            service.entitySet(table, new Schema(kept.stream().map(schema.fields()::get).toList()), values, "k");
+        }
+        ODataConnector od = ODataConnector.builder("od").service(TableRef.MAIN, server.url("random")).pageSize(16)
+                .batchSize(8).build();
+        return source("OData", od, List.of(), List.copyOf(RandomTables.SCHEMAS.keySet()), engine -> () -> {
+            if (engine.pushdown() && server.requests().stream().noneMatch(r -> r.parameters().containsKey("$filter"))) {
+                throw new AssertionError("OData got no $filter in " + server.requests().size() + " requests");
+            }
+        }, server);
+    }
+
+    /**
+     * The random tables as JSON that a server on the loopback interface
+     * answers, a record per line, read with their schemas; nothing is
+     * pushed to an endpoint. The check counts the requests.
+     */
+    static Source http(Path dir) {
+        Map<String, Path> files = write(dir, "json", all(), "");
+        HttpServer server;
+        try {
+            server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        AtomicInteger requests = new AtomicInteger();
+        for (Map.Entry<String, Path> f : files.entrySet()) {
+            server.createContext("/" + f.getKey(), exchange -> {
+                requests.incrementAndGet();
+                byte[] body = Files.readAllBytes(f.getValue());
+                exchange.getResponseHeaders().add("Content-Type", "application/x-ndjson");
+                exchange.sendResponseHeaders(200, body.length);
+                try (OutputStream out = exchange.getResponseBody()) {
+                    out.write(body);
+                }
+            });
+        }
+        ExecutorService threads = Executors.newFixedThreadPool(4);
+        server.setExecutor(threads);
+        server.start();
+        HttpConnector.Builder b = HttpConnector.builder("web").format(JsonFormat.NEWLINE_DELIMITED).batchSize(8);
+        for (String table : files.keySet()) {
+            b.table(table, "http://127.0.0.1:" + server.getAddress().getPort() + "/" + table)
+                    .schema(table, RandomTables.SCHEMAS.get(table));
+        }
+        return source("HTTP", b.build(), List.of(), List.copyOf(files.keySet()), engine -> () -> {
+            if (requests.get() == 0) {
+                throw new AssertionError("the HTTP server got no request");
+            }
+        }, () -> {
+            server.stop(0);
+            threads.shutdownNow();
         });
     }
 

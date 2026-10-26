@@ -190,6 +190,10 @@ public class SqlCorpusTest {
                     + " ORDER BY a",
             "SELECT a, (a, k) IN (SELECT a, n FROM u WHERE a IS NOT NULL AND n IS NOT NULL) AS i FROM t ORDER BY a",
             "SELECT a FROM t WHERE (a, b) IN (SELECT a, 'x' FROM u) ORDER BY a",
+            // A key of the order with a subquery, as Grafana orders its tables.
+            "SELECT a FROM t ORDER BY (SELECT max(a) FROM u) - a, a",
+            "SELECT a, b FROM t ORDER BY CASE WHEN a IN (SELECT a FROM u) THEN 0 ELSE 1 END, a, b",
+            "SELECT a FROM t ORDER BY (SELECT count(*) FROM u WHERE u.a = t.a) DESC, a",
             "SELECT a FROM t WHERE (a, k) NOT IN (SELECT a, n FROM u WHERE a IS NOT NULL AND n IS NOT NULL)"
                     + " ORDER BY a",
             "SELECT a, (a, b) IN (SELECT a, f FROM u WHERE false) AS i FROM t ORDER BY a",
@@ -940,8 +944,8 @@ public class SqlCorpusTest {
             Map.entry("SELECT unnest(any_value(s)) FROM n",
                     "UNNEST() on a struct column can only be applied as the root element"),
             Map.entry("SELECT unnest(l, recursive := true) FROM n", "Not supported: named arguments"),
-            // Subqueries go in WHERE, HAVING and the select list.
-            Map.entry("SELECT a FROM t ORDER BY (SELECT max(a) FROM u) - a", "Not supported: a subquery here"),
+            // Subqueries go in WHERE, HAVING, the select list and the order of a query without aggregates.
+            Map.entry("SELECT count(*) FROM t ORDER BY (SELECT max(a) FROM u)", "Not supported: a subquery here"),
             Map.entry("SELECT t.a FROM t JOIN u ON t.a = u.a AND u.a IN (SELECT 1)", "Not supported: a subquery here"),
             Map.entry("SELECT a IN (SELECT 1), count(*) FROM t GROUP BY 1", "Not supported: a subquery here"),
             Map.entry("SELECT sum((SELECT 1)) FROM t", "Not supported: a subquery here"),

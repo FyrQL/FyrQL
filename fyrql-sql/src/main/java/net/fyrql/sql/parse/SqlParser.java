@@ -21,6 +21,7 @@ import net.fyrql.sql.ast.QueryBody;
 import net.fyrql.sql.ast.SelectItem;
 import net.fyrql.sql.ast.SqlExpr;
 import net.sf.jsqlparser.parser.CCJSqlParser;
+import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.parser.ParseException;
 import net.sf.jsqlparser.parser.Token;
@@ -30,7 +31,9 @@ import net.sf.jsqlparser.statement.Statements;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -48,7 +51,28 @@ public final class SqlParser {
 
     private static final Pattern LEXICAL_POSITION = Pattern.compile("line (\\d+), column (\\d+)");
 
+    /** The words the parser does not take as names beyond those that SQL:2003 reserves, in alphabetical order. */
+    private static final List<String> RESERVED_WORDS = List.of("ABSENT", "CONNECT_BY_ROOT", "CSV", "DISTINCTROW",
+            "ERRORS", "EXCLUDES", "EXTEND", "FBV", "FINAL", "FORCE", "ILIKE", "IMPORT", "INCLUDES", "MINUS", "NOCYCLE",
+            "OUTPUT", "PIVOT", "PREFERRING", "PREWHERE", "PRIOR", "RETURNING", "SAMPLE", "SCRIPT", "SEMI", "SETTINGS",
+            "SQL_CACHE", "SQL_CALC_FOUND_ROWS", "SQL_NO_CACHE", "STATEMENT", "UNBOUNDED", "UNPIVOT", "USE", "VERIFY",
+            "XMLSERIALIZE", "XOR");
+
+    private static final Set<String> RESERVED = Set.copyOf(RESERVED_WORDS);
+
     private SqlParser() {
+    }
+
+    /**
+     * Returns the words that the parser does not take as names, beyond the
+     * reserved words of SQL:2003, in upper case and in alphabetical order. A
+     * name spelled as one of them is written in double quotes, as a source
+     * called {@code "csv"}.
+     *
+     * @return the words
+     */
+    public static List<String> reservedWords() {
+        return RESERVED_WORDS;
     }
 
     /**
@@ -277,8 +301,30 @@ public final class SqlParser {
         if (next.kind == 0) {
             return new SqlException("Syntax error at end of input", source.end());
         }
+        Token reserved = reservedWord(next);
+        if (reserved != null) {
+            String word = source.originalText(reserved);
+            return new SqlException("Syntax error at or near \"" + word + "\": " + word
+                    + " is a reserved word; quote it as \"" + word + "\"", source.position(reserved));
+        }
         return new SqlException("Syntax error at or near \"" + source.originalText(next) + "\"",
                 source.position(next));
+    }
+
+    /**
+     * Returns the first reserved word among the tokens that the parser read from the one it reports, or null.
+     * JSqlParser tries the forms of a clause and reports the token where the last one started, as {@code FROM} in
+     * {@code SELECT * FROM csv.t}; the tokens it read to the end of its tries hold the word it did not take as a
+     * name.
+     */
+    private static Token reservedWord(Token from) {
+        for (Token t = from; t != null && t.kind != 0; t = t.next) {
+            if (t.image != null && RESERVED.contains(t.image.toUpperCase(Locale.ROOT))
+                    && CCJSqlParserConstants.tokenImage[t.kind].startsWith("<K_")) {
+                return t;
+            }
+        }
+        return null;
     }
 
     private static SqlException lexicalError(TokenMgrException e, SourceText source) {

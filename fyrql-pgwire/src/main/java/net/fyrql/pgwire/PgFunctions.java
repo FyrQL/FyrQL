@@ -214,7 +214,112 @@ final class PgFunctions {
                 new Fixed("quote_ident", 1, 1, DataType.VARCHAR, true, a -> PgCatalog.quoteIdentifier(text(a[0]))),
                 new Fixed("quote_literal", 1, 1, DataType.VARCHAR, true, a -> PgSql.literal(text(a[0]))),
                 new Fixed("pg_size_pretty", 1, 1, DataType.VARCHAR, true, a -> size(((Number) a[0]).longValue())),
-                new Fixed("format", 1, 64, DataType.VARCHAR, false, PgFunctions::format));
+                new Fixed("format", 1, 64, DataType.VARCHAR, false, PgFunctions::format),
+                new Fixed("string_to_array", 2, 3, DataType.listOf(DataType.VARCHAR), false,
+                        PgFunctions::stringToArray),
+                new Fixed("parse_ident", 1, 2, DataType.listOf(DataType.VARCHAR), false, PgFunctions::parseIdent));
+    }
+
+    /**
+     * {@code string_to_array(s, delimiter [, null_string])} of PostgreSQL:
+     * the parts of a string between the delimiters, each character for a
+     * {@code NULL} delimiter, the whole string for an empty one, no part of
+     * an empty string; a part equal to the third argument is {@code NULL}.
+     */
+    static Object stringToArray(Object[] a) {
+        if (a[0] == null) {
+            return null;
+        }
+        String s = text(a[0]);
+        List<String> parts = new ArrayList<>();
+        if (!s.isEmpty()) {
+            if (a[1] == null) {
+                s.codePoints().forEach(c -> parts.add(new String(Character.toChars(c))));
+            } else if (text(a[1]).isEmpty()) {
+                parts.add(s);
+            } else {
+                String delimiter = text(a[1]);
+                int from = 0;
+                for (int at = s.indexOf(delimiter); at >= 0; at = s.indexOf(delimiter, from)) {
+                    parts.add(s.substring(from, at));
+                    from = at + delimiter.length();
+                }
+                parts.add(s.substring(from));
+            }
+        }
+        if (a.length > 2 && a[2] != null) {
+            String none = text(a[2]);
+            parts.replaceAll(p -> none.equals(p) ? null : p);
+        }
+        return parts;
+    }
+
+    /**
+     * {@code parse_ident(name [, strict])} of PostgreSQL: the parts of a
+     * qualified name, a part in double quotes as written, the others in
+     * lower case; unless strict, what follows the name is left out.
+     *
+     * @throws IllegalArgumentException if the text does not start with a name, or more follows when strict
+     */
+    static Object parseIdent(Object[] a) {
+        if (a[0] == null || a.length > 1 && a[1] == null) {
+            return null;
+        }
+        String s = text(a[0]);
+        boolean strict = a.length < 2 || Boolean.TRUE.equals(a[1]);
+        List<String> parts = new ArrayList<>();
+        int i = 0;
+        int n = s.length();
+        while (true) {
+            while (i < n && Character.isWhitespace(s.charAt(i))) {
+                i++;
+            }
+            if (i < n && s.charAt(i) == '"') {
+                StringBuilder b = new StringBuilder();
+                for (i++; ; ) {
+                    if (i >= n) {
+                        throw new IllegalArgumentException("string is not a valid identifier: \"" + s
+                                + "\"; unclosed double quotes");
+                    }
+                    char c = s.charAt(i++);
+                    if (c != '"') {
+                        b.append(c);
+                    } else if (i < n && s.charAt(i) == '"') {
+                        b.append('"');
+                        i++;
+                    } else {
+                        break;
+                    }
+                }
+                if (b.isEmpty()) {
+                    throw new IllegalArgumentException("string is not a valid identifier: \"" + s
+                            + "\"; quoted identifier must not be empty");
+                }
+                parts.add(b.toString());
+            } else {
+                int start = i;
+                while (i < n && (Character.isLetter(s.charAt(i)) || s.charAt(i) == '_'
+                        || i > start && (Character.isDigit(s.charAt(i)) || s.charAt(i) == '$'))) {
+                    i++;
+                }
+                if (i == start) {
+                    throw new IllegalArgumentException("string is not a valid identifier: \"" + s + "\"");
+                }
+                parts.add(s.substring(start, i).toLowerCase(Locale.ROOT));
+            }
+            while (i < n && Character.isWhitespace(s.charAt(i))) {
+                i++;
+            }
+            if (i < n && s.charAt(i) == '.') {
+                i++;
+            } else {
+                break;
+            }
+        }
+        if (strict && i < n) {
+            throw new IllegalArgumentException("string is not a valid identifier: \"" + s + "\"");
+        }
+        return parts;
     }
 
     /** {@code a & b} and {@code a | b} of PostgreSQL over integers, as a {@code BIGINT}. */

@@ -157,6 +157,12 @@ public final class EngineCatalog implements CatalogView {
         return resolver.databasePath();
     }
 
+    /** Names the items of a select list as PostgreSQL does along the path of a database, see {@link DatabasePath}. */
+    @Override
+    public boolean postgresNames() {
+        return databasePath() != null;
+    }
+
     /**
      * Returns a catalog over the same sources in which names resolve as in
      * PostgreSQL along the path of a database, see {@link DatabasePath}, or

@@ -256,7 +256,7 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
      * which are the same, to the table at a location in its current snapshot
      * or the one the named parameters select, and
      * {@code iceberg_snapshots(location)} to its snapshots, each under a
-     * generated name that starts with {@code #}. The location is the
+     * name of {@code #} and the text of the call. The location is the
      * directory of the table or a metadata file, local or in a store of the
      * engine. The named parameters:
      * <ul>
@@ -299,9 +299,8 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
                 resolved.location().metadataFile().version(), resolved.location().metadataFile().size(),
                 resolved.snapshot() == null ? -1L : resolved.snapshot().id());
         String table = calls.computeIfAbsent(key, k -> {
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, new Table(spec, resolved, snapshots));
-            return generated;
+            return callName(TableFunctionProvider.callText(function, arguments, namedArguments),
+                    new Table(spec, resolved, snapshots));
         });
         return TableRef.of(name, table);
     }
@@ -590,5 +589,18 @@ public final class IcebergConnector implements Connector, TableFunctionProvider 
             return new IcebergConnector(name, new IcebergFiles(FileStores.local(Path.of("")), readAhead), absolute,
                     batchSize, recordReads);
         }
+    }
+
+    /**
+     * Keeps the table of a call under {@code #} and the text of the call, the
+     * name the plans show; a call whose text names another table already, as
+     * after its file changed, gets a number as well.
+     */
+    private String callName(String call, Table table) {
+        String generated = CALL_PREFIX + call;
+        while (callTables.putIfAbsent(generated, table) != null) {
+            generated = CALL_PREFIX + call + " #" + callCount.incrementAndGet();
+        }
+        return generated;
     }
 }

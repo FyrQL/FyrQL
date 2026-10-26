@@ -152,7 +152,9 @@ class TpchPgWireTest {
         assertEquals(schema.size(), md.getColumnCount());
         for (int c = 0; c < schema.size(); c++) {
             DataType type = schema.type(c);
-            assertEquals(schema.name(c), md.getColumnLabel(c + 1));
+            // The engine names a call without an alias by its text, as sum(l_quantity) in Q18, the server by its
+            // function, as PostgreSQL does.
+            assertEquals(schema.name(c).replaceAll("^(\\w+)\\(.*\\)$", "$1"), md.getColumnLabel(c + 1));
             assertEquals(pgType(type), md.getColumnTypeName(c + 1), schema.name(c));
             if (type instanceof DataType.Decimal d) {
                 assertEquals(d.precision(), md.getPrecision(c + 1), schema.name(c));

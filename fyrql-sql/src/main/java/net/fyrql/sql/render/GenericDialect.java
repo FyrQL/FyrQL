@@ -295,7 +295,9 @@ public final class GenericDialect extends StandardDialect {
      * evaluates at least as widely: {@code =} or {@code IN} against
      * strings that are not empty, {@code LIKE} with a pattern that is not
      * empty and has no {@code \} or {@code [}, which some databases read as
-     * an escape or a class of characters, and {@code IS NULL}; an
+     * an escape or a class of characters, and no {@code _}, which matches
+     * half of a character outside the BMP in a database that counts in
+     * UTF-16, such as HSQLDB, and {@code IS NULL}; an
      * {@code AND} keeps the hints of its sides, an {@code OR} needs one on
      * both. A string is compared with or without regard to the case and to
      * trailing spaces, so the database may return more rows, never fewer.
@@ -345,7 +347,7 @@ public final class GenericDialect extends StandardDialect {
     /** Tells whether an expression is a pattern of {@code LIKE} that every database reads as FyrQL does. */
     private static boolean pattern(Expression e) {
         return text(e) && ((Expression.Literal) e).value() instanceof String s && s.indexOf('\\') < 0
-                && s.indexOf('[') < 0;
+                && s.indexOf('[') < 0 && s.indexOf('_') < 0;
     }
 
     /** No: the databases differ in the place of {@code NULL}s and in the order of strings. */

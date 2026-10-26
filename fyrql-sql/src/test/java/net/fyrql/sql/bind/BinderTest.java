@@ -181,9 +181,9 @@ class BinderTest {
     }
 
     @Test
-    void subqueriesGoInWhereHavingAndTheSelectListOnly() {
+    void subqueriesGoInWhereHavingTheSelectListAndTheOrderOnly() {
         String here = "Not supported: a subquery here at line 1, column ";
-        assertEquals(here + "26", error("SELECT a FROM t ORDER BY (SELECT 1)").getMessage());
+        assertEquals(here + "33", error("SELECT count(*) FROM t ORDER BY (SELECT 1)").getMessage());
         // EXISTS has the position of its subquery.
         assertEquals(here + "50", error("SELECT t.a FROM t JOIN u ON t.a = u.a AND EXISTS (SELECT 1)").getMessage());
         assertEquals(here + "26", error("SELECT a FROM t GROUP BY (SELECT 1)").getMessage());

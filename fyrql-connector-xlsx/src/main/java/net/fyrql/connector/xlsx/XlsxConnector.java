@@ -242,8 +242,8 @@ public final class XlsxConnector implements Connector, TableFunctionProvider, Fi
 
     /**
      * Binds {@code read_xlsx(path, ...)} to a table of the workbook in the
-     * schema {@code main} under a generated name that starts with {@code #}
-     * and does not appear among the tables of the catalog. The named
+     * schema {@code main} under a name of {@code #} and the text of the call,
+     * which does not appear among the tables of the catalog. The named
      * arguments are those of DuckDB: {@code header} (decided by default),
      * {@code sheet} (the first worksheet by default), {@code range} (such as
      * {@code A1:C10} or {@code A:C}), {@code stop_at_empty} (true by default,
@@ -295,9 +295,7 @@ public final class XlsxConnector implements Connector, TableFunctionProvider, Fi
         Call call = new Call(file.location(), file.version(), file.size(), options);
         String table = calls.computeIfAbsent(call, k -> {
             Table t = lookUp(new Table(file.location(), options, null, ZoneOffset.UTC), file);
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, t);
-            return generated;
+            return callName(TableFunctionProvider.callText(function, arguments, namedArguments), t);
         });
         return TableRef.of(name, table);
     }
@@ -341,9 +339,8 @@ public final class XlsxConnector implements Connector, TableFunctionProvider, Fi
             SheetSchema found = lookUp(new Table(object.location(), read, null, zone), object).schema();
             SheetSchema given = new SheetSchema(found.sheet(), schema, found.firstColumn(), found.dataRow(),
                     found.lastRow(), found.stopAtEmpty(), found.ignoreErrors(), found.rows());
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, new Table(object.location(), read, given, zone));
-            return generated;
+            return callName(TableFunctionProvider.callText("read_" + format, List.of(location), options),
+                    new Table(object.location(), read, given, zone));
         });
         return TableRef.of(name, table);
     }
@@ -551,5 +548,18 @@ public final class XlsxConnector implements Connector, TableFunctionProvider, Fi
             }
             return new XlsxConnector(name, tables, batchSize);
         }
+    }
+
+    /**
+     * Keeps the table of a call under {@code #} and the text of the call, the
+     * name the plans show; a call whose text names another table already, as
+     * after its file changed, gets a number as well.
+     */
+    private String callName(String call, Table table) {
+        String generated = CALL_PREFIX + call;
+        while (callTables.putIfAbsent(generated, table) != null) {
+            generated = CALL_PREFIX + call + " #" + callCount.incrementAndGet();
+        }
+        return generated;
     }
 }

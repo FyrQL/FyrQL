@@ -20,13 +20,16 @@ import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
 import net.fyrql.core.plan.PlanNode.Aggregation;
+import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.PlanNode.Pushed;
 import net.fyrql.core.plan.PlanNode.SortKey;
 import net.fyrql.core.plan.Plans;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.function.Function;
 
@@ -47,6 +50,12 @@ import java.util.function.Function;
  * into the scan as hints as well, which the connector sees again when the
  * scan is opened. A connector's answer is checked against the rules of the
  * negotiation.
+ * <p>
+ * When the connector takes over every filter and the order, the columns that
+ * only the filters read need not come back: the pass asks once more with
+ * them at the end of the request, as columns the engine does not need, and
+ * a connector that leaves them out of its batches gets a scan of fewer
+ * columns, under the projection renumbered.
  */
 final class ScanPushdown {
 
@@ -187,11 +196,101 @@ final class ScanPushdown {
                 throw new IllegalStateException("The connector " + connector.name() + " breaks the rules of the scan "
                         + "negotiation for " + scan.table() + ": " + broken);
             }
+            if (remaining.isEmpty() && !plan.aggregationAccepted() && (order.isEmpty() || plan.orderAccepted())) {
+                PlanNode narrowed = withoutFilterColumns(connector, filters, order,
+                        plan.limitAccepted() ? limitRows : OptionalLong.empty());
+                if (narrowed != null) {
+                    return narrowed;
+                }
+            }
             Pushed pushed = new Pushed(accepted, plan.limitAccepted() ? limitRows : OptionalLong.empty(),
                     plan.orderAccepted() ? order : List.of(),
                     plan.aggregationAccepted() ? aggregation : Optional.empty(), remaining);
             return rebuild(new PlanNode.Scan(scan.table(), scan.tableSchema(), scan.columns(), scan.fields(), pushed),
                     remaining, plan.aggregationAccepted(), order, plan.orderAccepted(), plan.limitAccepted());
+        }
+
+        /**
+         * Asks the connector, which takes over the filters, the order and the limit, to leave out the columns that
+         * only the filters read, with those columns at the end of the request. Returns the chain over the scan that
+         * leaves them out, or {@code null} if no column is read by the filters alone or the connector keeps them.
+         */
+        private PlanNode withoutFilterColumns(Connector connector, List<Expression> filters, List<SortKey> order,
+                OptionalLong limitRows) {
+            if (project == null) {
+                return null;
+            }
+            BitSet needed = new BitSet();
+            for (NamedExpression c : project.columns()) {
+                Expressions.columns(c.expression(), needed);
+            }
+            int width = scan.columns().size();
+            int kept = needed.cardinality();
+            if (kept == width) {
+                return null;
+            }
+            // The needed columns first, in their order, then those only the filters read.
+            int[] position = new int[width];
+            List<Integer> columns = new ArrayList<>();
+            List<List<String>> fields = new ArrayList<>();
+            for (int pass = 0; pass < 2; pass++) {
+                for (int i = 0; i < width; i++) {
+                    if (needed.get(i) == (pass == 0)) {
+                        position[i] = columns.size();
+                        columns.add(scan.columns().get(i));
+                        fields.add(scan.fields().get(i));
+                    }
+                }
+            }
+            List<Expression> moved = new ArrayList<>();
+            for (Expression f : filters) {
+                moved.add(renumber(f, position));
+            }
+            List<SortKey> movedOrder = new ArrayList<>();
+            for (SortKey k : order) {
+                movedOrder.add(new SortKey(position[k.column()], k.ascending(), k.nullsFirst()));
+            }
+            PlanNode.Scan reordered = new PlanNode.Scan(scan.table(), scan.tableSchema(), columns, fields,
+                    Pushed.NONE);
+            ScanRequest request = new ScanRequest(ColumnPath.of(reordered), moved, limitRows, movedOrder,
+                    Optional.empty(), kept);
+            ScanPlan plan = connector.plan(scan.table(), request);
+            if (!plan.leavesOutColumns()) {
+                return null;
+            }
+            String broken = null;
+            if (!plan.columns().equals(request.columns())) {
+                broken = "it reads " + plan.columns() + " instead of " + request.columns();
+            } else if (!plan.acceptedFilters().equals(moved) || plan.limitAccepted() != limitRows.isPresent()
+                    || plan.orderAccepted() != !movedOrder.isEmpty()) {
+                broken = "it leaves out the columns of the filters without taking over the filters, the order and "
+                        + "the limit";
+            } else if (!plan.output().types().equals(reordered.columnSchema().types().subList(0, kept))) {
+                broken = "it plans the columns " + plan.output() + " instead of the first " + kept + " of "
+                        + reordered.columnSchema();
+            }
+            if (broken != null) {
+                throw new IllegalStateException("The connector " + connector.name() + " breaks the rules of the scan "
+                        + "negotiation for " + scan.table() + ": " + broken);
+            }
+            Pushed pushed = new Pushed(moved, limitRows, movedOrder, Optional.empty(), List.of(),
+                    OptionalInt.of(kept));
+            PlanNode node = new PlanNode.Scan(scan.table(), scan.tableSchema(), columns, fields, pushed);
+            List<NamedExpression> renumbered = new ArrayList<>();
+            for (NamedExpression c : project.columns()) {
+                renumbered.add(new NamedExpression(c.name(), renumber(c.expression(), position)));
+            }
+            node = new PlanNode.Project(node, renumbered);
+            if (aggregate != null) {
+                node = new PlanNode.Aggregate(node, aggregate.groupColumns(), aggregate.aggregates());
+            }
+            if (sort != null && movedOrder.isEmpty()) {
+                node = new PlanNode.Sort(node, sort.keys());
+            }
+            if (limit != null && !(limitRows.isPresent() && limit.offset() == 0)) {
+                node = new PlanNode.Limit(node, limit.count(), limit.offset());
+            }
+            return node;
         }
 
         /** The chain over the negotiated scan, without what the connector took over. */
@@ -217,6 +316,12 @@ final class ScanPushdown {
             }
             return node;
         }
+    }
+
+    /** Gives each column of an expression the position the mapping gives it. */
+    private static Expression renumber(Expression e, int[] position) {
+        return Expressions.transform(e, x -> x instanceof Expression.Column c
+                ? new Expression.Column(position[c.index()], c.type()) : x);
     }
 
     private static List<Integer> remap(List<Integer> columns, int[] mapping) {

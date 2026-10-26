@@ -308,7 +308,7 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
     /**
      * Binds {@code read_csv(path, ...)} and {@code read_csv_auto}, which are
      * the same, to a table of the file in the schema {@code main} under a
-     * generated name that starts with {@code #} and does not appear among
+     * name of {@code #} and the text of the call, which does not appear among
      * the tables of the catalog. The named arguments are those of DuckDB:
      * {@code header} (a boolean, or a value that casts to one; detected by
      * default), {@code delim} or {@code sep} (one character, {@code '\t'}
@@ -394,9 +394,8 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         String table = calls.computeIfAbsent(call, k -> {
             Table t = new Table(local, call.delimiter(), call.quote(), false, call.nullString(), charset, null,
                     -1, call.dateFormat(), call.timestampFormat(), gzip, object, call.zone());
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, sniff(t, call.header(), sampleRows));
-            return generated;
+            return callName(TableFunctionProvider.callText(function, arguments, namedArguments),
+                    sniff(t, call.header(), sampleRows));
         });
         return TableRef.of(name, table);
     }
@@ -524,10 +523,9 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
         Path local = absolute;
         FileObject object = remote;
         String table = calls.computeIfAbsent(call, k -> {
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, new Table(local, delimiter, quote, header, nullString, charset, schema, -1,
+            return callName(TableFunctionProvider.callText("read_" + format, List.of(location), options),
+                    new Table(local, delimiter, quote, header, nullString, charset, schema, -1,
                     dateFormat, timestampFormat, gzip, object, zone));
-            return generated;
         });
         return TableRef.of(name, table);
     }
@@ -1294,5 +1292,18 @@ public final class CsvConnector implements Connector, TableFunctionProvider, Fil
             }
             return new CsvConnector(name, withSchemas, pending, batchSize, sampleRows, charset, splitSize);
         }
+    }
+
+    /**
+     * Keeps the table of a call under {@code #} and the text of the call, the
+     * name the plans show; a call whose text names another table already, as
+     * after its file changed, gets a number as well.
+     */
+    private String callName(String call, Table table) {
+        String generated = CALL_PREFIX + call;
+        while (callTables.putIfAbsent(generated, table) != null) {
+            generated = CALL_PREFIX + call + " #" + callCount.incrementAndGet();
+        }
+        return generated;
     }
 }

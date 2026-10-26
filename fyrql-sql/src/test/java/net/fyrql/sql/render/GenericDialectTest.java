@@ -173,7 +173,7 @@ class GenericDialectTest {
         GenericDialect d = GenericDialect.DEFAULT;
         Expression note = col(S, 2);
         List<Expression> hints = List.of(eq(note, lit("ab")), eq(lit("ab"), note), in(note, lit("a"), lit("b")),
-                like(note, lit("a%_")), isNull(note), isNull(col(S, 6)), gt(col(S, 0), lit(1)),
+                like(note, lit("a%")), isNull(note), isNull(col(S, 6)), gt(col(S, 0), lit(1)),
                 or(eq(note, lit("x")), gt(col(S, 0), lit(1))), and(gt(col(S, 0), lit(1)), eq(note, lit("x"))));
         for (Expression e : hints) {
             assertEquals(Optional.of(e), d.hint(e), e.toString());
@@ -181,6 +181,8 @@ class GenericDialectTest {
         List<Expression> none = List.of(eq(note, lit("")), in(note, lit("a"), lit("")),
                 in(note, lit("a"), nullOf(DataType.VARCHAR)), ne(note, lit("ab")), lt(note, lit("m")),
                 between(note, lit("a"), lit("b")), like(note, lit("a\\%")), like(note, lit("[a]%")),
+                // HSQLDB takes a character outside the BMP for two, which _ does not match.
+                like(note, lit("a%_")), like(note, lit("__")),
                 like(note, lit("")), ilike(note, lit("a%")), isNotNull(note), not(eq(note, lit("x"))),
                 or(ne(note, lit("x")), gt(col(S, 0), lit(1))), eq(call("upper", note), lit("A")),
                 eq(note, col(S, 2)), gt(col(S, 6), lit(1.5)));

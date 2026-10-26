@@ -316,9 +316,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
         }
         FileObject file = files.object(location);
         String table = calls.computeIfAbsent(List.of(ParquetFiles.Version.of(file)), v -> {
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, files.table(file.location(), List.of(file)));
-            return generated;
+            return callName(TableFunctionProvider.callText("read_" + format, List.of(location), options),
+                    files.table(file.location(), List.of(file)));
         });
         return TableRef.of(name, table);
     }
@@ -326,8 +325,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
     /**
      * Binds {@code read_parquet(path)} and {@code parquet_scan(path)}, which
      * are the same, to a table of the files of the path in the schema
-     * {@code main} under a generated name that starts with {@code #} and
-     * does not appear among the tables of the catalog. The path is a file,
+     * {@code main} under a name of {@code #} and the text of the call,
+     * which does not appear among the tables of the catalog. The path is a file,
      * a directory or a pattern with {@code *} and {@code ?} in the name of
      * the file, local or in a store of the engine such as
      * {@code s3://bucket/key}. The same call on unchanged files gives the same table; a
@@ -362,9 +361,8 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
             versions.add(ParquetFiles.Version.of(file));
         }
         String table = calls.computeIfAbsent(versions, v -> {
-            String generated = CALL_PREFIX + callCount.incrementAndGet();
-            callTables.put(generated, files.table(location, found));
-            return generated;
+            return callName(TableFunctionProvider.callText(function, arguments, namedArguments),
+                    files.table(location, found));
         });
         return TableRef.of(name, table);
     }
@@ -595,5 +593,18 @@ public final class ParquetConnector implements Connector, TableFunctionProvider,
             }
             return new ParquetConnector(name, files, absolute, tables, batchSize, recordReads);
         }
+    }
+
+    /**
+     * Keeps the table of a call under {@code #} and the text of the call, the
+     * name the plans show; a call whose text names another table already, as
+     * after its file changed, gets a number as well.
+     */
+    private String callName(String call, ParquetFiles.Table table) {
+        String generated = CALL_PREFIX + call;
+        while (callTables.putIfAbsent(generated, table) != null) {
+            generated = CALL_PREFIX + call + " #" + callCount.incrementAndGet();
+        }
+        return generated;
     }
 }

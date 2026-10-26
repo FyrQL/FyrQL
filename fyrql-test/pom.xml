@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.18.0</version>
+		<version>0.19.0</version>
 	</parent>
 
 	<artifactId>fyrql-test</artifactId>
@@ -459,6 +459,24 @@
 								<include>net/fyrql/test/SqlCorpusJdbcTest.java</include>
 							</includes>
 							<reportNameSuffix>nopushdown</reportNameSuffix>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+			<plugin>
+				<!-- The JARs of the engine, the connectors and the JDBC driver with what they need, for ModulePathTest. -->
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-dependency-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>module-path</id>
+						<phase>generate-test-resources</phase>
+						<goals>
+							<goal>build-classpath</goal>
+						</goals>
+						<configuration>
+							<includeScope>runtime</includeScope>
+							<outputFile>${project.build.directory}/module-path.txt</outputFile>
 						</configuration>
 					</execution>
 				</executions>

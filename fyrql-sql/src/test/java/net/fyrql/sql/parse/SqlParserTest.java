@@ -627,4 +627,29 @@ class SqlParserTest {
         assertEquals("Empty query", error("  -- nothing").reason());
         assertEquals("Empty query", error("").reason());
     }
+
+    @Test
+    void aReservedWordAsANameIsNamedInTheError() {
+        SqlException e = error("SELECT * FROM csv.t");
+        assertEquals("Syntax error at or near \"csv\": csv is a reserved word; quote it as \"csv\"", e.reason());
+        assertEquals(new Position(1, 15), e.position());
+        e = error("SELECT csv FROM t");
+        assertEquals("Syntax error at or near \"csv\": csv is a reserved word; quote it as \"csv\"", e.reason());
+        assertEquals(new Position(1, 8), e.position());
+        e = error("SELECT a AS Sample FROM t");
+        assertEquals("Syntax error at or near \"Sample\": Sample is a reserved word; quote it as \"Sample\"",
+                e.reason());
+        assertEquals(new Position(1, 13), e.position());
+        e = error("SELECT *\nFROM t JOIN csv.u ON true");
+        assertEquals(new Position(2, 13), e.position());
+        e = error("WITH output AS (SELECT 1) SELECT * FROM output");
+        assertEquals(new Position(1, 6), e.position());
+        e = error("SELECT t.prior FROM t");
+        assertEquals(new Position(1, 10), e.position());
+        // An error before the word is reported where it is.
+        assertEquals("Syntax error at or near \"c\"", error("SELECT a b c FROM t WHERE csv = 1").reason());
+        assertEquals("Syntax error at or near \"=\"", error("SELECT * FROM t WHERE x = = 1 AND csv = 1").reason());
+        // In double quotes, the words are names.
+        assertEquals(2, select("SELECT \"csv\", \"sample\" FROM \"csv\".t AS \"output\"").items().size());
+    }
 }

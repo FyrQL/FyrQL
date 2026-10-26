@@ -34,8 +34,21 @@ public record TableRef(String source, String schema, String table) {
         return new TableRef(source, MAIN, table);
     }
 
+    /**
+     * Tells whether the table is one a table function made for a call, such
+     * as {@code read_parquet('orders.parquet')}: its name is {@code #} and
+     * the text of the call, a name that no statement can give.
+     */
+    public boolean isCall() {
+        return table.startsWith("#") && table.indexOf('(') > 0;
+    }
+
+    /**
+     * Returns the three parts joined by dots, or for the table of a call
+     * the call, as the plans and the messages show it.
+     */
     @Override
     public String toString() {
-        return source + "." + schema + "." + table;
+        return isCall() ? table.substring(1) : source + "." + schema + "." + table;
     }
 }

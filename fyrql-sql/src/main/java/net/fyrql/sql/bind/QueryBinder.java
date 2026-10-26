@@ -1170,6 +1170,15 @@ final class QueryBinder {
                 aliasOutputs.putIfAbsent(SqlTrees.key(item.alias()), i);
             }
         }
+        for (int i = 0; i < items.size() && catalog.postgresNames(); i++) {
+            // PostgreSQL groups and orders by the name of an output column without an alias as well, as count.
+            Item item = items.get(i);
+            if (item.alias() == null && item.expression() != null
+                    && !(item.expression() instanceof SqlExpr.Identifier)) {
+                aliases.putIfAbsent(SqlTrees.key(item.name()), item.expression());
+                aliasOutputs.putIfAbsent(SqlTrees.key(item.name()), i);
+            }
+        }
         List<Conjunct> conjuncts = new ArrayList<>();
         if (s.where() != null) {
             plan = where(s.where(), plan, whereScope, aliases, ctes, correlation == null ? null : conjuncts);
@@ -1223,13 +1232,16 @@ final class QueryBinder {
             ExpressionBinder windowArguments = new ExpressionBinder(context, scope, aliases, null, null);
             Expression qualify = qualify(s, windowing, new ExpressionBinder(context, scope, aliases, null,
                     windowing.hook(windowArguments, null)));
+            // A key of the order may hold a subquery, which is joined as those of the select list are.
             ExpressionBinder orderBinder = new ExpressionBinder(context, scope, aliases, null,
-                    windowing.hook(windowArguments, unnesting.hook(windowArguments, null)));
+                    windowing.hook(windowArguments, unnesting.hook(windowArguments, null)), subqueries);
             List<Order> orders = orders(orderBy, outputs, aliasOutputs, orderBinder);
             int ordered = orders.size();
             orders.addAll(orders(distinctOn(s, correlated), outputs, aliasOutputs, orderBinder));
             plan = subqueries.attach(plan);
             outputs.replaceAll(subqueries::resolve);
+            orders.replaceAll(o -> o.expression() == null ? o
+                    : new Order(o.output(), subqueries.resolve(o.expression()), o.ascending(), o.nullsFirst()));
             plan = windowing.plan(plan, outputs, orders);
             if (qualify != null) {
                 plan = new PlanNode.Filter(plan, windowing.resolve(qualify));
@@ -1363,8 +1375,9 @@ final class QueryBinder {
                     }
                 }
                 case SelectItem.ExpressionItem e -> items.add(new Item(e.expression(), null,
-                        e.alias() != null ? e.alias() : name(e.expression(), scope), e.alias(),
-                        e.expression().position()));
+                        e.alias() != null ? e.alias() : catalog.postgresNames()
+                                ? PgLabels.name(e.expression(), id -> name(id, scope)) : name(e.expression(), scope),
+                        e.alias(), e.expression().position()));
             }
         }
         return items;

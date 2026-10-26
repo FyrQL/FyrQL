@@ -177,8 +177,8 @@ class JsonDifferentialTest {
         try (FyrQL on = FyrQL.builder().register(JsonConnector.builder("json").build()).pushdown(true).build();
                 FyrQL off = FyrQL.builder().register(JsonConnector.builder("json").build()).pushdown(false).build()) {
             String explain = on.explain(sql);
-            assertTrue(explain.contains("Scan json.main.#1 (id BIGINT, p.name VARCHAR, p.home.city VARCHAR)\n"),
-                    explain);
+            assertTrue(explain.contains("Scan read_json('" + people + "', sample_size = 1) (id BIGINT,"
+                    + " p.name VARCHAR, p.home.city VARCHAR)\n"), explain);
             // The age and the zip of Bob do not fit their types, but are never read.
             List<Object[]> rows = on.rows(sql);
             assertEquals("[[1, Ann, Rome], [2, Bob, Oslo]]", rows.stream().map(Arrays::toString).toList().toString());

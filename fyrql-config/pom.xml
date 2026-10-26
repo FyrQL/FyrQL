@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.18.0</version>
+		<version>0.19.0</version>
 	</parent>
 
 	<artifactId>fyrql-config</artifactId>
@@ -197,6 +197,11 @@
 							</filters>
 							<transformers>
 								<transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+								<!-- The text of the MPL 2.0 once; the filter above leaves out every other META-INF/LICENSE. -->
+								<transformer implementation="org.apache.maven.plugins.shade.resource.IncludeResourceTransformer">
+									<resource>META-INF/LICENSE</resource>
+									<file>${project.basedir}/../LICENSE</file>
+								</transformer>
 							</transformers>
 						</configuration>
 					</execution>

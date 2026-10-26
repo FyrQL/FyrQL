@@ -67,7 +67,7 @@ Sort #0, #1
             Join INNER ON l#0 = r#0 [codegen] [parallel]
               Scan catalog.main.products (sku VARCHAR, name VARCHAR, price DOUBLE)
               Project #1 AS sku, #2 AS quantity, CAST(#0 AS BIGINT) AS "#key0" [codegen] [parallel]
-                Scan shop.main.orders (customer_id INTEGER, sku VARCHAR, quantity INTEGER, status VARCHAR, order_date DATE) [pushed: WHERE ((#3 = 'shipped') AND (#4 >= DATE '2026-02-01'))]
+                Scan shop.main.orders (customer_id INTEGER, sku VARCHAR, quantity INTEGER, status VARCHAR, order_date DATE) [pushed: SELECT #0, #1, #2 WHERE ((#3 = 'shipped') AND (#4 >= DATE '2026-02-01'))]
 == Rows
 [east, Desk lamp, 3, 73.5]
 [east, Notebook, 20, 65.0]
@@ -76,7 +76,7 @@ Sort #0, #1
 [south, Monitor arm, 2, 178.0]
 [south, Office chair, 2, 298.0]
 == Statements the database received
-SELECT t."customer_id", t."sku", t."quantity", t."status", t."order_date" FROM "public"."orders" t WHERE ((t."status" = 'shipped') AND (t."order_date" >= DATE '2026-02-01'))
+SELECT t."customer_id", t."sku", t."quantity" FROM "public"."orders" t WHERE ((t."status" = 'shipped') AND (t."order_date" >= DATE '2026-02-01'))
 ```
 
 A test of the example checks that it prints exactly this.
@@ -85,7 +85,8 @@ A test of the example checks that it prints exactly this.
 
 - **`[pushed: ...]`** on the scan of the orders: the database took over the filter, and
   the last line shows the statement it received. Only the matching orders leave the
-  database.
+  database, and only with the columns `#0` to `#2` that the query needs: `status` and
+  `order_date`, which only the filter reads, stay there.
 - **The joins and the grouping** run in the engine, since the three tables are in three
   sources: the orders are joined with the four products first, then with the customers.
   Two tables of the same database would be joined in the database.

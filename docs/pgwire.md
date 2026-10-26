@@ -8,13 +8,15 @@ Part of the [FyrQL manual](manual.md).
 - [psycopg](#psycopg)
 - [pgjdbc and DBeaver](#pgjdbc-and-dbeaver)
 - [Metabase](#metabase)
+- [Grafana](#grafana)
+- [Superset](#superset)
 
 The module `fyrql-pgwire` is a server for an engine that speaks the wire protocol of
 PostgreSQL, version 3.0, so that psql, psycopg, the JDBC driver of PostgreSQL and the
-tools built on them, such as DBeaver and Metabase, query the sources of FyrQL without a
-driver of their own. It needs nothing but the JDK. The JAR of `fyrql-pgwire-all` holds
-the server with the engine, code generation and all connectors, without Arrow, gRPC and
-Netty, and starts it from a configuration file. This builds it as
+tools built on them, such as DBeaver, Metabase, Grafana and Superset, query the sources of
+FyrQL without a driver of their own. It needs nothing but the JDK. The JAR of
+`fyrql-pgwire-all` holds the server with the engine, code generation and all connectors,
+without Arrow, gRPC and Netty, and starts it from a configuration file. This builds it as
 `fyrql-pgwire-all/target/fyrql-pgwire-all-<version>.jar`:
 
 ```
@@ -208,8 +210,8 @@ while the names do. The owner of every object is `fyrql`. The functions that cli
 over the catalogs are there as well: `format_type`, `pg_get_userbyid`, `to_regclass`,
 `has_table_privilege` and its kin, which always grant, the visibility of objects, which
 they always have, `obj_description` and `col_description`, which are `NULL`, the texts of
-definitions such as `pg_get_indexdef` and `pg_get_viewdef`, which are `NULL` too, and the
-sizes of relations, which are 0.
+definitions such as `pg_get_indexdef` and `pg_get_viewdef`, which are `NULL` too, the
+sizes of relations, which are 0, and `string_to_array` and `parse_ident`.
 
 **Rewriting.** The engine follows DuckDB, and the server rewrites the forms of PostgreSQL
 that it does not take before the engine sees a statement: casts to `regclass`, `regtype`,
@@ -218,13 +220,28 @@ functions and types; `x = ANY(list)` and `x <> ALL(list)`; array literals such a
 `'{a,b}'::text[]`; `COLLATE`; `current_user`, `session_user`, `user`, `current_role`,
 `current_catalog`, `current_schema`, `current_schemas`, `current_setting` of the
 parameters of the server, `version()` and `pg_backend_pid()`; strings in `$tag$`;
-keywords as labels after `AS`; `generate_series` in `FROM`; `array(SELECT ...)`; and the
-subqueries of the `\d` commands of psql. One rule
+keywords as labels after `AS`; `generate_series`, `string_to_array` and `parse_ident` in
+`FROM`; `array(SELECT ...)`; `to_date` and `to_timestamp` with a pattern, which become
+`strptime`; `generate_subscripts` and a scalar subquery over `pg_sequence`, which read
+catalogs without rows here; and the subqueries of the `\d` commands of psql. One rule
 matters for queries of one's own: `~`, `~*`, `!~` and `!~*` match a part of the string, as
-in PostgreSQL, where elsewhere in FyrQL `~` matches the whole string, as in DuckDB. The
-label of an output column that is no plain column follows FyrQL, as `lower(x)` where
-PostgreSQL says `lower`, except for the forms above that the server replaces, which get
-the label of PostgreSQL, as `version`.
+in PostgreSQL, where elsewhere in FyrQL `~` matches the whole string, as in DuckDB.
+
+**Labels.** An output column without an alias gets the label PostgreSQL gives it, not the
+one of FyrQL: a column its name, a call its function (`lower` for `lower(x)`, `count` for
+`count(*)`, `btrim` for `trim(x)`), a cast the name of its operand or else of its type
+(`int4` for `1::int`, `date` for `CAST(NULL AS date)`), `CASE`, `COALESCE`, `NULLIF`,
+`GREATEST`, `LEAST`, `EXISTS` and `ARRAY` their keyword, a scalar subquery the name of its
+column, and every other expression `?column?`, as an operator, a literal or `true`.
+`GROUP BY` and `ORDER BY` take these labels as names, as in
+`SELECT count(*) FROM t ORDER BY count`.
+The columns of a subquery are named by the same rule, but each name once, as in DuckDB:
+`SELECT * FROM (SELECT 1, 2) s` has the columns `?column?` and `?column?_1`, where
+PostgreSQL repeats the label. A cast to `varchar` takes the name
+`text`, the type of the server for strings, where PostgreSQL takes `varchar`; and two
+forms keep the name of the function the parser makes of them: `position(a IN b)` is
+`strpos` and `EXTRACT(year FROM d)` is `date_part`. A test compares the labels of some 90
+items with those of PostgreSQL 18.
 
 **Types.** The server gives the types of FyrQL these types of PostgreSQL:
 
@@ -344,3 +361,25 @@ Metabase connects with a database of the type PostgreSQL, with host, port, the s
 the database name, and user and password; it synchronizes the schemas, tables and columns,
 fingerprints the columns, and answers questions of the query builder and native queries.
 This was tried with Metabase 0.64.3.2.
+
+## Grafana
+
+Grafana connects with a data source of the type PostgreSQL, with host and port, the
+source as the database, user and password, and TLS mode `disable` unless the server has
+TLS. `Save & test` passes. The query builder lists the tables of the database, those on
+the search path without their schema, and their columns, as it reads them from
+`information_schema` with `string_to_array` and `parse_ident`; tables, time series with
+`$__timeFilter`, `$__timeGroup`, `$__timeGroupAlias`, `$__time` and `$__timeEpoch`, and
+variables of a query, also with `__text` and `__value`, run as in PostgreSQL. This was tried
+with Grafana 13.2.4, through its HTTP API.
+
+## Superset
+
+Superset connects with a database such as
+`postgresql+psycopg2://alice:secret@localhost:5433/files`. The test of the connection
+passes; it lists the schemas, the tables and their columns through the dialect of
+SQLAlchemy for PostgreSQL, creates datasets, runs queries in SQL Lab, and draws charts with
+aggregates, filters, the time grains of `DATE_TRUNC` and time ranges, whose bounds are
+calls of `TO_DATE` and `TO_TIMESTAMP` with a pattern. A table has no primary key and
+no identity column here, as FyrQL keeps none. This was tried with Superset 6.1.0 on Python
+3.11 with SQLAlchemy 1.4.54 and psycopg2 2.9.13, through its REST API.
