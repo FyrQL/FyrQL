@@ -61,13 +61,13 @@ warehouse first.
   Python reads through ADBC into pyarrow and pandas. A server that speaks the wire
   protocol of PostgreSQL, also in one executable JAR, lets psql, psycopg, DBeaver,
   Metabase, Grafana and Superset query it as they query PostgreSQL, the other sources by
-  `source.schema.table`.
+  `source.schema.table`. From 1.0.0 on, both servers come as Docker images as well.
   Rules for the files that statements may read and write, which the servers close by
   default, time limits for queries, and sessions with their own time zone, search path
   and timeout for each connection and client let others use an engine.
   See [JDBC driver](docs/manual.md#jdbc-driver),
   [Flight SQL server](docs/manual.md#flight-sql-server),
-  [PostgreSQL wire protocol server](docs/pgwire.md),
+  [PostgreSQL wire protocol server](docs/pgwire.md), [Docker](docs/pgwire.md#docker),
   [File access](docs/manual.md#file-access), [Time limits](docs/manual.md#time-limits),
   [Sessions](docs/manual.md#sessions) and [Spring Boot](docs/spring-boot.md).
 - **Observable.** `EXPLAIN ANALYZE` runs a query and shows for each node of its plan the

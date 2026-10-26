@@ -597,6 +597,9 @@ connection; with more sources, a query reaches the tables of the others by three
 such as `shop.main.customers`. A column without an alias has the label PostgreSQL gives
 it, such as `count` for `count(*)`.
 
+From 1.0.0 on, the server also comes as a Docker image, `ghcr.io/fyrql/fyrql-pgwire`,
+which takes the file from a volume; see [Docker](pgwire.md#docker).
+
 More: [PostgreSQL wire protocol server](pgwire.md), [psql](pgwire.md#psql),
 [psycopg](pgwire.md#psycopg).
 

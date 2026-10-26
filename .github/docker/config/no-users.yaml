@@ -1,0 +1,7 @@
+# A configuration without users, with which the server must refuse to listen on an
+# address other hosts reach, as on the 0.0.0.0 of the image.
+
+sources:
+  - name: files
+    type: csv
+    directory: ../data

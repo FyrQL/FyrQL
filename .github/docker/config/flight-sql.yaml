@@ -1,0 +1,19 @@
+# The configuration of the smoke test of the image of the Flight SQL server, mounted as
+# /config/fyrql.yaml, with the data under /data and the JDBC driver of HSQLDB under
+# /drivers. The password comes from the environment.
+
+sources:
+  # The CSV files of the data directory, resolved against the directory of this file.
+  - name: files
+    type: csv
+    directory: ../data
+  # A database in memory, through a driver that is not in the image.
+  - name: hsql
+    type: jdbc
+    url: jdbc:hsqldb:mem:smoke
+    user: SA
+    password: ""
+
+server:
+  users:
+    smoke: ${env:FYRQL_SMOKE_PASSWORD}

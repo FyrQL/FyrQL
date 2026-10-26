@@ -4,6 +4,7 @@ Part of the [FyrQL manual](manual.md).
 
 ## Contents
 
+- [Docker](#docker)
 - [psql](#psql)
 - [psycopg](#psycopg)
 - [pgjdbc and DBeaver](#pgjdbc-and-dbeaver)
@@ -279,6 +280,71 @@ The other errors have the SQLSTATEs of FyrQL, which are those of PostgreSQL, suc
 `42601` for a syntax error, `42P01` for a table and `42703` for a column that does not
 exist, with the position in the text where FyrQL has one, and `XX000` for an
 error of a source.
+
+## Docker
+
+From 1.0.0 on, every release publishes an image of the server in the GitHub Container
+Registry, for amd64 and arm64: `ghcr.io/fyrql/fyrql-pgwire:<version>`, also under the
+tags of its minor and major version, such as `1.0` and `1`, and `latest`. It holds the
+JAR on a JRE 21 of Eclipse Temurin on Ubuntu and starts the server as the user 10001 from
+`/config/fyrql.yaml` on `0.0.0.0` and port 5433:
+
+```
+docker run -p 5433:5433 -v "$PWD/conf:/config:ro" -v "$PWD/data:/data:ro" \
+  -e FYRQL_PASSWORD ghcr.io/fyrql/fyrql-pgwire:<version>
+```
+
+with a file `conf/fyrql.yaml` such as
+
+```yaml
+sources:
+  - name: files
+    type: csv
+    directory: /data
+
+pgwire:
+  users:
+    alice: ${env:FYRQL_PASSWORD}
+```
+
+after which psql, DBeaver or Metabase connect to `localhost:5433` as `alice`.
+
+- As the server listens on `0.0.0.0`, the section `pgwire` must name `users`; without,
+  it does not start. The passwords come from the environment or the secrets of the
+  platform through `${env:NAME}`, not from the file or the image.
+- `/config` holds the file and what it names, such as the certificate and the key of
+  TLS; without TLS, the server warns that queries cross the network in plain text, and
+  TLS may also come from a proxy in front of it. A relative path in the file is resolved
+  against `/config`, so that `../data` is `/data` too.
+- `/data` holds the files of the sources; statements read and write files only as far as
+  the [file access](manual.md#file-access) allows, and writing needs a volume the user
+  10001 may write to.
+- `/drivers` holds the JDBC drivers of the databases of sources of the type `jdbc`, such
+  as `-v "$PWD/drivers:/drivers:ro"` with the JAR of the driver of PostgreSQL; they are on
+  the class path of the server.
+- The heap may take three quarters of the memory of the container, and the memory budget
+  is half the heap unless the file sets `memoryBudget`; spill files go to `/tmp` of the
+  container. `JAVA_TOOL_OPTIONS`, such as `-e JAVA_TOOL_OPTIONS=-Xmx4g`, sets further
+  options of the JVM. Arguments after the image replace the default ones, such as
+  `/config/other.yaml --host 0.0.0.0 --port 6543`.
+- `docker stop` ends the server as Ctrl+C does, and the server closes the engine.
+
+In a Compose file, next to Metabase or Grafana, the service is
+
+```yaml
+services:
+  fyrql:
+    image: ghcr.io/fyrql/fyrql-pgwire:<version>
+    ports: ["5433:5433"]
+    volumes: ["./conf:/config:ro", "./data:/data:ro"]
+    environment:
+      FYRQL_PASSWORD: ${FYRQL_PASSWORD}
+```
+
+and the other services reach it as `fyrql:5433`. The images have attestations of where
+they were built, signed by GitHub, which `gh attestation verify
+oci://ghcr.io/fyrql/fyrql-pgwire:<version> --owner FyrQL` checks. The image of the
+[Flight SQL server](manual.md#docker) works the same way.
 
 ## psql
 

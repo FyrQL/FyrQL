@@ -32,11 +32,13 @@ that run, each with its output.
 - [Flight SQL server](#flight-sql-server)
   - [Python](#python)
   - [JDBC tools](#jdbc-tools)
+  - [Docker](#docker)
 - [PostgreSQL wire protocol server](pgwire.md)
   - [psql](pgwire.md#psql)
   - [psycopg](pgwire.md#psycopg)
   - [pgjdbc and DBeaver](pgwire.md#pgjdbc-and-dbeaver)
   - [Metabase](pgwire.md#metabase)
+  - [Docker](pgwire.md#docker)
 - [Spring Boot](spring-boot.md)
 - [Supported SQL](#supported-sql)
   - [Time zone](#time-zone)
@@ -1642,6 +1644,22 @@ its Arrow type, so that `DECIMAL(p,s)` and `HUGEINT` are both `DECIMAL`, returne
 milliseconds and an `INTERVAL` a `PeriodDuration` of the driver; the types of FyrQL are
 in the type
 names of `getColumns` of its `DatabaseMetaData`.
+
+### Docker
+
+From 1.0.0 on, every release publishes an image of the server in the GitHub Container
+Registry, for amd64 and arm64, as for the [PostgreSQL wire protocol
+server](pgwire.md#docker), with the same layout: the JAR on a JRE 21 of Eclipse Temurin,
+the configuration file `/config/fyrql.yaml`, the data under `/data`, the JDBC drivers
+under `/drivers`, the user 10001, and `0.0.0.0` with the port 32010:
+
+```
+docker run -p 32010:32010 -v "$PWD/conf:/config:ro" -v "$PWD/data:/data:ro" \
+  -e FYRQL_PASSWORD ghcr.io/fyrql/fyrql-flight-sql:<version>
+```
+
+As the server listens on `0.0.0.0`, the section `server` of the file must name `users`
+or a `token`, such as `alice: ${env:FYRQL_PASSWORD}`; without, it does not start.
 
 ## Supported SQL
 
