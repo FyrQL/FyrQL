@@ -73,8 +73,9 @@ import java.util.stream.IntStream;
  * With a directory to spill to, the input that does not fit in the budget
  * is sorted as a sort over the budget sorts it, see {@link ExternalSort},
  * and the rows are then computed as they come, a few whole partitions at a
- * time, each with the rows of its partitions reserved; a partition that
- * does not fit fails the query. The results are the same.
+ * time, each with the rows of its partitions reserved, beside a merge that
+ * takes at most half of the budget; a partition that does not fit fails the
+ * query. The results are the same.
  */
 final class WindowOperator extends AbstractOperator {
 
@@ -214,7 +215,9 @@ final class WindowOperator extends AbstractOperator {
             // Rows come in batches whose peers and results take at most a quarter of the budget.
             long perRow = BYTES_PER_ROW + BYTES_PER_RESULT * window.calls().size() + BYTES_PER_NODE;
             int rows = (int) Math.max(1, Math.min(batchSize, budget.limit() / 4 / perRow));
-            external = new ExternalSort(label(), inputSchema, keys, budget, spill, context(), rows);
+            // The merge takes at most half of the budget, so that these rows and the partition held fit beside it.
+            external = new ExternalSort(label(), inputSchema, keys, budget, spill, context(), rows,
+                    budget.limit() / 2);
             external.start(runs);
             return new ArrayList<>();
         }

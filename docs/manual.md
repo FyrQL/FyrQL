@@ -2528,26 +2528,16 @@ with version 0.19.0:
 | All 22 queries | 19.8 | 13.9 | 14.1 | 8.3 |
 
 All 22 queries take FyrQL 1.4 times as long as DuckDB on one thread and 1.7 times as long
-on twelve; with version 0.15.0, they took 21.4 and 16.2 s against 14.6 and 9.1 s. FyrQL is
-faster in Q5, in which, as in Q3, Q7, Q8 and Q10, PostgreSQL joins the customers and
-orders for FyrQL, and in Q11, and close in Q2 and Q16; these three read only the smaller
-tables. Since version 0.19.0, a database leaves out the columns that only the filters it
-takes over read, such as `o_orderdate` in Q4. DuckDB is furthest ahead where a query reads
-much of `lineitem`, such as Q1, Q12, Q15, Q17 and Q19: in Q6, about three quarters of the
-time of FyrQL on one thread go to reading the Parquet file. Since version 0.14.0, the
-connector decodes the pages of the file itself; on the same day, with the column readers
-of parquet-java, Q6 took 0.61 s on one thread and Q1 1.61 s. Since version 0.15.0, strings
-from a dictionary keep its codes; with version 0.14.0, Q1 took 0.98 s on one thread. Q17
-and Q18 read `lineitem` twice, once for the subquery, and Q21 three times, as DuckDB does.
-Since version 0.17.5, Q15 computes `revenue` once for both its reads, see
-[Optimizer](#optimizer): Q15 took 0.37 s on one thread and 0.18 s on twelve, where version
-0.17.0 took 0.91 s and 0.40 s on the same day. On twelve threads, Q6 takes FyrQL less than
+on twelve. FyrQL is faster in Q5, in which, as in Q3, Q7, Q8 and Q10, PostgreSQL joins the
+customers and orders for FyrQL, and in Q11, and close in Q2 and Q16; these three read only
+the smaller tables. DuckDB is furthest ahead where a query reads much of `lineitem`, such
+as Q1, Q12, Q15, Q17 and Q19: in Q6, about three quarters of the time of FyrQL on one
+thread go to reading the Parquet file. Q17 and Q18 read `lineitem` twice, once for the
+subquery, and Q21 three times, as DuckDB does. On twelve threads, Q6 takes FyrQL less than
 half the time of one thread, and most other queries half to four fifths; Q7 and Q18 gain
 little, Q4 and Q22 nothing, Q22 since PostgreSQL runs its `NOT EXISTS` over the customers
 and orders on one core. The profile `tpch` checks that all 22 queries give the rows of
-DuckDB, in the interpreter and compiled, on one thread and on all. With version 0.5.5,
-timed from the plan and with DuckDB reading `orders` and `customer` from CSV files, the 22
-queries took 34.4 s in the interpreter on one thread and 19.4 s on twelve.
+DuckDB, in the interpreter and compiled, on one thread and on all.
 
 ### Compiled code and scans
 
@@ -2586,11 +2576,7 @@ of 122,880 rows), in milliseconds per run, with version 0.19.0:
 | The four columns of TPC-H Q6 | 364 | 39 |
 | All 16 columns | 560 | 180 |
 
-The connector decodes the pages of the Parquet file a page at a time. Through the column
-readers of parquet-java, value by value with several calls for each value of each column,
-as up to version 0.13.8, the four columns took 75 ms and all 16 columns 570 ms, about as
-long as the CSV file. With version 0.14.0, which copied each string from a dictionary, all
-16 columns took 227 ms.
+The connector decodes the pages of the Parquet file a page at a time.
 
 ### Threads
 
@@ -2611,11 +2597,9 @@ interpreted. On the laptop, with version 0.19.0, in milliseconds per run:
 
 Batches that are already in memory are read as fast as the memory delivers them, so
 that the cores gain little beyond four threads. With many groups, a worker passes the
-rows of the groups it holds no room for on into the partitions, as described above; with
-version 0.5.5, in which each worker held a table of nearly all of 100,000 groups in
-random order, that aggregation took 228 ms on twelve threads, more than on one. It still
-does not gain beyond four threads, since the merge compares the keys of every group once
-more.
+rows of the groups it holds no room for on into the partitions, as described above.
+It still does not gain beyond four threads, since the merge compares the keys of every
+group once more.
 
 ### Spilling
 
@@ -2655,11 +2639,10 @@ fastest run of each into `fyrql-test/target/arrow-report.md`:
 On the laptop, with version 0.19.0, they took 0.47 s as the batches of the engine, 1.02 s
 through an `ArrowReader`, 1.75 s through the Flight SQL server on localhost, read with the
 `FlightSqlClient` of Arrow Java, and 2.96 s through the JDBC driver with `getObject` for
-every value, 2.49 s with the typed getters; with version 0.6.5, before the connector
-decoded the Parquet file itself, they took 0.99, 1.17, 2.69 and 4.67 s. `ArrowBenchmark`
-in `fyrql-bench` converts four million rows on one thread, with version 0.19.0: into Arrow
-in 41 ms with four columns of fixed width, in 118 ms with nine columns of which three are
-strings, and in 103 ms with a list and a struct; back from Arrow in 84, 354 and 552 ms.
+every value, 2.49 s with the typed getters. `ArrowBenchmark` in `fyrql-bench` converts
+four million rows on one thread, with version 0.19.0: into Arrow in 41 ms with four columns
+of fixed width, in 118 ms with nine columns of which three are strings, and in 103 ms with
+a list and a struct; back from Arrow in 84, 354 and 552 ms.
 
 ## Compatibility
 

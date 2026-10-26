@@ -186,6 +186,32 @@ class ParallelSortWindowTest {
     }
 
     @Test
+    void manyRunsLeaveTheWindowHalfOfTheBudget() {
+        SplittableRandom random = new SplittableRandom(20261026);
+        int n = 20_000;
+        List<Object[]> rows = rows(random, n, false);
+        for (Object[] row : rows) {
+            // Partitions of about five rows.
+            row[MANY] = (long) random.nextInt(n / 5);
+        }
+        PlanNode.Scan scan = source.table("runs", SCHEMA, rows, n);
+        long total = Batches.estimateBytes(Batch.ofRows(SCHEMA, rows));
+        PlanNode.Window window = new PlanNode.Window(scan, List.of(MANY), List.of(SortKey.asc(ID)),
+                List.of(WindowCall.of(WindowFunction.ROW_NUMBER, List.of(), "rn"),
+                        WindowCall.of(WindowFunction.LEAD, List.of(S), "lead")));
+        Object expected = run(window, 1, true);
+        try (SpillDirectory spill = new SpillDirectory(temp)) {
+            // So small that the batches of the runs, one of each, would take nearly all of it.
+            for (int part = 40; part <= 64; part += 4) {
+                long parts = spill.statistics().parts();
+                assertSame(expected, run(window, 1, true, total / part, spill), "budget " + total / part);
+                assertTrue(spill.statistics().parts() - parts > 64, "more runs than are merged at once");
+            }
+        }
+        assertEquals(0, source.open.get(), "every reader is closed");
+    }
+
+    @Test
     void resultsOverTheBudgetFailAfterSpilling() {
         SplittableRandom random = new SplittableRandom(20261025);
         int n = 6000;

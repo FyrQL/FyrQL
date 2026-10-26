@@ -35,7 +35,9 @@ import java.util.List;
  * small, see {@link #runRows}; if the runs do
  * not fit at once, or there are more than {@link #fanIn} of them, groups of
  * them are first merged into new runs on disk, as many at a time as fit, at
- * most {@code fanIn}, down to two.
+ * most {@code fanIn}, down to two. A merge of more than two runs takes at
+ * most the room it is given, so that the reader of the rows keeps the rest
+ * of the budget for itself.
  */
 final class ExternalSort implements AutoCloseable {
 
@@ -61,6 +63,8 @@ final class ExternalSort implements AutoCloseable {
     private final SpillDirectory spill;
     private final QueryContext context;
     private final int batchSize;
+    /** The most bytes the runs of a merge of more than two take in the budget. */
+    private final long room;
     /** The runs not yet merged, and all files, which closing deletes. */
     private final Deque<Run> runs = new ArrayDeque<>();
     private final List<SpillFile> files = new ArrayList<>();
@@ -68,10 +72,21 @@ final class ExternalSort implements AutoCloseable {
     private long reserved;
 
     /**
+     * Merges runs in as much of the budget as there is.
+     *
      * @param schema the schema of the rows, without the places
      */
     ExternalSort(String label, Schema schema, List<SortKey> keys, MemoryBudget budget, SpillDirectory spill,
             QueryContext context, int batchSize) {
+        this(label, schema, keys, budget, spill, context, batchSize, budget.limit());
+    }
+
+    /**
+     * @param schema the schema of the rows, without the places
+     * @param room   the most bytes the runs of a merge of more than two take in the budget
+     */
+    ExternalSort(String label, Schema schema, List<SortKey> keys, MemoryBudget budget, SpillDirectory spill,
+            QueryContext context, int batchSize, long room) {
         this.label = label;
         this.schema = schema;
         this.keys = keys;
@@ -79,6 +94,7 @@ final class ExternalSort implements AutoCloseable {
         this.spill = spill;
         this.context = context;
         this.batchSize = batchSize;
+        this.room = room;
     }
 
     /** Returns the schema of a run: the columns of the rows, then their places. */
@@ -124,10 +140,10 @@ final class ExternalSort implements AutoCloseable {
         }
         while (true) {
             int n = Math.min(Math.max(2, fanIn), runs.size());
-            boolean fits = reserve(bytes(n));
+            boolean fits = fits(n);
             while (!fits && n > 2) {
                 n = Math.max(2, n / 2);
-                fits = reserve(bytes(n));
+                fits = fits(n);
             }
             if (fits && n == runs.size()) {
                 merge = new Merge(take(n));
@@ -187,6 +203,12 @@ final class ExternalSort implements AutoCloseable {
             bytes += r.batchBytes();
         }
         return bytes;
+    }
+
+    /** Reserves the batches of the first runs, unless they are more than two and take more than the room. */
+    private boolean fits(int n) {
+        long bytes = bytes(n);
+        return (n <= 2 || bytes <= room) && reserve(bytes);
     }
 
     private boolean reserve(long bytes) {
