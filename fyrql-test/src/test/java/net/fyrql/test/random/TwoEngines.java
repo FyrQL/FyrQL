@@ -181,7 +181,9 @@ final class TwoEngines implements AutoCloseable {
                 // The optimizer itself failed; the error names no node.
             }
         }
-        Outcome outcome = compare(sql, schema, actual, fyrqlError, ordered, ulps).withPlan(plan, optimized);
+        double relative = plan == null ? 0 : ResultComparison.tolerance(plan);
+        Outcome outcome = compare(sql, schema, actual, fyrqlError, ordered, ulps, relative).withPlan(plan,
+                optimized);
         if (crash) {
             return new Outcome(Outcome.Kind.FYRQL_CRASHES, sql, fyrqlError, outcome.duckError(), "")
                     .withPlan(plan, optimized);
@@ -192,7 +194,8 @@ final class TwoEngines implements AutoCloseable {
                 || outcome.kind() == Outcome.Kind.ROWS_DIFFER && !outcome.report().startsWith(UNSTABLE)) {
             duck.execute("PRAGMA disable_optimizer");
             try {
-                return outcome.withUnoptimized(compare(sql, schema, actual, fyrqlError, ordered, ulps).kind());
+                return outcome.withUnoptimized(compare(sql, schema, actual, fyrqlError, ordered, ulps, relative)
+                        .kind());
             } finally {
                 duck.execute("PRAGMA enable_optimizer");
             }
@@ -264,7 +267,8 @@ final class TwoEngines implements AutoCloseable {
         } else if (error != null) {
             return null;
         } else {
-            ResultComparison.Outcome same = ResultComparison.compare(plan.schema(), expected, rows, true, ulps);
+            ResultComparison.Outcome same = ResultComparison.compare(plan.schema(), expected, rows, true, ulps,
+                    ResultComparison.tolerance(plan));
             if (same.same()) {
                 return null;
             }
@@ -274,7 +278,7 @@ final class TwoEngines implements AutoCloseable {
     }
 
     private Outcome compare(String sql, Schema schema, List<Object[]> actual, String fyrqlError, boolean ordered,
-            int ulps) {
+            int ulps, double relative) {
         DuckResult expected;
         try {
             expected = duck(sql, schema);
@@ -292,13 +296,14 @@ final class TwoEngines implements AutoCloseable {
             return new Outcome(Outcome.Kind.TYPES_DIFFER, sql, null, null,
                     "types: DuckDB " + expected.types() + ", FyrQL " + types);
         }
-        ResultComparison.Outcome rows = ResultComparison.compare(schema, expected.rows(), actual, ordered, ulps);
+        ResultComparison.Outcome rows = ResultComparison.compare(schema, expected.rows(), actual, ordered, ulps,
+                relative);
         if (rows.same()) {
             return new Outcome(Outcome.Kind.SAME, sql, null, null, "");
         }
         // DuckDB may give other rows on another run of the same query.
         try {
-            if (ResultComparison.compare(schema, duck(sql, schema).rows(), actual, ordered, ulps).same()) {
+            if (ResultComparison.compare(schema, duck(sql, schema).rows(), actual, ordered, ulps, relative).same()) {
                 return new Outcome(Outcome.Kind.ROWS_DIFFER, sql, null, null, UNSTABLE + rows.report());
             }
         } catch (SQLException e) {

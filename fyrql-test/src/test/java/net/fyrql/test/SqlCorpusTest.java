@@ -344,6 +344,16 @@ public class SqlCorpusTest {
             "SELECT a FROM t ORDER BY true, DATE '2024-01-01', a",
             "SELECT true AS x UNION ALL SELECT 2.5::FLOAT",
             "SELECT bool_and(a > 0), bool_or(b = 'Z'), first(a ORDER BY a DESC), sum(1), avg(1), count(1) FROM t",
+            // Standard deviations and variances
+            "SELECT stddev(a), stddev_samp(c), stddev_pop(e), variance(k), var_samp(a), var_pop(c), stddev(NULL),"
+                    + " typeof(var_pop(e)) FROM t",
+            "SELECT k, stddev(a), var_pop(DISTINCT e ORDER BY e), variance(c) FILTER (WHERE a > 1), stddev_pop(a),"
+                    + " var_samp(DISTINCT e) FROM t GROUP BY k ORDER BY k",
+            "SELECT stddev(m), var_pop(s), variance(h), stddev_samp(g), var_samp(fl), stddev_pop(1.5) FROM w",
+            "SELECT stddev(a), var_pop(a), variance(c), stddev_pop(c) FROM t WHERE a = 1",
+            "SELECT stddev(x), var_pop(x) FROM (VALUES (0.1), (0.2), (0.3)) v(x)",
+            "SELECT a, stddev(a) OVER (ORDER BY a ROWS 1 PRECEDING), var_pop(c) OVER (PARTITION BY k),"
+                    + " variance(e) OVER (ORDER BY a ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM t ORDER BY a",
             "SELECT 1, count(*) FROM t GROUP BY ALL",
             "SELECT 1, count(*) FROM t WHERE false GROUP BY ALL",
             "SELECT 'x' AS k, count(*) FROM t WHERE false GROUP BY 1",
@@ -734,6 +744,11 @@ public class SqlCorpusTest {
             Map.entry("SELECT * FROM t JOIN u USING (b)", "Column \"b\" does not exist on right side of join!"),
             Map.entry("SELECT string_agg(b, b) FROM t", "Separator argument to StringAgg must be a constant"),
             Map.entry("SELECT string_agg(b, 1) FROM t", "No function matches string_agg(VARCHAR, INTEGER)"),
+            Map.entry("SELECT stddev(b) FROM t", "No function matches stddev(VARCHAR)"),
+            Map.entry("SELECT var_pop(d) FROM t", "No function matches var_pop(DATE)"),
+            Map.entry("SELECT variance('1') FROM t", "No function matches variance(VARCHAR)"),
+            Map.entry("SELECT stddev_pop(x) FROM (VALUES (1e200), (2e200)) v(x)", "STDDEV_POP is out of range!"),
+            Map.entry("SELECT var_samp(x) FROM (VALUES (1.0), ('NaN'::DOUBLE)) v(x)", "VARSAMP is out of range!"),
             Map.entry("SELECT 0.5::DOUBLE < true", "Cannot compare values of type DOUBLE and type BOOLEAN"),
             Map.entry("SELECT a FROM t ORDER BY 'x'", "ORDER BY non-integer literal has no effect"),
             Map.entry("SELECT a FROM t ORDER BY 1.5", "ORDER BY non-integer literal has no effect"),

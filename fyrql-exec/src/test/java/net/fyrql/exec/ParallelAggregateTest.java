@@ -418,7 +418,7 @@ class ParallelAggregateTest {
     }
 
     @Test
-    void floatingPointSumsDifferInTheLastBitsOnly() {
+    void floatingPointSumsAndStatisticsDifferInTheLastBitsOnly() {
         SplittableRandom random = new SplittableRandom(11);
         Schema schema = Schema.of(DataType.INTEGER, DataType.DOUBLE, DataType.FLOAT);
         List<Object[]> rows = new ArrayList<>();
@@ -431,7 +431,11 @@ class ParallelAggregateTest {
         PlanNode.Aggregate aggregate = new PlanNode.Aggregate(scan, List.of(0), List.of(
                 new AggregateCall(AggregateFunction.SUM, 1, false, "s"),
                 new AggregateCall(AggregateFunction.AVG, 1, false, "a"),
-                new AggregateCall(AggregateFunction.SUM, 2, false, "f")));
+                new AggregateCall(AggregateFunction.SUM, 2, false, "f"),
+                new AggregateCall(AggregateFunction.STDDEV_SAMP, 1, false, "sd"),
+                new AggregateCall(AggregateFunction.VAR_POP, 2, false, "vf"),
+                new AggregateCall(AggregateFunction.VAR_SAMP, 1, false, "v"),
+                new AggregateCall(AggregateFunction.STDDEV_POP, 2, false, "sdf")));
         @SuppressWarnings("unchecked")
         List<List<Object>> expected = (List<List<Object>>) run(aggregate, 1, true, 1);
         @SuppressWarnings("unchecked")
@@ -439,7 +443,7 @@ class ParallelAggregateTest {
         assertEquals(expected.size(), actual.size());
         for (int i = 0; i < expected.size(); i++) {
             assertEquals(expected.get(i).get(0), actual.get(i).get(0));
-            for (int c = 1; c < 4; c++) {
+            for (int c = 1; c < 8; c++) {
                 double e = ((Number) expected.get(i).get(c)).doubleValue();
                 double a = ((Number) actual.get(i).get(c)).doubleValue();
                 assertEquals(e, a, Math.ulp(e) * 64, "row " + i + " column " + c);

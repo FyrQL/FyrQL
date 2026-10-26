@@ -98,7 +98,7 @@ public final class Differential implements AutoCloseable {
                     : "FyrQL fails, DuckDB does not: " + fyrError) + "\n" + context);
         }
         ResultComparison.Outcome outcome = ResultComparison.compare(plan.schema(), expected, actual,
-                Plans.ordered(plan), ulps);
+                Plans.ordered(plan), ulps, ResultComparison.tolerance(plan));
         if (!outcome.same()) {
             fail("FyrQL differs from DuckDB:\n" + outcome.report() + context);
         }

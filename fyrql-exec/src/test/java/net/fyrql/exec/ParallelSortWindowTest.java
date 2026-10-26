@@ -383,6 +383,9 @@ class ParallelSortWindowTest {
             calls.add(new WindowCall(WindowFunction.AGGREGATE, call, List.of(), false, filter,
                     frame(random, order), call.name()));
         }
+        AggregateCall variance = new AggregateCall(AggregateFunction.VAR_SAMP, MANY, false, "var_samp");
+        calls.add(new WindowCall(WindowFunction.AGGREGATE, variance, List.of(), false, filter, frame(random, order),
+                variance.name()));
         // An aggregate that keeps its values takes the rows of each frame one by one: a short frame.
         Frame around = new Frame(FrameUnit.ROWS, bound(BoundKind.PRECEDING, 3), bound(BoundKind.FOLLOWING, 2),
                 FrameExclusion.values()[random.nextInt(FrameExclusion.values().length)]);

@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.20.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.20.1 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, views, the configuration file, the JDBC
 driver, Arrow, the Flight SQL server, the SQL it takes and where it differs from DuckDB,
 how it runs queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -1744,9 +1744,14 @@ queries](#observing-queries), and `SET`, `RESET`, `SHOW` and
   aliases of these names. A function may be named with the qualifier `main.`, as in
   `main.lower(x)`.
 - Aggregates: `count`, `sum`, `avg`, `min`, `max`, `string_agg`, `list`, `first`, `last`,
-  `any_value`, `bool_and`, `bool_or`, with `DISTINCT` and `ORDER BY` in the call, and
-  `FILTER (WHERE ...)` after it, which takes only the rows where its condition is true:
-  `count(*) FILTER (WHERE x > 1)` is 0 and any other aggregate `NULL` for none.
+  `any_value`, `bool_and`, `bool_or`, `stddev_samp` (alias `stddev`), `stddev_pop`,
+  `var_samp` (alias `variance`) and `var_pop`, with `DISTINCT` and `ORDER BY` in the
+  call, and `FILTER (WHERE ...)` after it, which takes only the rows where its condition
+  is true: `count(*) FILTER (WHERE x > 1)` is 0 and any other aggregate `NULL` for none.
+  The standard deviations and variances take numbers as `DOUBLE`s and give a `DOUBLE`,
+  computed in the order of DuckDB: `NULL` without a value; for one value `NULL` as a
+  sample and 0 as a population; a result that is not finite, as over NaN or over values
+  whose squares overflow, is an error.
 - Window functions: `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`,
   `ntile`, `lag` and `lead` with an offset and a default, `first_value`, `last_value`,
   `nth_value`, and the aggregates above, also with `DISTINCT`, `ORDER BY` and
@@ -1791,9 +1796,10 @@ Sort #0, #3
 A `Window` node appends one column per call to the rows of its input, for all calls with
 the same partition and order; `NULL`s come last in both directions, as in DuckDB. It reads
 its whole input and sorts it, gives each row its frame, and computes an aggregate over a
-moving frame from a segment tree, in logarithmic time per row; `string_agg`, `list`, and
-aggregates with `DISTINCT` or `ORDER BY` in the call go over each frame anew. With
-`QUALIFY`, the largest order of each region is
+moving frame from a segment tree, in logarithmic time per row, which may change the last
+binary digits of the standard deviations and variances, as in DuckDB; `string_agg`,
+`list`, and aggregates with `DISTINCT` or `ORDER BY` in the call go over each frame anew.
+With `QUALIFY`, the largest order of each region is
 
 ```sql
 SELECT c.region, o.id
@@ -2375,15 +2381,16 @@ top node of each segment with `[parallel]`, as in the plans of this manual; a se
 whose scan has one split runs on the thread of the query. The node above a segment takes
 the rows of its workers:
 
-- An aggregation whose aggregates are `count`, `sum`, `avg`, `min`, `max`, `bool_and`
-  and `bool_or` without `DISTINCT` and without an order lets each worker group its own
-  rows, then divides the groups into 16 partitions by their hashes and merges the
-  partitions on several threads. A worker that holds more than 16,384 groups, of whose
-  recent rows fewer than two fall on each new group, passes its further rows on as they
-  are, scattered into the partitions at once, so that many groups do not cost the
-  memory and the caches of every worker. The groups come out in the order of their first
-  rows, as on one thread. Other aggregates, such as `string_agg`, `list` or
-  `first`, read the rows in the order of the splits on the thread of the query.
+- An aggregation whose aggregates are `count`, `sum`, `avg`, `min`, `max`, `bool_and`,
+  `bool_or` and the standard deviations and variances, without `DISTINCT` and without an
+  order, lets each worker group its own rows, then divides the groups into 16 partitions
+  by their hashes and merges the partitions on several threads. A worker that holds more
+  than 16,384 groups, of whose recent rows fewer than two fall on each new group, passes
+  its further rows on as they are, scattered into the partitions at once, so that many
+  groups do not cost the memory and the caches of every worker. The groups come out in
+  the order of their first rows, as on one thread. Other aggregates, such as
+  `string_agg`, `list` or `first`, read the rows in the order of the splits on the
+  thread of the query.
 - A sort and a window keep the rows of the workers in the order of the splits; the sort
   sorts runs on several threads and merges them, stably, and the window computes its
   partitions on several threads, in ranges of at least 4,096 rows.
@@ -2395,7 +2402,8 @@ the rows of its workers:
 
 The results are those of one thread, with two exceptions, which DuckDB has as well: the
 last binary digits of `sum` and `avg` over `FLOAT` and `DOUBLE`, which add the partial
-sums of the workers; and, when rows of several splits fail, which of the errors is
+sums of the workers, and of the standard deviations and variances, which combine their
+partial moments; and, when rows of several splits fail, which of the errors is
 reported (that of the earliest split among those that failed before the query stopped).
 Of equal values, such as `-0.0` and `0.0`, a `min` or `max` keeps the first, as on one
 thread. The tests run every random query

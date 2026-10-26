@@ -38,7 +38,9 @@ import java.util.function.LongConsumer;
 /**
  * The value of one aggregate over the rows added to it, with boxed values:
  * sums of integers are exact 128-bit values, sums of decimals keep their
- * scale, and {@code avg} is a double. {@code DISTINCT} skips the values
+ * scale, and {@code avg} is a double, as are the standard deviations and
+ * variances, from {@link Moments} over the values as doubles.
+ * {@code DISTINCT} skips the values
  * seen before; an aggregate with an {@code ORDER BY} keeps its values with
  * their sort keys and accumulates them in that order at the end, with a
  * stable sort.
@@ -64,6 +66,8 @@ final class ValueAccumulator {
     private BigInteger bigSum;
     private double doubleSum;
     private BigDecimal decimalSum;
+    /** The mean and the sum of squared differences of a statistic, see {@link Moments}. */
+    private final double[] moments = new double[2];
     private Object extreme;
     private boolean bool;
     private List<Object> values;
@@ -142,6 +146,8 @@ final class ValueAccumulator {
         if (type instanceof Decimal d) {
             decimalSum = BigDecimal.valueOf(0, d.scale());
         }
+        moments[0] = 0;
+        moments[1] = 0;
         extreme = null;
         bool = function == AggregateFunction.BOOL_AND;
     }
@@ -199,6 +205,8 @@ final class ValueAccumulator {
             case LAST -> extreme = value;
             case BOOL_AND -> bool &= (Boolean) value;
             case BOOL_OR -> bool |= (Boolean) value;
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
+                    Moments.add(moments, 0, count, ((Number) value).doubleValue());
             case STRING_AGG, LIST -> {
                 if (values == null) {
                     values = new ArrayList<>();
@@ -263,6 +271,8 @@ final class ValueAccumulator {
             case LAST -> extreme = other.extreme;
             case BOOL_AND -> bool &= other.bool;
             case BOOL_OR -> bool |= other.bool;
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
+                    Moments.combine(moments, 0, count, other.moments, 0, other.count);
             default -> {
             }
         }
@@ -292,6 +302,8 @@ final class ValueAccumulator {
         bigSum = other.bigSum;
         doubleSum = other.doubleSum;
         decimalSum = other.decimalSum;
+        moments[0] = other.moments[0];
+        moments[1] = other.moments[1];
         extreme = other.extreme;
         bool = other.bool;
         values = other.values == null ? null : new ArrayList<>(other.values);
@@ -357,6 +369,8 @@ final class ValueAccumulator {
             }
             case MIN, MAX, FIRST, LAST, ANY_VALUE -> extreme;
             case BOOL_AND, BOOL_OR -> count == 0 ? null : bool;
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
+                    Moments.isNull(function, count) ? null : Moments.value(function, count, moments[1]);
             case LIST -> values;
             case STRING_AGG -> values == null || call.separator() == null ? null
                     : String.join(call.separator(), values.stream().map(String.class::cast).toList());

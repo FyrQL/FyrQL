@@ -52,7 +52,8 @@ class AggregateStateTest {
             DataType.decimal(38, 0), DataType.DATE, DataType.TIMESTAMP, DataType.VARCHAR);
 
     private static final List<AggregateFunction> FUNCTIONS = List.of(AggregateFunction.COUNT, AggregateFunction.SUM,
-            AggregateFunction.AVG, AggregateFunction.MIN, AggregateFunction.MAX);
+            AggregateFunction.AVG, AggregateFunction.MIN, AggregateFunction.MAX, AggregateFunction.STDDEV_SAMP,
+            AggregateFunction.STDDEV_POP, AggregateFunction.VAR_SAMP, AggregateFunction.VAR_POP);
 
     private static final Schema SCHEMA = schema();
 
@@ -203,6 +204,12 @@ class AggregateStateTest {
         assertNotNull(AggregateState.of(new AggregateCall(AggregateFunction.AVG, decimal, false, "x"), s));
         assertNotNull(AggregateState.of(new AggregateCall(AggregateFunction.MIN, date, false, "x"), s));
         assertNotNull(AggregateState.of(new AggregateCall(AggregateFunction.COUNT, varchar, false, "x"), s));
+        int dbl = 2 + VALUE_TYPES.indexOf(DataType.DOUBLE);
+        int flt = 2 + VALUE_TYPES.indexOf(DataType.FLOAT);
+        assertNotNull(AggregateState.of(new AggregateCall(AggregateFunction.VAR_POP, dbl, false, "x"), s));
+        assertNotNull(AggregateState.of(new AggregateCall(AggregateFunction.STDDEV_SAMP, flt, false, "x"), s));
+        // The binder casts the other numbers to DOUBLE; a plan without it takes the accumulators.
+        assertNull(AggregateState.of(new AggregateCall(AggregateFunction.VAR_SAMP, bigint, false, "x"), s));
         assertNull(AggregateState.of(new AggregateCall(AggregateFunction.SUM, huge, false, "x"), s));
         assertNull(AggregateState.of(new AggregateCall(AggregateFunction.MAX, decimal, false, "x"), s));
         assertNull(AggregateState.of(new AggregateCall(AggregateFunction.MIN, varchar, false, "x"), s));

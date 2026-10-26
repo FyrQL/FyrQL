@@ -231,8 +231,10 @@ final class HashAggregateOperator extends AbstractOperator {
     /**
      * Tells whether the groups of an aggregation merge into one another:
      * {@code count}, {@code sum}, {@code avg}, {@code min}, {@code max},
-     * {@code bool_and} and {@code bool_or}, without {@code DISTINCT} and
-     * {@code ORDER BY}, for which the order of the rows does not matter.
+     * {@code bool_and}, {@code bool_or} and the standard deviations and
+     * variances, without {@code DISTINCT} and {@code ORDER BY}, for which
+     * the order of the rows does not matter, but for the last bits of
+     * doubles.
      */
     static boolean mergeable(PlanNode.Aggregate aggregate) {
         for (AggregateCall call : aggregate.aggregates()) {
@@ -240,7 +242,8 @@ final class HashAggregateOperator extends AbstractOperator {
                 return false;
             }
             switch (call.function()) {
-                case COUNT_STAR, COUNT, SUM, AVG, MIN, MAX, BOOL_AND, BOOL_OR -> {
+                case COUNT_STAR, COUNT, SUM, AVG, MIN, MAX, BOOL_AND, BOOL_OR, STDDEV_SAMP, STDDEV_POP, VAR_SAMP,
+                        VAR_POP -> {
                 }
                 default -> {
                     return false;

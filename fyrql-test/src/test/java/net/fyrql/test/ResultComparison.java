@@ -11,6 +11,7 @@
 
 package net.fyrql.test;
 
+import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.DataType.Decimal;
 import net.fyrql.core.type.DataType.ListType;
@@ -96,14 +97,25 @@ public final class ResultComparison {
      */
     public static Outcome compare(Schema schema, List<Object[]> expected, List<Object[]> actual, boolean ordered,
             int ulps) {
-        if (ulps == 0 || expected.size() != actual.size()) {
+        return compare(schema, expected, actual, ordered, ulps, 0);
+    }
+
+    /**
+     * As {@link #compare(Schema, List, List, boolean, int)}, but
+     * floating-point values also agree within a relative tolerance, for
+     * results that depend on the order in which values are combined, see
+     * {@link #tolerance}.
+     */
+    public static Outcome compare(Schema schema, List<Object[]> expected, List<Object[]> actual, boolean ordered,
+            int ulps, double relative) {
+        if (ulps == 0 && relative == 0 || expected.size() != actual.size()) {
             return compare(schema, expected, actual, ordered);
         }
         List<Object[]> e = ordered ? expected : sortedByCanonical(schema, expected);
         List<Object[]> a = ordered ? actual : sortedByCanonical(schema, actual);
         for (int i = 0; i < e.size(); i++) {
             for (int c = 0; c < schema.size(); c++) {
-                if (!close(e.get(i)[c], a.get(i)[c], schema.type(c), ulps)) {
+                if (!close(e.get(i)[c], a.get(i)[c], schema.type(c), ulps, relative)) {
                     // The first row that differs, then the rows that differ exactly, as a multiset if unordered.
                     return new Outcome(false, "row " + i + " differs at column " + c + " (" + schema.name(c)
                             + "): expected " + canonical(schema, List.<Object[]>of(e.get(i))).get(0) + ", actual "
@@ -129,8 +141,41 @@ public final class ResultComparison {
         return result;
     }
 
-    /** Tells whether two values agree, floating-point values within a number of units in the last place. */
-    private static boolean close(Object x, Object y, DataType type, int ulps) {
+    /**
+     * The relative tolerance of the results of a plan: 1e-9 if it computes a
+     * standard deviation or a variance, whose doubles depend on how the
+     * moments of the parts of the values are combined, by threads and in
+     * the trees of windows, otherwise 0.
+     */
+    public static double tolerance(PlanNode plan) {
+        List<PlanNode.AggregateCall> calls = new ArrayList<>();
+        if (plan instanceof PlanNode.Aggregate a) {
+            calls.addAll(a.aggregates());
+        } else if (plan instanceof PlanNode.Window w) {
+            for (PlanNode.WindowCall call : w.calls()) {
+                if (call.aggregate() != null) {
+                    calls.add(call.aggregate());
+                }
+            }
+        }
+        for (PlanNode.AggregateCall call : calls) {
+            if (call.function().isStatistic()) {
+                return 1e-9;
+            }
+        }
+        for (PlanNode child : plan.children()) {
+            if (tolerance(child) > 0) {
+                return 1e-9;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Tells whether two values agree, floating-point values within a number
+     * of units in the last place or within a relative tolerance.
+     */
+    private static boolean close(Object x, Object y, DataType type, int ulps, double relative) {
         if (x == null || y == null) {
             return x == y;
         }
@@ -145,7 +190,7 @@ public final class ResultComparison {
             }
             double ulp = type == DataType.FLOAT ? Math.ulp((float) Math.max(Math.abs(a), Math.abs(b)))
                     : Math.ulp(Math.max(Math.abs(a), Math.abs(b)));
-            return Math.abs(a - b) <= ulps * ulp;
+            return Math.abs(a - b) <= Math.max(ulps * ulp, relative * Math.max(Math.abs(a), Math.abs(b)));
         }
         return canonical(x, type).equals(canonical(y, type));
     }

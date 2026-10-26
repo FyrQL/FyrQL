@@ -109,6 +109,9 @@ final class SqlGenerator {
 
     private static final Position P = Position.UNKNOWN;
     private static final List<String> ALIASES = List.of("x", "y", "z", "k", "v", "A", "B", "total", "Val", "n");
+    /** The standard deviations and variances with their aliases. */
+    private static final List<String> STATISTICS = List.of("stddev", "stddev_samp", "stddev_pop", "variance",
+            "var_samp", "var_pop");
 
     private final SplittableRandom random;
     private final FyrQL engine;
@@ -931,7 +934,7 @@ final class SqlGenerator {
             boolean distinct = chance(20);
             SqlExpr x = text.of(argument);
             List<OrderItem> own = List.of(new OrderItem(x, chance(60), chance(30)));
-            switch (random.nextInt(12)) {
+            switch (random.nextInt(13)) {
                 case 0 -> {
                     return countStar();
                 }
@@ -967,6 +970,11 @@ final class SqlGenerator {
                     // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.
                     if (plain && !floating && t != DataType.INTERVAL) {
                         return new SqlExpr.FunctionCall("list", List.of(x), distinct, false, own, P);
+                    }
+                }
+                case 10 -> {
+                    if (t.isNumeric()) {
+                        return new SqlExpr.FunctionCall(pick(STATISTICS), List.of(x), distinct, false, List.of(), P);
                     }
                 }
                 default -> {
@@ -1162,7 +1170,7 @@ final class SqlGenerator {
             boolean distinct = chance(20);
             SqlExpr x = text.of(argument);
             List<OrderItem> own = List.of(new OrderItem(x, chance(60), chance(30)));
-            switch (random.nextInt(11)) {
+            switch (random.nextInt(12)) {
                 case 0 -> call = countStar();
                 case 1 -> call = new SqlExpr.FunctionCall("count", List.of(x), distinct, false, List.of(), P);
                 case 2, 3 -> {
@@ -1199,6 +1207,11 @@ final class SqlGenerator {
                     if (plain && !floating) {
                         call = new SqlExpr.FunctionCall(chance(50) ? "any_value" : "arbitrary", List.of(x), false,
                                 false, own, P);
+                    }
+                }
+                case 10 -> {
+                    if (t.isNumeric()) {
+                        call = new SqlExpr.FunctionCall(pick(STATISTICS), List.of(x), distinct, false, List.of(), P);
                     }
                 }
                 default -> {

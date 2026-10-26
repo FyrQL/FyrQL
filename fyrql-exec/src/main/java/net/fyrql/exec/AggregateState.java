@@ -46,7 +46,8 @@ import java.util.Arrays;
  * {@code FLOAT} and {@code DOUBLE}, and for {@code min} and {@code max}
  * over these, except decimals of more than 18 digits, and over
  * {@code BOOLEAN}, {@code DATE}, {@code TIMESTAMP}, {@code TIME} and
- * {@code TIMESTAMP WITH TIME ZONE}. Its results are
+ * {@code TIMESTAMP WITH TIME ZONE}, and for the standard deviations and
+ * variances over {@code FLOAT} and {@code DOUBLE}. Its results are
  * those of the aggregation over objects in {@link HashAggregateOperator},
  * which covers the rest: exact sums that grow into a {@code BigInteger}
  * when a {@code long} overflows, the same conversion of a sum to a double
@@ -128,6 +129,8 @@ abstract class AggregateState {
                 }
                 yield type.isFloatingPoint() ? new DoubleExtreme(call.column(), type, max) : null;
             }
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
+                    type.isFloatingPoint() ? new Variance(call.column(), function) : null;
             default -> null;
         };
     }
@@ -505,6 +508,77 @@ abstract class AggregateState {
                 outNulls[group] = true;
             } else {
                 out[group] = average ? sums[group] / counts[group] : sums[group];
+            }
+        }
+
+        @Override
+        Vector finishResult() {
+            return DoubleVector.wrap(out, outNulls);
+        }
+    }
+
+    /**
+     * The standard deviations and variances over {@code FLOAT} and
+     * {@code DOUBLE}: a count and the {@link Moments} per group.
+     */
+    private static final class Variance extends AggregateState {
+        private final int column;
+        private final AggregateFunction function;
+        private long[] counts = new long[16];
+        private double[] moments = new double[32];
+        private double[] values = new double[0];
+        private boolean[] nulls = new boolean[0];
+        private double[] out;
+        private boolean[] outNulls;
+
+        Variance(int column, AggregateFunction function) {
+            this.column = column;
+            this.function = function;
+        }
+
+        @Override
+        void add(Batch b, int[] groupOf, int rows, int groups) {
+            counts = grow(counts, groups);
+            moments = grow(moments, 2 * groups);
+            if (values.length < rows) {
+                values = new double[rows];
+                nulls = new boolean[rows];
+            }
+            readDoubles(b.column(column), rows, values, nulls);
+            for (int r = 0; r < rows; r++) {
+                if (!nulls[r]) {
+                    int g = groupOf[r];
+                    Moments.add(moments, g, ++counts[g], values[r]);
+                }
+            }
+        }
+
+        @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            Variance o = (Variance) other;
+            if (o.counts[otherGroup] == 0) {
+                return;
+            }
+            counts = grow(counts, group + 1);
+            moments = grow(moments, 2 * (group + 1));
+            Moments.combine(moments, group, counts[group], o.moments, otherGroup, o.counts[otherGroup]);
+            counts[group] += o.counts[otherGroup];
+        }
+
+        @Override
+        void startResult(int groups) {
+            counts = grow(counts, groups);
+            moments = grow(moments, 2 * groups);
+            out = new double[groups];
+            outNulls = new boolean[groups];
+        }
+
+        @Override
+        void result(int group) {
+            if (Moments.isNull(function, counts[group])) {
+                outNulls[group] = true;
+            } else {
+                out[group] = Moments.value(function, counts[group], moments[2 * group + 1]);
             }
         }
 

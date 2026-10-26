@@ -115,7 +115,11 @@ class SpillingAggregateTest {
                 new AggregateCall(AggregateFunction.SUM, V, false, "svb").withFilter(B));
     }
 
-    /** Every other aggregate: with DISTINCT, with ORDER BY, lists and those of the first or last row, filtered too. */
+    /**
+     * Every other aggregate: with DISTINCT, with ORDER BY, lists and those of
+     * the first or last row, filtered too, and the statistics, whose doubles
+     * differ in the last bits when workers compute them.
+     */
     private static List<AggregateCall> others() {
         List<AggregateCall> calls = new ArrayList<>(mergeable());
         calls.add(new AggregateCall(AggregateFunction.SUM, V, true, "sdv"));
@@ -133,6 +137,8 @@ class SpillingAggregateTest {
         calls.add(new AggregateCall(AggregateFunction.LIST, V, false, "lvb").withFilter(B));
         calls.add(new AggregateCall(AggregateFunction.STRING_AGG, S, true, "sadb", ",", List.of(SortKey.asc(S)))
                 .withFilter(B));
+        calls.add(new AggregateCall(AggregateFunction.VAR_SAMP, V, false, "varv"));
+        calls.add(new AggregateCall(AggregateFunction.STDDEV_POP, DEC, false, "sddecb").withFilter(B));
         return calls;
     }
 

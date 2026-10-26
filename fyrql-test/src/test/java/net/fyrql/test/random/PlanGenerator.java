@@ -265,6 +265,8 @@ final class PlanGenerator {
                     ? new AggregateCall(f, column, distinct, name) : null;
             case MIN, MAX -> scalar ? new AggregateCall(f, column, distinct, name) : null;
             case BOOL_AND, BOOL_OR -> type == DataType.BOOLEAN ? new AggregateCall(f, column, distinct, name) : null;
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
+                    type.isNumeric() ? new AggregateCall(f, column, distinct, name) : null;
             case STRING_AGG, LIST, FIRST, LAST, ANY_VALUE -> {
                 // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.
                 if (floating || !scalar || f == AggregateFunction.LIST && type == DataType.INTERVAL) {
@@ -410,6 +412,8 @@ final class PlanGenerator {
                     ? new AggregateCall(f, column, distinct, name) : null;
             case MIN, MAX -> scalar ? new AggregateCall(f, column, distinct, name) : null;
             case BOOL_AND, BOOL_OR -> type == DataType.BOOLEAN ? new AggregateCall(f, column, false, name) : null;
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
+                    type.isNumeric() ? new AggregateCall(f, column, distinct, name) : null;
             case FIRST, LAST -> total && scalar ? new AggregateCall(f, column, false, name) : null;
             case STRING_AGG, LIST, ANY_VALUE -> {
                 // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.

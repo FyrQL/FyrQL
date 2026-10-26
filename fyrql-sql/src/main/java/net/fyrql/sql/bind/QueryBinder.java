@@ -2423,10 +2423,17 @@ final class QueryBinder {
             throw new SqlException("Wrong number of arguments for the aggregate " + name, p);
         }
         ExpressionBinder.Bound bound = binder.bound(f.arguments().get(0));
-        // As in DuckDB, a bare NULL is a BOOLEAN for bool_and and bool_or.
+        // As in DuckDB, a bare NULL is a BOOLEAN for bool_and and bool_or, a DOUBLE for the statistics.
         Expression argument = bound.isNull() && (function == AggregateFunction.BOOL_AND
                 || function == AggregateFunction.BOOL_OR) ? new Expression.Literal(DataType.BOOLEAN, null)
+                : bound.isNull() && function.isStatistic() ? new Expression.Literal(DataType.DOUBLE, null)
                 : bound.expression();
+        // DuckDB only has the statistics over DOUBLE, to which it casts every number.
+        Expression number = null;
+        if (function.isStatistic() && argument.type().isNumeric() && argument.type() != DataType.DOUBLE) {
+            number = argument;
+            argument = new Expression.Cast(argument, DataType.DOUBLE);
+        }
         Expression instant = null;
         if (function == AggregateFunction.STRING_AGG && Casts.mentions(argument.type(), DataType.Scalar.TIMESTAMPTZ)) {
             // The text of an instant depends on the time zone, which only a cast holds; it is ordered by the instant.
@@ -2442,7 +2449,8 @@ final class QueryBinder {
                 checkOrderLiteral(o.expression());
             }
             Expression key = binder.bind(o.expression());
-            int keyColumn = input.applyAsInt(key);
+            // A number orders as its DOUBLE does.
+            int keyColumn = input.applyAsInt(key.equals(number) ? argument : key);
             if (f.distinct() && keyColumn != column && !key.equals(instant)) {
                 throw new SqlException("In a DISTINCT aggregate, ORDER BY expressions must appear in the argument"
                         + " list", p);

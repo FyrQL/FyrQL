@@ -288,8 +288,17 @@ final class Metamorphic {
 
     // -------------------------------------------------------------- running
 
-    /** The rows of a query with their columns, or the error it failed with. */
-    private record Run(Schema schema, List<Object[]> rows, Throwable error) {
+    /**
+     * The rows of a query with their columns, or the error it failed with;
+     * with the relative tolerance of its doubles, see
+     * {@link ResultComparison#tolerance}, as threads combine the moments of
+     * the standard deviations and variances in an order that differs from
+     * run to run.
+     */
+    private record Run(Schema schema, List<Object[]> rows, Throwable error, double tolerance) {
+        Run(Schema schema, List<Object[]> rows, Throwable error) {
+            this(schema, rows, error, 0);
+        }
     }
 
     /** The end of a query that gives more than {@link #MAX_ROWS} rows. */
@@ -316,7 +325,7 @@ final class Metamorphic {
                     }
                     rows.addAll(b.rows());
                 }
-                return new Run(plan.schema(), rows, null);
+                return new Run(plan.schema(), rows, null, ResultComparison.tolerance(plan));
             }
         } catch (RuntimeException | StackOverflowError e) {
             return new Run(null, null, e);
@@ -367,7 +376,8 @@ final class Metamorphic {
         boolean exact = p.kind() == SqlGenerator.Kind.WHERE || p.kind() == SqlGenerator.Kind.JOIN_ON
                 || p.kind() == SqlGenerator.Kind.WINDOW;
         ResultComparison.Outcome same = ResultComparison.compare(base.schema(), exact ? base.rows()
-                : normalized(base.rows()), exact ? partitioned.rows() : normalized(partitioned.rows()), false);
+                : normalized(base.rows()), exact ? partitioned.rows() : normalized(partitioned.rows()), false, 0,
+                Math.max(base.tolerance(), partitioned.tolerance()));
         return new Check(same.same() ? Result.SAME : Result.DIFFERS, sql, same.report(), base.rows().isEmpty());
     }
 
@@ -420,7 +430,7 @@ final class Metamorphic {
                         + viewed.schema().types(), false);
             }
             ResultComparison.Outcome same = ResultComparison.compare(base.schema(), normalized(base.rows()),
-                    normalized(viewed.rows()), false);
+                    normalized(viewed.rows()), false, 0, Math.max(base.tolerance(), viewed.tolerance()));
             return new Check(same.same() ? Result.SAME : Result.DIFFERS, sql, same.report(), base.rows().isEmpty());
         } finally {
             engine.update("DROP VIEW IF EXISTS " + viewName());

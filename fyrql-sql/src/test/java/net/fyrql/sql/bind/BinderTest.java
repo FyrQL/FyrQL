@@ -318,6 +318,38 @@ class BinderTest {
     }
 
     @Test
+    void theStatisticsReadTheirNumbersAsDoubles() {
+        PlanNode.Project top = assertInstanceOf(PlanNode.Project.class, bind("SELECT stddev(a), stddev_samp(e),"
+                + " stddev_pop(a + 1), var_samp(a * 2), var_pop(DISTINCT a ORDER BY a DESC),"
+                + " variance(e) FILTER (WHERE a > 1), var_pop(NULL) FROM t"));
+        PlanNode.Aggregate aggregate = assertInstanceOf(PlanNode.Aggregate.class, top.input());
+        List<PlanNode.AggregateCall> calls = aggregate.aggregates();
+        assertEquals(List.of(PlanNode.AggregateFunction.STDDEV_SAMP, PlanNode.AggregateFunction.STDDEV_SAMP,
+                PlanNode.AggregateFunction.STDDEV_POP, PlanNode.AggregateFunction.VAR_SAMP,
+                PlanNode.AggregateFunction.VAR_POP, PlanNode.AggregateFunction.VAR_SAMP,
+                PlanNode.AggregateFunction.VAR_POP), calls.stream().map(PlanNode.AggregateCall::function).toList());
+        Schema input = aggregate.input().schema();
+        for (PlanNode.AggregateCall call : calls) {
+            assertEquals(DataType.DOUBLE, input.type(call.column()), call.toString());
+        }
+        for (Schema.Field field : top.schema().fields()) {
+            assertEquals(DataType.DOUBLE, field.type(), field.toString());
+        }
+        // The DISTINCT call is ordered by the DOUBLE it reads, which orders as the INTEGER does.
+        PlanNode.AggregateCall distinct = calls.get(4);
+        assertTrue(distinct.distinct());
+        assertEquals(List.of(PlanNode.SortKey.desc(distinct.column())), distinct.orderBy());
+        assertTrue(calls.get(5).filter() >= 0);
+        PlanNode.Project window = assertInstanceOf(PlanNode.Project.class,
+                bind("SELECT stddev_pop(e) OVER (ORDER BY a ROWS 1 PRECEDING) FROM t"));
+        assertEquals(DataType.DOUBLE, window.schema().type(0));
+        assertTrue(error("SELECT stddev(b) FROM t").reason().contains("stddev(VARCHAR)"));
+        assertTrue(error("SELECT var_pop('1') FROM t").reason().contains("var_pop(VARCHAR)"));
+        assertEquals("Wrong number of arguments for the aggregate variance",
+                error("SELECT variance(a, e) FROM t").reason());
+    }
+
+    @Test
     void orderByReadsColumnsThatAreNotSelected() {
         PlanNode.Project top = assertInstanceOf(PlanNode.Project.class, bind("SELECT a FROM t ORDER BY e DESC, 1"));
         PlanNode.Sort sort = assertInstanceOf(PlanNode.Sort.class, top.input());

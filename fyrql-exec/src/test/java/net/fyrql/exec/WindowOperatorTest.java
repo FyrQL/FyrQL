@@ -383,7 +383,24 @@ class WindowOperatorTest {
             PlanNode.Window w = new PlanNode.Window(values, random.nextBoolean() ? List.of(0) : List.of(), order,
                     calls);
             int batchSize = 1 + random.nextInt(100);
-            assertEquals(direct(w, batchSize, false), direct(w, batchSize, true), "round " + round + " " + frame);
+            String what = "round " + round + " " + frame;
+            List<List<Object>> expected = direct(w, batchSize, false);
+            List<List<Object>> actual = direct(w, batchSize, true);
+            assertEquals(expected.size(), actual.size(), what);
+            for (int r = 0; r < expected.size(); r++) {
+                for (int c = 0; c < s.size() + calls.size(); c++) {
+                    Object e = expected.get(r).get(c);
+                    Object a = actual.get(r).get(c);
+                    // The trees combine the moments of the statistics in another order than row by row.
+                    if (e instanceof Double x && a instanceof Double y && c >= s.size()
+                            && calls.get(c - s.size()).aggregate().function().isStatistic()) {
+                        assertEquals(x, y, Math.max(Math.abs(x), Math.abs(y)) * 1e-9, what + " row " + r + " "
+                                + calls.get(c - s.size()).name());
+                    } else {
+                        assertEquals(e, a, what + " row " + r + " column " + c);
+                    }
+                }
+            }
         }
     }
 

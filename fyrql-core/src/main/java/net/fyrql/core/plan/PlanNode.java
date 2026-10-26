@@ -548,10 +548,14 @@ public sealed interface PlanNode {
      * {@code last} take the first and the last value, {@code any_value} the
      * first that is not {@code NULL}; {@code bool_and} and {@code bool_or}
      * combine booleans. Over no values every function except the counts
-     * gives {@code NULL}.
+     * gives {@code NULL}. {@code stddev_samp}, {@code stddev_pop},
+     * {@code var_samp} and {@code var_pop} take numbers and give a
+     * {@code DOUBLE}; the sample forms give {@code NULL} over one value, and
+     * a result that is not finite is an error.
      */
     enum AggregateFunction {
-        COUNT_STAR, COUNT, SUM, AVG, MIN, MAX, STRING_AGG, LIST, FIRST, LAST, ANY_VALUE, BOOL_AND, BOOL_OR;
+        COUNT_STAR, COUNT, SUM, AVG, MIN, MAX, STRING_AGG, LIST, FIRST, LAST, ANY_VALUE, BOOL_AND, BOOL_OR,
+        STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP;
 
         /** Returns the name as DuckDB spells it. */
         public String sqlName() {
@@ -563,11 +567,16 @@ public sealed interface PlanNode {
             return this == LIST || this == FIRST || this == LAST;
         }
 
+        /** Tells whether the function is a standard deviation or a variance. */
+        public boolean isStatistic() {
+            return this == STDDEV_SAMP || this == STDDEV_POP || this == VAR_SAMP || this == VAR_POP;
+        }
+
         /**
          * Returns the function with a name or an alias of DuckDB
          * ({@code array_agg}, {@code listagg}, {@code group_concat},
-         * {@code arbitrary}), in any case; {@code count} is the count of
-         * values.
+         * {@code arbitrary}, {@code stddev}, {@code variance}), in any case;
+         * {@code count} is the count of values.
          *
          * @throws IllegalArgumentException if there is none
          */
@@ -577,6 +586,8 @@ public sealed interface PlanNode {
                 case "array_agg" -> LIST;
                 case "listagg", "group_concat" -> STRING_AGG;
                 case "arbitrary" -> FIRST;
+                case "stddev" -> STDDEV_SAMP;
+                case "variance" -> VAR_SAMP;
                 case "count_star" -> throw new IllegalArgumentException("Unknown aggregate " + name);
                 default -> {
                     try {
@@ -677,6 +688,9 @@ public sealed interface PlanNode {
                 return DataType.BIGINT;
             }
             DataType t = input.type(column);
+            if (function.isStatistic()) {
+                return DataType.DOUBLE;
+            }
             return switch (function) {
                 case SUM -> t.isIntegral() ? DataType.HUGEINT
                         : t instanceof Decimal d ? DataType.decimal(DataType.MAX_DECIMAL_PRECISION, d.scale())
@@ -698,7 +712,7 @@ public sealed interface PlanNode {
             if (column >= input.size()) {
                 throw new IllegalArgumentException("No column " + column + " for " + function);
             }
-            if ((function == AggregateFunction.SUM || function == AggregateFunction.AVG)
+            if ((function == AggregateFunction.SUM || function == AggregateFunction.AVG || function.isStatistic())
                     && !input.type(column).isNumeric() && !(function == AggregateFunction.AVG
                     && (input.type(column) == DataType.TIME || input.type(column) == DataType.INTERVAL))) {
                 throw new IllegalArgumentException(function + " of " + input.type(column));

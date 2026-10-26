@@ -403,6 +403,14 @@ class PlanDifferentialTest {
         differential.check(new PlanNode.Aggregate(new PlanNode.Filter(t, lit(false)), List.of(), List.of(
                 new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"),
                 new AggregateCall(AggregateFunction.SUM, 0, false, "s"))));
+        // The standard deviations and variances of integers, decimals and doubles, as DuckDB casts them to DOUBLE.
+        List<AggregateCall> statistics = List.of(agg(AggregateFunction.STDDEV_SAMP, 0, false),
+                agg(AggregateFunction.STDDEV_POP, 1, false), agg(AggregateFunction.VAR_SAMP, 3, false),
+                agg(AggregateFunction.VAR_POP, 0, true), agg(AggregateFunction.VAR_SAMP, 2, false));
+        differential.check(new PlanNode.Aggregate(t, List.of(5), statistics), AVG_ULPS);
+        differential.check(new PlanNode.Aggregate(t, List.of(7), statistics), AVG_ULPS);
+        differential.check(new PlanNode.Aggregate(t, List.of(), statistics), AVG_ULPS);
+        differential.check(new PlanNode.Aggregate(new PlanNode.Filter(t, lit(false)), List.of(), statistics));
     }
 
     private static AggregateCall agg(AggregateFunction f, int column, boolean distinct, SortKey... orderBy) {
@@ -609,6 +617,9 @@ class PlanDifferentialTest {
                 WindowCall.of(agg(AggregateFunction.STRING_AGG, 4, false, SortKey.asc(4)), around),
                 WindowCall.of(agg(AggregateFunction.LIST, 7, true, SortKey.desc(7)), whole),
                 WindowCall.of(agg(AggregateFunction.BOOL_OR, 5, false), around),
+                WindowCall.of(agg(AggregateFunction.STDDEV_SAMP, 0, false), around),
+                WindowCall.of(agg(AggregateFunction.VAR_POP, 3, false), frame(FrameUnit.ROWS,
+                        bound(BoundKind.PRECEDING, lit(2L)), current, FrameExclusion.NO_OTHERS)),
                 WindowCall.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n"), frame(FrameUnit.ROWS,
                         bound(BoundKind.FOLLOWING, lit(1L)), bound(BoundKind.FOLLOWING, lit(3L)),
                         FrameExclusion.NO_OTHERS)),
