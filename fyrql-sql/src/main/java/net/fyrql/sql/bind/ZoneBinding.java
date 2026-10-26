@@ -59,7 +59,7 @@ final class ZoneBinding {
                     c.options());
             case BoundStatement.CopyFrom c -> new BoundStatement.CopyFrom(c.table(), plan(c.input(), zone), c.path(),
                     c.format(), c.options());
-            case BoundStatement.Create c -> new BoundStatement.Create(c.table(), c.schema(),
+            case BoundStatement.Create c -> new BoundStatement.Create(c.table(), c.columns(),
                     c.input() == null ? null : plan(c.input(), zone), c.mode());
             case BoundStatement.Insert i -> new BoundStatement.Insert(i.table(), plan(i.input(), zone));
             case BoundStatement.Drop d -> d;

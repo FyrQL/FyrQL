@@ -124,7 +124,7 @@ final class Writes {
                 }
             }
         }
-        return write(() -> writer.create(table, create.schema()), rows, null, null, context);
+        return write(() -> writer.create(table, create.columns()), rows, null, null, context);
     }
 
     private long insert(BoundStatement.Insert insert, QueryContext context, Session session) {

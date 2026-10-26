@@ -91,7 +91,7 @@ final class Explain {
                 yield sb.append(']').toString();
             }
             case BoundStatement.Create c -> "Create table " + c.table() + " ("
-                    + String.join(", ", c.schema().fields().stream().map(Schema.Field::toString).toList()) + ")"
+                    + String.join(", ", c.columns().fields().stream().map(Schema.Field::toString).toList()) + ")"
                     + switch (c.mode()) {
                         case CREATE -> "";
                         case OR_REPLACE -> " [or replace]";

@@ -123,16 +123,17 @@ public sealed interface BoundStatement {
      * {@code CREATE TABLE}.
      *
      * @param table where the table goes
-     * @param schema its columns: the columns of the definition, or those of
+     * @param columns its columns: the columns of the definition, or those of
      *        the query of {@code AS}, which may hold {@code NULL} as in
-     *        DuckDB
-     * @param input the rows of {@code AS}, of the types of the schema, or
+     *        DuckDB; not named {@code schema}, whose accessor would hide
+     *        {@link BoundStatement#schema()}, the column {@code Count}
+     * @param input the rows of {@code AS}, of the types of the columns, or
      *        {@code null} for a table of a definition, which starts empty
      */
-    record Create(TableRef table, Schema schema, PlanNode input, CreateMode mode) implements BoundStatement {
+    record Create(TableRef table, Schema columns, PlanNode input, CreateMode mode) implements BoundStatement {
         public Create {
             Objects.requireNonNull(table, "table");
-            Objects.requireNonNull(schema, "schema");
+            Objects.requireNonNull(columns, "columns");
             Objects.requireNonNull(mode, "mode");
         }
     }

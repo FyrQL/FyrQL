@@ -96,6 +96,14 @@ class UpdateTest {
         List<List<Object>> plan = rows("EXPLAIN INSERT INTO mem.w VALUES (3, 'c')");
         assertTrue(String.valueOf(plan.get(0).get(0)).startsWith("Insert into mem.main.w"), plan.toString());
         assertEquals(List.of(List.of(2L)), rows("SELECT count(*) FROM w"));
+        // The columns of the table CREATE TABLE AS makes are not those of its result, the count.
+        String create = "CREATE TABLE mem.q AS SELECT k, v FROM tiny";
+        assertEquals(List.of("Count"), client.getExecuteSchema(create).getSchema().getFields().stream()
+                .map(Field::getName).toList());
+        FlightInfo created = client.execute(create);
+        assertEquals(List.of("Count"), TestServer.schema(created).getFields().stream().map(Field::getName).toList());
+        assertEquals(List.of(List.of(2L)), TestServer.comparable(TestServer.rows(client, created)));
+        assertEquals(List.of(List.of(2L)), rows("SELECT count(*) FROM q"));
     }
 
     @Test

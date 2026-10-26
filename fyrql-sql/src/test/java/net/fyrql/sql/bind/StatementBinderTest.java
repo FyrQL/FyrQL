@@ -208,7 +208,9 @@ class StatementBinderTest {
                 bind("CREATE TABLE n AS SELECT a, b AS c FROM t"));
         assertEquals(TableRef.of("s", "n"), c.table());
         assertEquals(Schema.of(new Schema.Field("a", DataType.INTEGER, true), new Schema.Field("c", DataType.VARCHAR)),
-                c.schema());
+                c.columns());
+        // The result is the count of rows written, not the columns of the table.
+        assertEquals(BoundStatement.COUNT, c.schema());
         assertEquals(BoundStatement.CreateMode.CREATE, c.mode());
         assertEquals(List.of(DataType.INTEGER, DataType.VARCHAR),
                 c.input().schema().fields().stream().map(Schema.Field::type).toList());
@@ -219,7 +221,8 @@ class StatementBinderTest {
 
         c = assertInstanceOf(BoundStatement.Create.class, bind("CREATE TABLE n (x INTEGER NOT NULL, y DECIMAL(5,1))"));
         assertEquals(Schema.of(new Schema.Field("x", DataType.INTEGER, false),
-                new Schema.Field("y", DataType.decimal(5, 1))), c.schema());
+                new Schema.Field("y", DataType.decimal(5, 1))), c.columns());
+        assertEquals(BoundStatement.COUNT, c.schema());
         assertNull(c.input());
 
         assertEquals("Column with name a appears more than once in table n@1:14",
