@@ -36,11 +36,11 @@ import java.util.logging.Logger;
  * <li>{@code config} names a configuration file of {@code fyrql-config},
  * relative to the working directory; its sources become the catalogs of
  * the connection. Without it, the engine has the sources {@code csv},
- * {@code json}, {@code parquet}, {@code iceberg} and {@code memory} without tables, as far
- * as their connectors are on the class path, so that table functions such
- * as {@code read_csv} and file names in {@code FROM} work, and
- * {@code CREATE TABLE memory.t AS ...} keeps a table for as long as the
- * connection.</li>
+ * {@code json}, {@code parquet}, {@code iceberg}, {@code xlsx} and
+ * {@code memory} without tables, as far as their connectors are on the
+ * class path, so that table functions such as {@code read_csv} and file
+ * names in {@code FROM} work, and {@code CREATE TABLE memory.t AS ...}
+ * keeps a table for as long as the connection.</li>
  * <li>{@code defaultSource}, {@code defaultSchema}, {@code batchSize},
  * {@code memoryBudget}, {@code spill}, {@code spillDirectory},
  * {@code codegen}, {@code codegenThreshold}, {@code pushdown},
@@ -148,7 +148,7 @@ public final class FyrQLDriver implements Driver {
         return MINOR_VERSION;
     }
 
-    /** Returns {@code false}: the driver only reads and has no transactions. */
+    /** Returns {@code false}: the driver has no transactions, every statement takes effect at once. */
     @Override
     public boolean jdbcCompliant() {
         return false;
