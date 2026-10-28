@@ -468,16 +468,19 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
 
     /**
      * Runs a statement and sends its batches, unless more queries than
-     * allowed run already. The query leaves its place before the server
-     * sends the end of its stream or its error, so that a client that has
-     * read it to its end can run its next query at once.
+     * allowed run already. The query leaves its place, and its ticket is
+     * redeemed, before the server sends the end of its stream or its error,
+     * so that a client that has read it to its end can run its next query
+     * at once and finds the handle gone.
      */
-    private void run(Statement s, ServerStreamListener listener) {
+    private void run(Statement s, ServerStreamListener listener, Runnable redeem) {
         if (s.cancelled) {
+            redeem.run();
             listener.error(CallStatus.CANCELLED.withDescription("The query was canceled").toRuntimeException());
             return;
         }
         if (!queries.tryAcquire()) {
+            redeem.run();
             listener.error(busy());
             return;
         }
@@ -502,6 +505,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                     if (context.isCancelled()) {
                         queries.release();
                         released = true;
+                        redeem.run();
                         CallStatus status = context.reason() == QueryContext.Reason.TIMEOUT ? CallStatus.TIMED_OUT
                                 : CallStatus.CANCELLED;
                         listener.error(status.withDescription(context.reason().message()).toRuntimeException());
@@ -511,6 +515,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                 }
                 queries.release();
                 released = true;
+                redeem.run();
                 listener.completed();
             }
         } catch (RuntimeException e) {
@@ -518,12 +523,14 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
                 queries.release();
                 released = true;
             }
+            redeem.run();
             if (!listener.isCancelled()) {
                 listener.error(FlightErrors.of(e));
             }
         } finally {
             buffers.readLock().unlock();
             s.runs.remove(context);
+            redeem.run();
             if (!released) {
                 queries.release();
             }
@@ -570,11 +577,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             listener.error(e);
             return;
         }
-        try {
-            run(s, listener);
-        } finally {
-            statements.remove(handle, owner(context));
-        }
+        run(s, listener, () -> statements.remove(handle, owner(context)));
     }
 
     @Override
@@ -719,7 +722,8 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
             listener.error(FlightErrors.of(e));
             return;
         }
-        run(s, listener);
+        run(s, listener, () -> {
+        });
     }
 
     /**
