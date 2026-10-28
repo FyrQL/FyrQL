@@ -233,6 +233,22 @@ class StatementBinderTest {
     }
 
     @Test
+    void thePrimaryKeyTakesTheNamesOfTheColumnsAndMakesThemNotNull() {
+        BoundStatement.Create c = assertInstanceOf(BoundStatement.Create.class,
+                bind("CREATE TABLE n (x INTEGER, \"Y\" VARCHAR, z DOUBLE, PRIMARY KEY (y, X))"));
+        assertEquals(List.of("Y", "x"), c.primaryKey());
+        assertEquals(Schema.of(new Schema.Field("x", DataType.INTEGER, false),
+                new Schema.Field("Y", DataType.VARCHAR, false), new Schema.Field("z", DataType.DOUBLE)), c.columns());
+        assertEquals(List.of(), ((BoundStatement.Create) bind("CREATE TABLE n (x INTEGER)")).primaryKey());
+        assertEquals("Table n does not have a column with name \"nope\"@1:14",
+                error("CREATE TABLE n (x INTEGER, PRIMARY KEY (nope))"));
+        assertEquals("column \"X\" appears twice in primary key constraint@1:14",
+                error("CREATE TABLE n (x INTEGER, PRIMARY KEY (x, X))"));
+        assertEquals("Invalid type for PRIMARY KEY column l: INTEGER[]@1:14",
+                error("CREATE TABLE n (l INTEGER[] PRIMARY KEY)"));
+    }
+
+    @Test
     void insertWritesTheRowsInTheColumnsOfTheTable() {
         BoundStatement.Insert i = assertInstanceOf(BoundStatement.Insert.class, bind("INSERT INTO t SELECT * FROM t"));
         assertEquals(S_T, i.table());

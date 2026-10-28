@@ -291,6 +291,25 @@ class JdbcWriterTest {
         }
     }
 
+    /** A primary key of {@code CREATE TABLE} is the database's, which then refuses a key twice. */
+    @ParameterizedTest
+    @EnumSource(names = {"H2", "SQLITE", "GENERIC"})
+    void theEngineCreatesATableWithAPrimaryKey(JdbcDialect dialect) {
+        TestDatabase db = TestDatabase.create(dialect);
+        JdbcConnector connector = db.connector("db");
+        try (FyrQL engine = FyrQL.builder().register(connector).build()) {
+            engine.update("CREATE TABLE db.keyed (id INTEGER, s VARCHAR, v DOUBLE, PRIMARY KEY (s, id))");
+            assertEquals(List.of("s", "id"), connector.catalog().primaryKey(TableRef.of("db", "keyed")));
+            assertFalse(connector.catalog().schema(TableRef.of("db", "keyed")).nullable(0));
+            assertEquals(2, engine.update("INSERT INTO db.keyed VALUES (1, 'a', 0.5), (1, 'b', NULL)"));
+            assertThrows(RuntimeException.class, () -> engine.update("INSERT INTO db.keyed VALUES (2, 'x', 0),"
+                    + " (1, 'a', 1)"));
+            assertEquals(2, engine.rows("SELECT * FROM db.keyed").size());
+            engine.update("CREATE TABLE db.single (id BIGINT PRIMARY KEY, v VARCHAR)");
+            assertEquals(List.of("id"), connector.catalog().primaryKey(TableRef.of("db", "single")));
+        }
+    }
+
     /** A date and a timestamp in a gap of daylight saving time, and before 1582, are written as they are. */
     @ParameterizedTest
     @EnumSource(names = {"H2", "SQLITE", "GENERIC"})

@@ -459,7 +459,7 @@ public final class JdbcConnector implements Connector {
             }
             return column;
         }
-        int column = catalog.primaryKey(table).map(schema::indexOf).orElse(-1);
+        int column = catalog.singleKey(table).map(schema::indexOf).orElse(-1);
         return column >= 0 && rangesOf(table, column, schema.type(column)) ? column : -1;
     }
 

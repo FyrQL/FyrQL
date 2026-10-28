@@ -74,10 +74,36 @@ class CatalogQueriesTest {
             assertEquals(List.of("id int4 " + Types.INTEGER + " 1", "customer int4 " + Types.INTEGER + " 2",
                     "amount numeric " + Types.NUMERIC + " 3"), columns);
         }
-        assertFalse(md.getPrimaryKeys(null, "main", "customers").next());
+        // The primary key that H2 tells, as pgjdbc reads it with _pg_expandarray; orders has none.
+        try (ResultSet rs = md.getPrimaryKeys(null, "main", "customers")) {
+            assertTrue(rs.next());
+            assertEquals(List.of("main", "customers", "id", "1", "customers_pkey"), List.of(rs.getString("TABLE_SCHEM"),
+                    rs.getString("TABLE_NAME"), rs.getString("COLUMN_NAME"), rs.getString("KEY_SEQ"),
+                    rs.getString("PK_NAME")));
+            assertFalse(rs.next());
+        }
+        assertFalse(md.getPrimaryKeys(null, "sales", "orders").next());
         assertFalse(md.getImportedKeys(null, "sales", "orders").next());
         assertFalse(md.getExportedKeys(null, "main", "customers").next());
-        assertFalse(md.getIndexInfo(null, "main", "customers", false, true).next());
+        assertEquals(List.of("customers_pkey"), column(md.getIndexInfo(null, "main", "customers", false, true),
+                "INDEX_NAME"));
+        assertEquals(List.of("id"), column(md.getBestRowIdentifier(null, "main", "customers",
+                DatabaseMetaData.bestRowSession, true), "COLUMN_NAME"));
+        // The constraint as DBeaver reads it, and its definition.
+        assertEquals(List.of(List.of("customers_pkey", "p", "[1]", "PRIMARY KEY (id)")), query(c, "SELECT"
+                + " c.conname, c.contype, CAST(c.conkey AS VARCHAR), pg_catalog.pg_get_constraintdef(c.oid) FROM"
+                + " pg_catalog.pg_constraint c INNER JOIN pg_catalog.pg_class t ON t.oid = c.conrelid WHERE"
+                + " c.contype <> 'f' AND t.relname = 'customers'"));
+        // The indexes of a table as \d of psql 16 reads them.
+        String oid = TestServer.value(c, "SELECT oid FROM pg_catalog.pg_class WHERE relname = 'customers'");
+        assertEquals(List.of(List.of("customers_pkey", "t", "t", "CREATE UNIQUE INDEX customers_pkey ON main.customers"
+                + " USING btree (id)", "PRIMARY KEY (id)", "p")), query(c, "SELECT c2.relname, i.indisprimary,"
+                + " i.indisunique, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),"
+                + " pg_catalog.pg_get_constraintdef(con.oid, true), contype FROM pg_catalog.pg_class c,"
+                + " pg_catalog.pg_class c2, pg_catalog.pg_index i LEFT JOIN pg_catalog.pg_constraint con ON"
+                + " (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x')) WHERE c.oid = '"
+                + oid + "' AND c.oid = i.indrelid AND i.indexrelid = c2.oid ORDER BY i.indisprimary DESC,"
+                + " c2.relname"));
         assertTrue(md.getTypeInfo().next());
         md.getFunctions(null, "pg_catalog", "lower").close();
         md.getProcedures(null, null, "%").close();
@@ -91,6 +117,18 @@ class CatalogQueriesTest {
         try (ResultSet rs = c.createStatement().executeQuery("SELECT * FROM sales.orders")) {
             assertEquals("int4", rs.getMetaData().getColumnTypeName(1));
             assertEquals(Types.NUMERIC, rs.getMetaData().getColumnType(3));
+        }
+        // The table and column a column of a result shows, from the OIDs of its RowDescription.
+        try (java.sql.PreparedStatement p = c.prepareStatement("SELECT name, id + 1 AS n FROM customers"
+                + " WHERE id = ?")) {
+            p.setInt(1, 1);
+            try (ResultSet rs = p.executeQuery()) {
+                org.postgresql.PGResultSetMetaData md2 = rs.getMetaData()
+                        .unwrap(org.postgresql.PGResultSetMetaData.class);
+                assertEquals(List.of("customers", "name", ""), List.of(md2.getBaseTableName(1),
+                        md2.getBaseColumnName(1), md2.getBaseTableName(2)));
+                assertEquals("main", md2.getBaseSchemaName(1));
+            }
         }
     }
 

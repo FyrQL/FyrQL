@@ -44,11 +44,11 @@ final class SourceText {
             "WINDOW", "QUALIFY", "USING", "FETCH");
 
     /** The kinds of the tokens of {@link #tokens}. */
-    private static final int WORD = 0;
-    private static final int OPEN = 1;
-    private static final int CLOSE = 2;
-    private static final int SEMICOLON = 3;
-    private static final int OTHER = 4;
+    static final int WORD = 0;
+    static final int OPEN = 1;
+    static final int CLOSE = 2;
+    static final int SEMICOLON = 3;
+    static final int OTHER = 4;
 
     private final String original;
     private final String text;
@@ -170,7 +170,7 @@ final class SourceText {
      * its kind and its level of parentheses, where a parenthesis counts on
      * the outer level.
      */
-    private static List<int[]> tokens(String text) {
+    static List<int[]> tokens(String text) {
         List<int[]> tokens = new ArrayList<>();
         int n = text.length();
         int depth = 0;
@@ -306,6 +306,49 @@ final class SourceText {
     /** Returns the position just after the end of the original text. */
     Position end() {
         return originalPosition(original.length());
+    }
+
+    /** Returns the position in the original text of an offset of the rewritten text. */
+    Position at(int offset) {
+        return originalPosition(origin[Math.min(offset, text.length())]);
+    }
+
+    /**
+     * A piece of a text that {@link #assemble} puts together: words of its
+     * own, whose characters take the position in the original text of an
+     * offset of this text, or the part of this text from {@code start} to
+     * {@code end}, which keeps its positions.
+     */
+    record Piece(String words, int start, int end) {
+
+        static Piece words(String words, int at) {
+            return new Piece(words, at, at);
+        }
+
+        static Piece part(int start, int end) {
+            return new Piece(null, start, end);
+        }
+    }
+
+    /**
+     * Returns a text made of pieces of this one and words between them,
+     * with the way back to the positions in the original text; so a
+     * statement that JSqlParser does not know can be parsed in parts.
+     */
+    SourceText assemble(List<Piece> pieces) {
+        Builder builder = new Builder(original);
+        for (Piece p : pieces) {
+            if (p.words() != null) {
+                for (int i = 0; i < p.words().length(); i++) {
+                    builder.add(p.words().charAt(i), origin[Math.min(p.start(), text.length())]);
+                }
+            } else {
+                for (int i = p.start(); i < p.end(); i++) {
+                    builder.add(text.charAt(i), origin[i]);
+                }
+            }
+        }
+        return builder.build();
     }
 
     private int offset(int line, int column) {

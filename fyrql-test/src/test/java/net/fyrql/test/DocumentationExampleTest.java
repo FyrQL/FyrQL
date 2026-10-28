@@ -200,6 +200,27 @@ class DocumentationExampleTest {
             RuntimeException e = assertThrows(RuntimeException.class,
                     () -> engine.update("INSERT INTO mem.regions VALUES (NULL, 1)"));
             assertTrue(e.getMessage().startsWith("NOT NULL constraint failed: regions.region"), e.getMessage());
+
+            // The example of changing rows.
+            engine.update("CREATE TABLE mem.stock (sku VARCHAR PRIMARY KEY, qty INTEGER NOT NULL)");
+            engine.update("INSERT INTO mem.stock VALUES ('a', 5), ('b', 0)");
+            engine.update("UPDATE mem.stock SET qty = qty + 1 WHERE sku = 'a'");
+            long merged = engine.update("""
+                    MERGE INTO mem.stock USING (VALUES ('b', 7), ('c', 2)) AS delivery(sku, qty)
+                    ON stock.sku = delivery.sku
+                    WHEN MATCHED THEN UPDATE SET qty = stock.qty + delivery.qty
+                    WHEN NOT MATCHED THEN INSERT VALUES (delivery.sku, delivery.qty)""");
+            assertEquals("2 [[a, 6], [b, 7], [c, 2]]", merged + " " + engine.rows("SELECT * FROM mem.stock ORDER BY"
+                    + " sku").stream().map(Arrays::toString).toList());
+            assertTrue(engine.explain("UPDATE mem.stock SET qty = 0").startsWith(
+                    "Update mem.main.stock [set: qty; keys: sku]\n"));
+            assertTrue(engine.explain("DELETE FROM mem.stock").startsWith("Delete from mem.main.stock [keys: sku]\n"));
+            assertTrue(engine.explain("MERGE INTO mem.stock USING (SELECT 'a' AS sku) s ON stock.sku = s.sku"
+                    + " WHEN MATCHED THEN UPDATE SET qty = 1 WHEN NOT MATCHED THEN INSERT VALUES (s.sku, 1)")
+                    .startsWith("Merge into mem.main.stock [update, insert; keys: sku]\n"));
+            e = assertThrows(RuntimeException.class, () -> engine.update("INSERT INTO mem.stock VALUES ('a', 1)"));
+            assertTrue(e.getMessage().startsWith("Duplicate key \"sku: a\" violates primary key constraint."),
+                    e.getMessage());
         }
         assertEquals("4 [[north, 15.75], [south, 20.00]]", printed);
     }

@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.21.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.22.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, views, the configuration file, the JDBC
 driver, Arrow, the Flight SQL server, the SQL it takes and where it differs from DuckDB,
 how it runs queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -22,6 +22,8 @@ that run, each with its output.
   - [Files](#files)
   - [Formats](#formats)
   - [Loading](#loading)
+  - [Changing rows](#changing-rows)
+  - [Schemas, columns and temporary tables](#schemas-columns-and-temporary-tables)
   - [Tables](#tables)
 - [Views](#views)
 - [File access](#file-access)
@@ -656,7 +658,7 @@ columns and partitions must still be those of the table.
 
 ## Writing and loading
 
-Five statements write, and each gives one row with the number of rows written in a
+These statements write, and each gives one row with the number of rows written in a
 column `Count` of the type `BIGINT`, as in DuckDB:
 
 - `COPY (query) TO 'file' [(option value, ...)]`, or `COPY table [(columns)] TO 'file'`,
@@ -669,7 +671,12 @@ column `Count` of the type `BIGINT`, as in DuckDB:
   there is one;
 - `INSERT INTO t [(columns)] query` and `INSERT INTO t [(columns)] VALUES (...), ...` add
   rows;
-- `DROP TABLE [IF EXISTS] t` drops a table.
+- `UPDATE`, `DELETE` and `MERGE` change, delete and merge rows, see
+  [Changing rows](#changing-rows);
+- `DROP TABLE [IF EXISTS] t` drops a table;
+- `CREATE SCHEMA`, `ALTER TABLE ... ADD COLUMN` and `CREATE TEMP TABLE`, see
+  [Schemas, columns and temporary tables](#schemas-columns-and-temporary-tables), which
+  give no rows written.
 
 `engine.update(sql)` runs such a statement and returns the number; `engine.sql`,
 `engine.rows` and the [JDBC driver](#jdbc-driver) run it too and give the row. With the
@@ -711,8 +718,9 @@ to the schema `main` of the source of that name or else to the schema of that na
 the default source, and of three parts to `source.schema.table`. Each statement is a
 transaction of its own in the source it writes to; there is no transaction over several
 statements or sources, and `CREATE OR REPLACE` drops the old table and then creates the
-new one in two steps. `UPDATE`, `DELETE`, `ALTER TABLE`, constraints and keys, and
-scripts of several statements are not supported.
+new one in two steps. `RETURNING`, `ON CONFLICT`, `DROP SCHEMA`, `ALTER TABLE` other than
+`ADD COLUMN`, constraints other than `PRIMARY KEY`, and scripts of several statements are
+not supported.
 
 ### Files
 
@@ -827,9 +835,109 @@ An object of S3 is loaded by its location, as in `COPY mem.archive FROM
 's3://lake/archive.csv'`. Files compressed with zstd, and several files at once, are not
 loaded; `INSERT INTO mem.archive SELECT * FROM read_csv('archive/**/*.csv')` loads many.
 
+### Changing rows
+
+`UPDATE t SET a = value, ... [FROM items] [WHERE condition]` sets columns of the rows that
+the condition selects, `DELETE FROM t [USING items] [WHERE condition]` deletes them, and
+`MERGE INTO t USING source ON condition WHEN ... THEN ...` brings the rows of a query, a
+file or a table of any source into a table, as DuckDB does. They change the tables of the
+memory and JDBC sources, each in one transaction of its source, and give the number of rows
+they changed; files, tables of Iceberg and tables of Java objects are not changed. With the
+sources of the [first example](#using-the-engine):
+
+```java
+engine.update("CREATE TABLE mem.stock (sku VARCHAR PRIMARY KEY, qty INTEGER NOT NULL)");
+engine.update("INSERT INTO mem.stock VALUES ('a', 5), ('b', 0)");
+engine.update("UPDATE mem.stock SET qty = qty + 1 WHERE sku = 'a'");
+long merged = engine.update("""
+        MERGE INTO mem.stock USING (VALUES ('b', 7), ('c', 2)) AS delivery(sku, qty)
+        ON stock.sku = delivery.sku
+        WHEN MATCHED THEN UPDATE SET qty = stock.qty + delivery.qty
+        WHEN NOT MATCHED THEN INSERT VALUES (delivery.sku, delivery.qty)""");
+System.out.println(merged + " " + engine.rows("SELECT * FROM mem.stock ORDER BY sku").stream()
+        .map(Arrays::toString).toList());
+```
+
+```
+2 [[a, 6], [b, 7], [c, 2]]
+```
+
+The values of `SET` come from the row before the change and are cast to the types of their
+columns as `INSERT` casts them; a bare `NULL` or a parameter `?` takes the type of its
+column. A column may be set once, and an unknown one fails with `Referenced update column
+x not found in table!`. With `FROM`, a row of the table changes once for each row of
+`FROM` it matches, each counts, and the last of them sets the values; `DELETE ... USING`
+counts each row it deletes once. `WHERE` and `SET` may hold subqueries, also correlated
+ones, but no aggregates or window functions.
+
+`MERGE` matches the rows of the table with those of the source by `ON` or by
+`USING (columns)`, with `NULL` matching nothing, and acts on each pair, and on each row of
+either side that matches nothing, with the first of its branches that holds:
+
+- `WHEN MATCHED [AND condition] THEN UPDATE [SET a = value, ...] | DELETE | DO NOTHING`;
+- `WHEN NOT MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)] VALUES (...) |
+  INSERT | INSERT BY NAME | DO NOTHING`, for a row of the source;
+- `WHEN NOT MATCHED BY SOURCE [AND condition] THEN UPDATE ... | DELETE | DO NOTHING`, for
+  a row of the table.
+
+`UPDATE` and `INSERT` without a list take the columns of the source by their position,
+`INSERT BY NAME` by their names, and a column of the table that an `INSERT` gives no value
+gets `NULL`. The pairs of one row of the table act in their order: after a `DELETE`, an
+`UPDATE` of the row does nothing, and of several updates, the last counts. The count is
+that of the pairs and rows that a branch other than `DO NOTHING` acted on, as in DuckDB.
+The source may be any table, view, query or file of the engine, such as
+`USING read_parquet('lake/deliveries.parquet') AS d`, and a table of any source with a
+writer the target.
+
+A source runs a whole `UPDATE` or `DELETE` itself if it can: the memory connector always,
+a JDBC source when its dialect writes every expression with the meaning FyrQL gives it,
+which holds for comparisons of columns and literals and for literals and columns as new
+values, but not for arithmetic or functions, and no column of instants takes part. It then
+sends one statement, such as `UPDATE "main"."stock" SET "qty" = ? WHERE ("sku" = ?)`.
+Otherwise, and always with `FROM`, `USING`, subqueries and for `MERGE`, the engine reads
+the rows to change first, completely and within the [memory
+budget](#memory-budget-and-spilling), and hands them to the source by key: the primary key
+of the table, or all its columns for a table without one, where rows alike change
+together. A JDBC source then sends `UPDATE ... WHERE "k" = ?`, `DELETE ... WHERE "k" = ?`
+and `INSERT` in batches of `batchRows` in one transaction, which a failure rolls back.
+`explain` shows the plan of the rows to change below a line such as
+`Update mem.main.stock [set: qty; keys: sku]`, `Delete from mem.main.stock [keys: sku]`
+or `Merge into mem.main.stock [update, insert; keys: sku]`. A database that checks a key
+row by row, such as PostgreSQL and H2, may refuse an `UPDATE` of key columns that DuckDB
+takes, as `SET k = k + 1`, which it checks at the end.
+
+### Schemas, columns and temporary tables
+
+`CREATE TABLE t (a INTEGER PRIMARY KEY, ...)`, or `CREATE TABLE t (a INTEGER, b VARCHAR,
+PRIMARY KEY (a, b))`, gives a table a primary key: its columns are `NOT NULL`, and a
+statement that leaves two rows with the same key fails, with `Duplicate key "a: 1"
+violates primary key constraint.` in memory and with the message of the database in a
+database, which keeps the key itself. A source that keeps no keys, such as one of files,
+refuses one; MySQL stores a `VARCHAR` of a key as `VARCHAR(768)`. The [JDBC
+driver](#jdbc-driver), the [Flight SQL server](#flight-sql-server) and the [PostgreSQL
+wire protocol server](pgwire.md) show the primary keys of the sources, so that a tool can
+change the rows of a result, see [DBeaver](#dbeaver).
+
+`CREATE SCHEMA [IF NOT EXISTS] [source.]schema` creates a schema in the default source, or
+in the one named, which a JDBC source does with `CREATE SCHEMA`; SQLite and the memory
+connector have no schemas but their own. `ALTER TABLE t ADD [COLUMN] [IF NOT EXISTS] c
+type [DEFAULT value]` adds a column at the end of a table, which may hold `NULL`, with the
+constant `value` in every row the table has; a table keeps no default for later rows,
+which get `NULL` where an `INSERT` gives no value. A constraint on the new column and the
+other forms of `ALTER TABLE` are not supported.
+
+`CREATE [OR REPLACE] TEMP TABLE [IF NOT EXISTS] t ...`, also `TEMPORARY`, creates a table
+in memory that only its [session](#sessions) sees, as long as the session lasts: a
+connection of the JDBC driver, of the PostgreSQL server or of a client of Flight SQL. The
+temporary tables of a session are in its source `temp`, schema `main`; a name of one part
+finds a temporary table before a table of that name elsewhere, as in DuckDB, so that
+`DROP TABLE t` drops it first, and `temp.t` names it alone. A view cannot read one. The
+source comes from the module `fyrql-connector-memory`; without it, or in an engine with a
+source named `temp`, there are no temporary tables.
+
 ### Tables
 
-The memory connector and the JDBC connector create, fill and drop tables. In
+The memory connector and the JDBC connector create, fill, change and drop tables. In
 memory, a table that SQL created holds the batches of its rows and shows the rows of a
 statement when the statement ends; a query that runs at that time goes on with the rows
 it started with. A table registered from Java objects can be read and dropped, but not
@@ -1253,6 +1361,12 @@ three parts are looked up, for this connection only. The
 schemas, tables and columns, with the number of rows of a table, or an estimate, in
 `REMARKS` if the source has one; it reads only the sources the catalog in the call matches.
 The tables of the sources have the type `TABLE`, the [views](#views) the type `VIEW`.
+A primary key that a source tells is in `getPrimaryKeys`, `getBestRowIdentifier` and, as a
+unique index `<table>_pkey`, in `getIndexInfo`, and the temporary tables of the connection
+are in the catalog `temp` once there are some. A column of a result that shows a column of
+a table as it is, through filters, sorts and projections of columns, names the table in
+`getCatalogName`, `getSchemaName` and `getTableName` of its `ResultSetMetaData` and is
+writable; a computed one is read-only.
 
 A statement runs one query: a `SELECT`, `WITH`, `VALUES` or set operation; or one
 statement that [writes](#writing-and-loading); or `EXPLAIN` or `EXPLAIN ANALYZE` followed by either,
@@ -1357,6 +1471,11 @@ created it, and the engine of another connection learns of a table created in a
 database only when that connection opens anew, as with Invalidate/Reconnect. DBeaver
 should stay in auto-commit, its default: in its manual commit mode, Commit and Rollback do
 nothing, and what a statement wrote stays.
+
+The rows of a table with a primary key, in memory or in a database, can be edited in the
+grid of DBeaver: it finds the table and its key in the metadata and saves a changed cell
+with an `UPDATE ... WHERE` of the key, a new row with an `INSERT` and a deleted one with a
+`DELETE`. For a table without a key, DBeaver asks for the columns of a virtual key.
 
 ## Arrow
 
@@ -1533,29 +1652,30 @@ server leaves the engine open. That engine keeps the file access it was built wi
 `fileAccess(FileAccess.NONE)`, or `READ` and allowed locations.
 
 The server runs queries as the JDBC driver does: a `SELECT`, `WITH`, `VALUES` or set
-operation, or `EXPLAIN` or `EXPLAIN ANALYZE` followed by a statement, which gives the
-plan as rows of one column `plan`; `EXPLAIN ANALYZE` runs when the client reads its
-stream, and an update with `EXPLAIN` fails with `INVALID_ARGUMENT`. A query is bound when
-the client asks for it, and its batches go out as the engine gives them, as fast as the
-client takes them; a client that cancels the query, or closes its stream before the end,
-stops it. A prepared statement tells the types of its parameters as their schema and takes
-one row of values. The calls for metadata give the sources as catalogs with their schemas,
-tables and columns, the table types `TABLE` and `VIEW`, the name `FyrQL` and the version
-of the server, and the types. A statement that [writes](#writing-and-loading) runs as an update, whose
-answer is the number of rows written, or, sent as a query, when the client asks for its
-flight info, which then gives the row of `Count`. A prepared statement that writes has a
-result without columns, as the Flight SQL JDBC driver of Arrow expects, and runs once for
-each row of values the client sends; at a row that fails, the rows before it stay written.
-`COPY` reads and writes files on the machine of the server, with paths relative to its
-working directory, as far as the [file access](#file-access) of the engine allows. Each
-statement is a transaction of its own, and there is no bulk ingestion. An error has the
-message of FyrQL, with the position in the text, and the status `INVALID_ARGUMENT` for
-a statement that does not parse or bind, values out of range, a failed cast and a write
-the target refuses, `UNAUTHORIZED`, `PERMISSION_DENIED` in gRPC, for a file the engine does
-not allow, `RESOURCE_EXHAUSTED` for the memory budget and `maxQueries`, which counts statements
-that write too, `CANCELLED` for a cancelled query, `TIMED_OUT` for one past its timeout, and
-`INTERNAL` for an error of a source. All clients share the engine, with its threads and its
-memory budget.
+operation, or `EXPLAIN` or `EXPLAIN ANALYZE` followed by a statement, which gives the plan
+as rows of one column `plan`; `EXPLAIN ANALYZE` runs when the client reads its stream, and
+an update with `EXPLAIN` fails with `INVALID_ARGUMENT`. A query is bound when the client
+asks for it, and its batches go out as the engine gives them, as fast as the client takes
+them; a client that cancels the query, or closes its stream before the end, stops it. A
+prepared statement tells the types of its parameters as their schema and takes one row of
+values. The calls for metadata give the sources as catalogs with their schemas, tables and
+columns, the table types `TABLE` and `VIEW`, the primary keys the sources tell, the name
+`FyrQL` and the version of the server, and the types. A statement that
+[writes](#writing-and-loading) runs as an update, whose answer is the number of rows
+written, or, sent as a query, when the client asks for its flight info, which then gives
+the row of `Count`. A prepared statement that writes has a result without columns, as the
+Flight SQL JDBC driver of Arrow expects, and runs once for each row of values the client
+sends; at a row that fails, the rows before it stay written. `COPY` reads and writes files
+on the machine of the server, with paths relative to its working directory, as far as the
+[file access](#file-access) of the engine allows. Each statement is a transaction of its
+own, and there is no bulk ingestion. An error has the message of FyrQL, with the position
+in the text, and the status `INVALID_ARGUMENT` for a statement that does not parse or
+bind, values out of range, a failed cast and a write the target refuses, `UNAUTHORIZED`,
+`PERMISSION_DENIED` in gRPC, for a file the engine does not allow, `RESOURCE_EXHAUSTED`
+for the memory budget and `maxQueries`, which counts statements that write too,
+`CANCELLED` for a cancelled query, `TIMED_OUT` for one past its timeout, and `INTERNAL`
+for an error of a source. All clients share the engine, with its threads and its memory
+budget.
 
 Every client is a [session](#sessions). The server sets the cookie
 `arrow_flight_session_id`, the one the clients of Arrow keep, finds the session of a
@@ -2092,6 +2212,13 @@ here; the random tests explain such differences by a ledger of their own, see
   builder defines it, where DuckDB keeps it in its database file. The names in its query
   resolve once, when it is created, as in PostgreSQL. `CREATE TEMP VIEW`, `ALTER VIEW`
   and `DROP VIEW ... CASCADE` are not supported.
+- `UPDATE`, `DELETE` and `MERGE` change a table without a primary key by the values of all
+  its columns, so that rows alike change together; with `FROM` or `MERGE`, such rows that
+  different rows of the source match all take the values of the last match, where DuckDB
+  changes each row by its own match. A table keeps no default of `ALTER TABLE ... ADD
+  COLUMN ... DEFAULT` for later rows, and `RETURNING`, `ON CONFLICT`, `THEN ERROR` of
+  `MERGE`, `DROP SCHEMA` and `DROP COLUMN` are not supported. A temporary table lives in the
+  session, not in a database file, and a view cannot read one.
 
 ### Execution
 
@@ -2931,7 +3058,7 @@ internal: `FyrQL.catalog()`, `JdbcConnector.sql()` and `JdbcDialect.sql()`.
 | `net.fyrql.connector` | SPI | - |
 | `net.fyrql.connector.files` | Internal | - |
 | `net.fyrql.core.type` | SPI | - |
-| `net.fyrql.core.vector` | SPI | `SpillFormat` (internal) |
+| `net.fyrql.core.vector` | SPI | `RowKey`, `SpillFormat` (internal) |
 | `net.fyrql.core.plan` | SPI | `Plans` (internal) |
 | `net.fyrql.core.expr` | SPI | `ScalarOps` (internal) |
 | `net.fyrql.core.value` | Internal | `Interval` (SPI) |

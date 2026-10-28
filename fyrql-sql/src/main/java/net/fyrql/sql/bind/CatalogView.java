@@ -112,6 +112,39 @@ public interface CatalogView {
     Schema schema(TableRef table);
 
     /**
+     * Returns where a new schema of a name of one or two parts goes: the
+     * source and the schema. The default supports no new schemas.
+     *
+     * @throws SqlException if the name names no source
+     */
+    default List<String> resolveNewSchema(List<String> name) {
+        throw new SqlException("Not supported: CREATE SCHEMA", Position.UNKNOWN);
+    }
+
+    /**
+     * Returns where a new temporary table goes, which lives in the session
+     * alone. The default supports none.
+     *
+     * @throws SqlException if the name names a source or schema other than that of temporary tables
+     */
+    default TableRef resolveTemporary(List<String> name) {
+        throw new SqlException("Not supported: temporary tables", Position.UNKNOWN);
+    }
+
+    /** Tells whether a table is a temporary one of the session. The default knows of none. */
+    default boolean temporary(TableRef table) {
+        return false;
+    }
+
+    /**
+     * Returns the columns of the primary key of a resolved table, in the
+     * order of the key; empty for none. The default knows of none.
+     */
+    default List<String> primaryKey(TableRef table) {
+        return List.of();
+    }
+
+    /**
      * Returns the parts of the name of a resolved table that qualify its
      * columns, as {@code t.c}, {@code schema.t.c} and {@code source.schema.t.c}
      * do; the default is {@code source.schema.table}.

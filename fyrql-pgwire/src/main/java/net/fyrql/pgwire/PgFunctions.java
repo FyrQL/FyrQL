@@ -89,6 +89,19 @@ final class PgFunctions {
         default String viewDefinition(int oid) {
             return null;
         }
+
+        /** The definition of a constraint by its OID, as {@code PRIMARY KEY (a, b)}, or {@code null}. */
+        default String constraintDefinition(int oid) {
+            return null;
+        }
+
+        /**
+         * The definition of an index by its OID, or the name of one of its
+         * columns, counted from 1; {@code null} if there is no such index.
+         */
+        default String indexDefinition(int oid, int column) {
+            return null;
+        }
     }
 
     /** Returns the functions of the engine and those of the server, in a registry of their own. */
@@ -103,6 +116,20 @@ final class PgFunctions {
             Integer oid = a[0] instanceof Number n ? Integer.valueOf(n.intValue()) : relations.apply(a[0].toString());
             return oid == null ? null : lookups.viewDefinition(oid);
         }) {
+            @Override
+            public boolean foldable() {
+                return false;
+            }
+        });
+        r.register(new Fixed("pg_get_constraintdef", 1, 2, DataType.VARCHAR, true,
+                a -> lookups.constraintDefinition(((Number) a[0]).intValue())) {
+            @Override
+            public boolean foldable() {
+                return false;
+            }
+        });
+        r.register(new Fixed("pg_get_indexdef", 1, 3, DataType.VARCHAR, true, a -> lookups.indexDefinition(
+                ((Number) a[0]).intValue(), a.length > 1 && a[1] != null ? ((Number) a[1]).intValue() : 0)) {
             @Override
             public boolean foldable() {
                 return false;
@@ -164,8 +191,6 @@ final class PgFunctions {
                 constant("col_description", 2, 2, DataType.VARCHAR, null),
                 constant("shobj_description", 2, 2, DataType.VARCHAR, null),
                 constant("pg_get_expr", 2, 3, DataType.VARCHAR, null),
-                constant("pg_get_indexdef", 1, 3, DataType.VARCHAR, null),
-                constant("pg_get_constraintdef", 1, 2, DataType.VARCHAR, null),
                 constant("pg_get_ruledef", 1, 2, DataType.VARCHAR, null),
                 constant("pg_get_triggerdef", 1, 2, DataType.VARCHAR, null),
                 constant("pg_get_partkeydef", 1, 1, DataType.VARCHAR, null),

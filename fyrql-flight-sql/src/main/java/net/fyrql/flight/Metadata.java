@@ -168,6 +168,26 @@ final class Metadata {
         return rows;
     }
 
+    /**
+     * Returns the rows of the columns of the primary key of the table a
+     * command names, as the sources that know it tell it, in the order of
+     * the key.
+     */
+    static List<Object[]> primaryKeys(FyrQL engine, FlightSql.CommandGetPrimaryKeys command) {
+        List<Object[]> rows = new ArrayList<>();
+        CatalogTables all = engine.catalogTables();
+        for (CatalogTables.TableInfo t : all.tables(catalog(command.hasCatalog(), command.getCatalog()),
+                catalog(command.hasDbSchema(), command.getDbSchema()), NamePattern.name(command.getTable()))) {
+            List<String> key = t.view() ? List.of() : all.primaryKey(t.table());
+            for (int i = 0; i < key.size(); i++) {
+                TableRef ref = t.table();
+                rows.add(new Object[] {ref.source(), ref.schema(), ref.table(), key.get(i), i + 1,
+                    ref.table() + "_pkey"});
+            }
+        }
+        return rows;
+    }
+
     private static NamePattern catalog(boolean set, String name) {
         return set ? NamePattern.name(name) : NamePattern.ANY;
     }

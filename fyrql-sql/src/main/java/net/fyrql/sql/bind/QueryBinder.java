@@ -303,6 +303,35 @@ final class QueryBinder {
         return new Rows(plan, untypedNulls(plan));
     }
 
+    /**
+     * Binds expressions over the columns of a table, as the {@code SET} and
+     * {@code WHERE} of an {@code UPDATE} or {@code DELETE} without
+     * {@code FROM}: column {@code i} of the expressions is column {@code i}
+     * of the table. They hold neither aggregates nor subqueries.
+     *
+     * @param alias the alias of the table, or {@code null}
+     * @param values the expressions, each bound as it is
+     * @param condition the condition, or {@code null}
+     * @return the bound expressions, then the bound condition if there is one
+     */
+    List<Expression> overTable(TableRef table, String alias, List<SqlExpr> values, SqlExpr condition) {
+        PlanNode scan = scan(table);
+        List<String> path = alias == null ? catalog.path(table) : List.of();
+        Relation relation = relation(scan, new Scope.Table(alias == null ? table.table() : alias, path),
+                scan.schema().fields().stream().map(Schema.Field::name).toList());
+        List<Expression> result = new ArrayList<>();
+        ExpressionBinder binder = new ExpressionBinder(context, relation.scope(), Map.of(),
+                "SET clause cannot contain aggregates!", null);
+        for (SqlExpr v : values) {
+            result.add(binder.bind(v));
+        }
+        if (condition != null) {
+            result.add(new ExpressionBinder(context, relation.scope(), Map.of(),
+                    "WHERE clause cannot contain aggregates!", null).condition(condition));
+        }
+        return result;
+    }
+
     private PlanNode body(QueryBody body, Map<String, Cte> ctes) {
         return switch (body) {
             case QueryBody.Select s -> select(s, List.of(), null, null, ctes, null);
@@ -831,7 +860,7 @@ final class QueryBinder {
     }
 
     /** The default alias of a file: its name up to the first dot. */
-    private static String fileAlias(String path) {
+    static String fileAlias(String path) {
         String name = path.substring(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
         int dot = name.indexOf('.');
         return dot > 0 ? name.substring(0, dot) : name;

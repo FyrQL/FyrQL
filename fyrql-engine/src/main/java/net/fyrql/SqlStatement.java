@@ -11,10 +11,15 @@
 
 package net.fyrql;
 
+import net.fyrql.core.plan.Plans;
+import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.bind.BoundStatement;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * A statement parsed and bound in a session, ready to run: a query,
@@ -62,6 +67,41 @@ public final class SqlStatement {
      */
     public boolean isQuery() {
         return bound instanceof BoundStatement.Query || bound instanceof BoundStatement.Explain;
+    }
+
+    /**
+     * A column of a table that a column of the result of a query shows as
+     * it is, so that a tool may change it with an {@code UPDATE} of the
+     * table.
+     *
+     * @param table the table
+     * @param column the name of the column in the table
+     */
+    public record ColumnOrigin(TableRef table, String column) {
+        public ColumnOrigin {
+            Objects.requireNonNull(table, "table");
+            Objects.requireNonNull(column, "column");
+        }
+    }
+
+    /**
+     * Returns for each column of the result of a query the column of a
+     * table it shows as it is: through projections of columns, filters,
+     * sorts and limits down to the table; empty for a column that the query
+     * computes, and for each column of a statement that is no query.
+     */
+    public List<Optional<ColumnOrigin>> origins() {
+        List<Optional<ColumnOrigin>> result = new ArrayList<>();
+        if (bound instanceof BoundStatement.Query q) {
+            for (Plans.Origin o : Plans.origins(q.plan())) {
+                result.add(o == null ? Optional.empty() : Optional.of(new ColumnOrigin(o.table(), o.column())));
+            }
+        } else {
+            for (int i = 0; i < schema().size(); i++) {
+                result.add(Optional.empty());
+            }
+        }
+        return result;
     }
 
     /**

@@ -11,11 +11,17 @@
 
 package net.fyrql.connector.jdbc;
 
+import net.fyrql.connector.RowChanges;
 import net.fyrql.connector.Sink;
 import net.fyrql.connector.Writer;
+import net.fyrql.core.expr.Expression;
+import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.plan.TableRef;
+import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.core.vector.Vector;
+import net.fyrql.sql.render.BoundSql;
 import net.fyrql.sql.render.Dialect;
 import net.fyrql.sql.render.SqlRenderer;
 
@@ -23,7 +29,12 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.OptionalLong;
 import java.util.function.Consumer;
 
 /**
@@ -36,6 +47,14 @@ import java.util.function.Consumer;
  * table after a rollback; the writer then drops it, as far as it can. The
  * catalog of the source reads the database again after a commit and after
  * a table is dropped.
+ * <p>
+ * An {@code UPDATE} or {@code DELETE} goes to the database as one statement
+ * when the dialect renders all its expressions with the semantics of the
+ * engine and none of them reads a column that holds instants, the rule of
+ * the pushdown of filters. Otherwise the engine hands the rows by key: an
+ * {@code UPDATE ... WHERE "k" = ?} or {@code DELETE ... WHERE "k" = ?} for
+ * each, with {@code "k" IS NULL} for a key that is {@code NULL}, and
+ * {@code INSERT}s, sent in batches in one transaction.
  */
 final class JdbcWriter implements Writer {
 
@@ -69,21 +88,191 @@ final class JdbcWriter implements Writer {
      */
     @Override
     public Sink create(TableRef table, Schema schema) {
+        return create(table, schema, List.of());
+    }
+
+    /** Creates a table with a primary key, which the database keeps. */
+    @Override
+    public Sink create(TableRef table, Schema schema, List<String> primaryKey) {
         for (int c = 0; c < schema.size(); c++) {
             try {
-                sql.typeName(schema.type(c));
+                if (primaryKey.contains(schema.name(c))) {
+                    sql.keyTypeName(schema.type(c));
+                } else {
+                    sql.typeName(schema.type(c));
+                }
             } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException("The JDBC source " + source + " cannot create " + table + ": "
                         + e.getMessage() + " (column " + schema.name(c) + ")");
             }
         }
         String name = catalog.qualifiedName(table);
-        return open(table, name, schema, new BitSet(), renderer().createTable(name, schema));
+        return open(table, name, schema, new BitSet(), renderer().createTable(name, schema, primaryKey));
     }
 
     @Override
     public Sink append(TableRef table) {
         return open(table, catalog.qualifiedName(table), catalog.schema(table), catalog.withTimeZone(table), null);
+    }
+
+    @Override
+    public OptionalLong update(TableRef table, int[] columns, List<Expression> values, Expression condition) {
+        BitSet zoned = zoned(table);
+        for (int k = 0; k < columns.length; k++) {
+            Expression v = values.get(k);
+            if (zoned.get(columns[k]) || !sql.supportsValue(v) || Expressions.columns(v).intersects(zoned)) {
+                return OptionalLong.empty();
+            }
+        }
+        if (condition != null && !pushable(condition, zoned)) {
+            return OptionalLong.empty();
+        }
+        return OptionalLong.of(run(renderer().update(catalog.qualifiedName(table), catalog.schema(table), columns,
+                values, condition)));
+    }
+
+    @Override
+    public OptionalLong delete(TableRef table, Expression condition) {
+        if (condition != null && !pushable(condition, zoned(table))) {
+            return OptionalLong.empty();
+        }
+        return OptionalLong.of(run(renderer().delete(catalog.qualifiedName(table), catalog.schema(table),
+                condition)));
+    }
+
+    @Override
+    public RowChanges change(TableRef table, int[] keys, int[] updated) {
+        String name = catalog.qualifiedName(table);
+        Schema schema = catalog.schema(table);
+        Transaction t;
+        try {
+            t = new Transaction();
+        } catch (SQLException e) {
+            throw new JdbcSourceException("The JDBC source " + source + " cannot open a connection to change "
+                    + table + ": " + e.getMessage(), e);
+        }
+        return new KeyedRows(table, name, schema, keys.clone(), updated.clone(), catalog.withTimeZone(table), t);
+    }
+
+    /** Creates a schema; SQLite has none but its databases. */
+    @Override
+    public void createSchema(String schema) {
+        if (dialect == JdbcDialect.SQLITE) {
+            throw new IllegalArgumentException("The JDBC source " + source + " is SQLite, which has no schemas");
+        }
+        String statement = "CREATE SCHEMA " + sql.quoteIdentifier(schema);
+        try {
+            Transaction t = new Transaction();
+            try {
+                t.execute(statement);
+                t.commit();
+            } catch (SQLException e) {
+                try {
+                    t.rollback();
+                } catch (SQLException again) {
+                    e.addSuppressed(again);
+                }
+                throw e;
+            } finally {
+                t.end();
+                catalog.refresh();
+            }
+        } catch (SQLException e) {
+            throw fails(statement, e);
+        }
+    }
+
+    /**
+     * Adds a column with {@code ALTER TABLE ... ADD COLUMN} and, for a value
+     * other than {@code NULL}, sets it in every row with an {@code UPDATE}
+     * of a parameter, in one transaction where the database allows; the
+     * database keeps no default for later rows.
+     */
+    @Override
+    public void addColumn(TableRef table, Schema.Field column, Object defaultValue) {
+        String type;
+        try {
+            type = sql.typeName(column.type());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("The JDBC source " + source + " cannot add the column "
+                    + column.name() + " to " + table + ": " + e.getMessage());
+        }
+        String name = catalog.qualifiedName(table);
+        String quoted = sql.quoteIdentifier(column.name());
+        String alter = "ALTER TABLE " + name + " ADD COLUMN " + quoted + " " + type;
+        String update = "UPDATE " + name + " SET " + quoted + " = ?";
+        String current = alter;
+        try {
+            Transaction t = new Transaction();
+            try {
+                t.execute(alter);
+                if (defaultValue != null) {
+                    current = update;
+                    record.accept(update);
+                    try (PreparedStatement p = t.connection.prepareStatement(update)) {
+                        JdbcBinding.setters(dialect, p, List.of(column.type()), new BitSet())[0].set(p, 1,
+                                defaultValue);
+                        p.executeUpdate();
+                    }
+                }
+                t.commit();
+            } catch (SQLException e) {
+                try {
+                    t.rollback();
+                } catch (SQLException again) {
+                    e.addSuppressed(again);
+                }
+                throw e;
+            } finally {
+                t.end();
+                catalog.refresh();
+            }
+        } catch (SQLException e) {
+            throw fails(current, e);
+        }
+    }
+
+    /** The columns of a table that hold instants, which the database compares in the time zone of its session. */
+    private BitSet zoned(TableRef table) {
+        BitSet zoned = catalog.withTimeZone(table);
+        if (JdbcTypes.comparesInstants(dialect)) {
+            zoned.clear();
+        }
+        return zoned;
+    }
+
+    private boolean pushable(Expression e, BitSet zoned) {
+        return sql.supports(e) && !Expressions.columns(e).intersects(zoned);
+    }
+
+    /** Runs one statement in a transaction of its own and returns the number of rows it changed. */
+    private long run(BoundSql statement) {
+        String shown = statement.parameters().isEmpty() ? statement.sql() : statement.toString();
+        try {
+            Transaction t = new Transaction();
+            try {
+                record.accept(shown);
+                long count;
+                try (PreparedStatement p = t.connection.prepareStatement(statement.sql())) {
+                    JdbcReader.bind(p, statement.parameters());
+                    count = p.executeUpdate();
+                }
+                t.commit();
+                return count;
+            } catch (SQLException | RuntimeException e) {
+                try {
+                    t.rollback();
+                } catch (SQLException again) {
+                    e.addSuppressed(again);
+                }
+                throw e;
+            } finally {
+                t.end();
+                catalog.refresh();
+            }
+        } catch (SQLException e) {
+            throw fails(shown, e);
+        }
     }
 
     @Override
@@ -201,6 +390,237 @@ final class JdbcWriter implements Writer {
             }
             if (failure != null) {
                 throw failure;
+            }
+        }
+    }
+
+    /**
+     * Changes of rows by key in one transaction: a prepared statement for
+     * each kind of change and each pattern of {@code NULL}s in the key, its
+     * rows sent in batches of {@code batchRows}, in the order of the calls.
+     */
+    private final class KeyedRows implements RowChanges {
+        private final TableRef table;
+        private final String name;
+        private final Schema schema;
+        private final int[] keys;
+        private final int[] updated;
+        private final BitSet withTimeZone;
+        private final Transaction transaction;
+        private final Map<String, Prepared> statements = new LinkedHashMap<>();
+        /** The kind of the last change: 'u', 'd' or 'i'. */
+        private char kind;
+        private long count;
+        private boolean done;
+
+        /** A prepared statement with the columns of the batch it binds and their setters. */
+        private final class Prepared {
+            final String sql;
+            final PreparedStatement statement;
+            final int[] columns;
+            final JdbcBinding.Setter[] setters;
+            int pending;
+
+            Prepared(String sql, int[] columns, List<DataType> types, BitSet zoned) throws SQLException {
+                this.sql = sql;
+                record.accept(sql);
+                this.statement = transaction.connection.prepareStatement(sql);
+                this.columns = columns;
+                this.setters = JdbcBinding.setters(dialect, statement, types, zoned);
+            }
+
+            void add(Batch batch, int row) throws SQLException {
+                for (int c = 0; c < columns.length; c++) {
+                    setters[c].set(statement, c + 1, batch.column(columns[c]).get(row));
+                }
+                statement.addBatch();
+                if (++pending == batchRows) {
+                    send();
+                }
+            }
+
+            void send() throws SQLException {
+                if (pending > 0) {
+                    for (int n : statement.executeBatch()) {
+                        count += n >= 0 ? n : n == Statement.SUCCESS_NO_INFO ? 1 : 0;
+                    }
+                    pending = 0;
+                }
+            }
+        }
+
+        KeyedRows(TableRef table, String name, Schema schema, int[] keys, int[] updated, BitSet withTimeZone,
+                Transaction transaction) {
+            this.table = table;
+            this.name = name;
+            this.schema = schema;
+            this.keys = keys;
+            this.updated = updated;
+            this.withTimeZone = withTimeZone;
+            this.transaction = transaction;
+        }
+
+        @Override
+        public void update(Batch batch) {
+            change('u', batch);
+        }
+
+        @Override
+        public void delete(Batch batch) {
+            change('d', batch);
+        }
+
+        @Override
+        public void insert(Batch batch) {
+            change('i', batch);
+        }
+
+        private void change(char what, Batch batch) {
+            if (done) {
+                throw new IllegalStateException("The changes are committed or closed");
+            }
+            String sql = null;
+            try {
+                if (what != kind) {
+                    sendAll();
+                    kind = what;
+                }
+                Vector[] key = new Vector[what == 'i' ? 0 : keys.length];
+                for (int k = 0; k < key.length; k++) {
+                    key[k] = batch.column(k);
+                }
+                for (int r = 0; r < batch.rowCount(); r++) {
+                    BitSet nulls = new BitSet();
+                    for (int k = 0; k < key.length; k++) {
+                        nulls.set(k, key[k].isNull(r));
+                    }
+                    Prepared p = prepared(what, nulls);
+                    sql = p.sql;
+                    p.add(batch, r);
+                }
+            } catch (SQLException e) {
+                throw new JdbcSourceException("The JDBC source " + source + " fails on " + (sql == null ? "the"
+                        + " changes of " + table : sql) + ": " + e.getMessage(), e);
+            }
+        }
+
+        /** Returns the statement of a kind of change for a pattern of {@code NULL}s in the key, prepared once. */
+        private Prepared prepared(char what, BitSet nulls) throws SQLException {
+            SqlRenderer renderer = renderer();
+            String text = switch (what) {
+                case 'i' -> renderer.insertPrepared(name, schema);
+                case 'd' -> "DELETE FROM " + name + " WHERE " + renderer.keyCondition(schema, keys, nulls);
+                default -> {
+                    StringBuilder b = new StringBuilder("UPDATE ").append(name).append(" SET ");
+                    for (int k = 0; k < updated.length; k++) {
+                        b.append(k > 0 ? ", " : "").append(sql.quoteIdentifier(schema.name(updated[k])))
+                                .append(" = ?");
+                    }
+                    yield b.append(" WHERE ").append(renderer.keyCondition(schema, keys, nulls)).toString();
+                }
+            };
+            Prepared p = statements.get(text);
+            if (p == null) {
+                // The columns of the batch the statement binds, with the columns of the table they are.
+                List<Integer> columns = new ArrayList<>();
+                List<Integer> tableColumns = new ArrayList<>();
+                if (what == 'i') {
+                    for (int c = 0; c < schema.size(); c++) {
+                        columns.add(c);
+                        tableColumns.add(c);
+                    }
+                }
+                if (what == 'u') {
+                    for (int k = 0; k < updated.length; k++) {
+                        columns.add(keys.length + k);
+                        tableColumns.add(updated[k]);
+                    }
+                }
+                if (what != 'i') {
+                    for (int k = 0; k < keys.length; k++) {
+                        if (!nulls.get(k)) {
+                            columns.add(k);
+                            tableColumns.add(keys[k]);
+                        }
+                    }
+                }
+                BitSet zoned = new BitSet();
+                List<DataType> types = new ArrayList<>();
+                for (int i = 0; i < tableColumns.size(); i++) {
+                    types.add(schema.type(tableColumns.get(i)));
+                    zoned.set(i, withTimeZone.get(tableColumns.get(i)));
+                }
+                p = new Prepared(text, columns.stream().mapToInt(Integer::intValue).toArray(), types, zoned);
+                statements.put(text, p);
+            }
+            return p;
+        }
+
+        private void sendAll() throws SQLException {
+            for (Prepared p : statements.values()) {
+                p.send();
+            }
+        }
+
+        @Override
+        public long commit() {
+            if (done) {
+                throw new IllegalStateException("The changes are committed or closed");
+            }
+            try {
+                sendAll();
+            } catch (SQLException e) {
+                throw new JdbcSourceException("The JDBC source " + source + " fails on the changes of " + table
+                        + ": " + e.getMessage(), e);
+            }
+            try {
+                transaction.commit();
+            } catch (SQLException e) {
+                throw new JdbcSourceException("The JDBC source " + source + " cannot commit the changes of " + table
+                        + ": " + e.getMessage(), e);
+            }
+            done = true;
+            try {
+                release();
+            } catch (SQLException e) {
+                throw new JdbcSourceException("The JDBC source " + source + " cannot release its connection after"
+                        + " the changes of " + table + ": " + e.getMessage(), e);
+            } finally {
+                catalog.refresh();
+            }
+            return count;
+        }
+
+        @Override
+        public void close() {
+            if (done) {
+                return;
+            }
+            done = true;
+            JdbcSourceException failure = new JdbcSourceException("The JDBC source " + source
+                    + " cannot roll back the changes of " + table);
+            try {
+                transaction.rollback();
+            } catch (SQLException e) {
+                failure.addSuppressed(e);
+            }
+            try {
+                release();
+            } catch (SQLException e) {
+                failure.addSuppressed(e);
+            }
+            if (failure.getSuppressed().length > 0) {
+                throw failure;
+            }
+        }
+
+        private void release() throws SQLException {
+            try {
+                for (Prepared p : statements.values()) {
+                    p.statement.close();
+                }
+            } finally {
+                transaction.end();
             }
         }
     }

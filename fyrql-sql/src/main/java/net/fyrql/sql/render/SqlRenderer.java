@@ -21,6 +21,7 @@ import net.fyrql.core.type.Schema;
 import net.fyrql.core.type.TypeRules;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.function.Function;
@@ -600,12 +601,98 @@ public final class SqlRenderer {
 
     /** Renders a {@code CREATE TABLE} statement for a schema. */
     public String createTable(String tableName, Schema schema) {
+        return createTable(tableName, schema, List.of());
+    }
+
+    /**
+     * Renders a {@code CREATE TABLE} with a primary key over the named
+     * columns; none for an empty list.
+     */
+    public String createTable(String tableName, Schema schema, List<String> primaryKey) {
         StringBuilder b = new StringBuilder("CREATE TABLE ").append(tableName).append(" (");
         for (int i = 0; i < schema.size(); i++) {
-            b.append(i > 0 ? ", " : "").append(dialect.quoteIdentifier(schema.name(i))).append(' ')
-                    .append(dialect.typeName(schema.type(i))).append(schema.nullable(i) ? "" : " NOT NULL");
+            String name = schema.name(i);
+            b.append(i > 0 ? ", " : "").append(dialect.quoteIdentifier(name)).append(' ')
+                    .append(primaryKey.contains(name) ? dialect.keyTypeName(schema.type(i))
+                            : dialect.typeName(schema.type(i)))
+                    .append(schema.nullable(i) && !primaryKey.contains(name) ? "" : " NOT NULL");
+        }
+        if (!primaryKey.isEmpty()) {
+            b.append(", PRIMARY KEY (");
+            for (int k = 0; k < primaryKey.size(); k++) {
+                b.append(k > 0 ? ", " : "").append(dialect.quoteIdentifier(primaryKey.get(k)));
+            }
+            b.append(')');
         }
         return b.append(')').toString();
+    }
+
+    /**
+     * Renders {@code UPDATE table SET "c" = value, ... [WHERE condition]},
+     * with expressions over the columns of the table; where the dialect
+     * {@linkplain Dialect#bindsLiterals binds its literals}, every literal
+     * other than {@code NULL} is a parameter {@code ?}.
+     *
+     * @param columns the positions of the columns to set
+     * @param values for each column to set, its new value
+     * @param condition the condition, or {@code null} for every row
+     */
+    public BoundSql update(String tableName, Schema schema, int[] columns, List<Expression> values,
+            Expression condition) {
+        List<BoundSql.Parameter> bound = new ArrayList<>();
+        parameters = dialect.bindsLiterals() ? bound : null;
+        try {
+            IntFunction<String> names = i -> dialect.quoteIdentifier(schema.name(i));
+            StringBuilder b = new StringBuilder("UPDATE ").append(tableName).append(" SET ");
+            for (int k = 0; k < columns.length; k++) {
+                b.append(k > 0 ? ", " : "").append(names.apply(columns[k])).append(" = ")
+                        .append(expression(values.get(k), names));
+            }
+            if (condition != null) {
+                b.append(" WHERE ").append(expression(condition, names));
+            }
+            return new BoundSql(b.toString(), bound, OptionalLong.empty());
+        } finally {
+            parameters = null;
+        }
+    }
+
+    /**
+     * Renders {@code DELETE FROM table [WHERE condition]}, with literals as
+     * {@link #update} renders them.
+     *
+     * @param condition the condition, or {@code null} for every row
+     */
+    public BoundSql delete(String tableName, Schema schema, Expression condition) {
+        List<BoundSql.Parameter> bound = new ArrayList<>();
+        parameters = dialect.bindsLiterals() ? bound : null;
+        try {
+            StringBuilder b = new StringBuilder("DELETE FROM ").append(tableName);
+            if (condition != null) {
+                b.append(" WHERE ").append(expression(condition,
+                        (IntFunction<String>) i -> dialect.quoteIdentifier(schema.name(i))));
+            }
+            return new BoundSql(b.toString(), bound, OptionalLong.empty());
+        } finally {
+            parameters = null;
+        }
+    }
+
+    /**
+     * Renders the condition of a change of a row by key, for a prepared
+     * statement: {@code "k" = ?} for each key column, or {@code "k" IS NULL}
+     * for one that holds {@code NULL} in the row.
+     *
+     * @param keys the positions of the key columns
+     * @param nulls which of the key columns, by their place among the keys, are {@code NULL}
+     */
+    public String keyCondition(Schema schema, int[] keys, BitSet nulls) {
+        StringBuilder b = new StringBuilder();
+        for (int k = 0; k < keys.length; k++) {
+            b.append(k > 0 ? " AND " : "").append(dialect.quoteIdentifier(schema.name(keys[k])))
+                    .append(nulls.get(k) ? " IS NULL" : " = ?");
+        }
+        return b.toString();
     }
 
     /** Renders an {@code INSERT} of rows of Java values. */

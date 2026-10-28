@@ -104,11 +104,13 @@ import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.create.table.CreateTable;
+import net.sf.jsqlparser.statement.create.table.Index;
 import net.sf.jsqlparser.statement.create.view.AutoRefreshOption;
 import net.sf.jsqlparser.statement.create.view.CreateView;
 import net.sf.jsqlparser.statement.create.view.ForceOption;
 import net.sf.jsqlparser.statement.create.view.TemporaryOption;
 import net.sf.jsqlparser.statement.drop.Drop;
+import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
@@ -131,6 +133,8 @@ import net.sf.jsqlparser.statement.select.TableFunction;
 import net.sf.jsqlparser.statement.select.UnionOp;
 import net.sf.jsqlparser.statement.select.Values;
 import net.sf.jsqlparser.statement.select.WithItem;
+import net.sf.jsqlparser.statement.update.Update;
+import net.sf.jsqlparser.statement.update.UpdateSet;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -158,8 +162,8 @@ import java.util.Set;
 final class JSqlParserAdapter {
 
     /** The start of the message for a statement that is not supported. */
-    private static final String SUPPORTED = "Only queries, COPY, CREATE TABLE, CREATE VIEW, INSERT INTO, DROP TABLE"
-            + " and DROP VIEW are supported";
+    private static final String SUPPORTED = "Only queries, COPY, CREATE TABLE, CREATE VIEW, CREATE SCHEMA, INSERT"
+            + " INTO, UPDATE, DELETE, MERGE, ALTER TABLE ... ADD COLUMN, DROP TABLE and DROP VIEW are supported";
 
     private final SourceText source;
     /** The parameters met so far, or {@code null} for a query that takes none. */
@@ -197,6 +201,11 @@ final class JSqlParserAdapter {
             case CreateTable c -> createTable(c);
             case CreateView v -> createView(v);
             case Insert i -> insert(i);
+            case Update u -> update(u);
+            case Delete d -> delete(d);
+            case net.sf.jsqlparser.statement.merge.Merge m -> throw unsupported("WITH before MERGE", m.getTable());
+            case net.sf.jsqlparser.statement.create.schema.CreateSchema c -> createSchema(c);
+            case net.sf.jsqlparser.statement.alter.Alter a -> alter(a);
             case Drop d when "TABLE".equalsIgnoreCase(d.getType()) -> drop(d);
             case Drop d when "VIEW".equalsIgnoreCase(d.getType()) -> dropView(d);
             case Drop d -> throw new SqlException(SUPPORTED + ", not DROP " + d.getType().toUpperCase(Locale.ROOT),
@@ -211,12 +220,15 @@ final class JSqlParserAdapter {
         Table table = c.getTable();
         Position position = position(table);
         reject(c.isUnlogged(), "UNLOGGED", table);
+        boolean temporary = false;
         if (c.getCreateOptionsStrings() != null && !c.getCreateOptionsStrings().isEmpty()) {
-            throw unsupported(String.join(" ", c.getCreateOptionsStrings()).toUpperCase(Locale.ROOT) + " TABLE",
-                    table);
+            String options = String.join(" ", c.getCreateOptionsStrings()).toUpperCase(Locale.ROOT);
+            if (!options.equals("TEMP") && !options.equals("TEMPORARY")) {
+                throw unsupported(options + " TABLE", table);
+            }
+            temporary = true;
         }
         reject(c.getTableOptionsStrings(), "table options", table);
-        reject(c.getIndexes(), "constraints", table);
         reject(c.getLikeTable(), "CREATE TABLE ... LIKE", table);
         reject(c.getTrailingLikeTable(), "CREATE TABLE ... LIKE", table);
         reject(c.getOfType(), "CREATE TABLE ... OF", table);
@@ -230,22 +242,43 @@ final class JSqlParserAdapter {
             throw new SqlException("OR REPLACE and IF NOT EXISTS cannot be used together", position);
         }
         List<ColumnDefinition> columns = new ArrayList<>();
+        List<String> primaryKey = new ArrayList<>();
         Query query = null;
         if (c.getSelect() != null) {
+            reject(c.getIndexes(), "constraints", table);
             query = query(c.getSelect());
         } else if (c.getColumnDefinitions() == null || c.getColumnDefinitions().isEmpty()) {
             throw new SqlException("Syntax error: CREATE TABLE needs columns, or AS and a query", position);
         } else {
             for (net.sf.jsqlparser.statement.create.table.ColumnDefinition d : c.getColumnDefinitions()) {
-                columns.add(column(d, table));
+                columns.add(column(d, table, primaryKey));
+            }
+            for (Index index : c.getIndexes() == null ? List.<Index>of() : c.getIndexes()) {
+                if (!"PRIMARY KEY".equalsIgnoreCase(index.getType())) {
+                    throw unsupported(index.getType().toUpperCase(Locale.ROOT)
+                            + " constraints; a table takes a PRIMARY KEY only", table);
+                }
+                reject(index.getIndexSpec(), "options of a PRIMARY KEY", table);
+                reject(index.getUsing(), "USING of a PRIMARY KEY", table);
+                if (!primaryKey.isEmpty()) {
+                    throw new SqlException("A table can have only one PRIMARY KEY", position);
+                }
+                for (String name : index.getColumnsNames()) {
+                    primaryKey.add(unquote(name, table));
+                }
             }
         }
         return new net.fyrql.sql.ast.CreateTable(nameParts(table), columns, query, c.isOrReplace(),
-                c.isIfNotExists(), position);
+                c.isIfNotExists(), primaryKey, temporary, position);
     }
 
-    /** {@code name type [NOT NULL | NULL]}; any other part of a column definition is an error. */
-    private ColumnDefinition column(net.sf.jsqlparser.statement.create.table.ColumnDefinition d, Table table) {
+    /**
+     * {@code name type [NOT NULL | NULL] [PRIMARY KEY]}; any other part of a
+     * column definition is an error. A column that is the primary key is
+     * added to it.
+     */
+    private ColumnDefinition column(net.sf.jsqlparser.statement.create.table.ColumnDefinition d, Table table,
+            List<String> primaryKey) {
         Position position = position(table);
         String name = unquote(d.getColumnName(), table);
         reject(d.isWithOptions(), "WITH OPTIONS", table);
@@ -263,9 +296,17 @@ final class JSqlParserAdapter {
                     && specs.get(i + 1).equalsIgnoreCase("NULL")) {
                 nullable = false;
                 i++;
+            } else if (specs.get(i).equalsIgnoreCase("PRIMARY") && i + 1 < specs.size()
+                    && specs.get(i + 1).equalsIgnoreCase("KEY")) {
+                if (!primaryKey.isEmpty()) {
+                    throw new SqlException("A table can have only one PRIMARY KEY", position);
+                }
+                primaryKey.add(name);
+                i++;
             } else if (!specs.get(i).equalsIgnoreCase("NULL")) {
                 throw new SqlException("Not supported: " + String.join(" ", specs.subList(i, specs.size()))
-                        + " (column " + name + "); a column has a name, a type and NOT NULL", position);
+                        + " (column " + name + "); a column has a name, a type, NOT NULL and PRIMARY KEY",
+                        position);
             }
         }
         return new ColumnDefinition(name, type, nullable);
@@ -361,6 +402,165 @@ final class JSqlParserAdapter {
             }
         }
         return new InsertInto(nameParts(table), columns, query(i.getSelect()), position(table));
+    }
+
+    /**
+     * {@code UPDATE name [[AS] alias] SET column = value, ... [FROM items]
+     * [WHERE condition]}, also {@code SET (a, b) = (x, y)}; {@code RETURNING},
+     * {@code ORDER BY}, {@code LIMIT}, joins before {@code SET} and
+     * {@code DEFAULT} are errors.
+     */
+    private net.fyrql.sql.ast.Update update(Update u) {
+        Table table = u.getTable();
+        reject(u.getWithItemsList(), "WITH before UPDATE", table);
+        reject(u.getOracleHint(), "hints", table);
+        reject(u.getModifierPriority(), "UPDATE " + u.getModifierPriority(), table);
+        reject(u.isModifierIgnore(), "UPDATE IGNORE", table);
+        reject(u.getStartJoins(), "joins before SET", table);
+        reject(u.isFromBeforeSet(), "FROM before SET", table);
+        reject(u.getOutputClause(), "OUTPUT", table);
+        reject(u.getReturningClause(), "RETURNING", table);
+        reject(u.getOrderByElements(), "ORDER BY in UPDATE", table);
+        reject(u.getLimit(), "LIMIT in UPDATE", table);
+        reject(u.getForPortionClause(), "FOR PORTION OF", table);
+        reject(u.getPreferringClause(), "PREFERRING", table);
+        reject(u.getOption(), "OPTION", table);
+        reject(u.isUseSelect() ? u.getSelect() : null, "SET (columns) = (query)", table);
+        List<net.fyrql.sql.ast.Update.Assignment> assignments = new ArrayList<>();
+        for (UpdateSet set : u.getUpdateSets()) {
+            ExpressionList<?> values = set.getValues();
+            if (values.size() != set.getColumns().size()) {
+                throw new SqlException("Syntax error: " + set.getColumns().size() + " columns but " + values.size()
+                        + " values in SET", position(set.getColumn(0)));
+            }
+            for (int i = 0; i < values.size(); i++) {
+                Column column = set.getColumn(i);
+                Expression value = set.getValue(i);
+                if (value instanceof Column c && c.getTable() == null
+                        && "DEFAULT".equalsIgnoreCase(c.getColumnName())) {
+                    throw unsupported("DEFAULT; a table has no defaults", c);
+                }
+                assignments.add(new net.fyrql.sql.ast.Update.Assignment(simpleName(column), expr(value),
+                        position(column)));
+            }
+        }
+        FromItem from = u.getFromItem() == null ? null : joins(fromItem(u.getFromItem()), u.getJoins());
+        return new net.fyrql.sql.ast.Update(nameParts(table), targetAlias(table), assignments, from,
+                exprOrNull(u.getWhere()), position(table));
+    }
+
+    /**
+     * {@code DELETE FROM name [[AS] alias] [USING items] [WHERE condition]};
+     * several tables, {@code RETURNING}, {@code ORDER BY} and {@code LIMIT}
+     * are errors.
+     */
+    private net.fyrql.sql.ast.Delete delete(Delete d) {
+        Table table = d.getTable();
+        reject(d.getWithItemsList(), "WITH before DELETE", table);
+        reject(d.getOracleHint(), "hints", table);
+        reject(d.getModifierPriority(), "DELETE " + d.getModifierPriority(), table);
+        reject(d.isModifierIgnore(), "DELETE IGNORE", table);
+        reject(d.isModifierQuick(), "DELETE QUICK", table);
+        reject(d.getTables(), "DELETE of several tables", table);
+        reject(d.getJoins(), "joins in DELETE; use USING", table);
+        reject(d.getOutputClause(), "OUTPUT", table);
+        reject(d.getReturningClause(), "RETURNING", table);
+        reject(d.getOrderByElements(), "ORDER BY in DELETE", table);
+        reject(d.getLimit(), "LIMIT in DELETE", table);
+        reject(d.getForPortionClause(), "FOR PORTION OF", table);
+        reject(d.getPreferringClause(), "PREFERRING", table);
+        reject(d.getOption(), "OPTION", table);
+        FromItem using = null;
+        for (net.sf.jsqlparser.statement.select.FromItem item
+                : d.getUsingFromItemList() == null ? List.<net.sf.jsqlparser.statement.select.FromItem>of()
+                        : d.getUsingFromItemList()) {
+            using = using == null ? fromItem(item) : cross(using, fromItem(item));
+        }
+        return new net.fyrql.sql.ast.Delete(nameParts(table), targetAlias(table), using, exprOrNull(d.getWhere()),
+                position(table));
+    }
+
+    /** Returns the alias of the table of {@code UPDATE} or {@code DELETE}, or {@code null}; it names no columns. */
+    private String targetAlias(Table table) {
+        if (table.getAlias() == null) {
+            return null;
+        }
+        reject(table.getAlias().getAliasColumns(), "names of columns in the alias of the table", table);
+        return aliasName(table.getAlias());
+    }
+
+    /** {@code CREATE SCHEMA [IF NOT EXISTS] [source.]schema}; an owner or statements in it are errors. */
+    private net.fyrql.sql.ast.CreateSchema createSchema(net.sf.jsqlparser.statement.create.schema.CreateSchema c) {
+        // JSqlParser keeps no tokens of this statement: its position is that of its first word.
+        Position position = CopyParser.start(source.text());
+        if (c.getAuthorization() != null) {
+            throw new SqlException("Not supported: AUTHORIZATION", position);
+        }
+        if (c.getStatements() != null && !c.getStatements().isEmpty()) {
+            throw new SqlException("Not supported: statements in CREATE SCHEMA", position);
+        }
+        if (c.getDatabaseOptions() != null && !c.getDatabaseOptions().isEmpty()) {
+            throw new SqlException("Not supported: options of CREATE SCHEMA", position);
+        }
+        List<String> name = new ArrayList<>();
+        if (c.getCatalogName() != null) {
+            name.add(unquote(c.getCatalogName(), c));
+        }
+        name.add(unquote(c.getSchemaName(), c));
+        return new net.fyrql.sql.ast.CreateSchema(name, c.hasIfNotExists(), position);
+    }
+
+    /**
+     * {@code ALTER TABLE name ADD [COLUMN] [IF NOT EXISTS] column type
+     * [DEFAULT value]}; any other change, more than one change and a
+     * constraint on the new column are errors.
+     */
+    private net.fyrql.sql.ast.AlterTable alter(net.sf.jsqlparser.statement.alter.Alter a) {
+        Table table = a.getTable();
+        Position position = position(table);
+        reject(a.isUseOnly(), "ALTER TABLE ONLY", table);
+        reject(a.isUseTableIfExists(), "ALTER TABLE IF EXISTS", table);
+        List<net.sf.jsqlparser.statement.alter.AlterExpression> changes = a.getAlterExpressions();
+        if (changes == null || changes.size() != 1) {
+            throw new SqlException("Not supported: more than one change in ALTER TABLE", position);
+        }
+        net.sf.jsqlparser.statement.alter.AlterExpression change = changes.get(0);
+        if (change.getOperation() != net.sf.jsqlparser.statement.alter.AlterOperation.ADD
+                || change.getColDataTypeList() == null || change.getColDataTypeList().size() != 1) {
+            throw new SqlException("Not supported: ALTER TABLE ... " + change.getOperation()
+                    + "; only ADD COLUMN is", position);
+        }
+        net.sf.jsqlparser.statement.alter.AlterExpression.ColumnDataType d = change.getColDataTypeList().get(0);
+        String name = unquote(d.getColumnName(), table);
+        DataType type;
+        try {
+            type = TypeNames.parse(d.getColDataType().toString());
+        } catch (IllegalArgumentException e) {
+            throw new SqlException(e.getMessage() + " (column " + name + ")", position);
+        }
+        List<String> specs = d.getColumnSpecs() == null ? List.of() : d.getColumnSpecs();
+        SqlExpr defaultValue = null;
+        if (!specs.isEmpty()) {
+            if (!specs.get(0).equalsIgnoreCase("DEFAULT") || specs.size() < 2) {
+                throw new SqlException(specs.get(0).equalsIgnoreCase("NOT") || specs.get(0).equalsIgnoreCase("PRIMARY")
+                        ? "Adding columns with constraints not yet supported"
+                        : "Not supported: " + String.join(" ", specs) + " (column " + name + ")", position);
+            }
+            String text = String.join(" ", specs.subList(1, specs.size()));
+            Query query;
+            try {
+                query = SqlParser.parse("SELECT " + text);
+            } catch (SqlException e) {
+                throw new SqlException("Not supported: DEFAULT " + text + " (column " + name + ")", position);
+            }
+            if (!(query.body() instanceof QueryBody.Select select) || select.items().size() != 1
+                    || !(select.items().get(0) instanceof SelectItem.ExpressionItem item) || select.from() != null) {
+                throw new SqlException("Not supported: DEFAULT " + text + " (column " + name + ")", position);
+            }
+            defaultValue = item.expression();
+        }
+        return new net.fyrql.sql.ast.AlterTable(nameParts(table), new ColumnDefinition(name, type, true),
+                defaultValue, change.isUseIfNotExists(), position);
     }
 
     private DropTable drop(Drop d) {

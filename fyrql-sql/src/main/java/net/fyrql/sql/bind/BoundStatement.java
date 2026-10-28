@@ -11,6 +11,7 @@
 
 package net.fyrql.sql.bind;
 
+import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
@@ -129,12 +130,16 @@ public sealed interface BoundStatement {
      *        {@link BoundStatement#schema()}, the column {@code Count}
      * @param input the rows of {@code AS}, of the types of the columns, or
      *        {@code null} for a table of a definition, which starts empty
+     * @param primaryKey the names of the columns of the primary key, as in
+     *        the columns, which are {@code NOT NULL}; empty for none
      */
-    record Create(TableRef table, Schema columns, PlanNode input, CreateMode mode) implements BoundStatement {
+    record Create(TableRef table, Schema columns, PlanNode input, CreateMode mode, List<String> primaryKey)
+            implements BoundStatement {
         public Create {
             Objects.requireNonNull(table, "table");
             Objects.requireNonNull(columns, "columns");
             Objects.requireNonNull(mode, "mode");
+            primaryKey = List.copyOf(primaryKey);
         }
     }
 
@@ -149,6 +154,122 @@ public sealed interface BoundStatement {
         public Insert {
             Objects.requireNonNull(table, "table");
             Objects.requireNonNull(input, "input");
+        }
+    }
+
+    /**
+     * {@code UPDATE}. The rows to update come as the {@code keyed} plan: the
+     * key columns of the table with the values of the rows before the
+     * update, then the new values of the columns to set, in the order of
+     * {@code columns}; a row of the table that several rows of
+     * {@code FROM} match comes once for each, and the last one counts. A
+     * statement without {@code FROM} and without subqueries also comes as
+     * expressions over the columns of the table, which a source may run as
+     * a whole.
+     *
+     * @param table the table
+     * @param columns the positions of the columns to set, each once
+     * @param values for each column to set, its new value as an expression
+     *        over the columns of the table, of the type of the column; or
+     *        {@code null} for a statement that only comes keyed
+     * @param condition the condition over the columns of the table, or
+     *        {@code null} for every row
+     * @param keys the positions of the key columns: the primary key, or
+     *        every column of a table without one
+     * @param keyed the rows to update by key
+     */
+    record Update(TableRef table, int[] columns, List<Expression> values, Expression condition, int[] keys,
+            PlanNode keyed) implements BoundStatement {
+        public Update {
+            Objects.requireNonNull(table, "table");
+            columns = columns.clone();
+            values = values == null ? null : List.copyOf(values);
+            keys = keys.clone();
+            Objects.requireNonNull(keyed, "keyed");
+        }
+    }
+
+    /**
+     * {@code DELETE}. The rows to delete come as the {@code keyed} plan of
+     * their key columns, a row possibly more than once; a statement without
+     * {@code USING} and without subqueries also comes as its condition,
+     * which a source may run as a whole.
+     *
+     * @param table the table
+     * @param condition the condition over the columns of the table, or
+     *        {@code null} for every row
+     * @param simple whether the statement comes as its condition too
+     * @param keys the positions of the key columns, as in {@link Update}
+     * @param keyed the keys of the rows to delete
+     */
+    record Delete(TableRef table, Expression condition, boolean simple, int[] keys, PlanNode keyed)
+            implements BoundStatement {
+        public Delete {
+            Objects.requireNonNull(table, "table");
+            keys = keys.clone();
+            Objects.requireNonNull(keyed, "keyed");
+        }
+    }
+
+    /**
+     * {@code CREATE SCHEMA}.
+     *
+     * @param source the source of the schema
+     * @param name the name of the schema; not {@code schema}, whose accessor
+     *        would hide {@link BoundStatement#schema()}
+     */
+    record CreateSchema(String source, String name, boolean ifNotExists) implements BoundStatement {
+        public CreateSchema {
+            Objects.requireNonNull(source, "source");
+            Objects.requireNonNull(name, "name");
+        }
+    }
+
+    /**
+     * {@code ALTER TABLE ... ADD COLUMN}.
+     *
+     * @param column the new column, which may hold {@code NULL}
+     * @param defaultValue the value of the column in the rows of the table,
+     *        as a value of its type, or {@code null} for {@code NULL}
+     */
+    record AddColumn(TableRef table, Schema.Field column, Object defaultValue, boolean ifNotExists)
+            implements BoundStatement {
+        public AddColumn {
+            Objects.requireNonNull(table, "table");
+            Objects.requireNonNull(column, "column");
+        }
+    }
+
+    /** What a branch of {@code MERGE} does. */
+    enum MergeAction {
+        UPDATE, DELETE, INSERT, NOTHING
+    }
+
+    /**
+     * {@code MERGE}. The changes come as the {@code changes} plan, in the
+     * order of the pairs of a row of the table and one of the source, and
+     * of the rows of either side alone, on which a branch acts other than
+     * with {@code DO NOTHING}: the number of the branch from 1, the key
+     * columns of the table with the values of its row, then every column of
+     * the table with its new value for an update or its value for an
+     * insert.
+     *
+     * @param table the table
+     * @param actions for each branch from the first, what it does
+     * @param keys the positions of the key columns, as in {@link Update}
+     * @param updated the positions of the columns that an update sets: those
+     *        that some branch with {@code UPDATE} sets, in their order in the
+     *        table
+     * @param changes the changes
+     */
+    record Merge(TableRef table, List<MergeAction> actions, int[] keys, int[] updated, PlanNode changes)
+            implements BoundStatement {
+        public Merge {
+            Objects.requireNonNull(table, "table");
+            actions = List.copyOf(actions);
+            keys = keys.clone();
+            updated = updated.clone();
+            Objects.requireNonNull(changes, "changes");
         }
     }
 

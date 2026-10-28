@@ -44,11 +44,13 @@ warehouse first.
   [Supported SQL](docs/manual.md#supported-sql),
   [Code generation](docs/manual.md#code-generation) and
   [Parallel execution](docs/manual.md#parallel-execution).
-- **Moving data.** `COPY ... TO` writes the result of a query into a CSV, JSON or Parquet
-  file or an Excel workbook, also in S3, `COPY ... FROM` loads such a file into a table,
-  and
-  `CREATE TABLE ... AS` and `INSERT INTO` write into tables in memory and in databases.
-  See [Writing and loading](docs/manual.md#writing-and-loading).
+- **Moving and changing data.** `COPY ... TO` writes the result of a query into a CSV,
+  JSON or Parquet file or an Excel workbook, also in S3, `COPY ... FROM` loads such a file
+  into a table, `CREATE TABLE ... AS` and `INSERT INTO` write into tables in memory and in
+  databases, and `UPDATE`, `DELETE` and `MERGE` change them, a `MERGE` with rows of any
+  source. Primary keys reach the JDBC driver, Flight SQL and the PostgreSQL wire protocol,
+  so that DBeaver edits rows in its grid. See [Writing and
+  loading](docs/manual.md#writing-and-loading).
 - **Views over the sources.** `CREATE VIEW`, or a view in the YAML file, gives a query
   over several sources a name and columns that every client sees as a table: the Java
   API, the JDBC driver, Flight SQL and the PostgreSQL wire protocol, with the view in
@@ -159,8 +161,9 @@ code against the interpreter and of spilling are under
 ## Status
 
 FyrQL is young: version 0.x, not yet used in production, and its API may still change
-until 1.0.0. It writes results into files, tables in memory and databases, but does not
-update or delete rows; aggregations, sorts, windows and joins with keys spill to disk
+until 1.0.0. It writes and changes tables in memory and databases, but not files, and has
+no transactions over several statements; aggregations, sorts, windows and joins with keys
+spill to disk
 above the memory budget, but a join spilled partition by partition runs on one thread;
 and where native code is fine and the sources are ones DuckDB reads, DuckDB is faster.
 FyrQL is meant for Java applications and JDBC tools that query data across databases,

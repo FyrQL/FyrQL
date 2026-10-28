@@ -153,11 +153,18 @@ public final class FyrQL implements AutoCloseable {
     private final ZoneId initialZone;
     /** The session of the engine, in which its methods without a session run. */
     private final Session session;
+    /** Creates the source of the temporary tables of each session, {@code null} if there is none. */
+    private final ConnectorFactory temporaryTables;
+
+    /** The name of the source of the temporary tables of a session. */
+    static final String TEMPORARY = "temp";
 
     private FyrQL(Map<String, Connector> connectors, SearchPath searchPath, FunctionRegistry functions,
             MemoryBudget budget, int batchSize, Codegen codegen, Optimizer.Options options, int threads,
-            boolean preserveOrder, SpillDirectory spill, ZoneId zone, FileAccessPolicy files, Timeouts timeouts) {
+            boolean preserveOrder, SpillDirectory spill, ZoneId zone, FileAccessPolicy files, Timeouts timeouts,
+            ConnectorFactory temporaryTables) {
         this.connectors = Collections.unmodifiableMap(new LinkedHashMap<>(connectors));
+        this.temporaryTables = temporaryTables;
         this.spill = spill;
         this.timeouts = timeouts;
         Views views = new Views();
@@ -184,6 +191,16 @@ public final class FyrQL implements AutoCloseable {
     /** Returns the optimizer and the executor over the sources of the engine. */
     Execution execution() {
         return execution;
+    }
+
+    /**
+     * Returns a new, empty source of temporary tables for a session, named
+     * {@value #TEMPORARY}: a source of the type {@code memory} if its module
+     * is on the class path and no source of the engine has that name;
+     * otherwise {@code null}.
+     */
+    Connector temporaryTables() {
+        return temporaryTables == null ? null : temporaryTables.create(TEMPORARY, Map.of());
     }
 
     /**
@@ -784,6 +801,9 @@ public final class FyrQL implements AutoCloseable {
             case BoundStatement.CopyFrom c -> c.input();
             case BoundStatement.Create c -> c.input();
             case BoundStatement.Insert i -> i.input();
+            case BoundStatement.Update u -> u.keyed();
+            case BoundStatement.Delete d -> d.keyed();
+            case BoundStatement.Merge m -> m.changes();
             default -> null;
         };
         if (input != null) {
@@ -1429,7 +1449,7 @@ public final class FyrQL implements AutoCloseable {
                         new MemoryBudget(memoryBudget), batchSize, codegen, options, engineThreads, preserveOrder,
                         !spill ? null : spillDirectory != null ? new SpillDirectory(spillDirectory)
                                 : SpillDirectory.temporary(),
-                        timeZone, files, timeouts);
+                        timeZone, files, timeouts, sources.containsKey(TEMPORARY) ? null : memoryFactory());
                 try {
                     for (ViewSpec v : views) {
                         engine.createView(v);
@@ -1443,6 +1463,17 @@ public final class FyrQL implements AutoCloseable {
                 close(implicit, e);
                 throw e;
             }
+        }
+
+        /** Returns the factory of sources of the type {@code memory} on the class path, or {@code null}. */
+        private ConnectorFactory memoryFactory() {
+            for (ConnectorFactory f : ServiceLoader.load(ConnectorFactory.class,
+                    classLoader != null ? classLoader : FyrQL.class.getClassLoader())) {
+                if (f.type().equals("memory")) {
+                    return f;
+                }
+            }
+            return null;
         }
 
         /**

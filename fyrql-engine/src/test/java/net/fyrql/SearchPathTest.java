@@ -129,7 +129,7 @@ class SearchPathTest {
                     .searchPath());
             IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                     () -> engine.newSession().use(new SearchPath("c", "main")));
-            assertEquals("The default source c is not registered; registered: [a, b]", e.getMessage());
+            assertEquals("The default source c is not registered; registered: [a, b, temp]", e.getMessage());
         }
     }
 }

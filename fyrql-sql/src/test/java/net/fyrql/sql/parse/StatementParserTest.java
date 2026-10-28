@@ -13,22 +13,29 @@ package net.fyrql.sql.parse;
 
 import net.fyrql.core.type.DataType;
 import net.fyrql.sql.SqlException;
+import net.fyrql.sql.ast.AlterTable;
+import net.fyrql.sql.ast.CreateSchema;
 import net.fyrql.sql.ast.CreateTable;
 import net.fyrql.sql.ast.CreateTable.ColumnDefinition;
 import net.fyrql.sql.ast.CopyTo;
+import net.fyrql.sql.ast.Delete;
+import net.fyrql.sql.ast.FromItem;
 import net.fyrql.sql.ast.CreateView;
 import net.fyrql.sql.ast.DropTable;
 import net.fyrql.sql.ast.DropView;
 import net.fyrql.sql.ast.Explain;
 import net.fyrql.sql.ast.InsertInto;
+import net.fyrql.sql.ast.Merge;
 import net.fyrql.sql.Position;
 import net.fyrql.sql.ast.Query;
 import net.fyrql.sql.ast.QueryBody;
 import net.fyrql.sql.ast.ResetVariable;
 import net.fyrql.sql.ast.SetVariable;
 import net.fyrql.sql.ast.ShowVariable;
+import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlPrinter;
 import net.fyrql.sql.ast.Statement;
+import net.fyrql.sql.ast.Update;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -49,8 +56,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class StatementParserTest {
 
-    private static final String SUPPORTED = "Only queries, COPY, CREATE TABLE, CREATE VIEW, INSERT INTO, DROP TABLE"
-            + " and DROP VIEW are supported";
+    private static final String SUPPORTED = "Only queries, COPY, CREATE TABLE, CREATE VIEW, CREATE SCHEMA, INSERT"
+            + " INTO, UPDATE, DELETE, MERGE, ALTER TABLE ... ADD COLUMN, DROP TABLE and DROP VIEW are supported";
 
     private static Statement parse(String sql) {
         return SqlParser.parseStatement(sql);
@@ -99,6 +106,128 @@ class StatementParserTest {
                 new ColumnDefinition("u", DataType.UUID, true),
                 new ColumnDefinition("h", DataType.HUGEINT, true),
                 new ColumnDefinition("i", DataType.INTEGER, true)), c.columns());
+    }
+
+    @Test
+    void createTableWithAPrimaryKey() {
+        CreateTable c = assertInstanceOf(CreateTable.class, parse("CREATE TABLE t (a INTEGER NOT NULL PRIMARY KEY,"
+                + " b VARCHAR)"));
+        assertEquals(List.of("a"), c.primaryKey());
+        assertEquals(new ColumnDefinition("a", DataType.INTEGER, false), c.columns().get(0));
+        c = assertInstanceOf(CreateTable.class, parse("CREATE TABLE t (a INTEGER, \"B\" VARCHAR,"
+                + " CONSTRAINT pk PRIMARY KEY (\"B\", a))"));
+        assertEquals(List.of("B", "a"), c.primaryKey());
+        assertEquals(List.of(), assertInstanceOf(CreateTable.class, parse("CREATE TABLE t (a INTEGER)")).primaryKey());
+    }
+
+    @Test
+    void update() {
+        Update u = assertInstanceOf(Update.class, parse("UPDATE s.t AS x SET a = a + 1, \"B\" = 'y' FROM u, v"
+                + " WHERE x.k = u.k"));
+        assertEquals(List.of("s", "t"), u.name());
+        assertEquals("x", u.alias());
+        assertEquals(List.of("a", "B"), u.assignments().stream().map(Update.Assignment::column).toList());
+        assertEquals("(a + 1)", SqlPrinter.print(u.assignments().get(0).value()));
+        assertInstanceOf(FromItem.Join.class, u.from());
+        assertEquals("(x.k = u.k)", SqlPrinter.print(u.where()));
+        assertEquals(new Position(1, 8), u.position());
+
+        u = assertInstanceOf(Update.class, SqlParser.parseStatementWithParameters("update t set (a, b) = (1, ?)")
+                .statement());
+        assertNull(u.alias());
+        assertNull(u.from());
+        assertNull(u.where());
+        assertEquals(List.of("a", "b"), u.assignments().stream().map(Update.Assignment::column).toList());
+        assertInstanceOf(SqlExpr.Parameter.class, u.assignments().get(1).value());
+    }
+
+    @Test
+    void delete() {
+        Delete d = assertInstanceOf(Delete.class,
+                parse("DELETE FROM s.t x USING u, (SELECT 1 AS k) w WHERE x.k = u.k"));
+        assertEquals(List.of("s", "t"), d.name());
+        assertEquals("x", d.alias());
+        assertInstanceOf(FromItem.Join.class, d.using());
+        assertEquals("(x.k = u.k)", SqlPrinter.print(d.where()));
+        d = assertInstanceOf(Delete.class, parse("delete from t"));
+        assertNull(d.alias());
+        assertNull(d.using());
+        assertNull(d.where());
+    }
+
+    @Test
+    void merge() {
+        Merge m = assertInstanceOf(Merge.class, parse("MERGE INTO s.t AS x\n"
+                + "USING (SELECT k, CASE WHEN v > 1 THEN 'a' ELSE 'b' END AS v FROM u) AS y ON x.k = y.k\n"
+                + "WHEN MATCHED AND y.v = 'a' THEN UPDATE SET v = CASE WHEN y.v = 'a' THEN 1 END, w = y.v\n"
+                + "WHEN MATCHED THEN DELETE\n"
+                + "WHEN NOT MATCHED BY SOURCE THEN DO NOTHING\n"
+                + "WHEN NOT MATCHED BY TARGET THEN INSERT (k, v) VALUES (y.k, (y.v))\n"
+                + "WHEN NOT MATCHED THEN INSERT BY NAME;"));
+        assertEquals(List.of("s", "t"), m.name());
+        assertEquals("x", m.alias());
+        assertEquals(new Position(1, 12), m.position());
+        FromItem.Subquery source = assertInstanceOf(FromItem.Subquery.class, m.source());
+        assertEquals("y", source.alias().name());
+        assertEquals(new Position(2, 7), source.position());
+        assertEquals("(x.k = y.k)", SqlPrinter.print(m.on()));
+        assertEquals(5, m.whens().size());
+        Merge.When w = m.whens().get(0);
+        assertEquals(Merge.Match.MATCHED, w.match());
+        assertEquals(new Position(3, 1), w.position());
+        assertEquals("(y.v = 'a')", SqlPrinter.print(w.condition()));
+        Merge.UpdateAction u = assertInstanceOf(Merge.UpdateAction.class, w.action());
+        assertEquals(List.of("v", "w"), u.assignments().stream().map(Update.Assignment::column).toList());
+        assertEquals(new Position(3, 44), u.assignments().get(0).position());
+        assertInstanceOf(SqlExpr.Case.class, u.assignments().get(0).value());
+        assertInstanceOf(Merge.DeleteAction.class, m.whens().get(1).action());
+        assertEquals(Merge.Match.NOT_MATCHED_BY_SOURCE, m.whens().get(2).match());
+        assertInstanceOf(Merge.NothingAction.class, m.whens().get(2).action());
+        Merge.InsertAction i = assertInstanceOf(Merge.InsertAction.class, m.whens().get(3).action());
+        assertEquals(Merge.Match.NOT_MATCHED, m.whens().get(3).match());
+        assertEquals(List.of("k", "v"), i.columns());
+        assertEquals(2, i.values().size());
+        i = assertInstanceOf(Merge.InsertAction.class, m.whens().get(4).action());
+        assertTrue(i.byName());
+        assertNull(i.values());
+
+        m = assertInstanceOf(Merge.class, parse("merge into t using 'x.csv' s using (k, \"L\")"
+                + " when matched then update when not matched then insert"));
+        assertNull(m.alias());
+        assertNull(m.on());
+        assertEquals(List.of("k", "L"), m.using());
+        assertInstanceOf(FromItem.FileName.class, m.source());
+        assertNull(assertInstanceOf(Merge.UpdateAction.class, m.whens().get(0).action()).assignments());
+        assertEquals(List.of(), assertInstanceOf(Merge.InsertAction.class, m.whens().get(1).action()).columns());
+
+        SqlParser.ParameterizedStatement p = SqlParser.parseStatementWithParameters("MERGE INTO t USING"
+                + " (SELECT ? AS k) s ON t.k = s.k AND t.v = ? WHEN NOT MATCHED THEN INSERT VALUES (s.k, ?)");
+        assertEquals(List.of(1, 2, 3), p.parameters().stream().map(SqlExpr.Parameter::index).toList());
+        assertEquals(new Position(1, 28), p.parameters().get(0).position());
+        assertEquals(new Position(1, 61), p.parameters().get(1).position());
+    }
+
+    @Test
+    void temporaryTablesSchemasAndColumns() {
+        CreateTable c = assertInstanceOf(CreateTable.class, parse("CREATE TEMP TABLE t (a INTEGER)"));
+        assertTrue(c.temporary());
+        assertTrue(assertInstanceOf(CreateTable.class, parse("create or replace temporary table t as select 1"))
+                .temporary());
+        assertFalse(assertInstanceOf(CreateTable.class, parse("CREATE TABLE t (a INTEGER)")).temporary());
+
+        assertEquals(new CreateSchema(List.of("sales"), false, new Position(1, 1)), parse("CREATE SCHEMA sales"));
+        assertEquals(new CreateSchema(List.of("db", "My Sales"), true, new Position(1, 1)),
+                parse("create schema if not exists db.\"My Sales\""));
+
+        AlterTable a = assertInstanceOf(AlterTable.class, parse("ALTER TABLE s.t ADD COLUMN IF NOT EXISTS \"B\""
+                + " DECIMAL(10, 2) DEFAULT -1.5"));
+        assertEquals(List.of("s", "t"), a.name());
+        assertEquals(new ColumnDefinition("B", DataType.decimal(10, 2), true), a.column());
+        assertTrue(a.ifNotExists());
+        assertEquals("(-1.5)", SqlPrinter.print(a.defaultValue()));
+        a = assertInstanceOf(AlterTable.class, parse("alter table t add c varchar"));
+        assertNull(a.defaultValue());
+        assertFalse(a.ifNotExists());
     }
 
     @Test
@@ -184,12 +313,22 @@ class StatementParserTest {
     @Test
     void errors() {
         Map<String, String> cases = new LinkedHashMap<>();
-        cases.put("CREATE TABLE t (a INTEGER PRIMARY KEY)",
-                "Not supported: PRIMARY KEY (column a); a column has a name, a type and NOT NULL@1:14");
+        cases.put("CREATE TABLE t (a INTEGER UNIQUE)",
+                "Not supported: UNIQUE (column a); a column has a name, a type, NOT NULL and PRIMARY KEY@1:14");
         cases.put("CREATE TABLE t (a INTEGER DEFAULT 1)",
-                "Not supported: DEFAULT 1 (column a); a column has a name, a type and NOT NULL@1:14");
-        cases.put("CREATE TABLE t (a INTEGER, CONSTRAINT pk PRIMARY KEY (a))", "Not supported: constraints@1:14");
-        cases.put("CREATE TEMP TABLE t (a INTEGER)", "Not supported: TEMP TABLE@1:19");
+                "Not supported: DEFAULT 1 (column a); a column has a name, a type, NOT NULL and PRIMARY KEY@1:14");
+        cases.put("CREATE TABLE t (a INTEGER, UNIQUE (a))",
+                "Not supported: UNIQUE constraints; a table takes a PRIMARY KEY only@1:14");
+        cases.put("CREATE TABLE t (a INTEGER PRIMARY KEY, b INTEGER PRIMARY KEY)",
+                "A table can have only one PRIMARY KEY@1:14");
+        cases.put("CREATE TABLE t (a INTEGER PRIMARY KEY, b INTEGER, PRIMARY KEY (b))",
+                "A table can have only one PRIMARY KEY@1:14");
+        cases.put("CREATE GLOBAL TEMPORARY TABLE t (a INTEGER)", "Not supported: GLOBAL TEMPORARY TABLE@1:31");
+        cases.put("ALTER TABLE t ADD COLUMN a INTEGER, ADD COLUMN b INTEGER",
+                "Not supported: more than one change in ALTER TABLE@1:13");
+        cases.put("ALTER TABLE t ADD COLUMN a INTEGER UNIQUE", "Not supported: UNIQUE (column a)@1:13");
+        cases.put("ALTER TABLE t RENAME TO u", "Not supported: ALTER TABLE ... RENAME_TABLE; only ADD COLUMN is@1:13");
+        cases.put("CREATE SCHEMA s AUTHORIZATION bob", "Not supported: AUTHORIZATION@1:1");
         cases.put("CREATE TABLE t (a INTEGER) WITH (fillfactor = 70)", "Not supported: table options@1:14");
         cases.put("CREATE TABLE t (a, b) AS SELECT 1, 2", "Not supported: column names before AS@1:14");
         cases.put("CREATE TABLE t (a TIMETZ)", "Type TIMETZ is not supported (column a)@1:14");
@@ -201,7 +340,36 @@ class StatementParserTest {
         cases.put("INSERT INTO t (t.a) VALUES (1)", "Syntax error: expected a name without a qualifier@1:16");
         cases.put("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", "Not supported: WITH before INSERT@1:34");
         cases.put("INSERT OR REPLACE INTO t VALUES (1)", SUPPORTED + ", not UPSERT@0:0");
-        cases.put("UPDATE t SET a = 1", SUPPORTED + ", not UPDATE@0:0");
+        cases.put("TRUNCATE t", SUPPORTED + ", not TRUNCATE@0:0");
+        cases.put("UPDATE t SET a = 1 RETURNING a", "Not supported: RETURNING@1:8");
+        cases.put("UPDATE t SET a = 1 ORDER BY a LIMIT 1", "Not supported: ORDER BY in UPDATE@1:8");
+        cases.put("UPDATE t SET a = DEFAULT", "Not supported: DEFAULT; a table has no defaults@1:18");
+        cases.put("UPDATE t SET t.a = 1", "Syntax error: expected a name without a qualifier@1:14");
+        cases.put("UPDATE t SET (a, b) = (1)", "Syntax error: 2 columns but 1 values in SET@1:15");
+        cases.put("WITH c AS (SELECT 1) UPDATE t SET a = 1", "Not supported: WITH before UPDATE@1:29");
+        cases.put("UPDATE t x(a) SET a = 1", "Not supported: names of columns in the alias of the table@1:8");
+        cases.put("DELETE FROM t RETURNING a", "Not supported: RETURNING@1:13");
+        cases.put("MERGE INTO t USING s ON t.k = s.k", "Syntax error: MERGE needs a WHEN@1:34");
+        cases.put("MERGE INTO t USING s WHEN MATCHED THEN DELETE",
+                "Syntax error: MERGE needs ON or USING after its source@1:22");
+        cases.put("MERGE INTO t USING s ON t.k = s.k WHEN MATCHED THEN INSERT",
+                "Syntax error: INSERT takes only WHEN NOT MATCHED [BY TARGET]@1:53");
+        cases.put("MERGE INTO t USING s ON t.k = s.k WHEN NOT MATCHED THEN DELETE",
+                "Syntax error: DELETE takes only WHEN MATCHED and WHEN NOT MATCHED BY SOURCE@1:57");
+        cases.put("MERGE INTO t USING s ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = 1 RETURNING *",
+                "Not supported: RETURNING@1:70");
+        cases.put("MERGE INTO t USING s ON t.k = s.k WHEN MATCHED BY SOURCE THEN DELETE",
+                "Syntax error at or near \"BY\"@1:48");
+        cases.put("MERGE INTO t USING s ON t.k = s.k WHEN MATCHED THEN UPDATE SET (a, b) = (1, 2)",
+                "Not supported: SET (columns) = ... in MERGE@1:64");
+        cases.put("MERGE INTO t USING s ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = ) ",
+                "Syntax error at or near \")\"@1:68");
+        cases.put("MERGE INTO t USING s ON (t.k = WHEN MATCHED THEN DELETE", "Syntax error: MERGE needs a WHEN@1:56");
+        cases.put("MERGE INTO t USING s ON t.k == s.k WHEN MATCHED THEN UPDATE SET v = s.v +",
+                "Syntax error at end of input@1:74");
+        cases.put("WITH c AS (SELECT 1) MERGE INTO t USING c ON t.k = c.k WHEN MATCHED THEN DELETE",
+                "Not supported: WITH before MERGE@1:33");
+        cases.put("DELETE FROM t WHERE a = 1 LIMIT 1", "Not supported: LIMIT in DELETE@1:13");
         cases.put("DROP TABLE t CASCADE", "Not supported: CASCADE@1:12");
         cases.put("DROP TABLE t, u", "Not supported: DROP TABLE of more than one table@1:15");
         cases.put("DROP INDEX i", SUPPORTED + ", not DROP INDEX@1:12");

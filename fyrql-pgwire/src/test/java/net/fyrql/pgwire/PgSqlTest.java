@@ -108,8 +108,12 @@ class PgSqlTest {
                         "SELECT s.r FROM unnest(generate_series(1, 3)) AS s(r), pg_catalog.pg_get_keywords"),
                 Map.entry("SELECT (information_schema._pg_expandarray(i.indkey)).n,"
                         + " information_schema._pg_expandarray(i.indkey) AS keys, (r.keys).x FROM i",
-                        "SELECT CAST(NULL AS INTEGER), CAST(NULL AS STRUCT(x SMALLINT, n INTEGER)) AS keys,"
-                                + " r.keys.x FROM i"),
+                        "SELECT unnest(range(1, len(i.indkey) + 1)) AS n, {'x': i.indkey[n], 'n': CAST(n AS INTEGER)}"
+                                + " AS keys, r.keys.x FROM i"),
+                Map.entry("SELECT a, information_schema._pg_expandarray(i.indkey) AS keys FROM pg_index i",
+                        "SELECT a, unnest(range(1, len(i.indkey) + 1)) AS fyrql_position_0, {'x':"
+                                + " i.indkey[fyrql_position_0], 'n': CAST(fyrql_position_0 AS INTEGER)} AS keys FROM"
+                                + " pg_index i"),
                 Map.entry("SELECT E'it\\'s', $t$a'b$t$, \"substring\"('abc', 2)",
                         "SELECT E'it''s', 'a''b', substring('abc', 2)"),
                 Map.entry("SELECT x AS update, y AS table FROM t", "SELECT x AS \"update\", y AS \"table\" FROM t"),

@@ -762,7 +762,7 @@ final class FyrQLResultSet implements ResultSet {
     @Override
     public ResultSetMetaData getMetaData() throws SQLException {
         checkOpen();
-        return new FyrQLResultSetMetaData(schema);
+        return new FyrQLResultSetMetaData(schema, source.origins());
     }
 
     /** Tells whether the result set is before its first row; {@code false} if it has none. */

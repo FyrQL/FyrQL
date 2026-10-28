@@ -84,6 +84,16 @@ class UpdateTest {
     }
 
     @Test
+    void updateDeleteAndMergeAnswerWithTheirCounts() throws Exception {
+        assertEquals(2, client.executeUpdate("INSERT INTO mem.w SELECT k, v FROM tiny"));
+        assertEquals(1, client.executeUpdate("UPDATE mem.w SET v = 'u' WHERE k = 1"));
+        assertEquals(2, client.executeUpdate("MERGE INTO mem.w USING (VALUES (2, 'm'), (9, 'n')) AS s(k, v)"
+                + " ON w.k = s.k WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.v)"));
+        assertEquals(List.of(List.of(1, "u"), List.of(2, "m"), List.of(9, "n")), rows("SELECT k, v FROM w ORDER BY k"));
+        assertEquals(3, client.executeUpdate("DELETE FROM mem.w"));
+    }
+
+    @Test
     void aStatementThatWritesSentAsAQueryRunsWithItsFlightInfo() throws Exception {
         assertEquals(List.of("Count"), client.getExecuteSchema("INSERT INTO mem.w VALUES (1, 'a')").getSchema()
                 .getFields().stream().map(Field::getName).toList());

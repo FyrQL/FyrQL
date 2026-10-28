@@ -45,6 +45,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 
 /**
@@ -342,6 +343,21 @@ final class Connection implements Runnable, PgSql.Context {
             public String viewDefinition(int oid) {
                 return server.catalog().snapshot(database).views().get(oid);
             }
+
+            @Override
+            public String constraintDefinition(int oid) {
+                return server.catalog().snapshot(database).constraints().get(oid);
+            }
+
+            @Override
+            public String indexDefinition(int oid, int column) {
+                PgCatalog.Snapshot s = server.catalog().snapshot(database);
+                List<String> columns = s.indexes().get(oid);
+                if (columns == null || column < 0 || column > columns.size()) {
+                    return null;
+                }
+                return column == 0 ? s.indexDefinitions().get(oid) : PgCatalog.quoteIdentifier(columns.get(column - 1));
+            }
         });
         if (source != null) {
             String schema = source.equals(engineDefault.defaultSource()) ? engineDefault.defaultSchema()
@@ -578,6 +594,8 @@ final class Connection implements Runnable, PgSql.Context {
         String tag;
         /** Whether the portal holds a place among the queries that run at once. */
         boolean permit;
+        /** For each column of the rows, the column of a table it shows as it is, or empty; empty if not known. */
+        List<Optional<SqlStatement.ColumnOrigin>> origins = List.of();
         /** Whether the portal is a cursor that outlives its transaction. */
         boolean hold;
         /** The context of the query of the portal, which a cancel request cancels. */
@@ -764,7 +782,7 @@ final class Connection implements Runnable, PgSql.Context {
             if (portal == null) {
                 throw new PgException(PgException.INVALID_CURSOR_NAME, "portal \"" + name + "\" does not exist");
             }
-            rowDescription(columns(portal.statement), portal.formats);
+            rowDescription(columns(portal.statement), portal.formats, origins(portal));
         } else {
             throw new PgException(PgException.PROTOCOL_VIOLATION, "invalid DESCRIBE message subtype " + (int) kind);
         }
@@ -785,16 +803,54 @@ final class Connection implements Runnable, PgSql.Context {
         };
     }
 
+    /** The columns of tables that the columns of a portal show, as far as its query tells them before it runs. */
+    private List<Optional<SqlStatement.ColumnOrigin>> origins(Portal portal) {
+        Prepared p = portal.statement;
+        if (p.query() == null || p.query().writes()) {
+            return List.of();
+        }
+        try {
+            return session.statement(p.query(), portal.values).origins();
+        } catch (RuntimeException e) {
+            return List.of();
+        }
+    }
+
     private void rowDescription(Schema schema, short[] formats) throws IOException {
+        rowDescription(schema, formats, List.of());
+    }
+
+    /**
+     * Sends the {@code RowDescription} of rows: a column that shows a column
+     * of a table of the database as it is comes with the OID of the table and
+     * the number of the column, as PostgreSQL gives them, so that a client
+     * such as pgjdbc tells the table of a column and a tool can change it.
+     */
+    private void rowDescription(Schema schema, short[] formats, List<Optional<SqlStatement.ColumnOrigin>> origins)
+            throws IOException {
         if (schema == null) {
             out.begin('n').end();
             return;
         }
+        PgCatalog.Snapshot snapshot = origins.isEmpty() || database == null ? null
+                : server.catalog().snapshot(database);
         out.begin('T').int16(schema.size());
         for (int i = 0; i < schema.size(); i++) {
             Schema.Field f = schema.fields().get(i);
             PgTypes.PgType t = PgTypes.of(f.type());
-            out.string(f.name()).int32(0).int16(0).int32(t.oid()).int16(t.length()).int32(t.modifier())
+            int table = 0;
+            int attribute = 0;
+            SqlStatement.ColumnOrigin o = snapshot == null || i >= origins.size() ? null : origins.get(i).orElse(null);
+            if (o != null && o.table().source().equals(database)) {
+                Integer oid = snapshot.classes().get(o.table().schema().toLowerCase(Locale.ROOT) + "."
+                        + o.table().table().toLowerCase(Locale.ROOT));
+                int number = oid == null ? -1 : snapshot.columns().getOrDefault(oid, List.of()).indexOf(o.column());
+                if (number >= 0) {
+                    table = oid;
+                    attribute = number + 1;
+                }
+            }
+            out.string(f.name()).int32(table).int16(attribute).int32(t.oid()).int16(t.length()).int32(t.modifier())
                     .int16(format(formats, i));
         }
         out.end();
@@ -1018,6 +1074,7 @@ final class Connection implements Runnable, PgSql.Context {
                     return;
                 }
                 QueryResult result = session.execute(statement, context);
+                portal.origins = statement.origins();
                 portal.rows = new Rows() {
                     @Override
                     public Schema schema() {
@@ -1039,7 +1096,7 @@ final class Connection implements Runnable, PgSql.Context {
             }
             portal.started = true;
             if (describe) {
-                rowDescription(portal.rows.schema(), new short[0]);
+                rowDescription(portal.rows.schema(), new short[0], portal.origins);
             }
         }
         running = portal.context;
@@ -1132,7 +1189,7 @@ final class Connection implements Runnable, PgSql.Context {
             }
             case "DROP" -> t.size() > 1 && t.get(1).is("VIEW") ? "DROP VIEW" : "DROP TABLE";
             case "SET", "RESET", "USE" -> "SET";
-            case "UPDATE", "DELETE" -> first + " " + count;
+            case "UPDATE", "DELETE", "MERGE" -> first + " " + count;
             default -> first;
         };
     }

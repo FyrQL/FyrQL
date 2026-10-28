@@ -208,6 +208,52 @@ class MemoryWriterTest {
     }
 
     @Test
+    void aPrimaryKeyRejectsNullsAndDuplicatesWithTheCommit() {
+        MemoryConnector c = MemoryConnector.builder("mem").build();
+        Writer w = c.writer().orElseThrow();
+        Schema schema = Schema.of(new Schema.Field("a", DataType.INTEGER, false),
+                new Schema.Field("b", DataType.VARCHAR, false), new Schema.Field("v", DataType.INTEGER));
+        try (Sink sink = w.create(T, schema, List.of("b", "a"))) {
+            sink.write(Batch.ofRows(schema, List.of(new Object[] {1, "x", 10}, new Object[] {1, "y", 20})));
+            sink.commit();
+        }
+        assertEquals(List.of("b", "a"), c.catalog().primaryKey(T));
+
+        // A key the table holds, a key twice in one write, a NULL in a key column: the table stays as it was.
+        try (Sink sink = w.append(T)) {
+            sink.write(Batch.ofRows(schema, List.of(new Object[] {2, "x", 0}, new Object[] {1, "x", 0})));
+            assertEquals("Duplicate key \"b: x, a: 1\" violates primary key constraint.",
+                    assertThrows(IllegalArgumentException.class, sink::commit).getMessage());
+        }
+        try (Sink sink = w.append(T)) {
+            sink.write(Batch.ofRows(schema, List.of(new Object[] {2, "z", 0}, new Object[] {2, "z", 1})));
+            assertEquals("PRIMARY KEY or UNIQUE constraint violation: duplicate key \"z, 2\"",
+                    assertThrows(IllegalArgumentException.class, sink::commit).getMessage());
+        }
+        try (Sink sink = w.append(T)) {
+            sink.write(Batch.ofRows(schema, List.<Object[]>of(new Object[] {null, "z", 0})));
+            assertEquals("NOT NULL constraint failed: t.a",
+                    assertThrows(IllegalArgumentException.class, sink::commit).getMessage());
+        }
+        assertEquals(OptionalLong.of(2), c.catalog().rowCount(T));
+        try (Sink sink = w.append(T)) {
+            sink.write(Batch.ofRows(schema, List.<Object[]>of(new Object[] {2, "x", 0})));
+            assertEquals(1, sink.commit());
+        }
+
+        // A key in one write too, and the names of the key are those of the schema.
+        try (Sink sink = w.create(TableRef.of("mem", "u"), schema, List.of("a"))) {
+            sink.write(Batch.ofRows(schema, List.of(new Object[] {1, "x", 0}, new Object[] {1, "y", 0})));
+            assertEquals("PRIMARY KEY or UNIQUE constraint violation: duplicate key \"1\"",
+                    assertThrows(IllegalArgumentException.class, sink::commit).getMessage());
+        }
+        assertEquals(List.of("t"), c.catalog().tables("main"));
+        assertEquals("Key column nope not found in table u",
+                assertThrows(IllegalArgumentException.class,
+                        () -> w.create(TableRef.of("mem", "u"), schema, List.of("nope"))).getMessage());
+    }
+
+    @Test
     void theFactoryOfTheTypeMemoryMakesAnEmptySource() {
         ConnectorFactory factory = ServiceLoader.load(ConnectorFactory.class).stream()
                 .map(ServiceLoader.Provider::get).filter(f -> f.type().equals("memory")).findFirst().orElseThrow();

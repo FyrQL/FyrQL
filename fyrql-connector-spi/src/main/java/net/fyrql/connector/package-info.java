@@ -77,6 +77,19 @@
  * <li>The engine writes the batches of a sink in the schema it opened the
  * sink with, from one thread, and then commits it or closes it without a
  * commit, which abandons the write.</li>
+ * <li>A source changes rows in one of two ways. It takes a whole
+ * {@code UPDATE} or {@code DELETE} over with
+ * {@link net.fyrql.connector.Writer#update} or
+ * {@link net.fyrql.connector.Writer#delete}, evaluating the expressions with
+ * exactly the semantics of the engine, like the filters of a scan, or it
+ * declines with an empty answer. Otherwise, and for statements that read
+ * other tables, such as {@code MERGE}, the engine reads the rows to change
+ * first, completely, and then hands them to
+ * {@link net.fyrql.connector.RowChanges} by key: the primary key of the
+ * table, or all of its columns if it has none.</li>
+ * <li>A source that keeps a primary key reports it through
+ * {@link net.fyrql.connector.Catalog#primaryKey} and checks it with every
+ * write, so that clients can edit rows by it.</li>
  * <li>Each statement is a transaction of its own in one source; there is
  * no transaction over several statements or sources.</li>
  * </ul>

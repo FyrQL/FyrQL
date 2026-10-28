@@ -52,6 +52,16 @@ public interface Dialect {
     String typeName(DataType type);
 
     /**
+     * Returns the name of a type in the dialect for a column of a primary
+     * key, which some databases index only up to a length.
+     *
+     * @throws IllegalArgumentException if the dialect has no such type
+     */
+    default String keyTypeName(DataType type) {
+        return typeName(type);
+    }
+
+    /**
      * Renders a value as a literal whose type is exactly the given one, also
      * for {@code NULL}.
      *
@@ -291,6 +301,15 @@ public interface Dialect {
      */
     default boolean supports(Expression expression) {
         return true;
+    }
+
+    /**
+     * Tells whether the dialect writes a value into a column exactly as
+     * FyrQL computes it, so that a connector may hand over the {@code SET}
+     * of an {@code UPDATE}. The default asks {@link #supports}.
+     */
+    default boolean supportsValue(Expression value) {
+        return supports(value);
     }
 
     /**

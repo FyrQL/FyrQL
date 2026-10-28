@@ -169,7 +169,8 @@ final class FyrQLConnection implements Connection {
                         SqlStates.READ_ONLY, null);
             }
             if (query) {
-                return new Outcome(BatchSource.of(session.execute(statement, context), context), -1);
+                return new Outcome(BatchSource.of(session.execute(statement, context), context,
+                        statement.origins()), -1);
             }
             return new Outcome(null, session.update(statement, context));
         } catch (RuntimeException e) {

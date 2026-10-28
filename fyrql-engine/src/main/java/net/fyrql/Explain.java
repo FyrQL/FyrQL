@@ -72,9 +72,11 @@ final class Explain {
      * {@code Copy from 'file' into source.schema.t [format: csv]},
      * {@code Create table source.schema.t (a INTEGER NOT NULL, b VARCHAR)}
      * with {@code [or replace]} or {@code [if not exists]},
-     * {@code Insert into source.schema.t} or
+     * {@code Insert into source.schema.t},
+     * {@code Update source.schema.t [set: v; keys: id]},
+     * {@code Delete from source.schema.t [keys: id]} or
      * {@code Drop table [if exists] source.schema.t}, or the setting of
- * {@code SET} and {@code RESET}: {@code Set TimeZone = 'UTC'}, {@code Reset TimeZone}.
+     * {@code SET} and {@code RESET}: {@code Set TimeZone = 'UTC'}, {@code Reset TimeZone}.
      */
     static String header(BoundStatement statement) {
         return switch (statement) {
@@ -98,6 +100,19 @@ final class Explain {
                         case IF_NOT_EXISTS -> " [if not exists]";
                     };
             case BoundStatement.Insert i -> "Insert into " + i.table();
+            case BoundStatement.Update u -> "Update " + u.table() + " [set: "
+                    + String.join(", ", names(u.keyed()).subList(u.keys().length, u.keyed().schema().size()))
+                    + "; keys: " + String.join(", ", names(u.keyed()).subList(0, u.keys().length)) + "]";
+            case BoundStatement.Merge m -> "Merge into " + m.table() + " [" + String.join(", ",
+                    m.actions().stream().map(a -> a.name().toLowerCase(java.util.Locale.ROOT)).toList()) + "; keys: "
+                    + String.join(", ", names(m.changes()).subList(1, 1 + m.keys().length)) + "]";
+            case BoundStatement.CreateSchema c -> "Create schema " + c.source() + "." + c.name()
+                    + (c.ifNotExists() ? " [if not exists]" : "");
+            case BoundStatement.AddColumn a -> "Alter table " + a.table() + " add column " + a.column()
+                    + (a.defaultValue() == null ? "" : " [default: " + net.fyrql.core.value.Casts.format(
+                            a.defaultValue(), a.column().type()) + "]") + (a.ifNotExists() ? " [if not exists]" : "");
+            case BoundStatement.Delete d -> "Delete from " + d.table() + " [keys: "
+                    + String.join(", ", names(d.keyed())) + "]";
             case BoundStatement.Drop d -> d.table() == null
                     ? "Drop table if exists " + String.join(".", d.name()) + " [no such table]"
                     : "Drop table " + (d.ifExists() ? "if exists " : "") + d.table();
@@ -117,6 +132,10 @@ final class Explain {
             case BoundStatement.Query q -> throw new IllegalArgumentException("A query has a plan, not a header");
             case BoundStatement.Explain e -> throw new IllegalArgumentException("EXPLAIN has no header");
         };
+    }
+
+    private static List<String> names(PlanNode plan) {
+        return plan.schema().fields().stream().map(Schema.Field::name).toList();
     }
 
     /** Prints a plan that an engine with a number of threads runs. */

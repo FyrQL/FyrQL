@@ -12,11 +12,13 @@
 package net.fyrql.jdbc;
 
 import net.fyrql.QueryResult;
+import net.fyrql.SqlStatement;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.exec.QueryContext;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * The batches behind a result set: those of a running query, or rows the
@@ -38,6 +40,14 @@ interface BatchSource {
     void close();
 
     /**
+     * Returns for each column the column of a table it shows as it is, or
+     * {@code null}; empty if not known.
+     */
+    default List<Optional<SqlStatement.ColumnOrigin>> origins() {
+        return List.of();
+    }
+
+    /**
      * Cancels the query from another thread, so that {@link #next()} fails
      * soon; rows the driver made itself are not canceled.
      */
@@ -50,10 +60,21 @@ interface BatchSource {
      * close as well.
      */
     static BatchSource of(QueryResult result, QueryContext context) {
+        return of(result, context, List.of());
+    }
+
+    /** The batches of a query as {@link #of(QueryResult, QueryContext)}, with the origins of its columns. */
+    static BatchSource of(QueryResult result, QueryContext context,
+            List<Optional<SqlStatement.ColumnOrigin>> origins) {
         return new BatchSource() {
             @Override
             public Schema schema() {
                 return result.schema();
+            }
+
+            @Override
+            public List<Optional<SqlStatement.ColumnOrigin>> origins() {
+                return origins;
             }
 
             @Override

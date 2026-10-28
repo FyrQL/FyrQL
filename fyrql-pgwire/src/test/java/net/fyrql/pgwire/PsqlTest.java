@@ -83,6 +83,7 @@ class PsqlTest {
         assertTrue(psql("shop", "\\dt *.*").contains("orders"));
         String customers = psql("shop", "\\d customers");
         assertTrue(customers.contains("integer") && customers.contains("not null"), customers);
+        assertTrue(customers.contains("\"customers_pkey\" PRIMARY KEY, btree (id)"), customers);
         String orders = psql("shop", "\\d+ sales.orders");
         assertTrue(orders.contains("numeric(10,2)"), orders);
         psql("shop", "\\dv");

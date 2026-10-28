@@ -11,11 +11,14 @@
 
 package net.fyrql.jdbc;
 
+import net.fyrql.SqlStatement;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.util.List;
+import java.util.Optional;
 
 /**
  * The columns of a result, see {@link JdbcTypes} for the types. A column
@@ -25,9 +28,21 @@ import java.sql.SQLException;
 final class FyrQLResultSetMetaData implements ResultSetMetaData {
 
     private final Schema schema;
+    private final List<Optional<SqlStatement.ColumnOrigin>> origins;
 
-    FyrQLResultSetMetaData(Schema schema) {
+    /**
+     * @param origins for each column the column of a table it shows as it
+     *        is, or {@code null}; empty if not known
+     */
+    FyrQLResultSetMetaData(Schema schema, List<Optional<SqlStatement.ColumnOrigin>> origins) {
         this.schema = schema;
+        this.origins = origins;
+    }
+
+    /** Returns the column of a table that a column shows as it is, or {@code null}. */
+    private SqlStatement.ColumnOrigin origin(int column) throws SQLException {
+        field(column);
+        return column <= origins.size() ? origins.get(column - 1).orElse(null) : null;
     }
 
     private Schema.Field field(int column) throws SQLException {
@@ -95,10 +110,11 @@ final class FyrQLResultSetMetaData implements ResultSetMetaData {
         return field(column).name();
     }
 
+    /** Returns the schema of the table a column shows as it is, else an empty string. */
     @Override
     public String getSchemaName(int column) throws SQLException {
-        field(column);
-        return "";
+        SqlStatement.ColumnOrigin o = origin(column);
+        return o == null ? "" : o.table().schema();
     }
 
     @Override
@@ -111,16 +127,18 @@ final class FyrQLResultSetMetaData implements ResultSetMetaData {
         return JdbcTypes.scale(type(column));
     }
 
+    /** Returns the table a column shows as it is, else an empty string. */
     @Override
     public String getTableName(int column) throws SQLException {
-        field(column);
-        return "";
+        SqlStatement.ColumnOrigin o = origin(column);
+        return o == null ? "" : o.table().table();
     }
 
+    /** Returns the source of the table a column shows as it is, else an empty string. */
     @Override
     public String getCatalogName(int column) throws SQLException {
-        field(column);
-        return "";
+        SqlStatement.ColumnOrigin o = origin(column);
+        return o == null ? "" : o.table().source();
     }
 
     @Override
@@ -133,16 +151,15 @@ final class FyrQLResultSetMetaData implements ResultSetMetaData {
         return type(column).sqlName();
     }
 
+    /** A column that shows a column of a table as it is can be written, by an {@code UPDATE} of the table. */
     @Override
     public boolean isReadOnly(int column) throws SQLException {
-        field(column);
-        return true;
+        return origin(column) == null;
     }
 
     @Override
     public boolean isWritable(int column) throws SQLException {
-        field(column);
-        return false;
+        return origin(column) != null;
     }
 
     @Override

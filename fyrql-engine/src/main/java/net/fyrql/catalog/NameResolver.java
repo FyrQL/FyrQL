@@ -46,6 +46,10 @@ import java.util.stream.Collectors;
  * <p>
  * The {@link Views} count as tables of their schemas; a view hides a table
  * of the same name.
+ * <p>
+ * A session may have a source of temporary tables, whose schema
+ * {@code main} comes first for a name of one part, as in DuckDB: a
+ * temporary table hides a table of its name elsewhere.
  */
 final class NameResolver {
 
@@ -53,6 +57,8 @@ final class NameResolver {
     private final SearchPath searchPath;
     private final DatabasePath database;
     private final Views views;
+    /** The source of the temporary tables of a session, or {@code null}. */
+    private final String temporary;
 
     /** A resolver over sources by name, in the order of their registration. */
     public NameResolver(Map<String, Connector> sources, SearchPath searchPath) {
@@ -75,6 +81,18 @@ final class NameResolver {
      */
     public NameResolver(Map<String, Connector> sources, SearchPath searchPath, DatabasePath database,
             Views views) {
+        this(sources, searchPath, database, views, null);
+    }
+
+    /**
+     * A resolver as {@link #NameResolver(Map, SearchPath, DatabasePath, Views)},
+     * with the source of the temporary tables of a session.
+     *
+     * @param temporary the name of that source among the sources, or {@code null}
+     */
+    NameResolver(Map<String, Connector> sources, SearchPath searchPath, DatabasePath database, Views views,
+            String temporary) {
+        this.temporary = temporary;
         this.sources = new LinkedHashMap<>(sources);
         this.searchPath = searchPath;
         this.database = database;
@@ -145,6 +163,12 @@ final class NameResolver {
      */
     public Optional<TableRef> find(List<String> name) {
         String text = String.join(".", name);
+        if (temporary != null && name.size() == 1) {
+            List<TableRef> temp = tables(temporary, TableRef.MAIN, name.get(0));
+            if (!temp.isEmpty()) {
+                return Optional.of(temp.get(0));
+            }
+        }
         List<TableRef> found;
         if (database == null || name.isEmpty() || name.size() > 3) {
             found = candidates(name);
@@ -334,6 +358,62 @@ final class NameResolver {
         String table = name.get(name.size() - 1);
         List<String> existing = match(tableNames(source, schema), table);
         return new TableRef(source, schema, existing.size() == 1 ? existing.get(0) : table);
+    }
+
+    /**
+     * Returns where a new temporary table goes: the schema {@code main} of
+     * the source of temporary tables, also named as {@code temp.name} or
+     * {@code temp.main.name}.
+     *
+     * @throws SqlException if the session has no such source, or the name names another source or schema
+     */
+    public TableRef resolveTemporary(List<String> name) {
+        if (temporary == null) {
+            throw new SqlException("Not supported: temporary tables, since a source of the engine is named temp",
+                    Position.UNKNOWN);
+        }
+        boolean fits = switch (name.size()) {
+            case 1 -> true;
+            case 2 -> name.get(0).equalsIgnoreCase(temporary);
+            case 3 -> name.get(0).equalsIgnoreCase(temporary) && name.get(1).equalsIgnoreCase(TableRef.MAIN);
+            default -> false;
+        };
+        if (!fits) {
+            throw new SqlException("A temporary table goes to " + temporary + "." + TableRef.MAIN + ", not to "
+                    + String.join(".", name.subList(0, Math.max(0, name.size() - 1))), Position.UNKNOWN);
+        }
+        String table = name.get(name.size() - 1);
+        List<String> existing = match(tableNames(temporary, TableRef.MAIN), table);
+        return new TableRef(temporary, TableRef.MAIN, existing.size() == 1 ? existing.get(0) : table);
+    }
+
+    /** Tells whether a table is in the source of temporary tables. */
+    public boolean temporary(TableRef table) {
+        return temporary != null && table.source().equals(temporary);
+    }
+
+    /**
+     * Returns where a new schema goes: two parts are {@code source.schema},
+     * one part is a schema of the default source, or of the database along
+     * the path of a database.
+     *
+     * @return the source and the schema
+     * @throws SqlException if the name names no source, or there is no default source
+     */
+    public List<String> resolveNewSchema(List<String> name) {
+        String source;
+        if (name.size() == 2) {
+            source = one(match(sources.keySet(), name.get(0)), "Source", name.get(0));
+        } else if (database != null) {
+            source = database.database();
+        } else {
+            source = searchPath.defaultSource();
+            if (source == null) {
+                throw new SqlException("There is no default source for the schema " + name.get(0)
+                        + "; name its source, as in source." + name.get(0), Position.UNKNOWN);
+            }
+        }
+        return List.of(source, name.get(name.size() - 1));
     }
 
     /** Returns the one name found, or fails with the kind of thing that was looked for. */

@@ -60,9 +60,19 @@ final class ZoneBinding {
             case BoundStatement.CopyFrom c -> new BoundStatement.CopyFrom(c.table(), plan(c.input(), zone), c.path(),
                     c.format(), c.options());
             case BoundStatement.Create c -> new BoundStatement.Create(c.table(), c.columns(),
-                    c.input() == null ? null : plan(c.input(), zone), c.mode());
+                    c.input() == null ? null : plan(c.input(), zone), c.mode(), c.primaryKey());
             case BoundStatement.Insert i -> new BoundStatement.Insert(i.table(), plan(i.input(), zone));
+            case BoundStatement.Update u -> new BoundStatement.Update(u.table(), u.columns(),
+                    u.values() == null ? null : u.values().stream().map(v -> expression(v, zone)).toList(),
+                    u.condition() == null ? null : expression(u.condition(), zone), u.keys(), plan(u.keyed(), zone));
+            case BoundStatement.Merge m -> new BoundStatement.Merge(m.table(), m.actions(), m.keys(), m.updated(),
+                    plan(m.changes(), zone));
+            case BoundStatement.Delete d -> new BoundStatement.Delete(d.table(),
+                    d.condition() == null ? null : expression(d.condition(), zone), d.simple(), d.keys(),
+                    plan(d.keyed(), zone));
             case BoundStatement.Drop d -> d;
+            case BoundStatement.CreateSchema c -> c;
+            case BoundStatement.AddColumn a -> a;
             // A view keeps its query, which a query that reads it binds again in its own time zone.
             case BoundStatement.CreateView v -> v;
             case BoundStatement.DropView d -> d;

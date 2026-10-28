@@ -85,6 +85,26 @@ final class ViewCatalogs {
         }
 
         @Override
+        public List<String> primaryKey(TableRef table) {
+            return catalog.primaryKey(table);
+        }
+
+        @Override
+        public List<String> resolveNewSchema(List<String> name) {
+            return catalog.resolveNewSchema(name);
+        }
+
+        @Override
+        public TableRef resolveTemporary(List<String> name) {
+            return catalog.resolveTemporary(name);
+        }
+
+        @Override
+        public boolean temporary(TableRef table) {
+            return catalog.temporary(table);
+        }
+
+        @Override
         public List<String> path(TableRef table) {
             return catalog.path(table);
         }

@@ -41,22 +41,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.21.0</version>
+    <version>0.22.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.21.0</version>
+    <version>0.22.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.21.0</version>
+    <version>0.22.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.21.0</version>
+    <version>0.22.0</version>
 </dependency>
 ```
 
@@ -238,9 +238,9 @@ More: [Connectors](manual.md#connectors) with what each source takes over,
 
 *3 minutes.* `COPY ... TO` writes the result of a query into a CSV, JSON or Parquet
 file or an Excel workbook, `CREATE TABLE` and `INSERT INTO` write into tables in memory
-and in databases, and
-`COPY ... FROM` loads a file into a table. `engine.update(sql)` runs such a statement and
-returns the number of rows. With the engine of the first query:
+and in databases, `UPDATE`, `DELETE` and `MERGE` change their rows, and `COPY ... FROM`
+loads a file into a table. `engine.update(sql)` runs such a statement and returns the
+number of rows. With the engine of the first query:
 
 ```java
 long written = engine.update("""
@@ -491,7 +491,8 @@ In the Driver Manager of DBeaver, a new driver gets the class name
 and password, and as libraries the JAR and the JDBC drivers of the databases that the
 configuration file names. A connection with that driver then asks for the file. A
 connection is always in auto-commit: each statement takes effect at once, and `commit` and
-`rollback` do nothing, so DBeaver stays in auto-commit, its default.
+`rollback` do nothing, so DBeaver stays in auto-commit, its default. The rows of a table
+with a primary key can be edited in the grid of DBeaver.
 
 More: [JDBC driver](manual.md#jdbc-driver), [DBeaver](manual.md#dbeaver).
 
@@ -613,7 +614,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.21.0</version>
+    <version>0.22.0</version>
 </dependency>
 ```
 

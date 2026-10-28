@@ -24,8 +24,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.BatchUpdateException;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLIntegrityConstraintViolationException;
 import java.sql.SQLTimeoutException;
@@ -81,6 +84,88 @@ class UpdateTest {
             assertEquals(0, s.executeUpdate("DROP TABLE IF EXISTS u"));
             assertEquals("42P01", assertThrows(SQLException.class, () -> s.executeQuery("SELECT * FROM u"))
                     .getSQLState());
+        }
+    }
+
+    @Test
+    void updateDeleteAndMergeHaveTheirCounts() throws SQLException {
+        try (Statement s = c.createStatement()) {
+            s.executeUpdate("CREATE TABLE k (id INTEGER PRIMARY KEY, v VARCHAR)");
+            assertEquals(3, s.executeUpdate("INSERT INTO k VALUES (1, 'a'), (2, 'b'), (3, 'c')"));
+            assertEquals(2, s.executeUpdate("UPDATE k SET v = upper(v) WHERE id > 1"));
+            assertEquals(1, s.executeUpdate("DELETE FROM k WHERE id = 3"));
+            assertEquals(3, s.executeUpdate("MERGE INTO k USING (VALUES (1, 'x'), (2, NULL), (4, 'd')) AS n(id, v)"
+                    + " ON k.id = n.id WHEN MATCHED AND n.v IS NULL THEN DELETE WHEN MATCHED THEN UPDATE SET v = n.v"
+                    + " WHEN NOT MATCHED THEN INSERT VALUES (n.id, n.v)"));
+            assertTrue(s.execute("SELECT id || v FROM k ORDER BY id"));
+            assertEquals(List.of("1x", "4d"), StatementTest.rows(s.getResultSet()));
+        }
+        try (PreparedStatement p = c.prepareStatement("UPDATE k SET v = ? WHERE id = ?")) {
+            p.setString(1, "edited");
+            p.setInt(2, 4);
+            assertEquals(1, p.executeUpdate());
+            assertEquals(Types.VARCHAR, p.getParameterMetaData().getParameterType(1));
+        }
+        try (PreparedStatement p = c.prepareStatement("MERGE INTO k USING (SELECT ? AS id) n ON k.id = n.id"
+                + " WHEN MATCHED THEN DELETE")) {
+            p.setInt(1, 1);
+            assertEquals(1, p.executeUpdate());
+        }
+        try (Statement s = c.createStatement()) {
+            assertTrue(s.execute("SELECT id || v FROM k"));
+            assertEquals(List.of("4edited"), StatementTest.rows(s.getResultSet()));
+        }
+    }
+
+    /**
+     * What a tool such as DBeaver needs to edit the rows of a result: the
+     * table and column a column shows, and the primary key of the table.
+     */
+    @Test
+    void theMetadataNamesTheTableAndTheKeyOfAResult() throws SQLException {
+        try (Statement s = c.createStatement()) {
+            s.executeUpdate("CREATE TABLE k (b VARCHAR, id INTEGER, v DOUBLE, PRIMARY KEY (id, b))");
+            s.executeUpdate("CREATE TEMP TABLE scratch (n INTEGER PRIMARY KEY)");
+            try (ResultSet rs = s.executeQuery("SELECT v, id, upper(b) AS u FROM k WHERE id > 0 ORDER BY id")) {
+                ResultSetMetaData md = rs.getMetaData();
+                assertEquals(List.of("mem.main.k", "mem.main.k", ".."), List.of(
+                        md.getCatalogName(1) + "." + md.getSchemaName(1) + "." + md.getTableName(1),
+                        md.getCatalogName(2) + "." + md.getSchemaName(2) + "." + md.getTableName(2),
+                        md.getCatalogName(3) + "." + md.getSchemaName(3) + "." + md.getTableName(3)));
+                assertTrue(md.isWritable(1) && !md.isReadOnly(2) && md.isReadOnly(3) && !md.isWritable(3));
+            }
+            DatabaseMetaData meta = c.getMetaData();
+            assertEquals(List.of("k b 2 k_pkey", "k id 1 k_pkey"), keys(meta.getPrimaryKeys(null, null, "k")));
+            assertEquals(List.of(), keys(meta.getPrimaryKeys("mem", "main", "nope")));
+            assertEquals(List.of("scratch n 1 scratch_pkey"), keys(meta.getPrimaryKeys("temp", null, "scratch")));
+            try (ResultSet rs = meta.getBestRowIdentifier("mem", "main", "k", DatabaseMetaData.bestRowSession,
+                    false)) {
+                List<String> rows = new java.util.ArrayList<>();
+                while (rs.next()) {
+                    rows.add(rs.getString("COLUMN_NAME") + " " + rs.getString("TYPE_NAME"));
+                }
+                assertEquals(List.of("id INTEGER", "b VARCHAR"), rows);
+            }
+            try (ResultSet rs = meta.getIndexInfo(null, null, "k", true, false)) {
+                assertTrue(rs.next());
+                assertEquals("k_pkey", rs.getString("INDEX_NAME"));
+                assertFalse(rs.getBoolean("NON_UNIQUE"));
+            }
+            try (ResultSet rs = meta.getTables("temp", null, "%", null)) {
+                assertTrue(rs.next());
+                assertEquals("scratch", rs.getString("TABLE_NAME"));
+            }
+        }
+    }
+
+    private static List<String> keys(ResultSet rs) throws SQLException {
+        try (rs) {
+            List<String> rows = new java.util.ArrayList<>();
+            while (rs.next()) {
+                rows.add(rs.getString("TABLE_NAME") + " " + rs.getString("COLUMN_NAME") + " " + rs.getShort("KEY_SEQ")
+                        + " " + rs.getString("PK_NAME"));
+            }
+            return rows;
         }
     }
 

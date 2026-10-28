@@ -240,6 +240,12 @@ public final class SqlParser {
             }
             return copy(sql, parameters);
         }
+        if (MergeParser.isMerge(sql)) {
+            if (!writes) {
+                throw new SqlException("Only queries are supported, not MERGE", CopyParser.start(sql));
+            }
+            return merge(sql, parameters);
+        }
         String setting = CopyParser.settingWord(sql);
         if (setting != null) {
             if (!writes) {
@@ -260,8 +266,13 @@ public final class SqlParser {
         if (statement instanceof net.fyrql.sql.ast.CreateView && !adapter.parameters().isEmpty()) {
             throw new SqlException("A view cannot have parameters", adapter.parameters().get(0).position());
         }
+        return new ParameterizedStatement(statement, numbered(adapter.parameters()));
+    }
+
+    /** Returns the parameters of a statement by their numbers, each once; a gap is an error. */
+    private static List<SqlExpr.Parameter> numbered(List<SqlExpr.Parameter> parameters) {
         TreeMap<Integer, SqlExpr.Parameter> byIndex = new TreeMap<>();
-        for (SqlExpr.Parameter p : adapter.parameters()) {
+        for (SqlExpr.Parameter p : parameters) {
             byIndex.putIfAbsent(p.index(), p);
         }
         List<SqlExpr.Parameter> numbered = new ArrayList<>(byIndex.values());
@@ -272,7 +283,91 @@ public final class SqlParser {
                         + " from $1 without a gap", numbered.get(i).position());
             }
         }
-        return new ParameterizedStatement(statement, numbered);
+        return numbered;
+    }
+
+    /**
+     * Parses {@code MERGE}: {@link MergeParser} reads its structure, and
+     * JSqlParser its source, conditions and values, put together in their
+     * order as {@code WITH merge_source AS (SELECT * FROM source) SELECT
+     * condition, value, ...}, each part keeping its position in the text.
+     */
+    private static ParameterizedStatement merge(String sql, boolean parameters) {
+        SourceText whole = SourceText.of(sql);
+        MergeParser.Parsed m = MergeParser.parse(whole);
+        List<MergeParser.Part> parts = new ArrayList<>();
+        if (m.on() != null) {
+            parts.add(m.on());
+        }
+        for (MergeParser.Branch b : m.branches()) {
+            if (b.condition() != null) {
+                parts.add(b.condition());
+            }
+            if (b.set() != null) {
+                b.set().forEach(a -> parts.add(a.value()));
+            }
+            if (b.values() != null) {
+                parts.addAll(b.values());
+            }
+        }
+        List<SourceText.Piece> pieces = new ArrayList<>();
+        int sourceStart = m.source().start();
+        pieces.add(SourceText.Piece.words("WITH merge_source AS (SELECT * FROM ", sourceStart));
+        pieces.add(SourceText.Piece.part(sourceStart, m.source().end()));
+        pieces.add(SourceText.Piece.words(") SELECT ", m.source().end()));
+        if (parts.isEmpty()) {
+            pieces.add(SourceText.Piece.words("1", sourceStart));
+        }
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) {
+                pieces.add(SourceText.Piece.words(", ", parts.get(i).start()));
+            }
+            pieces.add(SourceText.Piece.part(parts.get(i).start(), parts.get(i).end()));
+        }
+        SourceText text = whole.assemble(pieces);
+        Statements statements = statements(text);
+        if (statements == null || statements.size() != 1) {
+            throw new SqlException("Syntax error in MERGE", whole.at(m.source().start()));
+        }
+        JSqlParserAdapter adapter = new JSqlParserAdapter(text, parameters);
+        Query query = (Query) adapter.statement(statements.get(0), false);
+        FromItem source = ((QueryBody.Select) query.with().get(0).query().body()).from();
+        java.util.Iterator<SqlExpr> expressions = ((QueryBody.Select) query.body()).items().stream()
+                .map(i -> ((SelectItem.ExpressionItem) i).expression()).toList().iterator();
+        SqlExpr on = m.on() == null ? null : expressions.next();
+        List<net.fyrql.sql.ast.Merge.When> whens = new ArrayList<>();
+        for (MergeParser.Branch b : m.branches()) {
+            SqlExpr condition = b.condition() == null ? null : expressions.next();
+            net.fyrql.sql.ast.Merge.Action action = switch (b.action()) {
+                case "UPDATE" -> {
+                    List<net.fyrql.sql.ast.Update.Assignment> set = null;
+                    if (b.set() != null) {
+                        set = new ArrayList<>();
+                        for (MergeParser.Assignment a : b.set()) {
+                            set.add(new net.fyrql.sql.ast.Update.Assignment(a.column(), expressions.next(),
+                                    whole.at(a.at())));
+                        }
+                    }
+                    yield new net.fyrql.sql.ast.Merge.UpdateAction(set);
+                }
+                case "DELETE" -> new net.fyrql.sql.ast.Merge.DeleteAction();
+                case "NOTHING" -> new net.fyrql.sql.ast.Merge.NothingAction();
+                default -> {
+                    List<SqlExpr> values = null;
+                    if (b.values() != null) {
+                        values = new ArrayList<>();
+                        for (int i = 0; i < b.values().size(); i++) {
+                            values.add(expressions.next());
+                        }
+                    }
+                    yield new net.fyrql.sql.ast.Merge.InsertAction(b.columns(), values, b.byName());
+                }
+            };
+            whens.add(new net.fyrql.sql.ast.Merge.When(b.match(), condition, action, whole.at(b.at())));
+        }
+        net.fyrql.sql.ast.Merge merge = new net.fyrql.sql.ast.Merge(m.name(), m.alias(), source, on, m.using(),
+                whens, whole.at(m.nameAt()));
+        return new ParameterizedStatement(merge, numbered(adapter.parameters()));
     }
 
     /**
@@ -415,6 +510,9 @@ public final class SqlParser {
         Object node = switch (statement) {
             case net.sf.jsqlparser.statement.create.table.CreateTable c -> c.getTable();
             case net.sf.jsqlparser.statement.insert.Insert i -> i.getTable();
+            case net.sf.jsqlparser.statement.update.Update u -> u.getTable();
+            case net.sf.jsqlparser.statement.delete.Delete d -> d.getTable();
+            case net.sf.jsqlparser.statement.alter.Alter a -> a.getTable();
             case net.sf.jsqlparser.statement.drop.Drop d -> d.getName();
             default -> statement;
         };

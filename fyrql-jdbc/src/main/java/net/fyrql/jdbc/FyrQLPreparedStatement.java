@@ -188,7 +188,7 @@ final class FyrQLPreparedStatement extends FyrQLStatement implements PreparedSta
             values &= literal != null;
         }
         Schema columns = values ? connection.describe(rendered()) : connection.preparedColumns(sql.sql());
-        return columns == null ? null : new FyrQLResultSetMetaData(columns);
+        return columns == null ? null : new FyrQLResultSetMetaData(columns, List.of());
     }
 
     /**

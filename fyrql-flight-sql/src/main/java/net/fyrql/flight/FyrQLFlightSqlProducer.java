@@ -879,7 +879,7 @@ final class FyrQLFlightSqlProducer implements FlightSqlProducer {
     @Override
     public void getStreamPrimaryKeys(FlightSql.CommandGetPrimaryKeys command, CallContext context,
             ServerStreamListener listener) {
-        send(Schemas.GET_PRIMARY_KEYS_SCHEMA, listener, List::of);
+        send(Schemas.GET_PRIMARY_KEYS_SCHEMA, listener, () -> Metadata.primaryKeys(engine, command));
     }
 
     @Override

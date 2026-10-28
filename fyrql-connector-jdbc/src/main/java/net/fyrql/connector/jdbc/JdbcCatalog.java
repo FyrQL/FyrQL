@@ -67,7 +67,7 @@ final class JdbcCatalog implements Catalog {
     private final Map<String, List<String>> tables = new ConcurrentHashMap<>();
     private final Map<List<String>, Columns> columns = new ConcurrentHashMap<>();
     private final Map<List<String>, Long> rowCounts = new ConcurrentHashMap<>();
-    private final Map<List<String>, Optional<String>> primaryKeys = new ConcurrentHashMap<>();
+    private final Map<List<String>, List<String>> primaryKeys = new ConcurrentHashMap<>();
 
     /**
      * The schemas as listed, the name in the database of the one listed as
@@ -131,33 +131,40 @@ final class JdbcCatalog implements Catalog {
     }
 
     /**
-     * Returns the name of the column of the primary key of a table, or
-     * empty if the table has no primary key or one of several columns.
+     * Returns the columns of the primary key of a table in the order of the
+     * key, empty if it has none or the driver cannot tell.
      */
-    Optional<String> primaryKey(TableRef table) {
+    @Override
+    public List<String> primaryKey(TableRef table) {
         columns(table);
         String real = databaseSchema(table.schema());
         return primaryKeys.computeIfAbsent(List.of(real, table.table()), k -> withConnection(
                 c -> readPrimaryKey(c, k.get(0), k.get(1)), "read the primary key of " + table));
     }
 
-    private Optional<String> readPrimaryKey(Connection c, String schema, String table) throws SQLException {
+    /** Returns the name of the column of the primary key of a table, or empty if it has none or several. */
+    Optional<String> singleKey(TableRef table) {
+        List<String> key = primaryKey(table);
+        return key.size() == 1 ? Optional.of(key.get(0)) : Optional.empty();
+    }
+
+    private List<String> readPrimaryKey(Connection c, String schema, String table) throws SQLException {
         DatabaseMetaData md = c.getMetaData();
-        List<String> names = new ArrayList<>();
+        Map<Integer, String> names = new TreeMap<>();
         try (ResultSet rs = dialect == JdbcDialect.SQLITE ? md.getPrimaryKeys(null, null, table)
                 : catalogs() ? md.getPrimaryKeys(schema, null, table)
                 : md.getPrimaryKeys(null, schema, table)) {
             while (rs.next()) {
-                names.add(rs.getString("COLUMN_NAME"));
+                names.put(rs.getInt("KEY_SEQ"), rs.getString("COLUMN_NAME"));
             }
         } catch (SQLException | UnsupportedOperationException e) {
             if (dialect != JdbcDialect.GENERIC) {
                 throw e;
             }
-            // A driver that cannot tell the key: the table is read in one part.
-            return Optional.empty();
+            // A driver that cannot tell the key: the table has none for the engine.
+            return List.of();
         }
-        return names.size() == 1 ? Optional.of(names.get(0)) : Optional.empty();
+        return List.copyOf(names.values());
     }
 
     /**

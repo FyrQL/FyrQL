@@ -17,8 +17,10 @@ import net.fyrql.pgwire.SqlText.Token;
 
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -889,12 +891,21 @@ final class PgSql {
      * {@code generate_series(a, b) AS s(n)} unnests the list of the engine,
      * {@code string_to_array} and {@code parse_ident} are a row of their
      * value, {@code pg_get_keywords()} is the table of the server, and
-     * {@code _pg_expandarray} of {@code information_schema}, which pgjdbc
-     * reads the keys of indexes with, gives no rows, as FyrQL has no indexes.
+     * {@code _pg_expandarray} of {@code information_schema}, with which
+     * pgjdbc reads the columns of keys and indexes, numbers the elements of
+     * an array in a select list, see {@link #expandArray}.
      */
     private static String from(String sql) {
         List<Token> t = SqlText.tokens(sql);
         List<Edit> edits = new ArrayList<>();
+        int[] depth = new int[t.size()];
+        for (int i = 0, d = 0; i < t.size(); i++) {
+            d -= t.get(i).isSymbol(")") ? 1 : 0;
+            depth[i] = d;
+            d += t.get(i).isSymbol("(") ? 1 : 0;
+        }
+        // The alias of the position in its array of each array of _pg_expandarray, by its select list and text.
+        Map<String, String> positions = new HashMap<>();
         for (int i = 1; i < t.size(); i++) {
             Token k = t.get(i);
             boolean inFrom = t.get(i - 1).is("FROM", "JOIN") || t.get(i - 1).isSymbol(",") && inFromList(t, i - 1);
@@ -969,7 +980,12 @@ final class PgSql {
                 }
                 boolean wrapped = start > 0 && t.get(start - 1).isSymbol("(") && close + 3 < t.size()
                         && t.get(close + 1).isSymbol(")") && t.get(close + 2).isSymbol(".");
-                if (wrapped) {
+                Edit expanded = close > nameAt + 2 && !inFrom && !(start > 0 && t.get(start - 1).is("FROM", "JOIN"))
+                        ? expandArray(sql, t, start, nameAt, close, wrapped, depth, positions) : null;
+                if (expanded != null) {
+                    edits.add(expanded);
+                    i = expanded.to();
+                } else if (wrapped) {
                     String field = t.get(close + 3).value();
                     edits.add(new Edit(start - 1, close + 3, field.equals("n") ? "CAST(NULL AS INTEGER)"
                             : "CAST(NULL AS SMALLINT)"));
@@ -992,6 +1008,56 @@ final class PgSql {
             }
         }
         return apply(sql, t, edits);
+    }
+
+    /**
+     * Rewrites {@code _pg_expandarray(a)} in a select list, which gives a
+     * row for each element of the array with the element {@code x} and its
+     * position {@code n} from 1. FyrQL unnests one list in a select list, so
+     * the first call of an array in a select list becomes the positions,
+     * {@code unnest(range(1, len(a) + 1))}, under the alias of
+     * {@code (_pg_expandarray(a)).n [AS alias]}, {@code n} without one, or
+     * under one of its own, and
+     * every other call refers to that alias: {@code .n} is the position,
+     * {@code .x} is {@code a[position]}, and the call alone is the struct
+     * of both, whose fields an outer query reads.
+     *
+     * @return the edit, or {@code null} if the first call of an array is
+     *         neither {@code .n} with an alias nor an item of its own
+     */
+    private static Edit expandArray(String sql, List<Token> t, int start, int nameAt, int close, boolean wrapped,
+            int[] depth, Map<String, String> positions) {
+        String array = text(sql, t, nameAt + 2, close - 1);
+        String field = wrapped ? t.get(close + 3).value() : null;
+        int from = wrapped ? start - 1 : start;
+        int to = wrapped ? close + 3 : close;
+        String group = depth[from] + " " + array;
+        String position = positions.get(group);
+        if (position != null) {
+            return new Edit(from, to, field == null ? element(array, position)
+                    : field.equals("n") ? position : array + "[" + position + "]");
+        }
+        String range = "unnest(range(1, len(" + array + ") + 1))";
+        if ("n".equals(field)) {
+            if (to + 2 < t.size() && t.get(to + 1).is("AS") && isName(t.get(to + 2))) {
+                positions.put(group, t.get(to + 2).text());
+                return new Edit(from, to, range);
+            }
+            // Without an alias, the column has the name of the field, as in PostgreSQL.
+            positions.put(group, "n");
+            return new Edit(from, to, range + " AS n");
+        }
+        if (field == null && start > 0 && (t.get(start - 1).isSymbol(",") || t.get(start - 1).is("SELECT"))) {
+            String alias = "fyrql_position_" + positions.size();
+            positions.put(group, alias);
+            return new Edit(from, to, range + " AS " + alias + ", " + element(array, alias));
+        }
+        return null;
+    }
+
+    /** The element of an array at a position and the position, as {@code _pg_expandarray} gives them. */
+    private static String element(String array, String position) {
+        return "{'x': " + array + "[" + position + "], 'n': CAST(" + position + " AS INTEGER)}";
     }
 
     /**

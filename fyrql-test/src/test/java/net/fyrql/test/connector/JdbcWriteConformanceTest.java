@@ -47,6 +47,12 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * TABLE}, {@code CREATE TABLE IF NOT EXISTS} and {@code CREATE OR REPLACE
  * TABLE} do as they say. The generic dialect and SQLite create no
  * {@code HUGEINT}.
+ * <p>
+ * {@code UPDATE} and {@code DELETE} change a table with a primary key and
+ * one without, whole in the database where the dialect renders them, and
+ * otherwise by key, also with rows of the memory source; after each
+ * statement the table holds what DuckDB holds after it. A key the database
+ * refuses in the middle of the changes rolls all of them back.
  */
 class JdbcWriteConformanceTest {
 
@@ -137,6 +143,7 @@ class JdbcWriteConformanceTest {
                     + (r[2] == null ? null : ((Number) r[2]).intValue())).toList(), name);
 
             checkRollback(target, engine, connector);
+            checkChanges(target, engine, connector, duck);
 
             assertEquals(0, engine.update("DROP TABLE db.copy"), name);
             assertFalse(tables(connector).contains("copy"), name);
@@ -176,6 +183,113 @@ class JdbcWriteConformanceTest {
         assertFalse(tables(target.db().connector("again")).contains("broken"), name);
     }
 
+    /**
+     * Changes rows of a table with a primary key and of one without, as
+     * DuckDB changes its copies; a statement without {@code FROM} and
+     * subqueries over a table with a key goes to the database as one.
+     */
+    private static void checkChanges(Target target, FyrQL engine, JdbcConnector connector, DuckDbReference duck) {
+        String name = target.name();
+        List<String> setup = List.of(
+                "CREATE TABLE db.keyed (id INTEGER PRIMARY KEY, s VARCHAR, i INTEGER, d DOUBLE, dt DATE)",
+                "INSERT INTO db.keyed SELECT id, s, i, d, dt FROM memory.items",
+                "CREATE TABLE db.nokey AS SELECT id % 5 AS g, NULLIF(s, '') AS s FROM memory.items WHERE id < 40");
+        for (String sql : setup) {
+            engine.update(sql);
+            duck.execute(duckSql(sql));
+        }
+        sameTable(target, engine, duck, connector, "keyed", "the keyed table");
+
+        // The first statement sent is the change itself, not a query of the rows to change.
+        connector.clearStatements();
+        change(target, engine, duck, connector, "UPDATE db.keyed SET i = 5 WHERE id < 100 AND i > 0");
+        List<String> sent = connector.statements();
+        assertTrue(sent.get(0).startsWith("UPDATE ") && sent.get(0).contains(" WHERE "), name + ": " + sent);
+        connector.clearStatements();
+        change(target, engine, duck, connector, "DELETE FROM db.keyed WHERE i > 900 OR i IS NULL");
+        sent = connector.statements();
+        assertTrue(sent.get(0).startsWith("DELETE FROM "), name + ": " + sent);
+        // The dialect renders no arithmetic with the semantics of the engine: the engine changes the rows by key.
+        connector.clearStatements();
+        change(target, engine, duck, connector, "UPDATE db.keyed SET i = i + 1, s = 'w' WHERE id < 50");
+        sent = connector.statements();
+        assertTrue(sent.get(0).startsWith("SELECT ") && sent.get(1).startsWith("UPDATE ")
+                && sent.get(1).endsWith(" = ?"), name + ": " + sent);
+
+        // By key: rows of another source, subqueries, NULLs in the key of a table without a primary key.
+        change(target, engine, duck, connector, "UPDATE db.keyed SET s = m.s || '!' FROM memory.items m"
+                + " WHERE keyed.id = m.id AND m.id BETWEEN 100 AND 130 AND m.s IS NOT NULL");
+        change(target, engine, duck, connector, "UPDATE db.keyed SET d = 0.5 WHERE id IN (SELECT id FROM"
+                + " memory.items WHERE id % 7 = 0)");
+        change(target, engine, duck, connector, "DELETE FROM db.keyed USING memory.items m WHERE keyed.id = m.id"
+                + " AND m.id % 11 = 0");
+        change(target, engine, duck, connector, "UPDATE db.nokey SET g = g + 10 WHERE s IS NULL AND g IN"
+                + " (SELECT 1 UNION ALL SELECT 2)");
+        change(target, engine, duck, connector, "DELETE FROM db.nokey WHERE s IS NULL AND EXISTS (SELECT 1)");
+        change(target, engine, duck, connector, "UPDATE db.nokey SET s = 'n' WHERE g > 2");
+        change(target, engine, duck, connector, "MERGE INTO db.keyed USING (SELECT id, s FROM memory.items"
+                + " WHERE id % 13 = 0) m ON keyed.id = m.id WHEN MATCHED AND m.id % 2 = 0 THEN DELETE"
+                + " WHEN MATCHED THEN UPDATE SET s = m.s, i = NULL WHEN NOT MATCHED THEN INSERT (id, s) VALUES"
+                + " (m.id, 'merged') WHEN NOT MATCHED BY SOURCE AND keyed.id > 280 THEN UPDATE SET i = 0");
+        change(target, engine, duck, connector, "MERGE INTO db.nokey USING (SELECT 3 AS g) m USING (g)"
+                + " WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (m.g, NULL)");
+
+        // A key twice in the middle of the changes: nothing changes.
+        List<Object[]> before = engine.rows("SELECT * FROM db.keyed");
+        assertThrows(RuntimeException.class, () -> engine.update("UPDATE db.keyed SET id = m.id % 10 + 10000 FROM"
+                + " memory.items m WHERE keyed.id = m.id"));
+        assertEquals(before.size(), engine.rows("SELECT * FROM db.keyed WHERE id < 10000").size(), name);
+        sameTable(target, engine, duck, connector, "keyed", "the keyed table after a failed change");
+
+        // A column added with a value for the rows the table has, and NULL for the rows after.
+        assertEquals(0, engine.update("ALTER TABLE db.keyed ADD COLUMN extra INTEGER DEFAULT 7"), name);
+        assertEquals(0, engine.update("ALTER TABLE db.keyed ADD COLUMN IF NOT EXISTS extra VARCHAR"), name);
+        assertEquals(1, engine.update("INSERT INTO db.keyed (id) VALUES (100000)"), name);
+        assertEquals(List.of("7", "null"), engine.rows("SELECT DISTINCT CAST(extra AS VARCHAR) FROM db.keyed ORDER BY 1"
+                + " NULLS LAST").stream().map(r -> String.valueOf(r[0])).toList(), name);
+
+        assertEquals(0, engine.update("DROP TABLE db.keyed"), name);
+        assertEquals(0, engine.update("DROP TABLE db.nokey"), name);
+
+        // A schema, and a table in it; SQLite has no schemas.
+        if (target.db().dialect() == JdbcDialect.SQLITE) {
+            assertTrue(assertThrows(RuntimeException.class, () -> engine.update("CREATE SCHEMA db.extra"))
+                    .getMessage().contains("SQLite, which has no schemas"), name);
+            return;
+        }
+        assertEquals(0, engine.update("CREATE SCHEMA db.extra"), name);
+        assertEquals(0, engine.update("CREATE SCHEMA IF NOT EXISTS db.extra"), name);
+        assertTrue(connector.catalog().schemas().stream().anyMatch(s -> s.equalsIgnoreCase("extra")), name);
+        assertEquals(1, engine.update("CREATE TABLE db.extra.t AS SELECT 1 AS a"), name);
+        assertEquals(1L, engine.rows("SELECT count(*) FROM db.extra.t").get(0)[0], name);
+        assertEquals(0, engine.update("DROP TABLE db.extra.t"), name);
+    }
+
+    /** Runs a change in FyrQL and in DuckDB, which give the same count and leave the same rows. */
+    private static void change(Target target, FyrQL engine, DuckDbReference duck, JdbcConnector connector,
+            String sql) {
+        long expected;
+        try (java.sql.Statement s = duck.connection().createStatement()) {
+            expected = s.executeUpdate(duckSql(sql));
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException("DuckDB rejects " + duckSql(sql), e);
+        }
+        assertEquals(expected, engine.update(sql), target.name() + ": " + sql);
+        String table = sql.contains("db.nokey") ? "nokey" : "keyed";
+        sameTable(target, engine, duck, connector, table, "after " + sql);
+    }
+
+    /** A statement of the test for DuckDB, which holds the copies under their plain names. */
+    private static String duckSql(String sql) {
+        return sql.replace("db.", "").replace("memory.items", "items");
+    }
+
+    private static void sameTable(Target target, FyrQL engine, DuckDbReference duck, JdbcConnector connector,
+            String table, String what) {
+        Schema stored = connector.catalog().schema(TableRef.of(JdbcConformance.SOURCE, table));
+        sameRows(target, engine, duck, stored, "SELECT * FROM " + table, "SELECT * FROM db." + table, what);
+    }
+
     private static List<String> tables(JdbcConnector connector) {
         return connector.catalog().tables(TableRef.MAIN);
     }
@@ -191,6 +305,12 @@ class JdbcWriteConformanceTest {
      */
     private static void same(Target target, FyrQL engine, DuckDbReference duck, Schema stored, String query,
             String what) {
+        sameRows(target, engine, duck, stored, query, "SELECT * FROM db.copy WHERE id < 1000", what);
+    }
+
+    /** The rows of a query of FyrQL are those of a query of DuckDB, cast as {@link #same} casts them. */
+    private static void sameRows(Target target, FyrQL engine, DuckDbReference duck, Schema stored, String query,
+            String ours, String what) {
         List<String> casts = new ArrayList<>();
         for (Schema.Field f : stored.fields()) {
             casts.add("CAST(\"" + f.name() + "\" AS " + f.type().sqlName() + ") AS \"" + f.name() + "\"");
@@ -206,7 +326,7 @@ class JdbcWriteConformanceTest {
             }
             expected.add(row);
         }
-        List<Object[]> actual = engine.rows("SELECT * FROM db.copy WHERE id < 1000");
+        List<Object[]> actual = engine.rows(ours);
         ResultComparison.Outcome outcome = ResultComparison.compare(schema, expected, actual, false);
         assertTrue(outcome.same(), target.name() + ", " + what + ":\n" + outcome.report());
     }

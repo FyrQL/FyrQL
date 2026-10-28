@@ -16,6 +16,7 @@ import net.fyrql.connector.Capabilities;
 import net.fyrql.connector.Catalog;
 import net.fyrql.connector.ColumnPath;
 import net.fyrql.connector.Connector;
+import net.fyrql.connector.RowChanges;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
 import net.fyrql.connector.Sink;
@@ -28,6 +29,7 @@ import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
+import net.fyrql.core.vector.RowKey;
 import net.fyrql.core.vector.StructVector;
 import net.fyrql.core.vector.Vector;
 import net.fyrql.core.vector.Vectors;
@@ -35,6 +37,7 @@ import net.fyrql.core.vector.Vectors;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,7 +62,13 @@ import java.util.function.Supplier;
  * {@link #writer()}: such a table holds the batches written to it, which
  * a scan reads as they are. A table appears, or grows, with the commit of
  * a statement; a query reads the batches its table had when the query
- * started. A table of Java objects can be dropped but not written.
+ * started. A table of Java objects can be dropped but not written. A
+ * table created with a primary key checks it with every write.
+ * <p>
+ * {@code UPDATE} and {@code DELETE} run here as whole statements, with the
+ * evaluator of the engine; their changes, and those of {@code MERGE} by
+ * key, replace the batches of the table at once, so that a query that
+ * runs reads the rows as they were.
  * <p>
  * By default the connector takes over nothing of a scan. For tests of the
  * engine it can take over filters and a limit and read fields inside
@@ -103,8 +112,13 @@ public final class MemoryConnector implements Connector {
         }
     }
 
-    /** Batches written by SQL, none of them empty, in the columns of the schema. */
-    private record BatchTable(Schema schema, List<Batch> batches, long rowCount) implements Table {
+    /**
+     * Batches written by SQL, none of them empty, in the columns of the
+     * schema; {@code key} holds the positions of the primary key columns,
+     * empty for a table without one.
+     */
+    private record BatchTable(Schema schema, List<Batch> batches, long rowCount, List<Integer> key)
+            implements Table {
     }
 
     /** The rows of a split of a list, from {@code from} to before {@code to}, or to its end in the last split. */
@@ -141,6 +155,18 @@ public final class MemoryConnector implements Connector {
             @Override
             public OptionalLong rowCount(TableRef table) {
                 return OptionalLong.of(table(table).rowCount());
+            }
+
+            @Override
+            public List<String> primaryKey(TableRef table) {
+                if (!(table(table) instanceof BatchTable t)) {
+                    return List.of();
+                }
+                List<String> names = new ArrayList<>();
+                for (int c : t.key()) {
+                    names.add(t.schema().name(c));
+                }
+                return List.copyOf(names);
             }
         };
     }
@@ -359,14 +385,30 @@ public final class MemoryConnector implements Connector {
 
         @Override
         public Sink create(TableRef table, Schema schema) {
+            return create(table, schema, List.of());
+        }
+
+        @Override
+        public Sink create(TableRef table, Schema schema, List<String> primaryKey) {
             main(table);
+            List<Integer> key = new ArrayList<>();
+            for (String column : primaryKey) {
+                int c = schema.indexOf(column);
+                if (c < 0 || key.contains(c)) {
+                    throw new IllegalArgumentException(c < 0 ? "Key column " + column + " not found in table "
+                            + table.table() : "Key column " + column + " named twice");
+                }
+                key.add(c);
+            }
             return new BatchSink(schema, batches -> {
+                checkKey(table, schema, key, List.of(), batches);
                 synchronized (MemoryConnector.this) {
                     if (tables.containsKey(table.table())) {
                         throw new IllegalArgumentException("Table with name " + table.table()
                                 + " already exists in the memory source " + name);
                     }
-                    put(table.table(), new BatchTable(schema, List.copyOf(batches), count(batches)));
+                    put(table.table(), new BatchTable(schema, List.copyOf(batches), count(batches),
+                            List.copyOf(key)));
                 }
             });
         }
@@ -384,12 +426,103 @@ public final class MemoryConnector implements Connector {
                         throw new IllegalArgumentException("Table " + table.table() + " of the memory source "
                                 + name + " was dropped or replaced while rows were written to it");
                     }
+                    checkKey(table, now.schema(), now.key(), now.batches(), batches);
                     List<Batch> all = new ArrayList<>(now.batches());
                     all.addAll(batches);
                     put(table.table(), new BatchTable(now.schema(), List.copyOf(all),
-                            now.rowCount() + count(batches)));
+                            now.rowCount() + count(batches), now.key()));
                 }
             });
+        }
+
+        @Override
+        public OptionalLong delete(TableRef table, Expression condition) {
+            main(table);
+            synchronized (MemoryConnector.this) {
+                BatchTable t = written(table);
+                List<Batch> kept = new ArrayList<>();
+                long deleted = 0;
+                for (Batch b : t.batches()) {
+                    int[] rows = condition == null ? null : Evaluator.select(condition, b);
+                    int n = rows == null ? b.rowCount() : rows.length;
+                    deleted += n;
+                    if (n < b.rowCount()) {
+                        kept.add(n == 0 ? b : b.select(complement(rows, b.rowCount())));
+                    }
+                }
+                put(table.table(), new BatchTable(t.schema(), List.copyOf(kept), t.rowCount() - deleted, t.key()));
+                return OptionalLong.of(deleted);
+            }
+        }
+
+        @Override
+        public OptionalLong update(TableRef table, int[] columns, List<Expression> values, Expression condition) {
+            main(table);
+            synchronized (MemoryConnector.this) {
+                BatchTable t = written(table);
+                List<Batch> changed = new ArrayList<>();
+                long updated = 0;
+                for (Batch b : t.batches()) {
+                    int[] rows = condition == null ? null : Evaluator.select(condition, b);
+                    if (rows != null && rows.length == 0) {
+                        changed.add(b);
+                        continue;
+                    }
+                    // The new values come from the rows to update alone, before any of them changes.
+                    Batch selected = rows == null ? b : b.select(rows);
+                    List<Vector> vectors = new ArrayList<>(b.columns());
+                    for (int k = 0; k < columns.length; k++) {
+                        Vector v = Evaluator.eval(values.get(k), selected);
+                        vectors.set(columns[k], rows == null ? v : patched(b.column(columns[k]), v, rows));
+                    }
+                    changed.add(new Batch(t.schema(), b.rowCount(), vectors));
+                    updated += selected.rowCount();
+                }
+                checkNotNull(table, t.schema(), changed);
+                checkKey(table, t.schema(), t.key(), List.of(), changed);
+                put(table.table(), new BatchTable(t.schema(), List.copyOf(changed), t.rowCount(), t.key()));
+                return OptionalLong.of(updated);
+            }
+        }
+
+        @Override
+        public RowChanges change(TableRef table, int[] keys, int[] updated) {
+            main(table);
+            Schema schema = written(table).schema();
+            return new KeyedChanges(table, schema, keys.clone(), updated.clone());
+        }
+
+        @Override
+        public void addColumn(TableRef table, Schema.Field column, Object defaultValue) {
+            main(table);
+            synchronized (MemoryConnector.this) {
+                BatchTable t = written(table);
+                List<Schema.Field> fields = new ArrayList<>(t.schema().fields());
+                fields.add(column);
+                Schema schema = new Schema(fields);
+                List<Batch> batches = new ArrayList<>();
+                for (Batch b : t.batches()) {
+                    List<Vector> columns = new ArrayList<>(b.columns());
+                    columns.add(Evaluator.constant(column.type(), defaultValue, b.rowCount()));
+                    batches.add(new Batch(schema, b.rowCount(), columns));
+                }
+                put(table.table(), new BatchTable(schema, List.copyOf(batches), t.rowCount(), t.key()));
+            }
+        }
+
+        @Override
+        public void createSchema(String schema) {
+            throw new IllegalArgumentException("The memory source " + name + " has only the schema "
+                    + TableRef.MAIN + " and creates no other");
+        }
+
+        /** Returns a table that SQL wrote, which can be changed. */
+        private BatchTable written(TableRef table) {
+            if (!(table(table) instanceof BatchTable t)) {
+                throw new IllegalArgumentException("Table " + table.table() + " of the memory source " + name
+                        + " holds Java objects and cannot be written");
+            }
+            return t;
         }
 
         @Override
@@ -410,11 +543,275 @@ public final class MemoryConnector implements Connector {
             }
         }
 
+        /**
+         * Fails if the key columns of rows added to a table hold a
+         * {@code NULL}, or the same values as other rows; the messages are
+         * those of DuckDB.
+         */
+        private static void checkKey(TableRef table, Schema schema, List<Integer> key, List<Batch> existing,
+                List<Batch> added) {
+            if (key.isEmpty()) {
+                return;
+            }
+            Map<RowKey, Boolean> seen = new HashMap<>();
+            for (Batch b : existing) {
+                for (int r = 0; r < b.rowCount(); r++) {
+                    seen.put(new RowKey(columns(b, key), r), Boolean.TRUE);
+                }
+            }
+            for (Batch b : added) {
+                Vector[] columns = columns(b, key);
+                for (int c = 0; c < columns.length; c++) {
+                    if (columns[c].hasNulls()) {
+                        throw new IllegalArgumentException("NOT NULL constraint failed: " + table.table() + "."
+                                + schema.name(key.get(c)));
+                    }
+                }
+                for (int r = 0; r < b.rowCount(); r++) {
+                    RowKey k = new RowKey(columns, r);
+                    Boolean old = seen.put(k, Boolean.FALSE);
+                    if (old == Boolean.TRUE) {
+                        StringBuilder text = new StringBuilder();
+                        for (int c = 0; c < columns.length; c++) {
+                            text.append(c > 0 ? ", " : "").append(schema.name(key.get(c))).append(": ")
+                                    .append(RowKey.text(columns[c], r));
+                        }
+                        throw new IllegalArgumentException("Duplicate key \"" + text
+                                + "\" violates primary key constraint.");
+                    } else if (old != null) {
+                        throw new IllegalArgumentException(
+                                "PRIMARY KEY or UNIQUE constraint violation: duplicate key \"" + k + "\"");
+                    }
+                }
+            }
+        }
+
+        /** Fails if a column that is {@code NOT NULL} holds a {@code NULL} in one of the batches. */
+        private static void checkNotNull(TableRef table, Schema schema, List<Batch> batches) {
+            for (Batch b : batches) {
+                for (int c = 0; c < schema.size(); c++) {
+                    if (!schema.nullable(c) && b.column(c).hasNulls()) {
+                        throw new IllegalArgumentException("NOT NULL constraint failed: " + table.table() + "."
+                                + schema.name(c));
+                    }
+                }
+            }
+        }
+
+        private static Vector[] columns(Batch batch, List<Integer> key) {
+            Vector[] columns = new Vector[key.size()];
+            for (int c = 0; c < columns.length; c++) {
+                columns[c] = batch.column(key.get(c));
+            }
+            return columns;
+        }
+
         /** Sets a table; the caller holds the lock of the connector. */
         private void put(String table, Table t) {
             Map<String, Table> changed = new LinkedHashMap<>(tables);
             changed.put(table, t);
             tables = Collections.unmodifiableMap(changed);
+        }
+    }
+
+    /** Returns the rows from 0 to before {@code size} that are not among the given ascending rows. */
+    private static int[] complement(int[] rows, int size) {
+        int[] rest = new int[size - rows.length];
+        int n = 0;
+        int next = 0;
+        for (int r = 0; r < size; r++) {
+            if (next < rows.length && rows[next] == r) {
+                next++;
+            } else {
+                rest[n++] = r;
+            }
+        }
+        return rest;
+    }
+
+    /** Returns a vector with the values of another at the given ascending rows, one for each of them. */
+    private static Vector patched(Vector old, Vector values, int[] rows) {
+        int[] partOf = new int[old.size()];
+        int[] rowOf = new int[old.size()];
+        for (int r = 0; r < rowOf.length; r++) {
+            rowOf[r] = r;
+        }
+        for (int i = 0; i < rows.length; i++) {
+            partOf[rows[i]] = 1;
+            rowOf[rows[i]] = i;
+        }
+        return Vectors.gather(old.type(), List.of(old, values), partOf, rowOf, 0, old.size());
+    }
+
+    /**
+     * Changes to the rows of a table by key, held until the commit, which
+     * finds the rows of the keys in the batches the table has then and
+     * replaces them at once.
+     */
+    private final class KeyedChanges implements RowChanges {
+        private final TableRef table;
+        private final Schema schema;
+        private final int[] keys;
+        private final int[] updated;
+        private final List<Batch> updates = new ArrayList<>();
+        private final List<Batch> deletes = new ArrayList<>();
+        private final List<Batch> inserts = new ArrayList<>();
+        private boolean done;
+
+        KeyedChanges(TableRef table, Schema schema, int[] keys, int[] updated) {
+            this.table = table;
+            this.schema = schema;
+            this.keys = keys;
+            this.updated = updated;
+        }
+
+        @Override
+        public void update(Batch batch) {
+            add(updates, batch);
+        }
+
+        @Override
+        public void delete(Batch batch) {
+            add(deletes, batch);
+        }
+
+        @Override
+        public void insert(Batch batch) {
+            add(inserts, batch.rowCount() == 0 ? batch : new Batch(schema, batch.rowCount(), batch.columns()));
+        }
+
+        private void add(List<Batch> to, Batch batch) {
+            if (done) {
+                throw new IllegalStateException("The changes are committed or closed");
+            }
+            if (batch.rowCount() > 0) {
+                to.add(batch);
+            }
+        }
+
+        @Override
+        public long commit() {
+            if (done) {
+                throw new IllegalStateException("The changes are committed or closed");
+            }
+            done = true;
+            try {
+                return apply();
+            } finally {
+                updates.clear();
+                deletes.clear();
+                inserts.clear();
+            }
+        }
+
+        private long apply() {
+            synchronized (MemoryConnector.this) {
+                if (!(tables.get(table.table()) instanceof BatchTable t) || !t.schema().equals(schema)) {
+                    throw new IllegalArgumentException("Table " + table.table() + " of the memory source " + name
+                            + " was dropped or replaced while its rows were changed");
+                }
+                // The rows of each key: batch and row, packed in a long.
+                Map<RowKey, List<Long>> index = new HashMap<>();
+                List<Batch> batches = t.batches();
+                for (int b = 0; b < batches.size(); b++) {
+                    Vector[] columns = RowKey.columns(batches.get(b), keys);
+                    for (int r = 0; r < batches.get(b).rowCount(); r++) {
+                        index.computeIfAbsent(new RowKey(columns, r), k -> new ArrayList<>(1))
+                                .add((long) b << 32 | r);
+                    }
+                }
+                int[] all = new int[keys.length];
+                java.util.Arrays.setAll(all, k -> k);
+                long count = 0;
+                Map<Long, Integer> deleted = new HashMap<>();
+                for (Batch d : deletes) {
+                    Vector[] columns = RowKey.columns(d, all);
+                    for (int r = 0; r < d.rowCount(); r++) {
+                        for (long at : index.getOrDefault(new RowKey(columns, r), List.of())) {
+                            deleted.put(at, 0);
+                            count++;
+                        }
+                    }
+                }
+                // For each updated row of the table, the batch of updates and the row in it.
+                Map<Long, Long> newValues = new HashMap<>();
+                for (int u = 0; u < updates.size(); u++) {
+                    Vector[] columns = RowKey.columns(updates.get(u), all);
+                    for (int r = 0; r < updates.get(u).rowCount(); r++) {
+                        for (long at : index.getOrDefault(new RowKey(columns, r), List.of())) {
+                            newValues.put(at, (long) u << 32 | r);
+                            count++;
+                        }
+                    }
+                }
+                List<Batch> changed = new ArrayList<>();
+                for (int b = 0; b < batches.size(); b++) {
+                    changed.addAll(changed(batches.get(b), b, deleted, newValues));
+                }
+                for (Batch i : inserts) {
+                    changed.add(i);
+                    count += i.rowCount();
+                }
+                TableWriter.checkNotNull(table, schema, changed);
+                TableWriter.checkKey(table, schema, t.key(), List.of(), changed);
+                ((TableWriter) writer).put(table.table(), new BatchTable(schema, List.copyOf(changed),
+                        count(changed), t.key()));
+                return count;
+            }
+        }
+
+        /** Returns a batch of the table without its deleted rows and with the new values of its updated ones. */
+        private List<Batch> changed(Batch b, int index, Map<Long, Integer> deleted, Map<Long, Long> newValues) {
+            List<Integer> kept = new ArrayList<>();
+            boolean touched = false;
+            for (int r = 0; r < b.rowCount(); r++) {
+                long at = (long) index << 32 | r;
+                if (deleted.containsKey(at)) {
+                    touched = true;
+                } else {
+                    kept.add(r);
+                    touched |= newValues.containsKey(at);
+                }
+            }
+            if (!touched) {
+                return List.of(b);
+            }
+            if (kept.isEmpty()) {
+                return List.of();
+            }
+            int n = kept.size();
+            int[] partOf = new int[n];
+            int[] rowOf = new int[n];
+            List<Vector> columns = new ArrayList<>();
+            for (int c = 0; c < schema.size(); c++) {
+                int u = -1;
+                for (int k = 0; k < updated.length; k++) {
+                    u = updated[k] == c ? k : u;
+                }
+                List<Vector> parts = new ArrayList<>();
+                parts.add(b.column(c));
+                if (u >= 0) {
+                    for (Batch update : updates) {
+                        parts.add(update.column(keys.length + u));
+                    }
+                }
+                for (int i = 0; i < n; i++) {
+                    int r = kept.get(i);
+                    Long from = u >= 0 ? newValues.get((long) index << 32 | r) : null;
+                    partOf[i] = from == null ? 0 : 1 + (int) (from >>> 32);
+                    rowOf[i] = from == null ? r : (int) (long) from;
+                }
+                columns.add(Vectors.gather(schema.type(c), parts, partOf, rowOf, 0, n));
+            }
+            return List.of(new Batch(schema, n, columns));
+        }
+
+        @Override
+        public void close() {
+            done = true;
+            updates.clear();
+            deletes.clear();
+            inserts.clear();
         }
     }
 

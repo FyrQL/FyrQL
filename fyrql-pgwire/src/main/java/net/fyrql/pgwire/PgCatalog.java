@@ -45,9 +45,13 @@ import java.util.zip.CRC32;
  * for each database from the catalog of its source: its schemas as
  * {@code pg_namespace}, its tables and columns as {@code pg_class},
  * {@code pg_attribute}, {@code tables} and {@code columns}, the types of
- * PostgreSQL as {@code pg_type}, the sources as {@code pg_database}. The
- * tables have the columns of PostgreSQL 18; those FyrQL has nothing for,
- * such as indexes, constraints and triggers, are empty. The OIDs are
+ * PostgreSQL as {@code pg_type}, the sources as {@code pg_database}, the
+ * primary keys the sources tell as a unique index {@code table_pkey} in
+ * {@code pg_class} and {@code pg_index} and a constraint of that name in
+ * {@code pg_constraint}, {@code table_constraints} and
+ * {@code key_column_usage}. The tables have the columns of PostgreSQL 18;
+ * those FyrQL has nothing for, such as other indexes, foreign keys and
+ * triggers, are empty. The OIDs are
  * stable: the catalogs and types have those of PostgreSQL, the objects of
  * the sources numbers from a hash of their names. A snapshot is at most two
  * seconds old, and new after a statement of the server that writes.
@@ -91,10 +95,15 @@ final class PgCatalog {
      * @param classes the OIDs of the tables by their schema and name in lower case, {@code schema.table}
      * @param namespaces the OIDs of the schemas by their names
      * @param views the texts of the queries of the views by their OIDs
+     * @param constraints the definitions of the primary keys by the OIDs of their constraints,
+     *        as {@code pg_get_constraintdef} gives them
+     * @param indexes the columns of the primary keys by the OIDs of their indexes
+     * @param indexDefinitions the definitions of the indexes by their OIDs, as {@code pg_get_indexdef} gives them
      */
     record Snapshot(long built, MemoryConnector pgCatalog, MemoryConnector informationSchema,
             Map<String, Integer> classes, Map<String, Integer> namespaces, Map<Integer, String> classNames,
-            Map<Integer, List<String>> columns, Map<Integer, String> views) {
+            Map<Integer, List<String>> columns, Map<Integer, String> views, Map<Integer, String> constraints,
+            Map<Integer, List<String>> indexes, Map<Integer, String> indexDefinitions) {
     }
 
     /** Returns the current snapshot of a database, built now if the last is too old. */
@@ -571,6 +580,26 @@ final class PgCatalog {
                 relationNames.add("relation " + database + "." + s + "." + t);
             }
         }
+        // The primary keys of the tables, each an index and a constraint with OIDs of their own.
+        Map<String, List<String>> keys = new HashMap<>();
+        List<String> keyNames = new ArrayList<>();
+        for (Map.Entry<String, List<String>> e : tables.entrySet()) {
+            for (String t : e.getValue()) {
+                TableRef ref = new TableRef(database, e.getKey(), t);
+                List<String> key;
+                try {
+                    key = views.get(ref).isPresent() ? List.of() : engine.connector(database).catalog().primaryKey(ref);
+                } catch (RuntimeException ex) {
+                    key = List.of();
+                }
+                if (!key.isEmpty()) {
+                    String name = database + "." + e.getKey() + "." + t;
+                    keys.put(name, key);
+                    keyNames.add("index " + name);
+                    keyNames.add("constraint " + name);
+                }
+            }
+        }
         for (Table t : PG_TABLES) {
             taken.add(t.oid());
         }
@@ -578,6 +607,10 @@ final class PgCatalog {
             taken.add(t.oid());
         }
         Map<String, Integer> relationOids = oids(relationNames, taken);
+        Map<String, Integer> keyOids = oids(keyNames, taken);
+        Map<Integer, String> constraintDefinitions = new HashMap<>();
+        Map<Integer, List<String>> indexColumns = new HashMap<>();
+        Map<Integer, String> indexDefinitions = new HashMap<>();
         Map<String, Integer> classes = new HashMap<>();
         Map<Integer, String> classNames = new HashMap<>();
         Map<Integer, List<String>> columnNames = new HashMap<>();
@@ -612,8 +645,45 @@ final class PgCatalog {
                     // A table whose columns the source cannot tell is left out.
                     continue;
                 }
-                relation(pg, oid, table, namespace, view.isPresent() ? "v" : "r", columns.size(), -1);
+                List<String> key = keys.get(database + "." + schema + "." + table);
+                relation(pg, oid, table, namespace, view.isPresent() ? "v" : "r", columns.size(), -1, key != null);
                 attributes(pg, oid, columns);
+                if (key != null) {
+                    String name = database + "." + schema + "." + table;
+                    int index = keyOids.get("index " + name);
+                    int constraint = keyOids.get("constraint " + name);
+                    String keyName = table + "_pkey";
+                    List<Short> attnums = new ArrayList<>();
+                    List<Schema.Field> keyFields = new ArrayList<>();
+                    List<String> quoted = new ArrayList<>();
+                    for (String k : key) {
+                        attnums.add((short) (columns.indexOf(k) + 1));
+                        keyFields.add(columns.fields().get(columns.indexOf(k)));
+                        quoted.add(quoteIdentifier(k));
+                    }
+                    List<Integer> zeros = attnums.stream().map(a -> 0).toList();
+                    relation(pg, index, keyName, namespace, "i", key.size(), -1, false);
+                    attributes(pg, index, new Schema(keyFields));
+                    pg.add("pg_index", index, oid, (short) key.size(), (short) key.size(), true, false, true, false,
+                            true, false, true, false, true, true, false, attnums, zeros, zeros,
+                            attnums.stream().map(a -> (short) 0).toList(), null, null);
+                    pg.add("pg_constraint", constraint, keyName, namespace, "p", false, false, true, true, oid, 0,
+                            index, 0, 0, " ", " ", " ", true, (short) 0, true, false, attnums, null, null, null, null,
+                            null, null, null);
+                    info.add("table_constraints", database, schema, keyName, database, schema, table, "PRIMARY KEY",
+                            "NO", "NO", "YES", null);
+                    for (int k = 0; k < key.size(); k++) {
+                        info.add("key_column_usage", database, schema, keyName, database, schema, table, key.get(k),
+                                k + 1, null);
+                    }
+                    classes.put(schema.toLowerCase(Locale.ROOT) + "." + keyName.toLowerCase(Locale.ROOT), index);
+                    classNames.put(index, quoteIdentifier(schema) + "." + quoteIdentifier(keyName));
+                    constraintDefinitions.put(constraint, "PRIMARY KEY (" + String.join(", ", quoted) + ")");
+                    indexColumns.put(index, key);
+                    indexDefinitions.put(index, "CREATE UNIQUE INDEX " + quoteIdentifier(keyName) + " ON "
+                            + quoteIdentifier(schema) + "." + quoteIdentifier(table) + " USING btree ("
+                            + String.join(", ", quoted) + ")");
+                }
                 columnNames.put(oid, columns.fields().stream().map(Schema.Field::name).toList());
                 classes.put(schema.toLowerCase(Locale.ROOT) + "." + table.toLowerCase(Locale.ROOT), oid);
                 classNames.put(oid, quoteIdentifier(schema) + "." + quoteIdentifier(table));
@@ -684,7 +754,8 @@ final class PgCatalog {
         }
         Map<String, Integer> namespaceOids = new LinkedHashMap<>(namespaces);
         return new Snapshot(now, pgBuilder.build(), infoBuilder.build(), Map.copyOf(classes),
-                Map.copyOf(namespaceOids), Map.copyOf(classNames), Map.copyOf(columnNames), Map.copyOf(viewTexts));
+                Map.copyOf(namespaceOids), Map.copyOf(classNames), Map.copyOf(columnNames), Map.copyOf(viewTexts),
+                Map.copyOf(constraintDefinitions), Map.copyOf(indexColumns), Map.copyOf(indexDefinitions));
     }
 
     /** The rows of the tables of a catalog, by table. */
@@ -702,9 +773,19 @@ final class PgCatalog {
 
     private static void relation(Rows pg, int oid, String name, int namespace, String kind, int columns,
             float tuples) {
-        pg.add("pg_class", oid, name, namespace, 0, 0, OWNER, kind.equals("r") ? 2 : 0, oid, 0, 0, tuples, 0, 0, 0,
-                false, false, "p", kind, (short) columns, (short) 0, false, false, false, false, false, true, "d",
-                false, 0, 0, 0, null, null, null);
+        relation(pg, oid, name, namespace, kind, columns, tuples, false);
+    }
+
+    /**
+     * Adds a relation to {@code pg_class}: a table, a view or an index.
+     *
+     * @param indexed whether a table has an index, as one with a primary key has
+     */
+    private static void relation(Rows pg, int oid, String name, int namespace, String kind, int columns,
+            float tuples, boolean indexed) {
+        pg.add("pg_class", oid, name, namespace, 0, 0, OWNER, kind.equals("r") ? 2 : kind.equals("i") ? 403 : 0, oid,
+                0, 0, tuples, 0, 0, 0, indexed, false, "p", kind, (short) columns, (short) 0, false, false, false,
+                false, false, true, "d", false, 0, 0, 0, null, null, null);
     }
 
     private static void attributes(Rows pg, int relation, Schema schema) {

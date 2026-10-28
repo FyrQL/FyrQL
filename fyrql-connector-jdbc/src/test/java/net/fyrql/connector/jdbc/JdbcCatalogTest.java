@@ -79,5 +79,22 @@ class JdbcCatalogTest {
             assertEquals(0, engine.rows("SELECT * FROM \"Mixed Case\"").size());
             assertEquals(1, engine.rows("SELECT * FROM lite.seq").size());
         }
+        assertEquals(List.of("id"), connector.catalog().primaryKey(TableRef.of("lite", "Mixed Case")));
+        assertEquals(List.of(), connector.catalog().primaryKey(TableRef.of("lite", "cheap")));
+    }
+
+    @Test
+    void thePrimaryKeyHasItsColumnsInTheOrderOfTheKey() {
+        TestDatabase db = TestDatabase.create(JdbcDialect.H2);
+        db.execute("CREATE TABLE k (a INTEGER, b VARCHAR(10), c INTEGER, PRIMARY KEY (c, a))",
+                "CREATE TABLE one (id INTEGER PRIMARY KEY, v INTEGER)", "CREATE TABLE none (v INTEGER)");
+        JdbcConnector connector = db.connector("h2");
+        assertEquals(List.of("C", "A"), connector.catalog().primaryKey(TableRef.of("h2", "K")));
+        assertEquals(List.of("ID"), connector.catalog().primaryKey(TableRef.of("h2", "ONE")));
+        assertEquals(List.of(), connector.catalog().primaryKey(TableRef.of("h2", "NONE")));
+
+        TestDatabase lite = TestDatabase.create(JdbcDialect.SQLITE);
+        lite.execute("CREATE TABLE k (a INTEGER, b TEXT, c INTEGER, PRIMARY KEY (c, a))");
+        assertEquals(List.of("c", "a"), lite.connector("lite").catalog().primaryKey(TableRef.of("lite", "k")));
     }
 }

@@ -17,7 +17,9 @@ import net.fyrql.connector.Catalog;
 import net.fyrql.connector.Connector;
 import net.fyrql.connector.ScanPlan;
 import net.fyrql.connector.ScanRequest;
+import net.fyrql.connector.Sink;
 import net.fyrql.connector.Split;
+import net.fyrql.connector.Writer;
 import net.fyrql.connector.memory.MemoryConnector;
 import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
@@ -153,6 +155,44 @@ class WriteStatementTest {
                     fails(engine, "INSERT INTO s (b) VALUES (1)"));
             assertEquals(List.of(List.of(1L)), rows(engine, "SELECT count(*) FROM s"));
         }
+    }
+
+    @Test
+    void aPrimaryKeyIsKeptAndReported() {
+        try (FyrQL engine = engine()) {
+            engine.update("CREATE TABLE k (id INTEGER PRIMARY KEY, v VARCHAR)");
+            assertEquals(List.of("id"), engine.connector("mem").catalog().primaryKey(TableRef.of("mem", "k")));
+            assertEquals(List.of("id"), engine.catalogTables().primaryKey(TableRef.of("mem", "k")));
+            assertEquals(List.of(), engine.catalogTables().primaryKey(TableRef.of("mem", "people")));
+            assertEquals(2, engine.update("INSERT INTO k VALUES (1, 'a'), (2, 'b')"));
+            assertEquals("Duplicate key \"id: 1\" violates primary key constraint.",
+                    fails(engine, "INSERT INTO k VALUES (3, 'c'), (1, 'x')"));
+            assertEquals("PRIMARY KEY or UNIQUE constraint violation: duplicate key \"5\"",
+                    fails(engine, "INSERT INTO k VALUES (5, 'c'), (5, 'x')"));
+            assertEquals("NOT NULL constraint failed: k.id", fails(engine, "INSERT INTO k VALUES (NULL, 'n')"));
+            assertEquals(List.of(List.of(2L)), rows(engine, "SELECT count(*) FROM k"));
+        }
+
+        // A writer that keeps no keys refuses one, rather than lose it.
+        Writer plain = new Writer() {
+            @Override
+            public Sink create(TableRef table, Schema schema) {
+                throw new AssertionError();
+            }
+
+            @Override
+            public Sink append(TableRef table) {
+                throw new AssertionError();
+            }
+
+            @Override
+            public void drop(TableRef table) {
+                throw new AssertionError();
+            }
+        };
+        Schema schema = Schema.of(new Schema.Field("id", DataType.INTEGER, false));
+        assertEquals("Source files does not keep primary keys", assertThrows(IllegalArgumentException.class,
+                () -> plain.create(TableRef.of("files", "k"), schema, List.of("id"))).getMessage());
     }
 
     @Test

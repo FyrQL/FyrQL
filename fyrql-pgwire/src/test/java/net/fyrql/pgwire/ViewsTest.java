@@ -126,6 +126,10 @@ class ViewsTest {
         assertEquals("CREATE VIEW", net.fyrql.pgwire.Connection.writeTag("create or replace view v (a) as"
                 + " select 1", 0));
         assertEquals("DROP VIEW", net.fyrql.pgwire.Connection.writeTag("DROP VIEW IF EXISTS v", 0));
+        assertEquals("UPDATE 2", net.fyrql.pgwire.Connection.writeTag("update t set v = 1", 2));
+        assertEquals("DELETE 0", net.fyrql.pgwire.Connection.writeTag("DELETE FROM t", 0));
+        assertEquals("MERGE 3", net.fyrql.pgwire.Connection.writeTag("MERGE INTO t USING s ON t.k = s.k"
+                + " WHEN MATCHED THEN DELETE", 3));
         assertEquals("SELECT 3", net.fyrql.pgwire.Connection.writeTag("CREATE TABLE t AS SELECT 1", 3));
         assertEquals("DROP TABLE", net.fyrql.pgwire.Connection.writeTag("DROP TABLE t", 0));
     }

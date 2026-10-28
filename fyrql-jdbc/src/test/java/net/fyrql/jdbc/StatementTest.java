@@ -81,10 +81,10 @@ class StatementTest {
             SQLException e = assertThrows(SQLException.class, () -> s.executeUpdate("INSERT INTO t VALUES (1, 'x')"));
             assertEquals("42000", e.getSQLState());
             assertTrue(e.getMessage().startsWith("Source shop does not write tables"), e.getMessage());
-            e = assertThrows(SQLFeatureNotSupportedException.class, () -> s.execute("DELETE FROM t"));
+            e = assertThrows(SQLFeatureNotSupportedException.class, () -> s.execute("TRUNCATE t"));
             assertEquals("0A000", e.getSQLState());
-            assertTrue(e.getMessage().startsWith("Only queries, COPY, CREATE TABLE, CREATE VIEW, INSERT INTO, DROP"
-                    + " TABLE and DROP VIEW are supported, not DELETE"), e.getMessage());
+            assertTrue(e.getMessage().startsWith("Only queries, COPY, CREATE TABLE,")
+                    && e.getMessage().contains(" are supported, not TRUNCATE"), e.getMessage());
             e = assertThrows(SQLException.class, () -> s.executeLargeUpdate("SELECT 1"));
             assertEquals("42809", e.getSQLState());
             assertEquals("A query returns rows, not a number of rows written; run it with executeQuery or execute",

@@ -275,6 +275,16 @@ abstract class StandardDialect implements Dialect {
         return Expressions.allMatch(expression, this::supportsNode);
     }
 
+    /** A literal or a column of a type the dialect stores exactly, or what {@link #supports} takes. */
+    @Override
+    public boolean supportsValue(Expression value) {
+        return switch (value) {
+            case Expression.Literal l -> storesExactly(l.type());
+            case Expression.Column c -> storesExactly(c.type());
+            default -> supports(value);
+        };
+    }
+
     /**
      * Tells whether a value is a {@code BOOLEAN} as another is or is not:
      * FyrQL compares a boolean with a number, as DuckDB does, but databases

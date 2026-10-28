@@ -37,4 +37,12 @@ public interface Catalog {
     default OptionalLong rowCount(TableRef table) {
         return OptionalLong.empty();
     }
+
+    /**
+     * Returns the columns of the primary key of a table, in the order of the
+     * key; empty if the table has none or the source does not know it.
+     */
+    default List<String> primaryKey(TableRef table) {
+        return List.of();
+    }
 }

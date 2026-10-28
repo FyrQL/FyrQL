@@ -109,6 +109,12 @@ public final class MySqlDialect extends StandardDialect {
         return super.typeName(type);
     }
 
+    /** A {@code TEXT} or {@code BLOB} cannot be a key; 768 characters of four bytes fill an index entry. */
+    @Override
+    public String keyTypeName(DataType type) {
+        return type == Scalar.VARCHAR ? "VARCHAR(768)" : type == Scalar.BLOB ? "VARBINARY(3072)" : typeName(type);
+    }
+
     @Override
     String nullLiteral(DataType type) {
         return "NULL";

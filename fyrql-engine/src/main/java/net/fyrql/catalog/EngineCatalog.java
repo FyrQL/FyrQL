@@ -59,6 +59,8 @@ public final class EngineCatalog implements CatalogView {
     private final Views views;
     /** The sources of the engine, in which views may go, unlike the sources of a session alone. */
     private final Set<String> viewSources;
+    /** The source of the temporary tables of a session, or {@code null}. */
+    private final String temporary;
     private final Map<String, TableFunctionProvider> functions = new LinkedHashMap<>();
     private final Map<String, FileWriterProvider> fileWriters = new LinkedHashMap<>();
     private final Map<String, FileReaderProvider> fileReaders = new LinkedHashMap<>();
@@ -110,17 +112,19 @@ public final class EngineCatalog implements CatalogView {
      */
     public EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone,
             FileAccessPolicy policy, Views views) {
-        this(sources, searchPath, zone, policy, null, views, Set.copyOf(sources.keySet()));
+        this(sources, searchPath, zone, policy, null, views, Set.copyOf(sources.keySet()), null);
     }
 
     private EngineCatalog(Map<String, Connector> sources, SearchPath searchPath, Supplier<ZoneId> zone,
-            FileAccessPolicy policy, DatabasePath databasePath, Views views, Set<String> viewSources) {
+            FileAccessPolicy policy, DatabasePath databasePath, Views views, Set<String> viewSources,
+            String temporary) {
         this.zone = zone;
         this.policy = policy;
         this.sources = new LinkedHashMap<>(sources);
         this.views = views;
         this.viewSources = viewSources;
-        this.resolver = new NameResolver(sources, searchPath, databasePath, views);
+        this.temporary = temporary;
+        this.resolver = new NameResolver(sources, searchPath, databasePath, views, temporary);
         Connector preferred = searchPath.defaultSource() == null ? null : sources.get(searchPath.defaultSource());
         if (preferred instanceof TableFunctionProvider p) {
             for (String f : p.tableFunctions()) {
@@ -169,7 +173,8 @@ public final class EngineCatalog implements CatalogView {
      */
     public EngineCatalog withSearchPath(SearchPath searchPath) {
         return searchPath.equals(searchPath()) ? this
-                : new EngineCatalog(sources, searchPath, zone, policy, databasePath(), views, viewSources);
+                : new EngineCatalog(sources, searchPath, zone, policy, databasePath(), views, viewSources,
+                        temporary);
     }
 
     /** Returns the path of the database along which names resolve as in PostgreSQL, or {@code null}. */
@@ -193,7 +198,7 @@ public final class EngineCatalog implements CatalogView {
     public EngineCatalog withDatabasePath(DatabasePath databasePath) {
         return Objects.equals(databasePath, databasePath()) ? this
                 : new EngineCatalog(sources, searchPath(), zone, policy, databasePath, views,
-                        viewSources);
+                        viewSources, temporary);
     }
 
     /**
@@ -213,7 +218,8 @@ public final class EngineCatalog implements CatalogView {
      * @throws IllegalArgumentException if the default source of the path is not registered
      */
     public EngineCatalog withSession(SearchPath searchPath, Supplier<ZoneId> zone) {
-        return new EngineCatalog(sources, searchPath, zone, policy, databasePath(), views, viewSources);
+        return new EngineCatalog(sources, searchPath, zone, policy, databasePath(), views, viewSources,
+                temporary);
     }
 
     /**
@@ -229,7 +235,35 @@ public final class EngineCatalog implements CatalogView {
                 throw new IllegalArgumentException("There is a source " + e.getKey() + " already");
             }
         }
-        return new EngineCatalog(all, searchPath(), zone, policy, databasePath(), views, viewSources);
+        return new EngineCatalog(all, searchPath(), zone, policy, databasePath(), views, viewSources, temporary);
+    }
+
+    /**
+     * Returns a catalog over the sources of this one and a source of
+     * temporary tables after them, whose schema {@code main} comes first
+     * for names of one part, see {@link NameResolver}.
+     *
+     * @throws IllegalArgumentException if there is a source of its name already
+     */
+    public EngineCatalog withTemporary(String name, Connector temporaryTables) {
+        EngineCatalog more = withSources(Map.of(name, temporaryTables));
+        return new EngineCatalog(more.sources, searchPath(), zone, policy, databasePath(), views, viewSources,
+                name);
+    }
+
+    @Override
+    public TableRef resolveTemporary(List<String> name) {
+        return resolver.resolveTemporary(name);
+    }
+
+    @Override
+    public boolean temporary(TableRef table) {
+        return resolver.temporary(table);
+    }
+
+    @Override
+    public List<String> resolveNewSchema(List<String> name) {
+        return resolver.resolveNewSchema(name);
     }
 
     /** Returns which locations table functions and {@code COPY} may read and write. */
@@ -413,6 +447,21 @@ public final class EngineCatalog implements CatalogView {
         return new CatalogTables(sources, views);
     }
 
+    /**
+     * Returns the lists of the sources of this catalog without its source of
+     * temporary tables while that holds none, so that tools show it only
+     * once it has tables.
+     */
+    public CatalogTables catalogTablesOfSession() {
+        Connector temp = temporary == null ? null : sources.get(temporary);
+        if (temp == null || !temp.catalog().tables(TableRef.MAIN).isEmpty()) {
+            return catalogTables();
+        }
+        Map<String, Connector> without = new LinkedHashMap<>(sources);
+        without.remove(temporary);
+        return new CatalogTables(without, views);
+    }
+
     /** Tells whether a view of the name exists, or a table in a schema of a source of this catalog. */
     @Override
     public boolean exists(TableRef table) {
@@ -436,6 +485,13 @@ public final class EngineCatalog implements CatalogView {
             throw new SqlException("No source " + table.source(), Position.UNKNOWN);
         }
         return c.catalog().schema(table);
+    }
+
+    /** Returns the columns of the primary key of a table; none for a view. */
+    @Override
+    public List<String> primaryKey(TableRef table) {
+        Connector c = sources.get(table.source());
+        return c == null || views.get(table).isPresent() ? List.of() : c.catalog().primaryKey(table);
     }
 
     @Override

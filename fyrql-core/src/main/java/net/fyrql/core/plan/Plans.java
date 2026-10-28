@@ -210,6 +210,44 @@ public final class Plans {
         };
     }
 
+    /** A column of a table that an output column of a plan shows as it is. */
+    public record Origin(TableRef table, String column) {
+    }
+
+    /**
+     * Returns for each output column of a plan the column of a table it
+     * shows as it is: through projections of columns, filters, sorts and
+     * limits down to a scan of whole columns; {@code null} for a column
+     * computed or read otherwise.
+     */
+    public static List<Origin> origins(PlanNode plan) {
+        int width = plan.schema().size();
+        List<Origin> result = new ArrayList<>();
+        switch (plan) {
+            case PlanNode.Scan s -> {
+                for (int i = 0; i < s.columns().size(); i++) {
+                    result.add(s.fields().get(i).isEmpty()
+                            ? new Origin(s.table(), s.tableSchema().name(s.columns().get(i))) : null);
+                }
+            }
+            case PlanNode.Project p -> {
+                List<Origin> input = origins(p.input());
+                for (PlanNode.NamedExpression e : p.columns()) {
+                    result.add(e.expression() instanceof Expression.Column c ? input.get(c.index()) : null);
+                }
+            }
+            case PlanNode.Filter f -> result.addAll(origins(f.input()));
+            case PlanNode.Sort s -> result.addAll(origins(s.input()));
+            case PlanNode.Limit l -> result.addAll(origins(l.input()));
+            default -> {
+                for (int i = 0; i < width; i++) {
+                    result.add(null);
+                }
+            }
+        }
+        return result;
+    }
+
     /** Assigns pre-order ids to the nodes of a plan, by identity. */
     public static Map<PlanNode, Integer> ids(PlanNode plan) {
         Map<PlanNode, Integer> ids = new IdentityHashMap<>();

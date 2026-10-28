@@ -11,6 +11,7 @@
 
 package net.fyrql;
 
+import net.fyrql.catalog.CatalogTables;
 import net.fyrql.catalog.DatabasePath;
 import net.fyrql.catalog.EngineCatalog;
 import net.fyrql.catalog.SearchPath;
@@ -99,10 +100,11 @@ public final class Session {
         this.engine = engine;
         this.zone = zone;
         this.timeout = timeout;
-        this.overlay = Map.of();
+        Connector temporary = engine.temporaryTables();
+        this.overlay = temporary == null ? Map.of() : Map.of(FyrQL.TEMPORARY, temporary);
         this.functions = engine.functions();
-        this.execution = engine.execution();
-        this.names = names(catalog);
+        this.execution = temporary == null ? engine.execution() : engine.execution(this::connector);
+        this.names = names(temporary == null ? catalog : catalog.withTemporary(FyrQL.TEMPORARY, temporary));
     }
 
     /** A session of an engine with a search path, see {@link FyrQL#newSession()}. */
@@ -119,11 +121,17 @@ public final class Session {
         this.engine = engine;
         this.zone = zone;
         this.timeout = timeout;
-        this.overlay = Collections.unmodifiableMap(new LinkedHashMap<>(overlay));
+        Connector temporary = overlay.containsKey(FyrQL.TEMPORARY) ? null : engine.temporaryTables();
+        Map<String, Connector> all = new LinkedHashMap<>(overlay);
+        if (temporary != null) {
+            all.put(FyrQL.TEMPORARY, temporary);
+        }
+        this.overlay = Collections.unmodifiableMap(all);
         this.functions = functions;
         this.execution = this.overlay.isEmpty() ? engine.execution() : engine.execution(this::connector);
         EngineCatalog catalog = engine.catalog().withSession(searchPath, this::timeZone);
-        this.names = names(this.overlay.isEmpty() ? catalog : catalog.withSources(this.overlay));
+        catalog = overlay.isEmpty() ? catalog : catalog.withSources(overlay);
+        this.names = names(temporary == null ? catalog : catalog.withTemporary(FyrQL.TEMPORARY, temporary));
     }
 
     private Names names(EngineCatalog catalog) {
@@ -144,6 +152,16 @@ public final class Session {
     /** Returns the optimizer and the executor over the sources of this session. */
     FyrQL.Execution execution() {
         return execution;
+    }
+
+    /**
+     * Returns the sources, schemas, tables and columns that the session
+     * sees, for the metadata of tools: those of the engine, see
+     * {@link FyrQL#catalogTables()}, and the temporary tables of the
+     * session in the source {@code temp}, once there are some.
+     */
+    public CatalogTables catalogTables() {
+        return names.catalog().catalogTablesOfSession();
     }
 
     /** Returns the engine of the session. */

@@ -130,9 +130,17 @@ class MetadataTest {
     }
 
     @Test
-    void thereAreNoKeys() throws Exception {
+    void thereAreNoKeysButPrimaryKeys() throws Exception {
         TableRef t = TableRef.of("mem", "main", "t");
         assertEquals(List.of(), rows(client.getPrimaryKeys(t), FlightSqlProducer.Schemas.GET_PRIMARY_KEYS_SCHEMA));
+        client.executeUpdate("CREATE TABLE mem.keyed (a INTEGER, b VARCHAR, PRIMARY KEY (b, a))");
+        try {
+            assertEquals(List.of(List.of("mem", "main", "keyed", "b", 1, "keyed_pkey"),
+                    List.of("mem", "main", "keyed", "a", 2, "keyed_pkey")), rows(client.getPrimaryKeys(
+                            TableRef.of(null, null, "keyed")), FlightSqlProducer.Schemas.GET_PRIMARY_KEYS_SCHEMA));
+        } finally {
+            client.executeUpdate("DROP TABLE mem.keyed");
+        }
         assertEquals(List.of(), rows(client.getExportedKeys(t), FlightSqlProducer.Schemas.GET_EXPORTED_KEYS_SCHEMA));
         assertEquals(List.of(), rows(client.getImportedKeys(t), FlightSqlProducer.Schemas.GET_IMPORTED_KEYS_SCHEMA));
         assertEquals(List.of(), rows(client.getCrossReference(t, t),

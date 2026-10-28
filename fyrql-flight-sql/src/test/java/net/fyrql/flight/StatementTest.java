@@ -123,9 +123,8 @@ class StatementTest {
                 () -> client.execute("SELECT ? + 1"));
         FlightInfo info = client.execute("SELECT CAST(v AS INTEGER) FROM tiny");
         TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "", () -> TestServer.rows(client, info));
-        TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "Only queries, COPY, CREATE TABLE, CREATE VIEW, INSERT"
-                + " INTO, DROP TABLE and DROP VIEW are supported, not DELETE", () -> client.executeUpdate(
-                        "DELETE FROM tiny"));
+        assertTrue(TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "Only queries, COPY, CREATE TABLE",
+                () -> client.executeUpdate("TRUNCATE tiny")).status().description().endsWith(" not TRUNCATE"));
         TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "A query returns rows, not a number of rows written",
                 () -> client.executeUpdate("SELECT 1"));
         TestServer.fails(FlightStatusCode.INVALID_ARGUMENT, "Table tiny of the memory source mem holds Java objects",

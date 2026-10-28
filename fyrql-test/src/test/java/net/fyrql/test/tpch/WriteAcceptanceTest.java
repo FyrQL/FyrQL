@@ -42,6 +42,11 @@ import static org.junit.jupiter.api.Assertions.fail;
  * columns and {@code COPY ... FROM} loads, and {@code part} from a file of
  * JSON lines into an H2 database of its own. Q3, Q9 and Q13 over the copies
  * give the rows that DuckDB gives over the original files.
+ * <p>
+ * {@code MERGE} brings rows of the files into the databases: suppliers of
+ * the JSON file into a table of the database with its primary key, and
+ * quantities of the Parquet file of {@code lineitem} into a table of H2
+ * with a key of two columns. Counts and rows are those of DuckDB.
  */
 class WriteAcceptanceTest {
 
@@ -97,6 +102,63 @@ class WriteAcceptanceTest {
             assertEquals(0, engine.update("DROP TABLE h2.part"));
             assertEquals(0, engine.update("DROP TABLE mem.partsupp"));
             assertEquals(partsuppRows, count(engine, "partsupp"), "partsupp is the one of the CSV file again");
+        }
+    }
+
+    @Test
+    void mergeBringsRowsOfFilesIntoDatabases() {
+        Path data = TpchTest.directory(TpchEngine.SMALL);
+        TpchEngine tpch = TpchEngine.load(TpchEngine.SMALL, data);
+        TestDatabase h2 = TestDatabases.h2();
+        try (FyrQL engine = tpch.open(null, null, 0, List.of(h2.connector("h2", b -> {
+        })));
+                DuckDbReference duck = new DuckDbReference()) {
+            tpch.views(duck);
+            List<String> statements = List.of(
+                    "CREATE TABLE db.supp (s_suppkey INTEGER PRIMARY KEY, s_name VARCHAR, s_nationkey INTEGER,"
+                            + " s_acctbal DECIMAL(15,2))",
+                    "INSERT INTO db.supp SELECT s_suppkey, s_name, s_nationkey, s_acctbal FROM json.supplier"
+                            + " WHERE s_suppkey % 2 = 0",
+                    "MERGE INTO db.supp USING (SELECT * FROM json.supplier WHERE s_suppkey % 3 <> 0) s"
+                            + " ON supp.s_suppkey = s.s_suppkey"
+                            + " WHEN MATCHED AND s.s_nationkey < 5 THEN DELETE"
+                            + " WHEN MATCHED THEN UPDATE SET s_acctbal = s.s_acctbal + 1, s_name = upper(s.s_name)"
+                            + " WHEN NOT MATCHED THEN INSERT VALUES (s.s_suppkey, s.s_name, s.s_nationkey, 0)"
+                            + " WHEN NOT MATCHED BY SOURCE AND supp.s_suppkey < 30 THEN DELETE",
+                    "CREATE TABLE h2.ps (ps_partkey INTEGER, ps_suppkey INTEGER, ps_availqty INTEGER,"
+                            + " PRIMARY KEY (ps_partkey, ps_suppkey))",
+                    "INSERT INTO h2.ps SELECT ps_partkey, ps_suppkey, ps_availqty FROM files.partsupp"
+                            + " WHERE ps_partkey < 100",
+                    "MERGE INTO h2.ps USING (SELECT l_partkey, l_suppkey, sum(l_quantity) AS q FROM"
+                            + " parquet.lineitem WHERE l_partkey < 200 GROUP BY ALL) l"
+                            + " ON ps.ps_partkey = l.l_partkey AND ps.ps_suppkey = l.l_suppkey"
+                            + " WHEN MATCHED THEN UPDATE SET ps_availqty = ps_availqty - CAST(l.q AS INTEGER)"
+                            + " WHEN NOT MATCHED THEN INSERT VALUES (l.l_partkey, l.l_suppkey, 0)");
+            for (String sql : statements) {
+                String theirs = sql.replaceAll("\\b(db|h2|json|files|parquet)\\.", "");
+                long expected;
+                try (java.sql.Statement s = duck.connection().createStatement()) {
+                    expected = s.executeUpdate(theirs);
+                } catch (java.sql.SQLException e) {
+                    throw new IllegalStateException("DuckDB rejects " + theirs, e);
+                }
+                long count = engine.update(sql);
+                if (sql.startsWith("MERGE") || sql.startsWith("INSERT")) {
+                    assertTrue(count > 0, sql);
+                    assertEquals(expected, count, sql);
+                }
+            }
+            for (TableRef table : List.of(TableRef.of("db", "supp"), TableRef.of("h2", "ps"))) {
+                PlanNode.Scan scan = engine.scan(table);
+                List<Object[]> theirs = duck.query("SELECT * FROM " + table.table(), scan.schema());
+                net.fyrql.test.ResultComparison.Outcome outcome = net.fyrql.test.ResultComparison.compare(
+                        scan.schema(), theirs, engine.rows(scan), false);
+                assertTrue(outcome.same(), table + ":\n" + outcome.report());
+            }
+            assertEquals(List.of("s_suppkey"), engine.connector("db").catalog().primaryKey(TableRef.of("db", "supp"))
+                    .stream().map(n -> n.toLowerCase(java.util.Locale.ROOT)).toList());
+            assertEquals(0, engine.update("DROP TABLE db.supp"));
+            assertEquals(0, engine.update("DROP TABLE h2.ps"));
         }
     }
 

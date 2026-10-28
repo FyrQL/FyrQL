@@ -146,6 +146,18 @@ public final class CatalogTables {
         return result;
     }
 
+    /**
+     * Returns the columns of the primary key of a table in the order of the
+     * key; empty for a table without one, a view and an unknown source.
+     */
+    public List<String> primaryKey(TableRef table) {
+        Connector source = sources.get(table.source());
+        if (source == null || views.get(table).isPresent()) {
+            return List.of();
+        }
+        return source.catalog().primaryKey(table);
+    }
+
     /** Returns the views whose source, schema and name match the patterns. */
     public List<ViewInfo> views(NamePattern catalog, NamePattern schema, NamePattern view) {
         List<ViewInfo> result = new ArrayList<>();

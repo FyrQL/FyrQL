@@ -13,6 +13,7 @@ package net.fyrql.jdbc;
 
 import net.fyrql.catalog.CatalogTables;
 import net.fyrql.catalog.NamePattern;
+import net.fyrql.core.plan.TableRef;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.parse.SqlParser;
@@ -82,8 +83,40 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
         return MetadataResultSets.empty(layout);
     }
 
+    /** The tables the session of the connection sees, with its temporary tables. */
     private CatalogTables tables() {
-        return connection.engine().catalogTables();
+        return connection.session().catalogTables();
+    }
+
+    /**
+     * Returns the tables of exact names, {@code null} for any, that have a
+     * primary key, each with the columns of its key and their fields.
+     */
+    private List<Keyed> keyed(String catalog, String schema, String table) {
+        List<Keyed> result = new ArrayList<>();
+        CatalogTables all = tables();
+        for (CatalogTables.TableInfo t : all.tables(NamePattern.name(catalog), NamePattern.name(schema),
+                NamePattern.name(table))) {
+            List<String> key = t.view() ? List.of() : all.primaryKey(t.table());
+            if (key.isEmpty()) {
+                continue;
+            }
+            List<CatalogTables.ColumnInfo> columns = all.columns(NamePattern.name(t.table().source()),
+                    NamePattern.name(t.table().schema()), NamePattern.name(t.table().table()), NamePattern.ANY);
+            List<CatalogTables.ColumnInfo> keyColumns = new ArrayList<>();
+            for (String k : key) {
+                columns.stream().filter(c -> c.field().name().equals(k)).findFirst().ifPresent(keyColumns::add);
+            }
+            result.add(new Keyed(t.table(), keyColumns));
+        }
+        return result;
+    }
+
+    /** A table with the columns of its primary key, in the order of the key. */
+    private record Keyed(TableRef table, List<CatalogTables.ColumnInfo> key) {
+        String keyName() {
+            return table.table() + "_pkey";
+        }
     }
 
     // ---------------------------------------------------------------- catalogs, schemas, tables, columns
@@ -264,10 +297,22 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
         return empty(MetadataResultSets.TABLE_PRIVILEGES);
     }
 
+    /** Returns the columns of the primary key, which name a row as long as the session lasts. */
     @Override
     public ResultSet getBestRowIdentifier(String catalog, String schema, String table, int scope, boolean nullable)
             throws SQLException {
-        return empty(MetadataResultSets.BEST_ROW_IDENTIFIER);
+        return read(MetadataResultSets.BEST_ROW_IDENTIFIER, () -> {
+            List<Object[]> rows = new ArrayList<>();
+            for (Keyed k : keyed(catalog, schema, table)) {
+                for (CatalogTables.ColumnInfo c : k.key()) {
+                    DataType type = c.field().type();
+                    rows.add(new Object[] {(short) bestRowSession, c.field().name(), JdbcTypes.sqlType(type),
+                        type.sqlName(), columnSize(type), null, decimalDigits(type) == null ? null
+                                : (short) (int) decimalDigits(type), (short) bestRowNotPseudo});
+                }
+            }
+            return rows;
+        });
     }
 
     @Override
@@ -275,9 +320,20 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
         return empty(MetadataResultSets.VERSION_COLUMNS);
     }
 
+    /** Returns the columns of the primary keys of the sources that know them, ordered by the name of the column. */
     @Override
     public ResultSet getPrimaryKeys(String catalog, String schema, String table) throws SQLException {
-        return empty(MetadataResultSets.PRIMARY_KEYS);
+        return read(MetadataResultSets.PRIMARY_KEYS, () -> {
+            List<Object[]> rows = new ArrayList<>();
+            for (Keyed k : keyed(catalog, schema, table)) {
+                for (int i = 0; i < k.key().size(); i++) {
+                    rows.add(new Object[] {k.table().source(), k.table().schema(), k.table().table(),
+                        k.key().get(i).field().name(), (short) (i + 1), k.keyName()});
+                }
+            }
+            rows.sort(Comparator.comparing(r -> (String) r[3]));
+            return rows;
+        });
     }
 
     @Override
@@ -296,10 +352,21 @@ final class FyrQLDatabaseMetaData implements DatabaseMetaData {
         return empty(MetadataResultSets.KEYS);
     }
 
+    /** Returns the primary keys as unique indexes, the only indexes the driver knows. */
     @Override
     public ResultSet getIndexInfo(String catalog, String schema, String table, boolean unique, boolean approximate)
             throws SQLException {
-        return empty(MetadataResultSets.INDEX_INFO);
+        return read(MetadataResultSets.INDEX_INFO, () -> {
+            List<Object[]> rows = new ArrayList<>();
+            for (Keyed k : keyed(catalog, schema, table)) {
+                for (int i = 0; i < k.key().size(); i++) {
+                    rows.add(new Object[] {k.table().source(), k.table().schema(), k.table().table(), false, null,
+                        k.keyName(), (short) tableIndexOther, (short) (i + 1), k.key().get(i).field().name(), "A",
+                        null, null, null});
+                }
+            }
+            return rows;
+        });
     }
 
     @Override
