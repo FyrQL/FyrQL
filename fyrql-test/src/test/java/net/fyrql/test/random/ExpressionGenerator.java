@@ -16,6 +16,7 @@ import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.function.FunctionRegistry;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.value.EdgeValues;
+import net.fyrql.core.value.Interval;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -33,11 +34,13 @@ import java.util.SplittableRandom;
  * fit is thrown away and drawn again.
  * <p>
  * Some arguments are drawn from lists instead: the parts of the date
- * functions, the formats of {@code strftime} and {@code strptime}, and
- * the lengths of {@code repeat}, {@code lpad} and {@code rpad}, which
- * would otherwise build huge strings. The results of the transcendental
- * functions are rounded to six places, as the math libraries of the two
- * engines may differ in the last bit; {@code random} is left out.
+ * functions, the formats of {@code strftime} and {@code strptime}, the
+ * lengths of {@code repeat}, {@code lpad} and {@code rpad}, which would
+ * otherwise build huge strings, and the bounds and steps of
+ * {@code range} and {@code generate_series}, which would otherwise build
+ * huge lists. The results of the transcendental functions are rounded to
+ * six places, as the math libraries of the two engines may differ in the
+ * last bit; {@code random} is left out.
  */
 final class ExpressionGenerator {
 
@@ -364,6 +367,7 @@ final class ExpressionGenerator {
                     arguments.set(0, Expressions.call("strftime", time, Expressions.lit(format)));
                 }
             }
+            case "range", "generate_series" -> series(signature, arguments);
             case "repeat" -> arguments.set(1, Expressions.lit(random.nextInt(-1, 4)));
             case "lpad", "rpad" -> {
                 arguments.set(1, Expressions.lit(random.nextInt(-1, 9)));
@@ -387,5 +391,34 @@ final class ExpressionGenerator {
             call = Expressions.call("round", call, Expressions.lit(6));
         }
         return call;
+    }
+
+    /**
+     * Replaces the arguments of {@code range} or {@code generate_series}
+     * with literals of a few values apart, as bounds such as the edge
+     * values of their types would build lists of hundreds of millions of
+     * values: numbers from -3 to 3 in steps of one or two, or timestamps
+     * a few days apart in steps of half a day, a day or a month.
+     */
+    private void series(List<DataType> signature, List<Expression> arguments) {
+        if (signature.size() == 3 && signature.get(2) == DataType.INTERVAL) {
+            long start = (Long) RandomTables.smallValue(DataType.TIMESTAMP, random);
+            long stop = start + random.nextLong(-4, 5) * Interval.MICROS_PER_DAY;
+            long halfDay = Interval.MICROS_PER_DAY / 2;
+            Interval step = pick(List.of(Interval.ofDays(1), Interval.ofDays(-1), Interval.ofMicros(halfDay),
+                    Interval.ofMicros(-halfDay), Interval.ofMonths(1)));
+            arguments.set(0, Expressions.lit(DataType.TIMESTAMP, start));
+            arguments.set(1, Expressions.lit(DataType.TIMESTAMP, stop));
+            arguments.set(2, Expressions.lit(DataType.INTERVAL, step));
+            return;
+        }
+        long start = random.nextInt(-3, 4);
+        arguments.set(0, Expressions.lit(start));
+        if (arguments.size() > 1) {
+            arguments.set(1, Expressions.lit(start + random.nextInt(-6, 7)));
+        }
+        if (arguments.size() > 2) {
+            arguments.set(2, Expressions.lit((long) pick(List.of(1, 2, -1, -2))));
+        }
     }
 }
