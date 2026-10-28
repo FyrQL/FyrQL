@@ -151,7 +151,9 @@ public final class ListVector implements Vector {
                 appendNull();
                 return;
             }
-            for (Object element : (List<?>) value) {
+            List<?> list = (List<?>) value;
+            elements.reserve(list.size());
+            for (Object element : list) {
                 elements.append(element);
             }
             endList();

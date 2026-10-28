@@ -71,7 +71,7 @@ final class ExpressionBinder {
         TYPED,
         /** A bare {@code NULL}, typed {@code INTEGER} until the context decides. */
         NULL,
-        /** A string literal. */
+        /** A string literal, or a call folded to a {@code VARCHAR NULL}, which DuckDB treats alike. */
         STRING,
         /** An integer literal. */
         INTEGER,
@@ -608,7 +608,9 @@ final class ExpressionBinder {
      * is a constant {@code NULL}, the call is a {@code NULL} itself, and its
      * other arguments are never evaluated. The {@code NULL} keeps the type of
      * the call, except a decimal, which DuckDB types like a bare
-     * {@code NULL}.
+     * {@code NULL}, and a {@code VARCHAR}, which DuckDB treats like a string
+     * literal: it takes the type of the other values of a {@code CASE} or a
+     * list, as in {@code if(c, upper(NULL), 1)}, which is an {@code INTEGER}.
      */
     private static Bound foldNull(Expression call) {
         if (call instanceof Expression.Call c && !c.function().nullOnNullInput()) {
@@ -616,6 +618,9 @@ final class ExpressionBinder {
         }
         for (Expression argument : call.children()) {
             if (constantNull(argument)) {
+                if (call.type() == DataType.VARCHAR) {
+                    return new Bound(new Expression.Literal(DataType.VARCHAR, null), Kind.STRING);
+                }
                 return call.type() instanceof DataType.Decimal ? Bound.nullLiteral() : nullOf(call.type());
             }
         }

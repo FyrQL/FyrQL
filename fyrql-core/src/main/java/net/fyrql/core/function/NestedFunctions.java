@@ -405,14 +405,13 @@ final class NestedFunctions {
                 long start = args.length == 1 ? 0 : (Long) args[0];
                 long stop = args.length == 1 ? (Long) args[0] : (Long) args[1];
                 long step = args.length == 3 ? (Long) args[2] : 1;
-                List<Object> result = new ArrayList<>();
                 if (step == 0) {
-                    return result;
+                    return new ArrayList<>();
                 }
                 // The count in exact arithmetic, as the bounds may lie far apart.
                 BigInteger span = BigInteger.valueOf(stop).subtract(BigInteger.valueOf(start));
                 if (span.signum() != 0 && span.signum() != Long.signum(step)) {
-                    return result;
+                    return new ArrayList<>();
                 }
                 BigInteger[] steps = span.abs().divideAndRemainder(BigInteger.valueOf(step).abs());
                 BigInteger values = inclusive || steps[1].signum() != 0 ? steps[0].add(BigInteger.ONE) : steps[0];
@@ -421,6 +420,7 @@ final class NestedFunctions {
                 }
                 long count = values.longValue();
                 ValueBudget.take(count * SERIES_VALUE_BYTES, name);
+                List<Object> result = new ArrayList<>((int) count);
                 long v = start;
                 for (long i = 0; i < count; i++) {
                     result.add(v);
@@ -528,8 +528,8 @@ final class NestedFunctions {
     /** The most values a series gives, below the size of the largest array of Java. */
     private static final long MAX_SERIES = Integer.MAX_VALUE - 16;
 
-    /** The bytes a value of a series takes: a boxed long in the list, then a long in the vector. */
-    private static final long SERIES_VALUE_BYTES = 32;
+    /** The bytes a value of a series takes: a boxed long and its reference in the list, then a long in the vector. */
+    private static final long SERIES_VALUE_BYTES = 36;
 
     /** The values of a series of timestamps whose bytes are taken at a time, as their number is not known before. */
     private static final int SERIES_CHUNK = 4096;

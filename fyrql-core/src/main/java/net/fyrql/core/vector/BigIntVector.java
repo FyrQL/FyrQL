@@ -135,6 +135,15 @@ public final class BigIntVector implements Vector {
             }
         }
 
+        @Override
+        public void reserve(int more) {
+            if (size + more > values.length) {
+                int capacity = Math.max(size + more, values.length * 2);
+                values = Arrays.copyOf(values, capacity);
+                nulls = Nulls.grow(nulls, capacity);
+            }
+        }
+
         private void ensure() {
             if (size == values.length) {
                 values = Arrays.copyOf(values, size * 2);
@@ -149,7 +158,10 @@ public final class BigIntVector implements Vector {
 
         @Override
         public BigIntVector build() {
-            return new BigIntVector(type, Arrays.copyOf(values, size), Nulls.trim(nulls, size));
+            if (values.length != size) {
+                values = Arrays.copyOf(values, size);
+            }
+            return new BigIntVector(type, values, Nulls.trim(nulls, size));
         }
     }
 }

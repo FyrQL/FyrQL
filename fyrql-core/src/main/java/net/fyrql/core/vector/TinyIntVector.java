@@ -115,6 +115,15 @@ public final class TinyIntVector implements Vector {
             }
         }
 
+        @Override
+        public void reserve(int more) {
+            if (size + more > values.length) {
+                int capacity = Math.max(size + more, values.length * 2);
+                values = Arrays.copyOf(values, capacity);
+                nulls = Nulls.grow(nulls, capacity);
+            }
+        }
+
         private void ensure() {
             if (size == values.length) {
                 values = Arrays.copyOf(values, size * 2);
@@ -129,7 +138,10 @@ public final class TinyIntVector implements Vector {
 
         @Override
         public TinyIntVector build() {
-            return new TinyIntVector(Arrays.copyOf(values, size), Nulls.trim(nulls, size));
+            if (values.length != size) {
+                values = Arrays.copyOf(values, size);
+            }
+            return new TinyIntVector(values, Nulls.trim(nulls, size));
         }
     }
 }

@@ -67,6 +67,14 @@ public sealed interface Vector permits BooleanVector, TinyIntVector, SmallIntVec
          */
         void append(Object value);
 
+        /**
+         * Makes room for a number of further values, so that appending a
+         * long run of them grows the arrays once rather than step by step;
+         * a hint, which builders without arrays of their own ignore.
+         */
+        default void reserve(int more) {
+        }
+
         /** Returns the number of values appended so far. */
         int size();
 

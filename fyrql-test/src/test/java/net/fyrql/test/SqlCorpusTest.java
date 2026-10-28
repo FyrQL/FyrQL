@@ -339,6 +339,11 @@ public class SqlCorpusTest {
                     + " typeof(greatest(false, 1, CAST(9 AS TINYINT))) FROM t, w",
             "SELECT CAST(NULL AS INTEGER) AS x FROM t EXCEPT SELECT s FROM w",
             "SELECT if(NULL, 'Ab', total) FROM (SELECT NULL AS total, min(a) AS a2 FROM t) s0",
+            // A call folded to a VARCHAR NULL takes the type of the others, like a string literal.
+            "SELECT if(NULL, trim(NULL), total), typeof(if(a > 0, upper(NULL), 1)), typeof([upper(NULL), a]),"
+                    + " typeof(coalesce(lower(NULL), 1)), CASE WHEN a > 0 THEN upper(NULL) ELSE DATE '2024-01-01' END,"
+                    + " typeof(upper(NULL)), upper(NULL) < 1, a IN (upper(NULL), 2) FROM (SELECT false AS total) s0, t",
+            "SELECT typeof(x) FROM (SELECT upper(NULL) AS x UNION ALL SELECT 1) s",
             "SELECT CAST(-5.125::DOUBLE AS DECIMAL(6,2)), CAST(2.625::DOUBLE AS DECIMAL(6,2)), CAST(-2.5::FLOAT AS"
                     + " DECIMAL(4,0))",
             "SELECT a FROM t ORDER BY true, DATE '2024-01-01', a",
