@@ -20,9 +20,11 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.SplittableRandom;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -49,8 +51,7 @@ class StatisticsDifferentialTest {
                     + " var_pop(i) OVER (PARTITION BY g ORDER BY id), variance(m) OVER (PARTITION BY g)"
                     + " FROM data WHERE g < 20 ORDER BY id");
 
-    @Test
-    void severalThreadsAgreeWithDuckDb() {
+    private static FyrQL engine() {
         SplittableRandom random = new SplittableRandom(20261026);
         List<Object[]> rows = new ArrayList<>();
         for (int r = 0; r < 100_000; r++) {
@@ -61,13 +62,35 @@ class StatisticsDifferentialTest {
                     (float) random.nextGaussian()});
         }
         MemoryConnector memory = MemoryConnector.builder("mem").table("data", DATA, rows).splitRows(4096).build();
-        try (Differential differential = new Differential(FyrQL.builder().register(memory).threads(8).build())) {
+        return FyrQL.builder().register(memory).threads(8).build();
+    }
+
+    @Test
+    void severalThreadsAgreeWithDuckDb() {
+        try (Differential differential = new Differential(engine())) {
             FyrQL engine = differential.engine();
             assertTrue(engine.explain(QUERIES.get(0)).contains("[parallel]"), engine.explain(QUERIES.get(0)));
             for (String sql : QUERIES) {
                 PlanNode plan = engine.plan(sql);
                 assertTrue(ResultComparison.tolerance(plan) > 0, sql);
                 assertFalse(differential.check(plan, 4).isEmpty(), sql);
+            }
+        }
+    }
+
+    /** Equal values deviate by exactly nothing however threads split them, so that comparisons do not flip. */
+    @Test
+    void equalValuesGiveExactlyZeroOnSeveralThreads() {
+        String select = "stddev(5.86), var_pop(CAST(0.1 AS DOUBLE)), stddev_pop(x * 0 + 2.5),"
+                + " var_samp(CAST(1 AS FLOAT) / 3)";
+        try (FyrQL engine = engine()) {
+            for (String sql : List.of("SELECT " + select + " FROM data", "SELECT " + select + " FROM data GROUP BY g")) {
+                assertTrue(engine.explain(sql).contains("[parallel]"), engine.explain(sql));
+                for (int run = 0; run < 5; run++) {
+                    for (Object[] row : engine.rows(sql)) {
+                        assertEquals(List.of(0.0, 0.0, 0.0, 0.0), Arrays.asList(row), sql);
+                    }
+                }
             }
         }
     }

@@ -43,6 +43,15 @@ public final class WrittenFiles {
         public ResultComparison.Outcome compare(boolean ordered) {
             return ResultComparison.compare(schema, expected, actual, ordered);
         }
+
+        /**
+         * Compares the rows, doubles within a relative tolerance.
+         *
+         * @param relative the tolerance, see {@link ResultComparison#tolerance}
+         */
+        public ResultComparison.Outcome compare(boolean ordered, double relative) {
+            return ResultComparison.compare(schema, expected, actual, ordered, 0, relative);
+        }
     }
 
     private WrittenFiles() {

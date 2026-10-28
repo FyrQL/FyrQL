@@ -106,4 +106,29 @@ class MomentsTest {
             assertEquals(all[1], combined[1], Math.abs(all[1]) * 1e-9, what);
         }
     }
+
+    @Test
+    void equalValuesCombineToExactlyZero() {
+        SplittableRandom random = new SplittableRandom(4711);
+        for (double x : new double[] {5.86, 0.1, 1e300, -3.7, 1.0 / 3}) {
+            for (int round = 0; round < 200; round++) {
+                // Parts of random sizes, each combined into the moments of those before, as threads hand them in.
+                double[] combined = new double[2];
+                long count = 0;
+                int parts = 1 + random.nextInt(12);
+                for (int p = 0; p < parts; p++) {
+                    int size = 1 + random.nextInt(50);
+                    double[] part = new double[2];
+                    for (int i = 0; i < size; i++) {
+                        Moments.add(part, 0, i + 1, x);
+                    }
+                    Moments.combine(combined, 0, count, part, 0, size);
+                    count += size;
+                }
+                String what = x + ", round " + round + ", " + parts + " parts";
+                assertEquals(x, combined[0], what);
+                assertEquals(0.0, combined[1], what);
+            }
+        }
+    }
 }

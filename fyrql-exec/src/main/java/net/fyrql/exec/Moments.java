@@ -19,6 +19,8 @@ import net.fyrql.core.plan.PlanNode.AggregateFunction;
  * them, so that the results of one thread are the same to the bit: per
  * group the mean of the values and the sum of their squared differences
  * from it, updated value by value after Welford and combined after Chan.
+ * Unlike DuckDB, two equal means combine to that mean exactly, so that
+ * equal values have a sum of exactly 0 however threads split them.
  * The moments of a group are two doubles in an array, the mean at
  * {@code 2 * group} and the sum at {@code 2 * group + 1}; the count is
  * kept apart.
@@ -62,8 +64,9 @@ final class Moments {
         double target = n;
         double source = otherN;
         double total = n + otherN;
-        double mean = (source * other[j] + target * moments[i]) / total;
         double delta = other[j] - moments[i];
+        // DuckDB's mean of two equal means is not always that mean again; then the next combination finds a difference.
+        double mean = delta == 0 ? moments[i] : (source * other[j] + target * moments[i]) / total;
         moments[i + 1] = other[j + 1] + moments[i + 1] + delta * delta * source * target / total;
         moments[i] = mean;
     }

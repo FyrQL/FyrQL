@@ -55,7 +55,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * from it with {@code read_xlsx}, see {@link WrittenFiles#xlsx}; and
  * {@code COPY ... FROM} loads each file into a table of the memory source
  * with the columns of the result, which then has the rows of the query; an
- * empty string comes back from a CSV file as {@code NULL}. The columns are
+ * empty string comes back from a CSV file as {@code NULL}. {@code COPY}
+ * runs the query again, whose threads may split the rows otherwise, so
+ * that the doubles of a plan with a standard deviation or a variance agree
+ * within the tolerance of {@link ResultComparison#tolerance}. The columns are
  * renamed {@code c0}, {@code c1} and so on, since a result may have two
  * columns of the same name. A plan that fails in FyrQL is left out, and so
  * is a Parquet file of a result with a {@code HUGEINT} of 39 digits, which
@@ -93,6 +96,7 @@ class WriteRoundTripTest {
             for (int i = 0; i < RandomRun.QUERIES; i++) {
                 PlanNode plan = renamed(new PlanGenerator(RandomRun.random(i)).plan(3));
                 boolean ordered = Plans.ordered(plan);
+                double tolerance = ResultComparison.tolerance(plan);
                 String sql = renderer.render(plan);
                 Schema schema;
                 List<Object[]> rows;
@@ -137,7 +141,7 @@ class WriteRoundTripTest {
                     try {
                         ResultComparison.Outcome same = workbook ? WrittenFiles.xlsx(duck, engine, file, "")
                                 .compare(true) : WrittenFiles.duckDb(duck, file, format, schema, written)
-                                .compare(ordered);
+                                .compare(ordered, tolerance);
                         report = same.same() ? null : same.report();
                     } catch (RuntimeException e) {
                         report = e.getMessage() + (e.getCause() == null ? "" : ": " + e.getCause().getMessage());
@@ -151,7 +155,7 @@ class WriteRoundTripTest {
                     } else if (format.equals("csv") && schema.fields().stream().anyMatch(f -> f.type().isNested())) {
                         nestedInCsv++;
                     } else {
-                        report = loaded(engine, file, format, schema, written);
+                        report = loaded(engine, file, format, schema, written, tolerance);
                         if (report != null) {
                             unexplained.add("query " + i + " from " + format + ":\n" + report.indent(2) + "  sql: "
                                     + sql);
@@ -186,9 +190,11 @@ class WriteRoundTripTest {
      * compares its rows with the ones of the result in any order; the table
      * is dropped again.
      *
+     * @param tolerance the relative tolerance of doubles, see {@link ResultComparison#tolerance}
      * @return what differs, or {@code null} if the table has the rows of the result
      */
-    private static String loaded(FyrQL engine, Path file, String format, Schema schema, List<Object[]> rows) {
+    private static String loaded(FyrQL engine, Path file, String format, Schema schema, List<Object[]> rows,
+            double tolerance) {
         List<Schema.Field> fields = new ArrayList<>();
         for (Schema.Field f : schema.fields()) {
             fields.add(new Schema.Field(f.name(), f.type(), true));
@@ -205,7 +211,7 @@ class WriteRoundTripTest {
             }
             List<Object[]> expected = format.equals("csv") ? emptyAsNull(rows) : rows;
             ResultComparison.Outcome same = ResultComparison.compare(schema, expected,
-                    engine.rows("SELECT * FROM " + back), false);
+                    engine.rows("SELECT * FROM " + back), false, 0, tolerance);
             return same.same() ? null : same.report();
         } catch (RuntimeException e) {
             return e.toString();
