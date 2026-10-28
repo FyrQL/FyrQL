@@ -453,11 +453,11 @@ class ParallelAggregateTest {
 
     @Test
     void partitionsSpreadSmallKeys() {
-        int[] counts = new int[HashAggregateOperator.PARTITIONS];
+        int[] counts = new int[Partitions.PARTITIONS];
         for (int key = 0; key < 16_000; key++) {
             // The interpreted hash of one INTEGER key.
             int h = 17 * 31 + key;
-            counts[HashAggregateOperator.partition(h ^ h >>> 16, counts.length)]++;
+            counts[Partitions.partition(h ^ h >>> 16, counts.length)]++;
         }
         for (int c : counts) {
             assertTrue(c > 800 && c < 1200, Arrays.toString(counts));
@@ -515,7 +515,7 @@ class ParallelAggregateTest {
 
     @Test
     void runsMergeInTheOrderOfTheirPlaces() {
-        assertEquals(List.of(0, 3, 1, 4, 5, 2), Arrays.stream(HashAggregateOperator.mergeOrder(List.of(
+        assertEquals(List.of(0, 3, 1, 4, 5, 2), Arrays.stream(Partitions.mergeOrder(List.of(
                 new long[] {1, 5, 9}, new long[] {}, new long[] {2, 5, 7}))).boxed().toList());
     }
 }

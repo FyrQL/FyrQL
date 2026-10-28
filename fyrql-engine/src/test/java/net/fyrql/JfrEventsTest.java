@@ -138,6 +138,17 @@ class JfrEventsTest {
             }
             RecordedEvent query = of(events, "net.fyrql.Query").get(0);
             assertEquals(spills.stream().mapToLong(e -> e.getLong("bytes")).sum(), query.getLong("spilledBytes"));
+
+            // A join spills the partitions of both sides.
+            List<RecordedEvent> joined = of(record("join", () -> {
+                try (QueryResult result = engine.sql("SELECT a.n, b.s FROM t a JOIN t b ON a.n = b.n")) {
+                    assertEquals(20_000, result.rows().size());
+                }
+            }), "net.fyrql.Spill");
+            for (String what : List.of("build-", "probe-")) {
+                assertTrue(joined.stream().anyMatch(e -> e.getString("operator").startsWith("Join#")
+                        && e.getString("what").startsWith(what)), joined::toString);
+            }
         }
     }
 

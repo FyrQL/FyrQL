@@ -36,7 +36,6 @@ import java.util.Deque;
 import java.util.List;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.IntToLongFunction;
 import java.util.function.LongConsumer;
 
 /**
@@ -94,8 +93,8 @@ final class HashAggregateOperator extends AbstractOperator {
 
     private static final long BYTES_PER_GROUP = 128;
 
-    /** The partitions in which the groups of the workers are merged. */
-    static final int PARTITIONS = 16;
+    /** The partitions in which the groups of the workers are merged, see {@link Partitions}. */
+    private static final int PARTITIONS = Partitions.PARTITIONS;
 
     /** The groups and rows from which on the merge runs in partitions; fewer are merged on one thread. */
     static final int PARTITIONED_MERGE = 16_384;
@@ -119,16 +118,8 @@ final class HashAggregateOperator extends AbstractOperator {
     /** {@link #MIN_ROWS_PER_GROUP}, which tests raise. */
     static volatile int minRowsPerGroup = MIN_ROWS_PER_GROUP;
 
-    /** The most partitions into which the merge cuts the rows that went to disk, see {@link #mergeSpilled}. */
-    static final int MAX_PARTITIONS = 65_536;
-
     /** The partitions cut into smaller ones so far because they did not fit, which tests read. */
     static final AtomicLong REFINED = new AtomicLong();
-
-    /** The bits of a place for the row in its morsel, the highest morsel and the highest row it tells apart. */
-    private static final int ROW_BITS = 40;
-    private static final long MAX_MORSEL = (1L << 23) - 1;
-    private static final long MAX_ROW = (1L << ROW_BITS) - 1;
 
     private final PlanNode.Aggregate aggregate;
     private final Operator input;
@@ -360,7 +351,7 @@ final class HashAggregateOperator extends AbstractOperator {
         }
         Batch all = Batches.concat(schema(), results);
         if (ordered && results.size() > 1) {
-            all = all.select(mergeOrder(places));
+            all = all.select(Partitions.mergeOrder(places));
         }
         return new ArrayList<>(Batches.split(all, batchSize));
     }
@@ -494,9 +485,9 @@ final class HashAggregateOperator extends AbstractOperator {
     static int cut(List<Segment> segments, int part, Batch keys, long[] places, int entry) {
         int n = keys.rowCount();
         for (int from = 0, to; from < n; from = to) {
-            long morsel = places[entry + from] >>> ROW_BITS;
+            long morsel = places[entry + from] >>> Partitions.ROW_BITS;
             to = from + 1;
-            while (to < n && places[entry + to] >>> ROW_BITS == morsel) {
+            while (to < n && places[entry + to] >>> Partitions.ROW_BITS == morsel) {
                 to++;
             }
             segments.add(new Segment(part, keys, from, to, entry + from, places[entry + from],
@@ -510,7 +501,7 @@ final class HashAggregateOperator extends AbstractOperator {
      * their rows. A morsel is read by one worker, so that the segments of
      * different runs do not interleave and sorting them by their first
      * places suffices; should they interleave nonetheless, each row becomes a
-     * segment of its own, in the order of {@link #mergeOrder}.
+     * segment of its own, in the order of {@link Partitions#mergeOrder}.
      *
      * @param segments the segments of all runs, those of each run in its order, as {@link #cut} cuts them
      */
@@ -540,7 +531,7 @@ final class HashAggregateOperator extends AbstractOperator {
         }
         int[] next = new int[runs.size()];
         List<Segment> rows = new ArrayList<>(start[runs.size()]);
-        for (int index : mergeOrder(runs)) {
+        for (int index : Partitions.mergeOrder(runs)) {
             int w = 0;
             while (start[w + 1] <= index) {
                 w++;
@@ -592,92 +583,6 @@ final class HashAggregateOperator extends AbstractOperator {
             }
         }
         return states;
-    }
-
-    /** Returns the partition of a hash: its bits mixed, the highest of them scaled to the partitions. */
-    static int partition(int hash, int partitions) {
-        int mixed = hash * 0x9E3779B9;
-        return (int) (((mixed & 0xFFFFFFFFL) * partitions) >>> 32);
-    }
-
-    /** Returns the place of a row: its morsel and its place in the morsel, which order the rows as one thread. */
-    static long place(int morsel, long row) {
-        return Math.min(morsel, MAX_MORSEL) << ROW_BITS | Math.min(row, MAX_ROW);
-    }
-
-    /**
-     * Merges runs of places, each in ascending order, and returns the
-     * indexes of the places in the runs one after the other, in the order of
-     * the places; of equal places, the one of the earlier run comes first.
-     */
-    static int[] mergeOrder(List<long[]> places) {
-        long[][] runs = places.toArray(new long[0][]);
-        int r = runs.length;
-        int[] start = new int[r];
-        int[] at = new int[r];
-        int n = 0;
-        for (int i = 0; i < r; i++) {
-            start[i] = n;
-            n += runs[i].length;
-        }
-        // A binary heap of the runs that have places left, by their next place.
-        int[] heap = new int[r];
-        int size = 0;
-        for (int i = 0; i < r; i++) {
-            if (runs[i].length > 0) {
-                heap[size++] = i;
-                siftUp(heap, size - 1, runs, at);
-            }
-        }
-        int[] order = new int[n];
-        for (int k = 0; k < n; k++) {
-            int i = heap[0];
-            order[k] = start[i] + at[i];
-            at[i]++;
-            if (at[i] == runs[i].length) {
-                heap[0] = heap[--size];
-            }
-            siftDown(heap, size, runs, at);
-        }
-        return order;
-    }
-
-    private static boolean before(int x, int y, long[][] runs, int[] at) {
-        long a = runs[x][at[x]];
-        long b = runs[y][at[y]];
-        return a < b || a == b && x < y;
-    }
-
-    private static void siftUp(int[] heap, int i, long[][] runs, int[] at) {
-        while (i > 0) {
-            int parent = (i - 1) / 2;
-            if (!before(heap[i], heap[parent], runs, at)) {
-                return;
-            }
-            int t = heap[i];
-            heap[i] = heap[parent];
-            heap[parent] = t;
-            i = parent;
-        }
-    }
-
-    private static void siftDown(int[] heap, int size, long[][] runs, int[] at) {
-        int i = 0;
-        while (true) {
-            int least = i;
-            for (int child = 2 * i + 1; child <= 2 * i + 2 && child < size; child++) {
-                if (before(heap[child], heap[least], runs, at)) {
-                    least = child;
-                }
-            }
-            if (least == i) {
-                return;
-            }
-            int t = heap[i];
-            heap[i] = heap[least];
-            heap[least] = t;
-            i = least;
-        }
     }
 
     private void reserve(long bytes) {
@@ -796,28 +701,6 @@ final class HashAggregateOperator extends AbstractOperator {
     }
 
     /**
-     * Returns the one of some runs of places, each at a place of its own,
-     * whose place comes first, and the place of the next of the others, or
-     * {@link Long#MAX_VALUE} if there is no other: the first takes its
-     * places before that one.
-     */
-    private static long[] least(int count, IntToLongFunction placeOf) {
-        int best = 0;
-        long limit = Long.MAX_VALUE;
-        for (int i = 1; i < count; i++) {
-            long p = placeOf.applyAsLong(i);
-            long b = placeOf.applyAsLong(best);
-            if (p < b) {
-                limit = b;
-                best = i;
-            } else {
-                limit = Math.min(limit, p);
-            }
-        }
-        return new long[] {best, limit};
-    }
-
-    /**
      * What the merge of a partition of the rows that went to disk reads, in
      * the order of the places: the groups of a part there, or the rows of a
      * file, a batch at a time, each reserved while it is read.
@@ -927,7 +810,7 @@ final class HashAggregateOperator extends AbstractOperator {
             if ((done++ & (CHECK_INTERVAL - 1)) == 0) {
                 checkCancelled();
             }
-            long[] least = least(sources.size(), i -> sources.get(i).places[sources.get(i).at]);
+            long[] least = Partitions.least(sources.size(), i -> sources.get(i).places[sources.get(i).at]);
             int best = (int) least[0];
             Source s = sources.get(best);
             int from = s.at;
@@ -1007,7 +890,7 @@ final class HashAggregateOperator extends AbstractOperator {
 
     /**
      * A partition of the rows that went to disk: those whose hash is in
-     * {@code index} of {@code count} partitions, see {@link #partition}, in
+     * {@code index} of {@code count} partitions, see {@link Partitions#partition}, in
      * files whose rows are each in the order of their places.
      */
     private record Work(int index, int count, List<SpillFile> files) {
@@ -1020,9 +903,9 @@ final class HashAggregateOperator extends AbstractOperator {
      * other, each with what it needs reserved in the budget, which it gives
      * back once its results are on disk with the places of the first rows of
      * their groups. A partition that does not fit is cut into
-     * {@value #PARTITIONS} smaller ones by more of the bits of the hashes of
+     * {@value Partitions#PARTITIONS} smaller ones by more of the bits of the hashes of
      * the keys, its rows going to disk again, a file for each, down to
-     * {@value #MAX_PARTITIONS} partitions. The results are then read merged
+     * {@value Partitions#MAX_PARTITIONS} partitions. The results are then read merged
      * by their places, see {@link ExternalSort}, so that the groups come in
      * the order of their first rows and the group that fails is the first
      * one, as in memory.
@@ -1084,7 +967,7 @@ final class HashAggregateOperator extends AbstractOperator {
                     release(heldBytes);
                     heldBytes = 0;
                     again = true;
-                } else if ((long) w.count() * PARTITIONS > MAX_PARTITIONS) {
+                } else if ((long) w.count() * PARTITIONS > Partitions.MAX_PARTITIONS) {
                     throw new QueryException(label(), "Memory budget of " + budget.limit() + " bytes exceeded: "
                             + (budget.used() + e.bytes) + " bytes needed after spilling "
                             + context().spill().bytesWritten() + " bytes");
@@ -1137,7 +1020,7 @@ final class HashAggregateOperator extends AbstractOperator {
             batches.add(m.batch());
             places.add(m.places());
         }
-        int[] order = mergeOrder(places);
+        int[] order = Partitions.mergeOrder(places);
         long[] all = new long[order.length];
         int at = 0;
         for (long[] p : places) {
@@ -1170,7 +1053,7 @@ final class HashAggregateOperator extends AbstractOperator {
     }
 
     /**
-     * Cuts a partition into {@value #PARTITIONS} smaller ones: the rows of
+     * Cuts a partition into {@value Partitions#PARTITIONS} smaller ones: the rows of
      * its files, read in the order of their places, go to a new file for
      * each smaller partition, in this order.
      */
@@ -1185,7 +1068,7 @@ final class HashAggregateOperator extends AbstractOperator {
             }
         }
         while (!cursors.isEmpty()) {
-            long[] least = least(cursors.size(), i -> cursors.get(i).places[cursors.get(i).at]);
+            long[] least = Partitions.least(cursors.size(), i -> cursors.get(i).places[cursors.get(i).at]);
             int best = (int) least[0];
             Cursor c = cursors.get(best);
             int n = c.batch.rowCount();
@@ -1197,7 +1080,7 @@ final class HashAggregateOperator extends AbstractOperator {
             int[] sub = new int[to - from];
             int[] counts = new int[PARTITIONS];
             for (int r = from; r < to; r++) {
-                sub[r - from] = partition(c.hashes[r], count) - w.index() * PARTITIONS;
+                sub[r - from] = Partitions.partition(c.hashes[r], count) - w.index() * PARTITIONS;
                 counts[sub[r - from]]++;
             }
             for (int s = 0; s < PARTITIONS; s++) {
@@ -1299,7 +1182,7 @@ final class HashAggregateOperator extends AbstractOperator {
                 this.morsel = morsel;
                 row = 0;
             }
-            long first = place(morsel, row);
+            long first = Partitions.place(morsel, row);
             int n = b.rowCount();
             row += n;
             if (scattered != null) {
@@ -1458,7 +1341,7 @@ final class HashAggregateOperator extends AbstractOperator {
             // The rows of each partition, in their order, one partition after the other.
             int[] start = new int[PARTITIONS + 1];
             for (int r = 0; r < n; r++) {
-                int p = partition(hashes[r], PARTITIONS);
+                int p = Partitions.partition(hashes[r], PARTITIONS);
                 partitionOf[r] = p;
                 start[p + 1]++;
             }
@@ -1570,7 +1453,7 @@ final class HashAggregateOperator extends AbstractOperator {
             int[] own = new int[16];
             int count = 0;
             for (int g = 0; g < groups; g++) {
-                if (partition(table.hash(g), w.count()) == w.index()) {
+                if (Partitions.partition(table.hash(g), w.count()) == w.index()) {
                     own = count == own.length ? Arrays.copyOf(own, count * 2) : own;
                     own[count++] = g;
                 }
@@ -1592,7 +1475,7 @@ final class HashAggregateOperator extends AbstractOperator {
             int[] counts = new int[partitions];
             int[] partitionOfGroup = new int[groups];
             for (int g = 0; g < groups; g++) {
-                partitionOfGroup[g] = partition(table.hash(g), partitions);
+                partitionOfGroup[g] = Partitions.partition(table.hash(g), partitions);
                 counts[partitionOfGroup[g]]++;
             }
             int[][] ofPartition = new int[partitions][];

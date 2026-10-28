@@ -83,7 +83,7 @@ final class SortSink implements ParallelSegment.Sink {
             this.morsel = morsel;
             row = 0;
         }
-        Kept k = new Kept(morsel, HashAggregateOperator.place(morsel, row), b);
+        Kept k = new Kept(morsel, Partitions.place(morsel, row), b);
         row += b.rowCount();
         long bytes = Batches.estimateBytes(b);
         if (spill == null) {

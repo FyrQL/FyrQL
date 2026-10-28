@@ -24,8 +24,11 @@ import net.fyrql.exec.compiled.PipelineSpec;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiFunction;
 
 /**
  * Runs a chain of stages as one compiled pipeline over the batches of its
@@ -42,6 +45,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * hashed by its workers, see {@link JoinBuild}. In a copy of a chain of a
  * segment, the pipeline probes the tables the segment shares among its
  * workers, which emits the unmatched build rows itself.
+ * <p>
+ * With a directory to spill to and a limited budget, a build side that does
+ * not fit goes to disk, see {@link JoinBuild#side}; since the compiled
+ * stages probe tables in memory only, the pipeline then runs as the
+ * operators of its stages over the source and the build sides read, see
+ * {@link GraceHashJoin}.
  */
 final class PipelineOperator extends AbstractOperator {
 
@@ -54,8 +63,14 @@ final class PipelineOperator extends AbstractOperator {
     private final List<Operator> builds;
     private final MemoryBudget budget;
     private final Codegen codegen;
+    /** The directory to which build sides spill, or {@code null}; builds the operators of the stages. */
+    private final SpillDirectory spill;
+    private final BiFunction<Operator, Map<PlanNode.Join, JoinSide>, Operator> interpreted;
 
     private JoinTable[] tables;
+    private final List<JoinSide> sides = new ArrayList<>();
+    /** The operators of the stages, once a build side went to disk. */
+    private Operator fallback;
     /** The rows of the source that go through the pipeline at once, see {@link JoinTable#stepRows}. */
     private int stepRows = Integer.MAX_VALUE;
     /** The steps of a batch of the source that pairs with too many build rows at once, still to be consumed. */
@@ -73,9 +88,13 @@ final class PipelineOperator extends AbstractOperator {
      * @param builds   the right input of each join, in the order of {@link PipelineSpec#probes()}
      * @param budget   the budget the build sides are reserved in
      * @param codegen  the code generation, for the key functions that hash the build sides
+     * @param spill    the directory to which build sides spill, or {@code null}
+     * @param interpreted builds the operators of the stages over the source and the build sides read, once one
+     *                 went to disk
      */
     PipelineOperator(String label, PipelineSpec spec, List<String> labels, CompiledPipeline pipeline,
-            Operator input, List<Operator> builds, MemoryBudget budget, Codegen codegen) {
+            Operator input, List<Operator> builds, MemoryBudget budget, Codegen codegen, SpillDirectory spill,
+            BiFunction<Operator, Map<PlanNode.Join, JoinSide>, Operator> interpreted) {
         super(label, spec.output());
         this.spec = spec;
         this.input = input;
@@ -85,6 +104,8 @@ final class PipelineOperator extends AbstractOperator {
         this.builds = List.copyOf(builds);
         this.budget = budget;
         this.codegen = codegen;
+        this.spill = spill;
+        this.interpreted = interpreted;
         for (int k = 0; k < spec.stages().size(); k++) {
             if (spec.stages().get(k) instanceof PlanNode.Join) {
                 joinLabels.add(labels.get(k));
@@ -100,7 +121,7 @@ final class PipelineOperator extends AbstractOperator {
      */
     PipelineOperator(String label, PipelineSpec spec, List<String> labels, CompiledPipeline pipeline,
             Operator input, JoinTable[] tables, Codegen codegen) {
-        this(label, spec, labels, pipeline, input, List.of(), MemoryBudget.unlimited(), codegen);
+        this(label, spec, labels, pipeline, input, List.of(), MemoryBudget.unlimited(), codegen, null, null);
         this.tables = tables.clone();
         this.leftoversDone = true;
         stepRows = stepRows();
@@ -110,6 +131,9 @@ final class PipelineOperator extends AbstractOperator {
     Batch compute() {
         if (tables == null) {
             buildTables();
+        }
+        if (fallback != null) {
+            return fallback.next();
         }
         while (!sourceDone) {
             Batch b = steps.poll();
@@ -151,22 +175,45 @@ final class PipelineOperator extends AbstractOperator {
 
     private void buildTables() {
         tables = new JoinTable[joins.size()];
+        Map<PlanNode.Join, JoinSide> read = new IdentityHashMap<>();
+        boolean spilled = false;
         for (int p = joins.size() - 1; p >= 0; p--) {
+            JoinSide side;
             try {
-                tables[p] = build(p);
+                side = side(p);
             } catch (QueryException e) {
                 throw e;
             } catch (RuntimeException e) {
                 throw failure(joinLabels.get(p), e);
             }
+            sides.add(side);
+            read.put(joins.get(p), side);
+            if (side instanceof JoinSide.Table t) {
+                tables[p] = t.table();
+            } else {
+                spilled = true;
+            }
             JoinType type = joins.get(p).type();
-            if (tables[p].rowCount() == 0 && (type == JoinType.INNER || type == JoinType.SEMI)) {
+            if (side.rowCount() == 0 && (type == JoinType.INNER || type == JoinType.SEMI)) {
                 // As the hash join: without build rows these joins have no output, and what they probe is not read.
                 sourceDone = true;
                 return;
             }
         }
+        if (spilled) {
+            fallback = interpreted.apply(input, read);
+            return;
+        }
         stepRows = stepRows();
+    }
+
+    /** Reads the right input of a join, to disk if it spills and does not fit. */
+    private JoinSide side(int p) {
+        PlanNode.Join j = joins.get(p);
+        if (JoinBuild.spills(j, budget, spill)) {
+            return JoinBuild.side(builds.get(p), j, joinLabels.get(p), budget, spill, codegen, reserved, context());
+        }
+        return new JoinSide.Table(build(p));
     }
 
     /** Returns the rows of the source that go through the pipeline at once. */
@@ -219,9 +266,17 @@ final class PipelineOperator extends AbstractOperator {
 
     @Override
     public void close() {
-        input.close();
+        if (fallback != null) {
+            // The operators of the stages close the source.
+            fallback.close();
+        } else {
+            input.close();
+        }
         for (Operator build : builds) {
             build.close();
+        }
+        for (JoinSide side : sides) {
+            side.close();
         }
         budget.release(reserved.getAndSet(0));
     }

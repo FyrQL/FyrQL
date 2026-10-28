@@ -19,7 +19,7 @@ import java.util.Properties;
 /** The version of FyrQL, which {@code version()} gives, from a resource the build fills in. */
 final class Versions {
 
-    /** The text of {@code version()}, such as {@code FyrQL 0.20.1}. */
+    /** The text of {@code version()}, such as {@code FyrQL 0.21.0}. */
     static final String VERSION = "FyrQL " + number();
 
     private Versions() {

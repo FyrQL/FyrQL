@@ -229,8 +229,12 @@ public final class Executor {
         private final Set<PlanNode> unordered = Collections.newSetFromMap(new IdentityHashMap<>());
         /** The scan of the copy of a chain that is being built, {@code null} outside of one. */
         private MorselScan morselScan;
-        /** The tables of the joins of the copy of a chain that is being built. */
-        private Map<PlanNode.Join, JoinTable> tables;
+        /** The build sides of the joins of the copy of a chain, or of a pipeline, that is being built. */
+        private Map<PlanNode.Join, JoinSide> tables;
+        /** Whether the joins over these build sides emit their unmatched build rows themselves. */
+        private boolean ownLeftovers;
+        /** The operators opened already for nodes, which opening a node returns. */
+        private final Map<PlanNode, Operator> substitutes = new IdentityHashMap<>();
         /** The buffers of the common tables around the node that is being opened, by their ids. */
         private final Map<Integer, CommonTableBuffer> commonTables = new HashMap<>();
 
@@ -272,6 +276,10 @@ public final class Executor {
         }
 
         Operator open(PlanNode node) {
+            Operator substitute = substitutes.get(node);
+            if (substitute != null) {
+                return substitute;
+            }
             AbstractOperator op;
             if (morselScan == null && segments.contains(node)) {
                 op = segment(node);
@@ -300,18 +308,55 @@ public final class Executor {
                 chains.add(new ParallelSegment.Chain(scan, label(scan), builds, (s, t) -> chain(in, s, t)));
                 ordered |= !scan.pushed().order().isEmpty();
             }
-            return new ParallelSegment(label(top), top.schema(), chains, source, threads, ordered, budget, codegen);
+            return new ParallelSegment(label(top), top.schema(), chains, source, threads, ordered, budget, codegen,
+                    spill);
         }
 
-        /** Builds a copy of a chain over the scan of a worker and the tables of the joins of the chain. */
-        private Operator chain(PlanNode top, MorselScan scan, Map<PlanNode.Join, JoinTable> joinTables) {
+        /** Builds a copy of a chain over the scan of a worker and the build sides of the joins of the chain. */
+        private Operator chain(PlanNode top, MorselScan scan, Map<PlanNode.Join, JoinSide> sides) {
             morselScan = scan;
-            tables = joinTables;
+            tables = sides;
             try {
                 return open(top);
             } finally {
                 morselScan = null;
                 tables = null;
+            }
+        }
+
+        /**
+         * Opens the join of a copy of a chain, or of the stages of a
+         * pipeline, over its build side read already; a join whose build side
+         * went to disk emits its unmatched build rows itself.
+         */
+        private AbstractOperator join(String label, PlanNode.Join j) {
+            JoinSide side = tables.get(j);
+            boolean leftovers = ownLeftovers || side instanceof JoinSide.Spilled;
+            return new HashJoinOperator(label, j, open(j.left()), side, leftovers, budget, codegen, batchSize,
+                    !unordered.contains(j), spill);
+        }
+
+        /**
+         * Builds the operators of a pipeline that does not run compiled since
+         * a build side went to disk: over the source the pipeline opened
+         * already and the build sides it read, whose joins emit their
+         * unmatched build rows themselves.
+         */
+        private Operator interpreted(PlanNode top, PlanNode sourceNode, Operator input,
+                Map<PlanNode.Join, JoinSide> sides) {
+            Map<PlanNode.Join, JoinSide> outer = tables;
+            boolean outerLeftovers = ownLeftovers;
+            substitutes.put(sourceNode, input);
+            tables = sides;
+            ownLeftovers = true;
+            try {
+                AbstractOperator op = operator(top);
+                op.attach(context);
+                return op;
+            } finally {
+                substitutes.remove(sourceNode);
+                tables = outer;
+                ownLeftovers = outerLeftovers;
             }
         }
 
@@ -332,7 +377,11 @@ public final class Executor {
             if (tables != null) {
                 JoinTable[] shared = new JoinTable[p.spec().probes().size()];
                 for (int k = 0; k < shared.length; k++) {
-                    shared[k] = tables.get(p.spec().probes().get(k));
+                    if (!(tables.get(p.spec().probes().get(k)) instanceof JoinSide.Table t)) {
+                        // The compiled stages probe tables in memory only.
+                        return null;
+                    }
+                    shared[k] = t.table();
                 }
                 return new PipelineOperator(label(node), p.spec(), labels, compiled, open(p.source()), shared,
                         codegen);
@@ -343,7 +392,9 @@ public final class Executor {
             for (PlanNode.Join j : p.spec().probes()) {
                 builds.add(open(j.right()));
             }
-            return new PipelineOperator(label(node), p.spec(), labels, compiled, input, builds, budget, codegen);
+            PlanNode sourceNode = p.source();
+            return new PipelineOperator(label(node), p.spec(), labels, compiled, input, builds, budget, codegen,
+                    spill, (in, sides) -> interpreted(node, sourceNode, in, sides));
         }
 
         private AbstractOperator operator(PlanNode node) {
@@ -353,9 +404,9 @@ public final class Executor {
                 case PlanNode.Remote r -> new ScanOperator(label, r, source);
                 case PlanNode.Filter f -> new FilterOperator(label, f, open(f.input()), codegen);
                 case PlanNode.Project p -> new ProjectOperator(label, p, open(p.input()), codegen);
-                case PlanNode.Join j -> tables != null
-                        ? new HashJoinOperator(label, j, open(j.left()), tables.get(j), codegen)
-                        : new HashJoinOperator(label, j, open(j.left()), open(j.right()), budget, codegen);
+                case PlanNode.Join j -> tables != null ? join(label, j)
+                        : new HashJoinOperator(label, j, open(j.left()), open(j.right()), budget, codegen,
+                                batchSize, !unordered.contains(j), spill);
                 case PlanNode.Aggregate a -> new HashAggregateOperator(label, a, open(a.input()), budget, batchSize,
                         codegen, threads, !unordered.contains(a), spill);
                 case PlanNode.Sort s -> new SortOperator(label, s, open(s.input()), budget, batchSize,

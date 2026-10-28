@@ -51,43 +51,38 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * and keeps the customers without orders of Q22. The semi join of Q18
  * filters the orders before they are joined with the customers. The scans
  * of {@code orders} and {@code customer} are read in ranges of their keys.
- * With a budget of {@value #SPILL_BUDGET} bytes, the hash tables of the
- * joins fit and every query gives the same rows, the aggregation of Q18
- * spilling to disk; with {@value #SMALLER_BUDGET} bytes, those of Q1, Q13
- * and Q18 spill too, and on one thread with {@value #SINGLE_THREAD_BUDGET}
- * bytes, that of Q17.
+ * With a budget of {@value #SPILL_BUDGET} bytes, every query gives the same
+ * rows, the larger build sides of the joins, as those of Q21, and the
+ * aggregation of Q18 spilling to disk; with {@value #SMALLER_BUDGET} bytes,
+ * Q13, Q18 and Q21 spill, and on one thread with
+ * {@value #SINGLE_THREAD_BUDGET} bytes, Q17 and Q21.
  * The files are
  * written into {@code target/tpch} once, or into the directory of the
  * system property {@code fyrql.tpch.dir}.
  */
 class TpchTest {
 
-    /** The budget of the engine that spills: the least in which the hash tables of the joins of Q21 fit. */
-    static final long SPILL_BUDGET = 4L << 20;
+    /** The budget of the engine that spills: half of the least in which the hash tables of the joins of Q21 fit. */
+    static final long SPILL_BUDGET = 2L << 20;
 
     /**
-     * A budget in which Q1, Q13 and Q18 spill, but the hash tables of
-     * Q21 do not fit. Q20 spills only in about this budget, in which the hash
-     * table of one of its joins fits or not depending on what the workers
-     * hold at the same moment, so that it is not among them.
+     * A budget in which Q13, Q18 and Q21 spill. Whether Q1, Q17 and Q20
+     * spill in it depends on what the workers hold at the same moment, so
+     * that only their rows are compared.
      */
-    static final long SMALLER_BUDGET = 2L << 20;
+    static final long SMALLER_BUDGET = 1L << 20;
 
     /**
      * The threads of the engine with the smaller budget. What its workers
-     * hold at the same time decides whether a query spills and whether the
-     * hash tables of the joins fit beside it, so that the number must not
-     * follow the processors of the machine: on two, the hash table of Q20
-     * does not fit.
+     * hold at the same time decides whether a query spills, so that the
+     * number must not follow the processors of the machine.
      */
     static final int SMALLER_BUDGET_THREADS = 4;
 
     /**
-     * The budget in which the aggregation of Q17 spills on one thread. On
-     * {@value #SMALLER_BUDGET_THREADS} threads with {@value #SMALLER_BUDGET}
-     * bytes it spills only if their workers hold their tables at the same
-     * time; on one thread it spills in 1 MiB and not in 1.5 MiB, whatever
-     * the timing.
+     * The budget in which the aggregation of Q17 and the joins of Q21 spill
+     * on one thread, whatever the timing; the aggregation of Q17 spills in
+     * 1 MiB and not in 1.5 MiB there.
      */
     static final long SINGLE_THREAD_BUDGET = 1L << 19;
 
@@ -173,21 +168,22 @@ class TpchTest {
     }
 
     @Test
-    void aggregationsSortsAndWindowsSpillWithASmallerBudget() throws IOException {
+    void aggregationsJoinsSortsAndWindowsSpillWithASmallerBudget() throws IOException {
         Path dir = Files.createTempDirectory("fyrql-tpch-");
         try {
             try (FyrQL small = tpch.open(null, null, SMALLER_BUDGET_THREADS, List.of(),
                     b -> b.memoryBudget(SMALLER_BUDGET).spillDirectory(dir))) {
-                for (String name : List.of("q01", "q13", "q17", "q18")) {
-                    // Q1 has four groups and Q17 groups a table each worker holds a part of: whether they
-                    // spill depends on how many workers reserve at the same time, so that only their rows
-                    // are compared here.
-                    assertSpills(small, name, SMALLER_BUDGET, !name.equals("q01") && !name.equals("q17"));
+                for (String name : List.of("q01", "q13", "q17", "q18", "q20", "q21")) {
+                    // Q1 has four groups, Q17 groups a table each worker holds a part of, and a hash table of
+                    // Q20 fits or not beside what the workers hold: whether they spill depends on how many
+                    // workers reserve at the same time, so that only their rows are compared here.
+                    assertSpills(small, name, SMALLER_BUDGET, List.of("q13", "q18", "q21").contains(name));
                 }
             }
             try (FyrQL one = tpch.open(null, null, 1, List.of(),
                     b -> b.memoryBudget(SINGLE_THREAD_BUDGET).spillDirectory(dir))) {
                 assertSpills(one, "q17", SINGLE_THREAD_BUDGET, true);
+                assertSpills(one, "q21", SINGLE_THREAD_BUDGET, true);
             }
         } finally {
             Files.deleteIfExists(dir);

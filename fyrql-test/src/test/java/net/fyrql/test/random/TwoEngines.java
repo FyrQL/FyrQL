@@ -54,10 +54,11 @@ import java.util.function.Supplier;
  * sums of them in another order, or the outcome is
  * {@link Outcome.Kind#THREADS_DIFFER}. A fourth run with a budget of
  * {@value #SPILL_BUDGET} bytes, on the threads of the default, spills
- * aggregations, sorts and windows to disk and must agree with the
+ * aggregations, sorts, windows and joins to disk and must agree with the
  * interpreted one in the same way, or the outcome is
  * {@link Outcome.Kind#SPILL_DIFFERS}; that it runs out of the budget, as a
- * join does, which does not spill, is no difference.
+ * join without keys does, is no difference, unless a join with keys does
+ * so without spilling, see {@link BudgetFailures}.
  */
 final class TwoEngines implements AutoCloseable {
 
@@ -249,7 +250,8 @@ final class TwoEngines implements AutoCloseable {
         try {
             rows = other.rows(plan);
         } catch (QueryException e) {
-            if (other == spilling && e.getMessage() != null && e.getMessage().startsWith("Memory budget")) {
+            if (other == spilling && e.getMessage() != null && e.getMessage().startsWith("Memory budget")
+                    && !BudgetFailures.unexpected(plan, e)) {
                 outOfBudget++;
                 return null;
             }

@@ -315,8 +315,9 @@ final class Metamorphic {
      * {@code rows()}; it stops at more than {@link #MAX_ROWS} rows.
      */
     private Run run(String sql) {
+        PlanNode plan = null;
         try {
-            PlanNode plan = engine.plan(sql);
+            plan = engine.plan(sql);
             try (QueryResult result = engine.execute(plan)) {
                 List<Object[]> rows = new ArrayList<>();
                 for (Batch b = result.nextBatch(); b != null; b = result.nextBatch()) {
@@ -327,7 +328,14 @@ final class Metamorphic {
                 }
                 return new Run(plan.schema(), rows, null, ResultComparison.tolerance(plan));
             }
-        } catch (RuntimeException | StackOverflowError e) {
+        } catch (RuntimeException e) {
+            if (plan != null && BudgetFailures.unexpected(plan, e)) {
+                // A crash rather than a query out of the budget.
+                return new Run(null, null, new IllegalStateException("A join with keys did not spill: "
+                        + e.getMessage(), e));
+            }
+            return new Run(null, null, e);
+        } catch (StackOverflowError e) {
             return new Run(null, null, e);
         }
     }

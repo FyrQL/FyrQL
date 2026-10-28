@@ -1136,8 +1136,8 @@ public final class FyrQL implements AutoCloseable {
         /**
          * Sets the bytes the queries of the engine may hold in joins,
          * aggregations and sorts; unlimited by default. Above it,
-         * aggregations, sorts and windows spill to disk, see
-         * {@link #spill(boolean)}, and the other operators fail.
+         * aggregations, sorts, windows and joins with keys spill to disk,
+         * see {@link #spill(boolean)}, and the other operators fail.
          */
         public Builder memoryBudget(long bytes) {
             this.memoryBudget = bytes;
@@ -1145,8 +1145,9 @@ public final class FyrQL implements AutoCloseable {
         }
 
         /**
-         * Sets whether aggregations, sorts and windows spill to disk when
-         * the memory budget is exhausted, instead of failing; on by default.
+         * Sets whether aggregations, sorts, windows and joins spill to disk
+         * when the memory budget is exhausted, instead of failing; on by
+         * default.
          * Without a budget, nothing spills.
          */
         public Builder spill(boolean enabled) {

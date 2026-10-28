@@ -176,7 +176,7 @@ public class FyrQLProperties {
          */
         private String memoryBudget;
 
-        /** Whether sorts, aggregations and windows move parts to disk when the memory budget runs out. */
+        /** Whether sorts, aggregations, windows and joins move parts to disk when the memory budget runs out. */
         private Boolean spill;
 
         /** The directory for the parts moved to disk; by default one of the system for temporary files. */

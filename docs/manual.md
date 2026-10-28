@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.20.1 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.21.0 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, views, the configuration file, the JDBC
 driver, Arrow, the Flight SQL server, the SQL it takes and where it differs from DuckDB,
 how it runs queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -172,7 +172,7 @@ take their default from a system property.
 | `functions(FunctionRegistry)` | - | `FunctionRegistry.standard()` | The scalar functions of queries; an application adds its own to a registry of the built-in ones |
 | `batchSize(int)` | `batchSize` | 2048 | The rows of a batch |
 | `memoryBudget(long)` | `memoryBudget`, `0` for none | no limit; half the heap in the Flight SQL server | The bytes that the queries of the engine hold together; see [Memory budget and spilling](#memory-budget-and-spilling) |
-| `spill(boolean)` | `spill` | `true` | Whether aggregations, sorts and windows spill to disk above the budget, instead of failing |
+| `spill(boolean)` | `spill` | `true` | Whether aggregations, sorts, windows and joins spill to disk above the budget, instead of failing |
 | `spillDirectory(Path)` | `spillDirectory` | the temporary directory of the JVM | The directory under which the engine creates its directory for spilling |
 | `codegen(CodegenMode)` | `codegen`: `off`, `auto` or `always` | the system property `fyrql.codegen`, or `auto` | When expressions, keys and pipelines are compiled; see [Code generation](#code-generation) |
 | `codegenThreshold(long)` | `codegenThreshold` | 10,000 | The rows after which an operator compiles in `auto`, and the estimated rows from which a chain runs as a compiled pipeline |
@@ -1494,11 +1494,11 @@ under `engine` limit how long the queries of clients run, see [Time limits](#tim
 a client of Flight SQL asks for no timeout of its own, and a deadline of its call that
 passes ends the query as a cancel does. Unless the section `engine` sets them, the server
 sets `maxQueryTimeout` to an hour and `memoryBudget` to half the heap of the JVM, above
-which aggregations, sorts and windows spill, so that no query holds the server without
-end or takes all of its memory; `0` lifts either limit. Every client that signs in may
-run every statement, also one that writes into the tables of a source of the type `jdbc`
-or creates tables in memory, as far as the source and its database user allow; a server
-for clients that only read has sources whose database users only read.
+which aggregations, sorts, windows and joins spill, so that no query holds the server
+without end or takes all of its memory; `0` lifts either limit. Every client that signs
+in may run every statement, also one that writes into the tables of a source of the type
+`jdbc` or creates tables in memory, as far as the source and its database user allow; a
+server for clients that only read has sources whose database users only read.
 
 ```yaml
 engine:
@@ -2098,8 +2098,9 @@ here; the random tests explain such differences by a ledger of their own, see
 - On several threads, the last binary digits of `sum` and `avg` over `FLOAT` and
   `DOUBLE`, and which error is reported when rows of several parts of a source fail, may
   change from run to run, as in DuckDB; see [Parallel execution](#parallel-execution).
-- DuckDB also spills the hash tables of joins, and a single group or partition that does
-  not fit; FyrQL fails then, see [Memory budget and spilling](#memory-budget-and-spilling).
+- DuckDB also spills a single group or partition that does not fit, and the build side
+  of a join without keys; FyrQL fails then, see
+  [Memory budget and spilling](#memory-budget-and-spilling).
 
 ## Optimizer
 
@@ -2513,10 +2514,10 @@ together for what they hold: the hash tables of joins, the groups of aggregation
 rows of sorts, windows, set operations and common tables that run once. Without it, the
 budget has no limit, but in the [Flight SQL server](#flight-sql-server) it is half the
 heap; in a configuration file and the URL of the JDBC driver, `0` is no limit. When an
-aggregation, a sort, a window or a common table does not fit, it spills to disk, unless
-the setting `spill` is `false`; then the query fails with `Memory budget of ... bytes
-exceeded`, as do the others when they do not fit, with the SQL state `53200` in the JDBC
-driver and `RESOURCE_EXHAUSTED` in the Flight SQL server.
+aggregation, a sort, a window, a join with keys or a common table does not fit, it spills
+to disk, unless the setting `spill` is `false`; then the query fails with `Memory budget
+of ... bytes exceeded`, as do the others when they do not fit, with the SQL state `53200`
+in the JDBC driver and `RESOURCE_EXHAUSTED` in the Flight SQL server.
 
 - A **sort** keeps its rows while they fit. Then the rows held, with the batch that did
   not fit, are sorted into a run that goes to disk with the place of each row among all
@@ -2542,7 +2543,22 @@ driver and `RESOURCE_EXHAUSTED` in the Flight SQL server.
 - A **common table** that runs once keeps its rows while they fit. Then all of them go
   to one file, the rest are appended to it, and every read reads the file from the
   start.
-- Joins, `EXCEPT` and `INTERSECT` do not spill.
+- A **join** with keys keeps the rows of its build side, the right one, while they and
+  their hash table take at most half of the budget, so that probing has room; on
+  several threads, each worker hashes the rows it reads. Then both sides go to disk in
+  16 partitions by the hash of their keys, and the partitions are joined one after the
+  other, on one thread: the build rows of each become a hash table, which the probe rows
+  of the partition probe. A partition whose build rows do not fit is cut into 16 smaller
+  ones by more bits of the hash, down to 65,536 partitions; one whose rows all have one
+  key fails at once. Rows with a `NULL` key match nothing and go to no partition; a
+  `RIGHT` or `FULL` join emits its unmatched build rows, those too, at the end. Every
+  row carries its place, so that the output, which a partition gives in the order of
+  its probe rows, is merged back into the order of the join in memory, as a sort merges
+  its runs; where the order does not matter, on several threads with `preserveOrder`
+  off, it comes partition by partition. Every type of join with keys spills, also with
+  a condition beyond them; a compiled pipeline runs as the interpreted operators of its
+  stages once a build side went to disk.
+- Joins without keys, `EXCEPT` and `INTERSECT` do not spill.
 - The lists of the functions `range` and `generate_series` count against the budget
   while the batch whose values they are is computed, so that a list such as
   `range(1000000000)` fails the query rather than exhaust the heap. As a constant, such a
@@ -2653,7 +2669,7 @@ which JDK Mission Control shows:
 | `net.fyrql.Query` | `sql` (the text of the statement, at most 1,000 characters, or else the first line of its plan), `rows` (read from the result, or written), `outcome` (`ok`, `failed`, `cancelled` or `timeout`), `error`, `spilledBytes` | from the start of the run until the result is closed, or until a statement that writes has written |
 | `net.fyrql.SourceRequest` | `source`, `kind` (such as `GET`, `query` or `next_page`), `target` (a URL or a statement, at most 1,000 characters), `status`, `bytes` (as the answer announces them) | from sending a request to S3, an HTTP endpoint, an OData service or a database until its answer came |
 | `net.fyrql.Compile` | `kind` (such as `CompiledFilter` or `CompiledPipeline`), `className`, `sourceLength`, `outcome` (`compiled`, `tooLarge` or `failed`) | the compilation of a class of generated code, not one taken from the cache |
-| `net.fyrql.Spill` | `operator` (such as `Sort#1`), `what` (such as `run`), `rows`, `batches`, `bytes` | a part an operator spilled, from its first batch until it was finished |
+| `net.fyrql.Spill` | `operator` (such as `Sort#1`), `what` (such as `run`, or `build-3-of-16` for a partition of the build side of a join), `rows`, `batches`, `bytes` | a part an operator spilled, from its first batch until it was finished |
 
 ```
 java -XX:StartFlightRecording=filename=fyrql.jfr -jar application.jar
@@ -2797,24 +2813,33 @@ group once more.
 
 ### Spilling
 
-On the laptop, with version 0.19.0, at scale factor 1, compiled on twelve threads with a
-budget of 256 MB, the fastest of three runs: Q17 spills 139 MB and takes 0.78 s instead of
-0.31 s without a limit, Q18 spills 74 MB and takes 1.47 s instead of 1.12 s, and the other
-queries spill nothing and take the same time, except Q21, whose joins need 315 MB for
-their hash tables and fail; with 512 MB, nothing spills. `SpillBenchmark` in `fyrql-bench`
-sorts, aggregates and windows the four million rows of `ParallelBenchmark` without a limit
-and with a budget of a quarter of their bytes, with version 0.19.0, in milliseconds per
-run (one fork, four measurements, which vary by up to a third on twelve threads):
+On the laptop, with version 0.21.0, at scale factor 1, compiled on twelve threads with a
+budget of 256 MB, the fastest of three runs, all 22 queries give the same rows and take
+21.2 s instead of 16.7 s without a limit: Q13, whose join of the customers with their
+orders holds at most half of the budget, spills 219 MB and takes 2.47 s instead of
+1.81 s; Q17 spills 139 MB and takes 1.02 s instead of 0.55 s; Q18 spills 75 MB and takes
+2.03 s instead of 1.73 s; and Q21 spills 314 MB, the build side of its semi join, and
+takes 4.01 s instead of 0.95 s, since the partitions of a join that spilled, and the
+operators above it in its chain, run on one thread. The other queries spill nothing and
+take the same time. `SpillBenchmark` in `fyrql-bench` sorts, aggregates and windows the
+four million rows of `ParallelBenchmark`, and joins the 100,000 customers with them as
+the build side, without a limit and with a budget of a quarter of their bytes, in
+milliseconds per run (one fork, four measurements, which vary by up to a third on twelve
+threads, and the join with the budget by more; the join with version 0.21.0, the others
+with 0.19.0):
 
 | Benchmark | 1 thread | 1 thread, budget | 12 threads | 12 threads, budget |
 | --- | ---: | ---: | ---: | ---: |
 | Sort of all rows by a decimal | 4,338 | 5,371 | 1,532 | 2,440 |
 | Aggregation in about 980,000 groups | 1,141 | 925 | 320 | 886 |
 | Window with `row_number` in 100,000 partitions | 5,708 | 7,021 | 2,057 | 3,359 |
+| Join of the customers with all rows | 756 | 1,123 | 766 | 1,280 |
 
 On one thread, the sort and the window take a fifth to a quarter longer and the
 aggregation about as long; on twelve, where the merge of the runs and partitions runs on
-one thread, they take up to almost three times as long. On
+one thread, they take up to almost three times as long. The join gains nothing from
+twelve threads, as its probe side is one split; with the budget, it writes about 450 MB
+a run and takes half as long again. On
 Windows, creating and deleting a file takes about a millisecond, since the virus scanner
 looks at it, so that a query that spills into thousands of small files, with a budget of
 a few kilobytes, spends most of its time on them.

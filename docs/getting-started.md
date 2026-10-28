@@ -41,22 +41,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.20.1</version>
+    <version>0.21.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.20.1</version>
+    <version>0.21.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.20.1</version>
+    <version>0.21.0</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.20.1</version>
+    <version>0.21.0</version>
 </dependency>
 ```
 
@@ -401,7 +401,7 @@ and [Views](manual.md#views).
 *2 minutes.* The defaults suit most applications: a query runs on all processors, with
 no limit of memory, and compiles its hot loops when `fyrql-codegen` is on the class path.
 A budget limits the memory that the queries of an engine hold together; above it,
-aggregations, sorts and windows spill to disk:
+aggregations, sorts, windows and joins spill to disk:
 
 ```java
 FyrQL engine = FyrQL.builder()
@@ -613,7 +613,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.20.1</version>
+    <version>0.21.0</version>
 </dependency>
 ```
 

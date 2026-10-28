@@ -170,6 +170,10 @@ class ExplainAnalyzeTest {
             assertTrue(text.split("\n")[0].matches(".*, spilled [0-9.]+ (bytes|KB|MB) in \\d+ parts?"), text);
             assertTrue(line(text, "Sort").matches(".*; spilled [0-9.]+ (bytes|KB|MB) in \\d+ parts?, read back .*"),
                     text);
+            // A join whose build side does not fit spills both sides.
+            String joined = engine.explainAnalyze("SELECT a.n, b.s FROM t a JOIN t b ON a.n = b.n");
+            assertTrue(line(joined, "Join").matches(".*; spilled [0-9.]+ (bytes|KB|MB) in \\d+ parts?, read back .*"),
+                    joined);
         }
     }
 

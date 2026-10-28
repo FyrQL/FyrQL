@@ -49,6 +49,12 @@ import java.util.function.Supplier;
  * {@code RIGHT} or {@code FULL} join at the top of a chain emits the build
  * rows that never matched after all others, once.
  * <p>
+ * With a directory to spill to and a limited budget, a build side that does
+ * not fit goes to disk, see {@link JoinBuild#side}; then the chains run on
+ * the thread of the query, and the join of that side joins its partitions
+ * one after the other and emits its unmatched build rows itself, see
+ * {@link GraceHashJoin}.
+ * <p>
  * A failure of a worker ends the segment, with the failure as the
  * operator of the worker reports it, see {@link Exchange}. Closing the
  * segment stops the workers and waits for them; each closes the operators
@@ -62,10 +68,10 @@ final class ParallelSegment extends AbstractOperator {
      * @param scan      the scan at the bottom of the chain
      * @param scanLabel the label of the scan
      * @param builds    the build sides of the joins of the chain, from the top down
-     * @param build     builds the operators of a copy of the chain over a scan and the tables of its joins
+     * @param build     builds the operators of a copy of the chain over a scan and the build sides of its joins
      */
     record Chain(PlanNode.Scan scan, String scanLabel, List<Build> builds,
-            BiFunction<MorselScan, Map<PlanNode.Join, JoinTable>, Operator> build) {
+            BiFunction<MorselScan, Map<PlanNode.Join, JoinSide>, Operator> build) {
 
         /**
          * Returns the join at the top of the chain that emits its unmatched
@@ -133,9 +139,13 @@ final class ParallelSegment extends AbstractOperator {
     private final boolean ordered;
     private final MemoryBudget budget;
     private final Codegen codegen;
+    /** The directory to which build sides spill, or {@code null}. */
+    private final SpillDirectory spill;
 
     private boolean started;
-    private final Map<PlanNode.Join, JoinTable> tables = new IdentityHashMap<>();
+    private final Map<PlanNode.Join, JoinSide> sides = new IdentityHashMap<>();
+    /** Whether a build side went to disk, so that the chains run on the thread of the query. */
+    private boolean spilled;
     private final AtomicLong reserved = new AtomicLong();
     /** The splits of each chain, {@code null} for a chain that reads nothing; the chains that read something. */
     private final List<Splits> splits = new ArrayList<>();
@@ -151,6 +161,8 @@ final class ParallelSegment extends AbstractOperator {
     private final List<MorselScan> localScans = new ArrayList<>();
     private int chain;
     private int lastMorsel;
+    /** The last morsel of each active chain, for what its operators emit after its scan has ended. */
+    private final List<Integer> lastMorsels = new ArrayList<>();
     /** On workers: the exchange and the tasks. */
     private Exchange exchange;
     private final List<Future<?>> workers = new ArrayList<>();
@@ -163,9 +175,10 @@ final class ParallelSegment extends AbstractOperator {
      * @param ordered whether the batches come in the order of the morsels, as on one thread
      * @param budget  the budget the build sides are reserved in
      * @param codegen the code generation, for the key functions that hash the build sides
+     * @param spill   the directory to which build sides spill, or {@code null}
      */
     ParallelSegment(String label, Schema schema, List<Chain> chains, TableSource source, int threads,
-            boolean ordered, MemoryBudget budget, Codegen codegen) {
+            boolean ordered, MemoryBudget budget, Codegen codegen, SpillDirectory spill) {
         super(label, schema);
         this.chains = List.copyOf(chains);
         this.source = source;
@@ -173,6 +186,7 @@ final class ParallelSegment extends AbstractOperator {
         this.ordered = ordered;
         this.budget = budget;
         this.codegen = codegen;
+        this.spill = spill;
     }
 
     /** The copies of the chains count, under the same labels as the segment and its scans. */
@@ -202,7 +216,8 @@ final class ParallelSegment extends AbstractOperator {
             }
             Batch b = operators.get(chain).next();
             if (b != null) {
-                lastMorsel = localScans.get(chain).morsel().index();
+                Morsel m = localScans.get(chain).morsel();
+                lastMorsel = m != null ? m.index() : lastMorsels.get(chain);
                 return b;
             }
             chain++;
@@ -214,7 +229,9 @@ final class ParallelSegment extends AbstractOperator {
     private Batch leftovers() {
         while (leftoverChain < chains.size()) {
             PlanNode.Join j = chains.get(leftoverChain++).leftovers();
-            Batch b = j == null ? null : tables.get(j).leftovers(j.left().schema(), j.schema());
+            // A join whose build side went to disk emits its unmatched build rows itself.
+            Batch b = j == null || !(sides.get(j) instanceof JoinSide.Table t) ? null
+                    : t.table().leftovers(j.left().schema(), j.schema());
             if (b != null) {
                 lastMorsel = morselCount;
                 return b;
@@ -351,10 +368,11 @@ final class ParallelSegment extends AbstractOperator {
                 active.add(c);
                 morsels.addAll(own);
                 byChain.add(own);
+                lastMorsels.add(own.get(own.size() - 1).index());
             }
         }
         morselCount = morsels.size();
-        int n = Math.min(threads, morsels.size());
+        int n = spilled ? 1 : Math.min(threads, morsels.size());
         if (n <= 1) {
             local = new ArrayList<>();
             for (List<Morsel> own : byChain) {
@@ -374,7 +392,7 @@ final class ParallelSegment extends AbstractOperator {
                 MorselScan scan = new MorselScan(chains.get(c).scanLabel(), chains.get(c).scan(), c, splits.get(c),
                         ex);
                 scan.attach(context());
-                Operator op = chains.get(c).build().apply(scan, tables);
+                Operator op = chains.get(c).build().apply(scan, sides);
                 operators.add(op);
                 ops.add(op);
                 own.add(scan);
@@ -413,25 +431,28 @@ final class ParallelSegment extends AbstractOperator {
     }
 
     /**
-     * Reads the build sides of the joins of a chain into their tables, from
-     * the top down, and tells whether the chain reads its scan: not below
-     * an empty build side of an {@code INNER} or {@code SEMI} join.
+     * Reads the build sides of the joins of a chain, from the top down, and
+     * tells whether the chain reads its scan: not below an empty build side
+     * of an {@code INNER} or {@code SEMI} join.
      */
     private boolean buildTables(Chain ch) {
         for (Build b : ch.builds()) {
-            JoinTable table;
+            JoinSide side;
             try {
-                table = Timing.run(context(), b.label(), () -> JoinBuild.read(b.right(), b.join(), b.label(),
-                        budget, codegen, reserved, context()));
+                side = Timing.run(context(), b.label(), () -> JoinBuild.spills(b.join(), budget, spill)
+                        ? JoinBuild.side(b.right(), b.join(), b.label(), budget, spill, codegen, reserved, context())
+                        : new JoinSide.Table(JoinBuild.read(b.right(), b.join(), b.label(), budget, codegen,
+                                reserved, context())));
             } catch (QueryException e) {
                 throw e;
             } catch (RuntimeException e) {
                 throw new QueryException(b.label(), e.getMessage() == null ? e.getClass().getSimpleName()
                         : e.getMessage(), e);
             }
-            tables.put(b.join(), table);
+            sides.put(b.join(), side);
+            spilled |= side instanceof JoinSide.Spilled;
             JoinType type = b.join().type();
-            if (table.rowCount() == 0 && (type == JoinType.INNER || type == JoinType.SEMI)) {
+            if (side.rowCount() == 0 && (type == JoinType.INNER || type == JoinType.SEMI)) {
                 return false;
             }
         }
@@ -463,7 +484,7 @@ final class ParallelSegment extends AbstractOperator {
         MorselScan scan = new MorselScan(ch.scanLabel(), ch.scan(), c, splits.get(c), morsels);
         scan.attach(context());
         localScans.add(scan);
-        return ch.build().apply(scan, tables);
+        return ch.build().apply(scan, sides);
     }
 
     /** The work of a worker: its copies of the chains, one after the other, then it closes them. */
@@ -524,6 +545,9 @@ final class ParallelSegment extends AbstractOperator {
             for (Build b : ch.builds()) {
                 b.right().close();
             }
+        }
+        for (JoinSide side : sides.values()) {
+            side.close();
         }
         budget.release(reserved.getAndSet(0));
     }

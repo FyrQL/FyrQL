@@ -214,7 +214,7 @@ class CancelTest {
         join.attach(context);
         QueryCancelledException e = runUntilCancelled(join);
         assertEquals("Join#0", e.operator());
-        assertTrue(ranIn(e, HashJoinOperator.class.getName(), "probe"), "the probe stopped");
+        assertTrue(ranIn(e, JoinProbe.class.getName(), "probe"), "the probe stopped");
         join.close();
     }
 

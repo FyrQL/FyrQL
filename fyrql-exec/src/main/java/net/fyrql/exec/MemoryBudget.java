@@ -14,7 +14,8 @@ package net.fyrql.exec;
 /**
  * The memory the queries of an engine may hold in their pipeline breakers
  * (join build sides, aggregation state, sorted input). An operator that can
- * spill to disk asks with {@link #tryReserve} and spills when the budget is
+ * spill to disk, such as an aggregation, a sort, a window or a join with
+ * keys, asks with {@link #tryReserve} and spills when the budget is
  * exhausted; the others take with {@link #reserve}, and their query fails
  * instead of filling the heap.
  */

@@ -16,6 +16,7 @@ import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
 import net.fyrql.core.plan.PlanNode.AggregateFunction;
+import net.fyrql.core.plan.PlanNode.JoinType;
 import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.PlanNode.SortKey;
 import net.fyrql.core.plan.PlanNode.WindowCall;
@@ -56,11 +57,11 @@ import static net.fyrql.core.expr.Expressions.mul;
 import static net.fyrql.core.expr.Expressions.rem;
 
 /**
- * A sort, an aggregation of about a million groups and a window over the
- * rows of {@link CodegenBenchmark}, in the splits of
- * {@link ParallelBenchmark}, interpreted: without a limit of memory, and
- * with a budget of a quarter of the bytes of the rows, so that they spill
- * to the temporary directory of the JVM.
+ * A sort, an aggregation of about a million groups, a window and a join
+ * whose build side they are over the rows of {@link CodegenBenchmark}, in
+ * the splits of {@link ParallelBenchmark}, interpreted: without a limit of
+ * memory, and with a budget of a quarter of the bytes of the rows, so that
+ * they spill to the temporary directory of the JVM.
  * <p>
  * Run with {@code java -jar fyrql-bench/target/benchmarks.jar SpillBenchmark}.
  */
@@ -85,6 +86,7 @@ public class SpillBenchmark {
     private PlanNode sort;
     private PlanNode groupByMany;
     private PlanNode window;
+    private PlanNode join;
 
     @Setup
     public void setUp() throws IOException {
@@ -100,7 +102,8 @@ public class SpillBenchmark {
         MemoryBudget limit = budget.equals("all") ? MemoryBudget.unlimited() : new MemoryBudget(bytes / 4);
         directory = Files.createTempDirectory("fyrql-bench-");
         spill = new SpillDirectory(directory);
-        executor = new Executor(new ParallelBenchmark.InSplits(Map.of(TableRef.of("mem", "lineitem"), splits)), limit,
+        executor = new Executor(new ParallelBenchmark.InSplits(Map.of(TableRef.of("mem", "lineitem"), splits,
+                TableRef.of("mem", "customer"), List.of(CodegenBenchmark.customers(1)))), limit,
                 CodegenBenchmark.BATCH, Codegen.off(), threads, true, spill);
         PlanNode.Scan lineitem = PlanNode.Scan.all(TableRef.of("mem", "lineitem"), CodegenBenchmark.LINEITEM);
         sort = new PlanNode.Sort(lineitem, List.of(SortKey.desc(2)));
@@ -112,6 +115,11 @@ public class SpillBenchmark {
                         new AggregateCall(AggregateFunction.SUM, 1, false, "quantity")));
         window = new PlanNode.Window(lineitem, List.of(0), List.of(SortKey.asc(5)), List.of(
                 WindowCall.of(WindowFunction.ROW_NUMBER, List.of(), "rn")));
+        PlanNode.Scan customer = PlanNode.Scan.all(TableRef.of("mem", "customer"), CodegenBenchmark.CUSTOMER);
+        join = new PlanNode.Join(customer, new PlanNode.Project(lineitem, List.of(
+                new NamedExpression("key", col(CodegenBenchmark.LINEITEM, 0)),
+                new NamedExpression("quantity", col(CodegenBenchmark.LINEITEM, 1)))), List.of(0), List.of(0),
+                JoinType.INNER);
     }
 
     @TearDown
@@ -138,6 +146,12 @@ public class SpillBenchmark {
     @Benchmark
     public long window(Blackhole bh) {
         return run(window, bh);
+    }
+
+    /** The 100,000 customers with the quantities of their lines: a join whose build side is all the rows. */
+    @Benchmark
+    public long join(Blackhole bh) {
+        return run(join, bh);
     }
 
     private long run(PlanNode plan, Blackhole bh) {
