@@ -17,7 +17,7 @@
 	<parent>
 		<groupId>io.github.fyrql</groupId>
 		<artifactId>fyrql</artifactId>
-		<version>0.22.0</version>
+		<version>0.22.5</version>
 	</parent>
 
 	<artifactId>fyrql-jdbc</artifactId>
@@ -82,6 +82,11 @@
 		<dependency>
 			<groupId>io.github.fyrql</groupId>
 			<artifactId>fyrql-connector-jdbc</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>

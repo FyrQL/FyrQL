@@ -156,8 +156,8 @@ class DriverTest {
         failsToConnect("jdbc:fyrql:?codegen=off&Codegen=auto", "The URL sets the key codegen twice");
         failsToConnect("jdbc:fyrql:?config=%zz", "The URL has the part %zz, which is not validly encoded");
         failsToConnect("jdbc:fyrql:?codegen=sometimes", "The option codegen of the engine must be off, auto or always: sometimes");
-        failsToConnect("jdbc:fyrql:?defaultSource=shop", "The default source shop of the engine is none of the"
-                + " sources csv, json, parquet");
+        failsToConnect("jdbc:fyrql:?defaultSource=shop", "The default source shop is none of the sources csv,"
+                + " json, parquet");
         failsToConnect("jdbc:fyrql:?config=" + path(dir.resolve("missing.yaml")), "Cannot read the configuration");
     }
 
@@ -215,7 +215,7 @@ class DriverTest {
         DriverPropertyInfo[] info = driver.getPropertyInfo("jdbc:fyrql:?codegen=always", new Properties());
         assertEquals(List.of("config", "defaultSource", "defaultSchema", "batchSize", "memoryBudget", "spill",
                 "spillDirectory", "codegen", "codegenThreshold", "pushdown", "threads", "preserveOrder", "timeZone",
-                "fileAccess", "allowedLocations", "queryTimeout", "maxQueryTimeout"),
+                "fileAccess", "allowedLocations", "queryTimeout", "maxQueryTimeout", "shared", "closeDelay"),
                 Arrays.stream(info).map(i -> i.name).toList());
         assertArrayEquals(new String[] {"none", "read", "readWrite"}, info[13].choices);
         assertArrayEquals(new String[] {"true", "false"}, info[5].choices);
@@ -226,16 +226,21 @@ class DriverTest {
         assertTrue(codegen.description.startsWith("When expressions are compiled"));
         assertNull(info[0].value);
         assertNull(info[0].choices);
-        assertEquals(17, driver.getPropertyInfo("jdbc:fyrql:?colour=red", null).length, "a bad URL is no error here");
+        assertArrayEquals(new String[] {"true", "false"}, info[17].choices);
+        assertEquals(19, driver.getPropertyInfo("jdbc:fyrql:?colour=red", null).length, "a bad URL is no error here");
     }
 
     @Test
     void theTimeoutsComeFromTheUrl() throws SQLException {
         try (Connection c = driver.connect("jdbc:fyrql:?queryTimeout=30s&maxQueryTimeout=5m", null)) {
-            assertEquals(Optional.of(java.time.Duration.ofSeconds(30)), c.unwrap(FyrQL.class).queryTimeout());
+            assertEquals(Optional.empty(), c.unwrap(FyrQL.class).queryTimeout(), "the timeout is one of the session");
+            assertEquals(Optional.of(java.time.Duration.ofSeconds(30)), ((FyrQLConnection) c).session()
+                    .queryTimeout());
+            assertEquals(List.of("30s"), first(c, "SHOW statement_timeout"));
             assertEquals(Optional.of(java.time.Duration.ofMinutes(5)), c.unwrap(FyrQL.class).maxQueryTimeout());
         }
-        failsToConnect("jdbc:fyrql:?queryTimeout=soon", "The option queryTimeout of the engine must be a duration");
+        failsToConnect("jdbc:fyrql:?queryTimeout=soon", "The option queryTimeout of the connection must be a"
+                + " duration");
     }
 
     @Test

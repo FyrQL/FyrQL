@@ -2,7 +2,7 @@
 
 # FyrQL manual
 
-This manual describes FyrQL 0.22.0 in full: its Java API and settings, the connectors and
+This manual describes FyrQL 0.22.5 in full: its Java API and settings, the connectors and
 what they push down, writing and loading, views, the configuration file, the JDBC
 driver, Arrow, the Flight SQL server, the SQL it takes and where it differs from DuckDB,
 how it runs queries and how to observe them, with measurements. The [PostgreSQL wire protocol
@@ -1328,10 +1328,15 @@ north 1 10.5
 
 The CSV file gives `amount` the type `DOUBLE`, as DuckDB would, and so the sums are doubles.
 
-The keys of the URL are `config` and the [engine settings](#engine-settings) of the
-[configuration file](#configuration-file) except `implicitSources`, which win over those
-of the file. The same keys may come as properties of the connection, which win over the
-URL; `getPropertyInfo` describes them, so that tools offer them. Keys are matched without
+The keys of the URL are `config`, `shared`, `closeDelay` and the
+[engine settings](#engine-settings) of the [configuration file](#configuration-file)
+except `implicitSources`, which win over those of the file. Four of them, `timeZone`,
+`defaultSource`, `defaultSchema` and `queryTimeout`, are settings of the
+[session](#sessions) of the connection rather than of the engine: they apply to this
+connection only, and `RESET` returns to the value of the file, or of the engine by
+default, as in a session of pgwire. The same keys may come as properties of the
+connection, which win over the URL; `getPropertyInfo` describes them, so that tools offer
+them. Keys are matched without
 regard to case, values in the URL are decoded from `%xx`, and a blank value counts as not
 set. The properties `user` and `password`, which tools always send, are ignored; another
 unknown property gives a warning on the connection, and an unknown key in the URL fails
@@ -1347,10 +1352,32 @@ Without `config`, the engine has the sources `csv`, `json`, `parquet`, `iceberg`
 `xlsx` without tables, so that file names and table functions can be queried, as in `SELECT *
 FROM 'data/orders.csv'`, `SELECT * FROM read_parquet('lake/events.parquet')` or `SELECT *
 FROM iceberg_scan('warehouse/db/orders')`, and files written, and the source `memory`, in
-which `CREATE TABLE memory.t AS ...` creates tables that live as long as the connection.
+which `CREATE TABLE memory.t AS ...` creates tables that live as long as the engine.
 
-Every connection builds an engine of its own and closes it when the connection closes; an
-application with an engine of its own opens a connection over it with
+Connections share an engine when their configurations are equal: the same sources, views
+and engine settings after the file is read anew, and the same `closeDelay`. They see the
+same tables in memory, as connections to a database do, and have one memory budget and
+one pool of threads, for which their queries compete; a pool of ten connections opens
+each source once, not ten times. Every engine setting counts, so a connection with
+`fileAccess=read` never shares the engine of one that may write. When the file changes,
+the next connection gets a new engine, and the old one stays open until its last
+connection closes; for a while, two engines then open the same sources, which embedded
+databases such as H2 allow within one process. A file that cannot be read fails only the
+new connection. The last connection to close closes the engine, and its tables in memory
+are gone, as in `jdbc:h2:mem:`:
+
+| `closeDelay` | The engine closes |
+| --- | --- |
+| `0`, the default | with its last connection |
+| a duration, such as `30s` or `5m` | that long after its last connection, unless a new one comes |
+| `-1` | when the JVM ends |
+
+With `shared=false`, a connection builds an engine of its own and closes it with the
+connection. Closing the engine that `unwrap(FyrQL.class)` returns closes it for every
+connection that shares it. The engines belong to the class loader of the driver, so two
+tools that load the driver each in a class loader of their own share nothing.
+
+An application with an engine of its own opens a connection over it with
 `FyrQLDriver.connect(engine, false)`, which leaves the engine open, and
 `FyrQLDataSource` is a `DataSource` for either way. Either way, a connection is a
 [session](#sessions) of its own: `SET`, `RESET` and `USE` change only it, also when
@@ -1387,8 +1414,9 @@ until its first rows while it is executed, as in the drivers of databases, and t
 while its result set is read. `cancel()` and a timeout from `setQueryTimeout` stop a
 running query or statement, also one that waits for a database, with the SQLState
 `57014` or `HYT00`; the timeout counts until the result set is closed. `setQueryTimeout(0)`,
-the default, takes the `queryTimeout` of the engine, and its `maxQueryTimeout` shortens any
-timeout (see [Time limits](#time-limits)). The queries of one connection run one at a time. An
+the default, takes the `statement_timeout` of the session, which starts with the
+`queryTimeout` of the URL or of the engine, and the `maxQueryTimeout` of the engine
+shortens any timeout (see [Time limits](#time-limits)). The queries of one connection run one at a time. An
 error has the message of FyrQL, with the position in the text or the node of the plan,
 and the exception of FyrQL as its cause; its SQLState tells the kind, such as `42601` for
 the syntax, `42P01` for an unknown table, `42703` for an unknown column, `42P07` for a
@@ -1462,15 +1490,13 @@ In DBeaver, a new driver in the Driver Manager gets
   DBeaver, which does not register them with the `DriverManager`.
 
 A connection with that driver then asks for the configuration file. DBeaver opens several
-connections to a database, for the metadata and for each editor, and each of them builds
-an engine; switching off the separate connections in the settings of the connection
-keeps it at one. DBeaver runs a statement that writes with `execute` and shows the
-number of rows written. Its navigator shows a new table after a refresh only with a
-single connection: a table in memory exists only in the engine of the connection that
-created it, and the engine of another connection learns of a table created in a
-database only when that connection opens anew, as with Invalidate/Reconnect. DBeaver
-should stay in auto-commit, its default: in its manual commit mode, Commit and Rollback do
-nothing, and what a statement wrote stays.
+JDBC connections for one connection of its own, for the metadata and for each editor;
+they share one engine, so a table that one editor creates, in memory or in a database,
+can be queried in another, and the navigator shows it after a refresh. The tables in
+memory are gone once DBeaver disconnects, unless the URL sets `closeDelay=-1`, which keeps
+the engine until DBeaver ends. DBeaver runs a statement that writes with `execute` and
+shows the number of rows written. It should stay in auto-commit, its default: in its manual
+commit mode, Commit and Rollback do nothing, and what a statement wrote stays.
 
 The rows of a table with a primary key, in memory or in a database, can be edited in the
 grid of DBeaver: it finds the table and its key in the metadata and saves a changed cell

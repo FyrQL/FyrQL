@@ -58,7 +58,8 @@ warehouse first.
   sources. See [Views](docs/manual.md#views).
 - **Embedded, with clients.** The engine runs inside the application and is set up with
   a builder, a YAML file or, with a starter, the `application.yml` of Spring Boot. A JDBC
-  driver, also as one JAR, opens it to tools such as DBeaver; results come as Apache
+  driver, also as one JAR, opens it to tools such as DBeaver, whose connections share one
+  engine per configuration; results come as Apache
   Arrow vectors, in the process or from a Flight SQL server in one executable JAR, which
   Python reads through ADBC into pyarrow and pandas. A server that speaks the wire
   protocol of PostgreSQL, also in one executable JAR, lets psql, psycopg, DBeaver,

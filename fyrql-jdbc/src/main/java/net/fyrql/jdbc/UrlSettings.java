@@ -11,11 +11,14 @@
 
 package net.fyrql.jdbc;
 
+import net.fyrql.connector.ConfigOptions;
+
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -35,6 +38,14 @@ import java.util.Properties;
  * left empty. The properties {@code user} and {@code password}, which
  * tools always send, are ignored; other unknown properties are collected
  * for a warning, while an unknown key in the URL is an error.
+ * <p>
+ * The keys fall into three groups: those of the driver, {@code config},
+ * {@code shared} and {@code closeDelay}, which choose the engine and how
+ * long it lives; those of the session, {@code timeZone},
+ * {@code defaultSource}, {@code defaultSchema} and {@code queryTimeout},
+ * which each connection sets on its own session; and the settings of the
+ * engine, all others, which connections that share an engine have in
+ * common.
  *
  * @param values the settings by the names of their {@link #KEYS}, in the order of the keys
  * @param unknownProperties the names of the properties that are no key
@@ -47,11 +58,39 @@ record UrlSettings(Map<String, String> values, List<String> unknownProperties) {
     /** The key of the configuration file. */
     static final String CONFIG = "config";
 
+    /** The key of whether connections with the same settings share an engine. */
+    static final String SHARED = "shared";
+
+    /** The key of how long a shared engine stays open after its last connection is closed. */
+    static final String CLOSE_DELAY = "closeDelay";
+
+    /** The key of the time zone of the session. */
+    static final String TIME_ZONE = "timeZone";
+
+    /** The key of the default source of the session. */
+    static final String DEFAULT_SOURCE = "defaultSource";
+
+    /** The key of the default schema of the session. */
+    static final String DEFAULT_SCHEMA = "defaultSchema";
+
+    /** The key of the timeout of the session. */
+    static final String QUERY_TIMEOUT = "queryTimeout";
+
+    /** The keys that each connection sets on its own session instead of on the engine. */
+    static final List<String> SESSION_KEYS = List.of(TIME_ZONE, DEFAULT_SOURCE, DEFAULT_SCHEMA, QUERY_TIMEOUT);
+
+    /** The delay of {@link #closeDelay()} for an engine that is never closed. */
+    static final Duration NEVER = Duration.ofSeconds(-1);
+
     /** A key of the settings, with its description and the values it takes, if they are few. */
     record Key(String name, String description, List<String> choices) {
     }
 
-    /** The keys, {@code config} first and then the settings of the engine of {@code fyrql-config}. */
+    /**
+     * The keys, {@code config} first, then the settings of the engine of
+     * {@code fyrql-config} and the keys of the session, then those of the
+     * driver.
+     */
     static final List<Key> KEYS = List.of(
             new Key(CONFIG, "The configuration file of the sources and the engine, YAML or JSON; without it the"
                     + " engine has the sources csv, json, parquet, iceberg and memory without tables, for table"
@@ -85,7 +124,11 @@ record UrlSettings(Map<String, String> values, List<String> unknownProperties) {
             new Key("queryTimeout", "How long a query may run without a query timeout of its statement, such as"
                     + " 30s or 5m; no limit by default", List.of()),
             new Key("maxQueryTimeout", "How long any query may run, also with a longer query timeout of its"
-                    + " statement, such as 30s or 5m; no limit by default", List.of()));
+                    + " statement, such as 30s or 5m; no limit by default", List.of()),
+            new Key(SHARED, "Whether connections with the same configuration and settings of the engine share one"
+                    + " engine, and so its tables in memory; true by default", List.of("true", "false")),
+            new Key(CLOSE_DELAY, "How long a shared engine stays open after its last connection is closed, such as"
+                    + " 30s or 5m, or -1 for until the JVM ends; 0 by default", List.of()));
 
     private static final List<String> IGNORED = List.of("user", "password");
 
@@ -169,11 +212,63 @@ record UrlSettings(Map<String, String> values, List<String> unknownProperties) {
         }
     }
 
-    /** Returns the settings of the engine, all but {@code config}, as the configuration file names them. */
+    /**
+     * Returns the settings of the engine, as the configuration file names
+     * them: all but the keys of the driver and of the session.
+     */
     Map<String, String> engineSettings() {
         Map<String, String> settings = new LinkedHashMap<>(values);
-        settings.remove(CONFIG);
+        settings.keySet().removeAll(List.of(CONFIG, SHARED, CLOSE_DELAY));
+        settings.keySet().removeAll(SESSION_KEYS);
         return settings;
+    }
+
+    /** Returns the settings that the connection sets on its session, by the names of their keys. */
+    Map<String, String> sessionSettings() {
+        Map<String, String> settings = new LinkedHashMap<>(values);
+        settings.keySet().retainAll(SESSION_KEYS);
+        return settings;
+    }
+
+    /**
+     * Returns whether connections with the same settings share an engine.
+     *
+     * @throws SQLException {@code 08001} if the value is neither {@code true} nor {@code false}
+     */
+    boolean shared() throws SQLException {
+        String value = values.get(SHARED);
+        if (value == null || value.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (value.equalsIgnoreCase("false")) {
+            return false;
+        }
+        throw SqlStates.connectionFailure("The key " + SHARED + " has the value " + value + ", which is neither"
+                + " true nor false", null);
+    }
+
+    /**
+     * Returns how long a shared engine stays open after its last connection
+     * is closed: {@link Duration#ZERO} by default, {@link #NEVER} for
+     * {@code -1}.
+     *
+     * @throws SQLException {@code 08001} if the value is no duration
+     */
+    Duration closeDelay() throws SQLException {
+        String value = values.get(CLOSE_DELAY);
+        if (value == null) {
+            return Duration.ZERO;
+        }
+        if (value.equals("-1")) {
+            return NEVER;
+        }
+        try {
+            return new ConfigOptions("the connection", Map.of(CLOSE_DELAY, value), Path.of(""))
+                    .timeLimit(CLOSE_DELAY).orElseThrow();
+        } catch (IllegalArgumentException e) {
+            throw SqlStates.connectionFailure("The key " + CLOSE_DELAY + " has the value " + value + ", which is no"
+                    + " duration such as 30s or 5m, nor 0 or -1", e);
+        }
     }
 
     /** Returns the decoded pairs of the query of a URL, in their order. */

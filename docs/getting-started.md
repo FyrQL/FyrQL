@@ -41,22 +41,22 @@ compiled code, `fyrql-codegen`:
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-engine</artifactId>
-    <version>0.22.0</version>
+    <version>0.22.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-csv</artifactId>
-    <version>0.22.0</version>
+    <version>0.22.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-connector-memory</artifactId>
-    <version>0.22.0</version>
+    <version>0.22.5</version>
 </dependency>
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-codegen</artifactId>
-    <version>0.22.0</version>
+    <version>0.22.5</version>
 </dependency>
 ```
 
@@ -477,7 +477,9 @@ north 1 10.5
 
 The CSV file gives `amount` the type `DOUBLE`, as DuckDB would, and so the sums are
 doubles. Settings of the engine can follow in the URL, as in
-`jdbc:fyrql:?config=fyrql.yaml&threads=4&memoryBudget=512MB`.
+`jdbc:fyrql:?config=fyrql.yaml&threads=4&memoryBudget=512MB`. Connections with the same
+URL share one engine and its tables in memory; the last one to close closes it, unless
+`closeDelay` keeps it open for a while, such as `closeDelay=5m`, or for good with `-1`.
 
 For DBeaver and other tools, `fyrql-jdbc-all` holds the driver with the engine and all
 connectors in one JAR, built as `fyrql-jdbc-all/target/fyrql-jdbc-all-<version>.jar`:
@@ -614,7 +616,7 @@ the application depends on
 <dependency>
     <groupId>io.github.fyrql</groupId>
     <artifactId>fyrql-spring-boot-starter</artifactId>
-    <version>0.22.0</version>
+    <version>0.22.5</version>
 </dependency>
 ```
 

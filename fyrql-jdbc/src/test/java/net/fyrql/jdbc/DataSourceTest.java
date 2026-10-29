@@ -32,17 +32,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DataSourceTest {
 
     @Test
-    void eachConnectionOfAUrlHasAnEngineOfItsOwn() throws SQLException {
+    void theConnectionsOfAUrlShareItsEngine() throws SQLException {
         FyrQLDataSource ds = new FyrQLDataSource("jdbc:fyrql:?pushdown=false");
         ds.setProperty("codegen", "off");
         assertEquals("jdbc:fyrql:?pushdown=false", ds.getUrl());
         try (Connection a = ds.getConnection(); Connection b = ds.getConnection("sa", "secret")) {
             FyrQL engine = a.unwrap(FyrQL.class);
-            assertNotSame(engine, b.unwrap(FyrQL.class));
+            assertSame(engine, b.unwrap(FyrQL.class));
             assertEquals(CodegenMode.OFF, engine.codegen());
             assertFalse(engine.pushdown());
             assertEquals(List.of(1), DriverTest.first(a, "SELECT 1"));
         }
+        ds.setProperty("shared", "false");
+        try (Connection a = ds.getConnection(); Connection b = ds.getConnection()) {
+            assertNotSame(a.unwrap(FyrQL.class), b.unwrap(FyrQL.class));
+        }
+        ds.setProperty("shared", null);
         ds.setProperty("codegen", null);
         ds.setUrl("jdbc:fyrql:");
         try (Connection c = ds.getConnection()) {

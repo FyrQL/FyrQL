@@ -16,11 +16,13 @@ import net.fyrql.PreparedQuery;
 import net.fyrql.Session;
 import net.fyrql.SqlStatement;
 import net.fyrql.catalog.SearchPath;
+import net.fyrql.connector.ConfigOptions;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.exec.QueryContext;
 import net.fyrql.sql.SqlException;
 
+import java.nio.file.Path;
 import java.sql.Array;
 import java.sql.Blob;
 import java.sql.CallableStatement;
@@ -37,6 +39,7 @@ import java.sql.SQLXML;
 import java.sql.Savepoint;
 import java.sql.Statement;
 import java.sql.Struct;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -50,8 +53,10 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * A connection to an engine, which it owns and closes, unless it was
- * opened over an engine of the application with
+ * A connection to an engine, which it shares with the other connections of
+ * the driver with the same settings and whose last connection closes it,
+ * which it owns and closes with {@code shared=false}, or which belongs to
+ * the application if it was opened with
  * {@link FyrQLDriver#connect(FyrQL, boolean)}. The connection is always in
  * auto-commit: a statement that writes is one transaction of the source
  * it writes to, if the source has transactions, and takes effect at once.
@@ -74,7 +79,8 @@ import java.util.concurrent.locks.ReentrantLock;
 final class FyrQLConnection implements Connection {
 
     private final FyrQL engine;
-    private final boolean closeEngine;
+    /** What closing the connection does to the engine: close it, release a share of it, or nothing. */
+    private final Runnable owner;
     private final String url;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ReentrantLock lock = new ReentrantLock();
@@ -86,11 +92,53 @@ final class FyrQLConnection implements Connection {
     private int holdability = ResultSet.CLOSE_CURSORS_AT_COMMIT;
     private int networkTimeout;
 
-    FyrQLConnection(FyrQL engine, boolean closeEngine, String url) {
+    /**
+     * @param owner what closing the connection does to the engine, such as
+     *        {@code engine::close}; it may throw a runtime exception if a
+     *        source cannot be closed
+     */
+    FyrQLConnection(FyrQL engine, Runnable owner, String url) {
         this.engine = Objects.requireNonNull(engine, "engine");
-        this.closeEngine = closeEngine;
+        this.owner = Objects.requireNonNull(owner, "owner");
         this.url = url;
         this.session = engine.newSession();
+    }
+
+    /**
+     * Sets the settings of the session that the URL and the properties give
+     * instead of the engine: {@code timeZone}, {@code defaultSource},
+     * {@code defaultSchema} and {@code queryTimeout}. {@code RESET} returns
+     * to the settings of the engine, as in a session of pgwire.
+     *
+     * @param settings the values by the names of their keys
+     * @throws SQLException {@code 08001} if a value is invalid
+     */
+    void startWith(Map<String, String> settings) throws SQLException {
+        String zone = settings.get(UrlSettings.TIME_ZONE);
+        String timeout = settings.get(UrlSettings.QUERY_TIMEOUT);
+        String source = settings.get(UrlSettings.DEFAULT_SOURCE);
+        String schema = settings.get(UrlSettings.DEFAULT_SCHEMA);
+        try {
+            if (zone != null) {
+                session.set("TimeZone", zone);
+            }
+            if (timeout != null) {
+                Duration t = new ConfigOptions("the connection", Map.of(UrlSettings.QUERY_TIMEOUT, timeout),
+                        Path.of("")).timeLimit(UrlSettings.QUERY_TIMEOUT).orElseThrow();
+                session.set("statement_timeout", t.toMillis() + "ms");
+            }
+        } catch (SqlException | IllegalArgumentException e) {
+            throw SqlStates.connectionFailure(e.getMessage(), e);
+        }
+        if (source != null && !engine.sources().contains(source)) {
+            throw SqlStates.connectionFailure("The default source " + source + " is none of the sources "
+                    + String.join(", ", engine.sources()), null);
+        }
+        if (source != null || schema != null) {
+            SearchPath path = session.searchPath();
+            session.use(new SearchPath(source != null ? source : path.defaultSource(),
+                    schema != null ? schema : path.defaultSchema()));
+        }
     }
 
     /** Returns the engine. */
@@ -412,7 +460,11 @@ final class FyrQLConnection implements Connection {
         checkOpen();
     }
 
-    /** Closes the statements of the connection, and the engine if the connection owns it. */
+    /**
+     * Closes the statements of the connection, and the engine if the
+     * connection owns it, or gives back its share of an engine that
+     * connections share.
+     */
     @Override
     public void close() throws SQLException {
         if (!closed.compareAndSet(false, true)) {
@@ -431,23 +483,18 @@ final class FyrQLConnection implements Connection {
             }
         }
         statements.clear();
-        if (failure != null && !closeEngine) {
-            throw failure;
-        }
-        if (closeEngine) {
-            try {
-                engine.close();
-            } catch (RuntimeException e) {
-                SQLException f = new SQLException("Cannot close the sources of the engine: " + e.getMessage(),
-                        SqlStates.GENERAL, e);
-                if (failure != null) {
-                    f.addSuppressed(failure);
-                }
-                throw f;
-            }
+        try {
+            owner.run();
+        } catch (RuntimeException e) {
+            SQLException f = new SQLException("Cannot close the sources of the engine: " + e.getMessage(),
+                    SqlStates.GENERAL, e);
             if (failure != null) {
-                throw failure;
+                f.addSuppressed(failure);
             }
+            throw f;
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 

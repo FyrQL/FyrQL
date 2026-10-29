@@ -23,10 +23,11 @@ import java.util.logging.Logger;
 
 /**
  * A data source of FyrQL connections: either by a URL and properties, as
- * {@link FyrQLDriver} takes them, each connection with an engine of its
- * own; or over one engine of the application, which the connections share
- * and do not close. Every connection is a session of its own, with its own
- * settings.
+ * {@link FyrQLDriver} takes them, whose connections share the engine of
+ * their configuration unless the URL says {@code shared=false}, as the
+ * driver describes; or over one engine of the application, which the
+ * connections share and do not close. Every connection is a session of its
+ * own, with its own settings.
  */
 public final class FyrQLDataSource implements DataSource {
 
