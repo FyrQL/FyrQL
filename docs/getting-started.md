@@ -310,7 +310,28 @@ QUALIFY row_number() OVER w = 1
 ORDER BY c.region
 ```
 
-with the rows `[north, 1]` and `[south, 2]`.
+with the rows `[north, 1]` and `[south, 2]`. A lateral join reads the row before it, so
+that the two largest orders of each region are
+
+```sql
+SELECT c.region, top.id, top.amount
+FROM (SELECT DISTINCT region FROM customers) AS c,
+     LATERAL (SELECT o.id, o.amount
+              FROM orders AS o JOIN customers AS k ON o.customerId = k.id
+              WHERE k.region = c.region
+              ORDER BY o.amount DESC NULLS LAST LIMIT 2) AS top
+ORDER BY c.region, top.amount DESC
+```
+
+```
+[north, 1, 10.50]
+[north, 3, 5.25]
+[south, 2, 20.00]
+```
+
+`median`, `quantile_cont`, `corr`, `regr_slope`, `arg_max`, `mode` and the other
+statistics of DuckDB work as aggregates and over windows, and `WITH RECURSIVE` walks
+hierarchies.
 
 More: [Supported SQL](manual.md#supported-sql),
 [Differences from DuckDB](manual.md#differences-from-duckdb).

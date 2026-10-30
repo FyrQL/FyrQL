@@ -143,9 +143,10 @@ public final class ResultComparison {
 
     /**
      * The relative tolerance of the results of a plan: 1e-9 if it computes a
-     * standard deviation or a variance, whose doubles depend on how the
-     * moments of the parts of the values are combined, by threads and in
-     * the trees of windows, otherwise 0.
+     * standard deviation, a variance, a covariance, a correlation or a
+     * regression, whose doubles depend on how the moments of the parts of
+     * the values are combined, by threads and in the trees of windows,
+     * otherwise 0.
      */
     public static double tolerance(PlanNode plan) {
         List<PlanNode.AggregateCall> calls = new ArrayList<>();
@@ -159,7 +160,7 @@ public final class ResultComparison {
             }
         }
         for (PlanNode.AggregateCall call : calls) {
-            if (call.function().isStatistic()) {
+            if (call.function().isStatistic() || call.function().isCovariance()) {
                 return 1e-9;
             }
         }

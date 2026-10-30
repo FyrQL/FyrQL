@@ -55,8 +55,8 @@ import java.util.stream.IntStream;
  * <p>
  * An aggregate over a frame comes from a {@link SegmentTree} per partition,
  * or, for the aggregates that keep their values ({@code DISTINCT}, an
- * {@code ORDER BY}, {@code string_agg}, {@code list}), from the rows of the
- * frame one by one. Rows with the same frame as the row before share its
+ * {@code ORDER BY}, {@code string_agg}, {@code list}, the quantiles,
+ * {@code mode}), from the rows of the frame one by one. Rows with the same frame as the row before share its
  * result.
  * <p>
  * On more than one thread, the input is sorted on several threads, see
@@ -875,7 +875,7 @@ final class WindowOperator extends AbstractOperator {
         Aggregates(WindowCall call, int n) {
             super(call);
             this.values = new Object[n];
-            this.mergeable = trees && ValueAccumulator.mergeable(call.aggregate());
+            this.mergeable = trees && ValueAccumulator.mergeableInTrees(call.aggregate());
             this.filter = call.filter() >= 0 ? rows.column(call.filter()) : null;
         }
 

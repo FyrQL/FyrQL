@@ -261,13 +261,25 @@ class DocumentationExampleTest {
             for (Object[] row : engine.rows(largest)) {
                 printed.add(Arrays.toString(row));
             }
+            String lateral = """
+                    SELECT c.region, top.id, top.amount
+                    FROM (SELECT DISTINCT region FROM customers) AS c,
+                         LATERAL (SELECT o.id, o.amount
+                                  FROM orders AS o JOIN customers AS k ON o.customerId = k.id
+                                  WHERE k.region = c.region
+                                  ORDER BY o.amount DESC NULLS LAST LIMIT 2) AS top
+                    ORDER BY c.region, top.amount DESC""";
+            for (Object[] row : engine.rows(lateral)) {
+                printed.add(Arrays.toString(row));
+            }
             plan = engine.explain(sql);
             pipeline = engine.codegen() == CodegenMode.ALWAYS ? "[codegen pipeline]" : "[codegen]";
             parallel = engine.threads() > 1 ? " [parallel]" : "";
         }
 
         assertEquals(List.of("[north, 1, 10.50, 1, 15.75]", "[north, 3, 5.25, 2, 15.75]", "[north, 4, null, 3, 15.75]",
-                "[south, 2, 20.00, 1, 20.00]", "[north, 1]", "[south, 2]"), printed);
+                "[south, 2, 20.00, 1, 20.00]", "[north, 1]", "[south, 2]", "[north, 1, 10.50]", "[north, 3, 5.25]",
+                "[south, 2, 20.00]"), printed);
         assertEquals("""
                 Sort #0, #3
                   Project #4 AS region, #0 AS id, #1 AS amount, #5 AS place, #6 AS total

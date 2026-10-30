@@ -14,7 +14,6 @@ package net.fyrql.exec;
 import net.fyrql.connector.Batches;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
-import net.fyrql.core.plan.PlanNode.SortKey;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.vector.Batch;
@@ -193,15 +192,7 @@ final class HashAggregateOperator extends AbstractOperator {
         this.keyColumns = keyColumnList.stream().mapToInt(Integer::intValue).toArray();
         TreeSet<Integer> used = new TreeSet<>(keyColumnList);
         for (AggregateCall call : aggregate.aggregates()) {
-            if (call.column() >= 0) {
-                used.add(call.column());
-            }
-            for (SortKey k : call.orderBy()) {
-                used.add(k.column());
-            }
-            if (call.filter() >= 0) {
-                used.add(call.filter());
-            }
+            used.addAll(call.inputColumns());
         }
         this.scatteredColumns = List.copyOf(used);
         this.scatteredSchema = inputSchema.select(scatteredColumns);
@@ -222,10 +213,12 @@ final class HashAggregateOperator extends AbstractOperator {
     /**
      * Tells whether the groups of an aggregation merge into one another:
      * {@code count}, {@code sum}, {@code avg}, {@code min}, {@code max},
-     * {@code bool_and}, {@code bool_or} and the standard deviations and
-     * variances, without {@code DISTINCT} and {@code ORDER BY}, for which
-     * the order of the rows does not matter, but for the last bits of
-     * doubles.
+     * {@code bool_and}, {@code bool_or}, the standard deviations,
+     * variances, covariances, correlations and regressions, {@code arg_min},
+     * {@code arg_max} and the quantiles, whose parts of the values are
+     * joined, without {@code DISTINCT} and {@code ORDER BY},
+     * for which the order of the rows does not matter, but for the last bits
+     * of doubles.
      */
     static boolean mergeable(PlanNode.Aggregate aggregate) {
         for (AggregateCall call : aggregate.aggregates()) {
@@ -234,7 +227,9 @@ final class HashAggregateOperator extends AbstractOperator {
             }
             switch (call.function()) {
                 case COUNT_STAR, COUNT, SUM, AVG, MIN, MAX, BOOL_AND, BOOL_OR, STDDEV_SAMP, STDDEV_POP, VAR_SAMP,
-                        VAR_POP -> {
+                        VAR_POP, CORR, COVAR_POP, COVAR_SAMP, REGR_COUNT, REGR_SLOPE, REGR_INTERCEPT, REGR_R2,
+                        REGR_AVGX, REGR_AVGY, REGR_SXX, REGR_SYY, REGR_SXY, ARG_MIN, ARG_MAX, QUANTILE_CONT,
+                        QUANTILE_DISC -> {
                 }
                 default -> {
                     return false;

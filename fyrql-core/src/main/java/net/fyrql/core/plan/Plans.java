@@ -12,13 +12,16 @@
 package net.fyrql.core.plan;
 
 import net.fyrql.core.expr.Expression;
+import net.fyrql.core.expr.Expressions;
 import net.fyrql.core.type.Schema;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.UnaryOperator;
 
 /**
@@ -79,7 +82,65 @@ public final class Plans {
             case PlanNode.CommonTable t -> new PlanNode.CommonTable(t.id(), t.name(), children.get(0),
                     children.get(1));
             case PlanNode.CommonTableScan s -> s;
+            case PlanNode.RecursiveUnion r -> new PlanNode.RecursiveUnion(r.id(), r.name(), children.get(0),
+                    children.get(1), r.all());
+            case PlanNode.WorkingTableScan w -> w;
+            case PlanNode.LateralJoin l -> new PlanNode.LateralJoin(l.id(), children.get(0), children.get(1), l.type());
         };
+    }
+
+    /**
+     * Applies a mapping to the expressions of every node of a plan, see
+     * {@link #mapExpressions}, from the leaves up; a plan the mapping does
+     * not change comes back as it is.
+     *
+     * @param rebuilt takes each node of the plan and the node that takes its place, which may be the same
+     */
+    public static PlanNode mapAllExpressions(PlanNode node, UnaryOperator<Expression> mapping,
+            BiConsumer<PlanNode, PlanNode> rebuilt) {
+        List<PlanNode> children = new ArrayList<>();
+        boolean changed = false;
+        for (PlanNode child : node.children()) {
+            PlanNode c = mapAllExpressions(child, mapping, rebuilt);
+            changed |= c != child;
+            children.add(c);
+        }
+        PlanNode result = changed ? withChildren(node, children) : node;
+        List<Expression> before = expressions(result);
+        PlanNode mapped = mapExpressions(result, mapping);
+        if (!changed && expressions(mapped).equals(before)) {
+            mapped = node;
+        }
+        rebuilt.accept(node, mapped);
+        return mapped;
+    }
+
+    /** Tells whether a plan reads a value of the left row of a lateral join, which a source cannot. */
+    public static boolean readsOuter(PlanNode plan) {
+        for (PlanNode n : nodes(plan)) {
+            for (Expression e : expressions(n)) {
+                if (!Expressions.allMatch(e, x -> !(x instanceof Expression.Outer))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Returns the columns of the left input of a lateral join that the {@link Expression.Outer}s of its id read. */
+    public static BitSet outerSlots(PlanNode right, int id) {
+        BitSet slots = new BitSet();
+        for (PlanNode n : nodes(right)) {
+            for (Expression e : expressions(n)) {
+                Expressions.allMatch(e, x -> {
+                    if (x instanceof Expression.Outer o && o.id() == id) {
+                        slots.set(o.slot());
+                    }
+                    return true;
+                });
+            }
+        }
+        return slots;
     }
 
     /**
@@ -305,6 +366,11 @@ public final class Plans {
             case PlanNode.CommonTable t -> sb.append("CommonTable ").append(t.name()).append(" #").append(t.id());
             case PlanNode.CommonTableScan s -> sb.append("CommonTableScan ").append(s.name()).append(" #")
                     .append(s.id()).append(' ').append(s.columns()).append(' ').append(fields(s.schema()));
+            case PlanNode.RecursiveUnion r -> sb.append("RecursiveUnion ").append(r.name()).append(" #")
+                    .append(r.id()).append(r.all() ? " ALL" : "");
+            case PlanNode.WorkingTableScan w -> sb.append("WorkingTableScan ").append(w.name()).append(" #")
+                    .append(w.id()).append(' ').append(fields(w.schema()));
+            case PlanNode.LateralJoin l -> sb.append("LateralJoin ").append(l.type()).append(" #").append(l.id());
         }
         sb.append('\n');
         for (PlanNode child : node.children()) {

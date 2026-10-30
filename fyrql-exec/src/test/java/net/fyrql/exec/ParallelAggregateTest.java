@@ -226,6 +226,12 @@ class ParallelAggregateTest {
             if (random.nextBoolean()) {
                 calls.add(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "nf").withFilter(KEYS));
             }
+            if (random.nextBoolean()) {
+                // Of equal keys the first row, also over keys -0.0 and 0.0.
+                calls.add(AggregateCall.of(random.nextBoolean() ? AggregateFunction.ARG_MIN : AggregateFunction.ARG_MAX,
+                        KEYS + random.nextInt(VALUE_TYPES.size()), random.nextInt(3) == 0 ? 3
+                        : KEYS + random.nextInt(VALUE_TYPES.size()), false, "g"));
+            }
             PlanNode input = random.nextBoolean() ? scan
                     : new PlanNode.Filter(scan, gt(col(SCHEMA, 2), lit(0L)));
             PlanNode.Aggregate aggregate = new PlanNode.Aggregate(input, keys, calls);
@@ -418,6 +424,35 @@ class ParallelAggregateTest {
     }
 
     @Test
+    void argMinAndArgMaxKeepTheFirstOfEqualKeys() {
+        SplittableRandom random = new SplittableRandom(20261029);
+        Schema schema = Schema.of(new Schema.Field("k", DataType.INTEGER), new Schema.Field("d", DataType.DOUBLE),
+                new Schema.Field("r", DataType.INTEGER));
+        List<Object[]> rows = new ArrayList<>();
+        for (int r = 0; r < 4000; r++) {
+            // Equal keys in every group, zeros of both signs among them, which a later split may bring first.
+            double d = random.nextInt(4) == 0 ? 1.0 : random.nextBoolean() ? -0.0 : 0.0;
+            rows.add(new Object[] {r % 37, random.nextInt(10) == 0 ? null : d, r});
+        }
+        PlanNode.Scan scan = source.table("equal keys", schema, rows, splits(random, rows.size()));
+        List<AggregateCall> calls = List.of(AggregateCall.of(AggregateFunction.ARG_MIN, 2, 1, false, "first_min"),
+                AggregateCall.of(AggregateFunction.ARG_MAX, 2, 1, false, "first_max"),
+                AggregateCall.of(AggregateFunction.ARG_MAX, 1, 2, false, "last"));
+        for (List<Integer> keys : List.of(List.of(0), List.<Integer>of())) {
+            PlanNode.Aggregate aggregate = new PlanNode.Aggregate(scan, keys, calls);
+            Object expected = run(aggregate, 1, true, EXACT);
+            for (int run = 0; run < 10; run++) {
+                for (int threads : new int[] {2, 3, 8}) {
+                    assertSame(expected, run(aggregate, threads, true, EXACT), threads + " threads, run " + run);
+                }
+                scatterBeyond(run % 3);
+                assertSame(expected, run(aggregate, 4, true, EXACT), "rows kept as they are, run " + run);
+                restore();
+            }
+        }
+    }
+
+    @Test
     void floatingPointSumsAndStatisticsDifferInTheLastBitsOnly() {
         SplittableRandom random = new SplittableRandom(11);
         Schema schema = Schema.of(DataType.INTEGER, DataType.DOUBLE, DataType.FLOAT);
@@ -435,7 +470,12 @@ class ParallelAggregateTest {
                 new AggregateCall(AggregateFunction.STDDEV_SAMP, 1, false, "sd"),
                 new AggregateCall(AggregateFunction.VAR_POP, 2, false, "vf"),
                 new AggregateCall(AggregateFunction.VAR_SAMP, 1, false, "v"),
-                new AggregateCall(AggregateFunction.STDDEV_POP, 2, false, "sdf")));
+                new AggregateCall(AggregateFunction.STDDEV_POP, 2, false, "sdf"),
+                AggregateCall.of(AggregateFunction.COVAR_SAMP, 1, 2, false, "cs"),
+                AggregateCall.of(AggregateFunction.CORR, 2, 1, false, "c"),
+                AggregateCall.of(AggregateFunction.REGR_SLOPE, 1, 2, false, "rs"),
+                AggregateCall.of(AggregateFunction.REGR_INTERCEPT, 1, 2, false, "ri"),
+                AggregateCall.of(AggregateFunction.REGR_R2, 2, 1, false, "rr")));
         @SuppressWarnings("unchecked")
         List<List<Object>> expected = (List<List<Object>>) run(aggregate, 1, true, 1);
         @SuppressWarnings("unchecked")
@@ -443,10 +483,11 @@ class ParallelAggregateTest {
         assertEquals(expected.size(), actual.size());
         for (int i = 0; i < expected.size(); i++) {
             assertEquals(expected.get(i).get(0), actual.get(i).get(0));
-            for (int c = 1; c < 8; c++) {
+            for (int c = 1; c < expected.get(i).size(); c++) {
                 double e = ((Number) expected.get(i).get(c)).doubleValue();
                 double a = ((Number) actual.get(i).get(c)).doubleValue();
-                assertEquals(e, a, Math.ulp(e) * 64, "row " + i + " column " + c);
+                // A correlation near 0 loses digits to cancellation, which the order of combining changes.
+                assertEquals(e, a, c < 8 ? Math.ulp(e) * 64 : Math.abs(e) * 1e-9, "row " + i + " column " + c);
             }
         }
     }

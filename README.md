@@ -34,13 +34,14 @@ warehouse first.
   pages no row of which can pass, and a partitioned table the files; what spans sources
   runs in the engine.
   See [Optimizer](docs/manual.md#optimizer).
-- **Analytical SQL.** Joins, grouping, also by `ROLLUP`, `CUBE` and `GROUPING SETS`,
-  aggregates with `FILTER`, also standard deviations and variances, subqueries that are
-  turned into joins, also correlated ones and with `ANY` and `ALL`, common tables that
-  run once for all their reads, window functions with all frames of DuckDB, set
-  operations and nested types, executed over columnar batches by a vectorized
-  interpreter, with whole pipelines compiled at run time by Janino, on all cores, and
-  spilling to disk above a memory budget. See
+- **Analytical SQL.** Joins, also lateral ones, grouping, also by `ROLLUP`, `CUBE` and
+  `GROUPING SETS`, aggregates with `FILTER`, also standard deviations, correlations,
+  regressions, `arg_min`/`arg_max`, `median`, quantiles, `percentile_cont ... WITHIN
+  GROUP` and `mode`, subqueries that are turned into joins, also correlated ones and with
+  `ANY` and `ALL`, common tables that run once for all their reads, `WITH RECURSIVE`,
+  window functions with all frames of DuckDB, set operations and nested types, executed
+  over columnar batches by a vectorized interpreter, with whole pipelines compiled at run
+  time by Janino, on all cores, and spilling to disk above a memory budget. See
   [Supported SQL](docs/manual.md#supported-sql),
   [Code generation](docs/manual.md#code-generation) and
   [Parallel execution](docs/manual.md#parallel-execution).

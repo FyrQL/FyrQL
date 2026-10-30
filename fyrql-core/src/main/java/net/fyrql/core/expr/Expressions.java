@@ -378,7 +378,7 @@ public final class Expressions {
      * {@linkplain net.fyrql.core.function.ScalarFunction#foldable() foldable}.
      */
     public static boolean isConstant(Expression e) {
-        return allMatch(e, x -> !(x instanceof Expression.Column) && !isRandom(x)
+        return allMatch(e, x -> !(x instanceof Expression.Column) && !(x instanceof Expression.Outer) && !isRandom(x)
                 && !(x instanceof Expression.Call c && !c.function().foldable()));
     }
 
@@ -426,6 +426,7 @@ public final class Expressions {
         return switch (e) {
             case Expression.Literal l -> l;
             case Expression.Column col -> col;
+            case Expression.Outer o -> o;
             case Expression.Arithmetic a -> new Expression.Arithmetic(a.op(), c.get(0), c.get(1));
             case Expression.Negate n -> new Expression.Negate(c.get(0));
             case Expression.Comparison cm -> new Expression.Comparison(cm.op(), c.get(0), c.get(1));

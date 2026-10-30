@@ -30,6 +30,7 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,8 +40,11 @@ import java.util.function.LongConsumer;
  * The value of one aggregate over the rows added to it, with boxed values:
  * sums of integers are exact 128-bit values, sums of decimals keep their
  * scale, and {@code avg} is a double, as are the standard deviations and
- * variances, from {@link Moments} over the values as doubles.
- * {@code DISTINCT} skips the values
+ * variances, from {@link Moments} over the values as doubles, and the
+ * covariances, correlations and regressions from {@link CoMoments}; the
+ * quantiles keep their values in {@link Quantiles}, {@code mode} counts
+ * each distinct value, in the order in which they come.
+ * {@code DISTINCT} skips the values, or pairs of values,
  * seen before; an aggregate with an {@code ORDER BY} keeps its values with
  * their sort keys and accumulates them in that order at the end, with a
  * stable sort.
@@ -54,6 +58,8 @@ final class ValueAccumulator {
     private final LongConsumer reserve;
     private final AggregateFunction function;
     private final DataType type;
+    /** The type of the second column of a function of two, {@code null} for the others. */
+    private final DataType secondType;
     private final DataType resultType;
     private final Set<RowKey> seen;
     /** The values with their sort keys, for an ordered aggregate; {@code null} otherwise. */
@@ -68,7 +74,15 @@ final class ValueAccumulator {
     private BigDecimal decimalSum;
     /** The mean and the sum of squared differences of a statistic, see {@link Moments}. */
     private final double[] moments = new double[2];
+    /** The state of a covariance, see {@link CoMoments}; {@code null} for the other functions. */
+    private final double[] coMoments;
     private Object extreme;
+    /** The key of the value of {@code arg_min} and {@code arg_max}. */
+    private Object extremeKey;
+    /** The values of a quantile; {@code null} for the other functions. */
+    private final Quantiles quantiles;
+    /** The count of each distinct value of {@code mode}, in the order of their first rows; {@code null} otherwise. */
+    private final LinkedHashMap<RowKey, Frequency> frequencies;
     private boolean bool;
     private List<Object> values;
 
@@ -85,6 +99,10 @@ final class ValueAccumulator {
         this.reserve = reserve;
         this.function = call.function();
         this.type = function == AggregateFunction.COUNT_STAR ? null : input.type(call.column());
+        this.secondType = call.second() < 0 ? null : input.type(call.second());
+        this.coMoments = function.isCovariance() ? new double[CoMoments.SIZE] : null;
+        this.quantiles = function.isQuantile() ? new Quantiles(type) : null;
+        this.frequencies = function == AggregateFunction.MODE ? new LinkedHashMap<>() : null;
         this.resultType = call.type(input);
         this.seen = call.distinct() ? new HashSet<>() : null;
         this.ordered = call.orderBy().isEmpty() ? null : new ArrayList<>();
@@ -101,7 +119,16 @@ final class ValueAccumulator {
      */
     static boolean mergeable(AggregateCall call) {
         return !call.distinct() && call.orderBy().isEmpty() && call.function() != AggregateFunction.STRING_AGG
-                && call.function() != AggregateFunction.LIST;
+                && call.function() != AggregateFunction.LIST && call.function() != AggregateFunction.MODE;
+    }
+
+    /**
+     * Tells whether accumulators of an aggregate merge in the nodes of a
+     * {@link SegmentTree}: those that {@link #mergeable merge}, but for the
+     * quantiles, whose nodes would keep the values of all rows below them.
+     */
+    static boolean mergeableInTrees(AggregateCall call) {
+        return mergeable(call) && !call.function().isQuantile();
     }
 
     /**
@@ -148,7 +175,14 @@ final class ValueAccumulator {
         }
         moments[0] = 0;
         moments[1] = 0;
+        if (coMoments != null) {
+            java.util.Arrays.fill(coMoments, 0);
+        }
         extreme = null;
+        extremeKey = null;
+        if (quantiles != null) {
+            quantiles.clear();
+        }
         bool = function == AggregateFunction.BOOL_AND;
     }
 
@@ -162,26 +196,41 @@ final class ValueAccumulator {
         if (v.isNull(row) && !function.keepsNulls()) {
             return;
         }
+        Vector s = call.second() < 0 ? null : b.column(call.second());
+        if (s != null && s.isNull(row)) {
+            return;
+        }
         Object value = v.get(row);
-        if (seen != null && !seen.add(new RowKey(new Object[] {Keys.canonical(value)}))) {
+        Object second = s == null ? null : s.get(row);
+        if (seen != null && !seen.add(new RowKey(s == null ? new Object[] {Keys.canonical(value)}
+                : new Object[] {Keys.canonical(value), Keys.canonical(second)}))) {
             return;
         }
         if (ordered == null) {
-            accept(value);
+            accept(value, second);
             return;
         }
         reserve.accept(BYTES_PER_VALUE);
-        Object[] entry = new Object[1 + call.orderBy().size()];
+        Object[] entry = new Object[2 + call.orderBy().size()];
         entry[0] = value;
+        entry[1] = second;
         for (int k = 0; k < call.orderBy().size(); k++) {
-            entry[k + 1] = b.column(call.orderBy().get(k).column()).get(row);
+            entry[k + 2] = b.column(call.orderBy().get(k).column()).get(row);
         }
         ordered.add(entry);
     }
 
-    /** Accumulates one value; {@code null} only for the functions that keep {@code NULL}s. */
-    private void accept(Object value) {
+    /**
+     * Accumulates one value, with the value of the second column of a
+     * function of two; {@code null} only for the functions that keep
+     * {@code NULL}s.
+     */
+    private void accept(Object value, Object second) {
         count++;
+        if (coMoments != null) {
+            CoMoments.add(coMoments, 0, count, ((Number) value).doubleValue(), ((Number) second).doubleValue());
+            return;
+        }
         switch (function) {
             case SUM, AVG -> {
                 if (type instanceof Decimal) {
@@ -207,6 +256,26 @@ final class ValueAccumulator {
             case BOOL_OR -> bool |= (Boolean) value;
             case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
                     Moments.add(moments, 0, count, ((Number) value).doubleValue());
+            case ARG_MIN, ARG_MAX -> {
+                int c = count == 1 ? 0 : Order.compare(second, extremeKey, secondType);
+                if (count == 1 || (function == AggregateFunction.ARG_MIN ? c < 0 : c > 0)) {
+                    extreme = value;
+                    extremeKey = second;
+                }
+            }
+            case QUANTILE_CONT, QUANTILE_DISC -> {
+                reserve.accept(BYTES_PER_VALUE);
+                quantiles.add(value);
+            }
+            case MODE -> {
+                Frequency f = frequencies.get(new RowKey(new Object[] {Keys.canonical(value)}));
+                if (f == null) {
+                    reserve.accept(BYTES_PER_VALUE);
+                    frequencies.put(new RowKey(new Object[] {Keys.canonical(value)}), new Frequency(value, 1));
+                } else {
+                    f.count++;
+                }
+            }
             case STRING_AGG, LIST -> {
                 if (values == null) {
                     values = new ArrayList<>();
@@ -273,7 +342,21 @@ final class ValueAccumulator {
             case BOOL_OR -> bool |= other.bool;
             case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
                     Moments.combine(moments, 0, count, other.moments, 0, other.count);
+            case ARG_MIN, ARG_MAX -> {
+                int c = count == 0 ? 0 : Order.compare(other.extremeKey, extremeKey, secondType);
+                if (count == 0 || (function == AggregateFunction.ARG_MIN ? c < 0 : c > 0)) {
+                    extreme = other.extreme;
+                    extremeKey = other.extremeKey;
+                }
+            }
+            case QUANTILE_CONT, QUANTILE_DISC -> {
+                reserve.accept(BYTES_PER_VALUE * other.quantiles.size());
+                quantiles.addAll(other.quantiles);
+            }
             default -> {
+                if (coMoments != null) {
+                    CoMoments.combine(coMoments, 0, count, other.coMoments, 0, other.count);
+                }
             }
         }
         count += other.count;
@@ -291,7 +374,9 @@ final class ValueAccumulator {
             throw new IllegalStateException("The accumulator of " + call.name() + " has rows already");
         }
         long kept = (other.seen == null ? 0 : other.seen.size()) + (other.ordered == null ? 0 : other.ordered.size())
-                + (other.values == null ? 0 : other.values.size());
+                + (other.values == null ? 0 : other.values.size())
+                + (other.quantiles == null ? 0 : other.quantiles.size())
+                + (other.frequencies == null ? 0 : other.frequencies.size());
         if (kept > 0) {
             reserve.accept(BYTES_PER_VALUE * kept);
         }
@@ -304,7 +389,19 @@ final class ValueAccumulator {
         decimalSum = other.decimalSum;
         moments[0] = other.moments[0];
         moments[1] = other.moments[1];
+        if (coMoments != null) {
+            System.arraycopy(other.coMoments, 0, coMoments, 0, CoMoments.SIZE);
+        }
         extreme = other.extreme;
+        extremeKey = other.extremeKey;
+        if (quantiles != null) {
+            quantiles.addAll(other.quantiles);
+        }
+        if (frequencies != null) {
+            for (var e : other.frequencies.entrySet()) {
+                frequencies.put(e.getKey(), new Frequency(e.getValue().value, e.getValue().count));
+            }
+        }
         bool = other.bool;
         values = other.values == null ? null : new ArrayList<>(other.values);
         if (seen != null) {
@@ -320,7 +417,7 @@ final class ValueAccumulator {
         if (ordered != null) {
             ordered.sort(comparator());
             for (Object[] entry : ordered) {
-                accept(entry[0]);
+                accept(entry[0], entry[1]);
             }
             ordered.clear();
         }
@@ -367,14 +464,37 @@ final class ValueAccumulator {
                 }
                 yield doubleSum / count;
             }
-            case MIN, MAX, FIRST, LAST, ANY_VALUE -> extreme;
+            case MIN, MAX, FIRST, LAST, ANY_VALUE, ARG_MIN, ARG_MAX -> extreme;
+            case CORR, COVAR_POP, COVAR_SAMP, REGR_COUNT, REGR_SLOPE, REGR_INTERCEPT, REGR_R2, REGR_AVGX, REGR_AVGY,
+                    REGR_SXX, REGR_SYY, REGR_SXY -> CoMoments.value(function, coMoments, 0, count);
             case BOOL_AND, BOOL_OR -> count == 0 ? null : bool;
             case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
                     Moments.isNull(function, count) ? null : Moments.value(function, count, moments[1]);
+            case QUANTILE_CONT, QUANTILE_DISC -> quantiles.result(function, call.fractions());
+            case MODE -> {
+                Frequency best = null;
+                for (Frequency f : frequencies.values()) {
+                    if (best == null || f.count > best.count) {
+                        best = f;
+                    }
+                }
+                yield best == null ? null : best.value;
+            }
             case LIST -> values;
             case STRING_AGG -> values == null || call.separator() == null ? null
                     : String.join(call.separator(), values.stream().map(String.class::cast).toList());
         };
+    }
+
+    /** A value of {@code mode}, the first of its equals, and how often it came. */
+    private static final class Frequency {
+        private final Object value;
+        private long count;
+
+        Frequency(Object value, long count) {
+            this.value = value;
+            this.count = count;
+        }
     }
 
     /** Orders the entries by their sort keys, with the direction and the place of {@code NULL} of each. */
@@ -383,8 +503,8 @@ final class ValueAccumulator {
         return (x, y) -> {
             for (int k = 0; k < keys.size(); k++) {
                 SortKey key = keys.get(k);
-                Object a = x[k + 1];
-                Object b = y[k + 1];
+                Object a = x[k + 2];
+                Object b = y[k + 2];
                 int c;
                 if (a == null || b == null) {
                     c = a == null && b == null ? 0 : (a == null) == key.nullsFirst() ? -1 : 1;

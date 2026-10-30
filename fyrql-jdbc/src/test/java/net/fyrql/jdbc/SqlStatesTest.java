@@ -70,8 +70,7 @@ class SqlStatesTest {
                 new String[] {"42883", "SELECT nothing(1)", "Function with name nothing does not exist"},
                 new String[] {"42883", "SELECT substring(1)", "No function matches"},
                 new String[] {"0A000", "TRUNCATE shop.t", " are supported, not TRUNCATE"},
-                new String[] {"0A000", "WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r",
-                        "WITH RECURSIVE is not supported"});
+                new String[] {"0A000", "SELECT 1 MINUS SELECT 1", "Not supported: MINUS"});
         try (Statement s = c.createStatement()) {
             for (String[] k : cases) {
                 SQLException e = assertThrows(SQLException.class, () -> s.executeQuery(k[1]), k[1]);

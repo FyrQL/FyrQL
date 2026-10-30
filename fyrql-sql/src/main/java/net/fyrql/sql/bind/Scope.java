@@ -183,6 +183,17 @@ final class Scope {
         return r;
     }
 
+    /** Resolves a name as {@link #lookup} does, among the columns of this scope only, without the outer one. */
+    Resolved lookupLocal(List<String> name, Position position) {
+        for (int k = Math.min(name.size(), 4); k >= 1; k--) {
+            Column c = find(name.subList(0, k), true, position);
+            if (c != null) {
+                return new Resolved(c, name.subList(k, name.size()));
+            }
+        }
+        return null;
+    }
+
     /**
      * Resolves a name as {@link #resolve} does, but finds nothing where the
      * first part of a name of several parts names no table.

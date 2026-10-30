@@ -17,6 +17,8 @@ import net.fyrql.core.expr.Expressions.Side;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.PlanNode.AggregateCall;
 import net.fyrql.core.plan.PlanNode.AggregateFunction;
+import net.fyrql.core.plan.PlanNode.Fraction;
+import net.fyrql.core.plan.PlanNode.Fractions;
 import net.fyrql.core.plan.PlanNode.NamedExpression;
 import net.fyrql.core.plan.PlanNode.SortKey;
 import net.fyrql.core.plan.Plans;
@@ -39,9 +41,11 @@ import net.fyrql.sql.ast.SqlExpr;
 import net.fyrql.sql.ast.SqlPrinter;
 import net.fyrql.sql.ast.WindowSpec;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -52,25 +56,40 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
+import java.util.function.UnaryOperator;
 
 /** Binds the queries of one statement; see {@link Binder}. */
 final class QueryBinder {
 
     /**
      * A common table expression with the ones visible to its own query, its
-     * id in the plan, and the plan of its query once a query reads it.
+     * id in the plan, and the plan of its query once a query reads it. A
+     * recursive one sees itself; while its query is bound, a read of itself
+     * in its step is a read of the rows of the round before.
      */
     private static final class Cte {
         final Query.CommonTable table;
         final Map<String, Cte> environment;
         final int id;
         PlanNode definition;
+        /** Whether the query of the common table is being bound, and which part of it. */
+        Binding binding = Binding.NONE;
+        /** The id and the columns of the rows of a round, while the step is bound. */
+        int workingId;
+        Schema workingSchema;
+        /** Whether the step read the rows of the round before. */
+        boolean readsItself;
 
         Cte(Query.CommonTable table, Map<String, Cte> environment, int id) {
             this.table = table;
             this.environment = environment;
             this.id = id;
         }
+    }
+
+    /** The part of the query of a recursive common table that is being bound. */
+    private enum Binding {
+        NONE, ANCHOR, STEP, OTHER
     }
 
     /** The plan of a {@code FROM} clause with its columns. */
@@ -138,6 +157,46 @@ final class QueryBinder {
     private final Map<PlanNode, BitSet> untypedNulls = new IdentityHashMap<>();
     /** The ids given to the common tables of the statement so far. */
     private int commonTables;
+    /** The lateral joins whose right input is being bound, the innermost first, see {@link Lateral}. */
+    private final Deque<Lateral> laterals = new ArrayDeque<>();
+    private int lateralJoins;
+
+    /**
+     * The left input of a join whose right input is being bound: a name the
+     * queries of the right input do not find, of a column of the left input,
+     * is the value of the left row, an {@link Expression.Outer}; one beyond,
+     * of a lateral join around this one, resolves as there.
+     */
+    private final class Lateral implements Scope.Outer {
+        final int id;
+        final Relation left;
+        final Scope.Outer around;
+        boolean read;
+
+        Lateral(int id, Relation left, Scope.Outer around) {
+            this.id = id;
+            this.left = left;
+            this.around = around;
+        }
+
+        @Override
+        public Scope.Resolved resolve(List<String> name, Position position) {
+            if (left.scope().lookupLocal(name, position) == null) {
+                return around == null ? null : around.resolve(name, position);
+            }
+            Expression value = new ExpressionBinder(context, left.scope(), Map.of(), "", null)
+                    .bind(new SqlExpr.Identifier(name, position));
+            int width = left.plan().schema().size();
+            if (!Expressions.allMatch(value, x -> !(x instanceof Expression.Column c) || c.index() < width)) {
+                throw new SqlException("Not supported: a reference to a query more than one level out of a subquery",
+                        position);
+            }
+            read = true;
+            Expression outer = Expressions.transform(value, x -> x instanceof Expression.Column c
+                    ? new Expression.Outer(id, c.index(), c.type()) : x);
+            return new Scope.Resolved(new Scope.Column(null, name.get(name.size() - 1), outer, false), List.of());
+        }
+    }
     /** The views whose queries are being bound, inside one another. */
     private final Set<TableRef> viewsInUse = new HashSet<>();
 
@@ -167,9 +226,10 @@ final class QueryBinder {
             if (!names.add(SqlTrees.key(ct.name()))) {
                 throw new SqlException("Duplicate CTE name \"" + ct.name() + "\"", ct.position());
             }
-            Cte cte = new Cte(ct, environment, ++commonTables);
-            defined.add(cte);
             Map<String, Cte> next = new HashMap<>(environment);
+            // A recursive common table sees itself.
+            Cte cte = new Cte(ct, ct.recursive() ? next : environment, ++commonTables);
+            defined.add(cte);
             next.put(SqlTrees.key(ct.name()), cte);
             environment = next;
         }
@@ -233,7 +293,7 @@ final class QueryBinder {
         for (PlanNode n : Plans.nodes(plan)) {
             if (n instanceof PlanNode.Aggregate || n instanceof PlanNode.Join || n instanceof PlanNode.Window
                     || n instanceof PlanNode.Sort || n instanceof PlanNode.SetOperation
-                    || n instanceof PlanNode.Union) {
+                    || n instanceof PlanNode.Union || n instanceof PlanNode.RecursiveUnion) {
                 return true;
             }
         }
@@ -273,8 +333,97 @@ final class QueryBinder {
 
     /** Binds the query of a common table, with the names of its column list. */
     private PlanNode definition(Cte cte) {
-        PlanNode plan = query(cte.table.query(), cte.environment);
-        return rename(plan, cte.table.columns(), cte.table.name(), cte.table.position());
+        if (cte.table.recursive()) {
+            PlanNode recursion = recursion(cte);
+            if (recursion != null) {
+                return recursion;
+            }
+        }
+        Binding outer = cte.binding;
+        cte.binding = cte.table.recursive() ? Binding.OTHER : Binding.NONE;
+        // A common table reads no left row of a lateral join where a query reads it.
+        List<Lateral> around = new ArrayList<>(laterals);
+        laterals.clear();
+        try {
+            PlanNode plan = query(cte.table.query(), cte.environment);
+            return rename(plan, cte.table.columns(), cte.table.name(), cte.table.position());
+        } finally {
+            cte.binding = outer;
+            laterals.addAll(around);
+        }
+    }
+
+    /**
+     * Binds the query of a common table of {@code WITH RECURSIVE} that is
+     * {@code anchor UNION [ALL] step} and whose step reads it, as DuckDB
+     * does: the anchor may not read it, the step any number of times; the
+     * columns have the names of the anchor, or of the column list as far as
+     * it goes, and its types, to which the step is cast, but where the anchor
+     * has a bare {@code NULL}. Returns {@code null} for a query of another
+     * form, or whose step does not read the common table, which is bound as
+     * any query.
+     */
+    private PlanNode recursion(Cte cte) {
+        Query q = cte.table.query();
+        if (!(q.body() instanceof QueryBody.SetOperation s) || s.kind() != QueryBody.SetKind.UNION
+                || !q.with().isEmpty()) {
+            return null;
+        }
+        Position position = cte.table.position();
+        if (q.limit() != null || q.offset() != null) {
+            throw new SqlException("LIMIT or OFFSET in a recursive query is not allowed", position);
+        }
+        if (!q.orderBy().isEmpty()) {
+            throw new SqlException("ORDER BY in a recursive query is not allowed", position);
+        }
+        Binding outer = cte.binding;
+        try {
+            cte.binding = Binding.ANCHOR;
+            PlanNode anchor = body(s.left(), cte.environment);
+            List<String> names = cte.table.columns();
+            anchor = rename(anchor, names.subList(0, Math.min(names.size(), anchor.schema().size())),
+                    cte.table.name(), position);
+            BitSet anchorNulls = untypedNulls(anchor);
+            PlanNode step = step(cte, s, anchor);
+            if (step == null) {
+                return null;
+            }
+            if (step.schema().size() != anchor.schema().size()) {
+                throw new SqlException(
+                        "Set operations can only apply to expressions with the same number of result columns",
+                        position(s.right()));
+            }
+            // A bare NULL of the anchor takes the type of the step, which then reads rows of that type.
+            List<DataType> types = new ArrayList<>(anchor.schema().types());
+            BitSet stepNulls = untypedNulls(step);
+            boolean retyped = false;
+            for (int i = 0; i < types.size(); i++) {
+                if (anchorNulls.get(i) && !stepNulls.get(i) && !types.get(i).equals(step.schema().type(i))) {
+                    types.set(i, step.schema().type(i));
+                    retyped = true;
+                }
+            }
+            if (retyped) {
+                anchor = castColumns(anchor, types, anchorNulls);
+                step = step(cte, s, anchor);
+                stepNulls = untypedNulls(step);
+            }
+            step = castColumns(step, anchor.schema().types(), stepNulls);
+            return new PlanNode.RecursiveUnion(cte.workingId, cte.table.name(), anchor, step, s.all());
+        } finally {
+            cte.binding = outer;
+        }
+    }
+
+    /** Binds the step of a recursion over the rows of the anchor, or returns {@code null} if it does not read them. */
+    private PlanNode step(Cte cte, QueryBody.SetOperation s, PlanNode anchor) {
+        cte.binding = Binding.STEP;
+        cte.workingId = ++commonTables;
+        cte.workingSchema = anchor.schema();
+        cte.readsItself = false;
+        PlanNode step = body(s.right(), cte.environment);
+        cte.binding = Binding.NONE;
+        return cte.readsItself ? step : null;
     }
 
     PlanNode query(Query q) {
@@ -644,8 +793,9 @@ final class QueryBinder {
                 TableRef table = tableFunction(function, List.of(f.path()), Map.of(), f.position());
                 yield named(scan(table), f.alias(), fileAlias(f.path()), false, f.position());
             }
+            // In the right input of a lateral join, the list may read the left row.
             case FromItem.TableFunctionCall f when unnests(f) -> unnest(new Relation(oneRow(), List.of()),
-                    unnestList(f, Scope.none()), f);
+                    unnestList(f, laterals.isEmpty() ? Scope.none() : Scope.none().withOuter(laterals.peek())), f);
             case FromItem.TableFunctionCall f -> {
                 ExpressionBinder binder = new ExpressionBinder(context, Scope.none(), Map.of(),
                         "The arguments of a table function cannot contain aggregates", null);
@@ -758,21 +908,27 @@ final class QueryBinder {
 
     /**
      * A join with {@code unnest} of a list of the left input, a lateral
-     * reference: each left row once per element of its list. DuckDB also
-     * keeps the rows without elements in a {@code LEFT} join, which FyrQL
-     * does not take yet.
+     * reference: each left row once per element of its list. A {@code LEFT}
+     * join keeps a row without elements, or without any its condition
+     * takes, with a {@code NULL}, as a lateral join of the unnest of the
+     * list of each row.
      */
     private Relation lateralUnnest(FromItem.Join j, Relation left, Expression list) {
         FromItem.TableFunctionCall f = (FromItem.TableFunctionCall) j.right();
         switch (j.kind()) {
             case RIGHT, FULL -> throw new SqlException(
                     "The combining JOIN type must be INNER or LEFT for a LATERAL reference", j.position());
-            case LEFT -> throw new SqlException("Not supported: a LEFT JOIN with a lateral UNNEST", j.position());
             default -> {
                 if (j.natural() || !j.using().isEmpty()) {
                     throw new SqlException("Not supported: NATURAL or USING with a lateral UNNEST", j.position());
                 }
             }
+        }
+        if (j.kind() == FromItem.JoinKind.LEFT) {
+            int id = ++lateralJoins;
+            int width = left.plan().schema().size();
+            Relation unnested = unnest(new Relation(oneRow(), List.of()), outer(list, id, width), f);
+            return lateralJoin(j, left, new Relation(unnested.plan(), unnested.columns()), id);
         }
         Relation result = unnest(left, list, f);
         if (j.on() == null) {
@@ -783,9 +939,111 @@ final class QueryBinder {
         return new Relation(new PlanNode.Filter(result.plan(), on), result.columns());
     }
 
+    /** An expression over the columns of the left input of a lateral join as one over the values of its left row. */
+    private static Expression outer(Expression e, int id, int width) {
+        return Expressions.transform(e, x -> x instanceof Expression.Column c
+                ? c.index() < width ? new Expression.Outer(id, c.index(), c.type())
+                : new Expression.Column(c.index() - width, c.type()) : x);
+    }
+
+    /**
+     * A join whose right input reads the left row: {@code INNER} or
+     * {@code LEFT}, as in DuckDB. A condition of a {@code LEFT} join decides
+     * which right rows match and goes into the right input; that of an
+     * inner join filters the joined rows. A right input of projections and
+     * filters over a part that reads no left row joins as any join, the
+     * conditions over the left row on the join, see {@link #pullUp};
+     * otherwise a {@link PlanNode.LateralJoin} runs it for each left row.
+     */
+    private Relation lateralJoin(FromItem.Join j, Relation left, Relation right, int id) {
+        if (j.kind() == FromItem.JoinKind.RIGHT || j.kind() == FromItem.JoinKind.FULL) {
+            throw new SqlException("The combining JOIN type must be INNER or LEFT for a LATERAL reference",
+                    j.position());
+        }
+        if (j.natural() || !j.using().isEmpty()) {
+            throw new SqlException("Not supported: NATURAL or USING with a LATERAL reference", j.position());
+        }
+        int width = left.plan().schema().size();
+        List<Scope.Column> columns = new ArrayList<>(left.columns());
+        columns.addAll(shift(right.columns(), width));
+        boolean outerJoin = j.kind() == FromItem.JoinKind.LEFT;
+        PlanNode rightPlan = right.plan();
+        Expression filter = null;
+        if (j.on() != null) {
+            Expression on = new ExpressionBinder(context, new Scope(columns, true), Map.of(),
+                    "JOIN clause cannot contain aggregates!", null).condition(j.on());
+            if (outerJoin) {
+                rightPlan = new PlanNode.Filter(rightPlan, outer(on, id, width));
+            } else {
+                filter = on;
+            }
+        }
+        PlanNode plan = outerJoin ? null : pullUp(id, left.plan(), rightPlan);
+        if (plan == null) {
+            plan = new PlanNode.LateralJoin(id, left.plan(), rightPlan,
+                    outerJoin ? PlanNode.JoinType.LEFT : PlanNode.JoinType.INNER);
+        }
+        if (filter != null) {
+            plan = new PlanNode.Filter(plan, filter);
+        }
+        return new Relation(plan, columns);
+    }
+
+    /**
+     * The inner join of a right input that is projections and filters over
+     * a part that reads no left row: a cross join with that part, and the
+     * filters and projections above it, over the left columns too, the
+     * values of the left row as its columns; the optimizer makes the
+     * equalities of the filters keys of the join. Returns {@code null} for a
+     * right input of another form.
+     */
+    private static PlanNode pullUp(int id, PlanNode left, PlanNode right) {
+        List<PlanNode> above = new ArrayList<>();
+        PlanNode base = right;
+        while (base instanceof PlanNode.Project || base instanceof PlanNode.Filter) {
+            above.add(base);
+            base = base.children().get(0);
+        }
+        if (Plans.outerSlots(base, id).cardinality() > 0) {
+            return null;
+        }
+        int width = left.schema().size();
+        UnaryOperator<Expression> joined = e -> Expressions.transform(e, x -> x instanceof Expression.Outer o
+                && o.id() == id ? new Expression.Column(o.slot(), o.type())
+                : x instanceof Expression.Column c ? new Expression.Column(c.index() + width, c.type()) : x);
+        PlanNode plan = new PlanNode.Join(left, base, List.of(), List.of(), PlanNode.JoinType.CROSS);
+        for (int i = above.size() - 1; i >= 0; i--) {
+            if (above.get(i) instanceof PlanNode.Filter f) {
+                plan = new PlanNode.Filter(plan, joined.apply(f.condition()));
+            } else {
+                PlanNode.Project p = (PlanNode.Project) above.get(i);
+                List<NamedExpression> projected = new ArrayList<>();
+                for (int c = 0; c < width; c++) {
+                    projected.add(new NamedExpression(left.schema().name(c),
+                            new Expression.Column(c, left.schema().type(c))));
+                }
+                for (NamedExpression c : p.columns()) {
+                    projected.add(new NamedExpression(c.name(), joined.apply(c.expression())));
+                }
+                plan = new PlanNode.Project(plan, projected);
+            }
+        }
+        return plan;
+    }
+
     private Relation tableName(FromItem.TableName t, Map<String, Cte> ctes) {
         if (t.name().size() == 1) {
             Cte cte = ctes.get(SqlTrees.key(t.name().get(0)));
+            if (cte != null && cte.binding != Binding.NONE) {
+                // A recursive common table reads itself.
+                if (cte.binding != Binding.STEP) {
+                    throw new SqlException("Circular reference to CTE \"" + cte.table.name()
+                            + "\", use WITH RECURSIVE to use recursive CTEs.", t.position());
+                }
+                cte.readsItself = true;
+                PlanNode plan = new PlanNode.WorkingTableScan(cte.workingId, cte.table.name(), cte.workingSchema);
+                return named(plan, t.alias(), cte.table.name(), true, t.position());
+            }
             if (cte != null) {
                 // Bound once; the query decides at its end whether its scans read the rows or bind it each.
                 if (cte.definition == null) {
@@ -823,6 +1081,8 @@ final class QueryBinder {
         CatalogView outer = catalog;
         catalog = view.catalog(statementCatalog);
         PlanNode plan;
+        List<Lateral> around = new ArrayList<>(laterals);
+        laterals.clear();
         try {
             plan = query(view.query(), Map.of());
         } catch (SqlException e) {
@@ -831,6 +1091,7 @@ final class QueryBinder {
         } finally {
             catalog = outer;
             viewsInUse.remove(table);
+            laterals.addAll(around);
         }
         Schema schema = plan.schema();
         if (schema.size() != view.schema().size()) {
@@ -1064,7 +1325,22 @@ final class QueryBinder {
                 return lateralUnnest(j, left, list);
             }
         }
-        Relation right = from(j.right(), ctes);
+        Relation right;
+        if (j.right() instanceof FromItem.Subquery) {
+            // As in DuckDB, a subquery reads the items before it, with LATERAL or without.
+            Lateral lateral = new Lateral(++lateralJoins, left, laterals.peek());
+            laterals.push(lateral);
+            try {
+                right = from(j.right(), ctes);
+            } finally {
+                laterals.pop();
+            }
+            if (lateral.read) {
+                return lateralJoin(j, left, right, lateral.id);
+            }
+        } else {
+            right = from(j.right(), ctes);
+        }
         int lw = left.plan().schema().size();
         int rw = right.plan().schema().size();
         PlanNode.JoinType type = PlanNode.JoinType.valueOf(j.kind().name());
@@ -1246,6 +1522,10 @@ final class QueryBinder {
         if (correlation != null) {
             whereScope = scope.withOuter(correlation);
             scope = scope.withOuter(correlation.outsideWhere());
+        } else if (!laterals.isEmpty()) {
+            // The right input of a lateral join reads the left row anywhere.
+            whereScope = scope.withOuter(laterals.peek());
+            scope = whereScope;
         }
         PlanNode plan = from.plan();
         List<Item> items = unnestStructs(expand(s.items(), scope), scope);
@@ -2447,6 +2727,12 @@ final class QueryBinder {
             throw new SqlException("Function \"" + name + "\" cannot be applied to a star expression", p);
         }
         AggregateFunction function = AggregateFunction.of(name);
+        if (function.isBinary()) {
+            return binaryCall(f, function, outputName, binder, input, schema, filter);
+        }
+        if (function.isQuantile() || function == AggregateFunction.MODE && f.arguments().isEmpty()) {
+            return quantileCall(f, function, outputName, binder, input, schema, filter);
+        }
         int arity = function == AggregateFunction.STRING_AGG ? 2 : 1;
         if (f.arguments().isEmpty() || f.arguments().size() > arity) {
             throw new SqlException("Wrong number of arguments for the aggregate " + name, p);
@@ -2498,6 +2784,187 @@ final class QueryBinder {
             checked.check(columns);
             return checked;
         }, p, "No function matches " + name + "(" + argument.type() + ")");
+    }
+
+    /**
+     * Binds a call of an aggregate of two columns, see
+     * {@link AggregateFunction#isBinary}. As in DuckDB, the covariances,
+     * correlations and regressions take only {@code DOUBLE}s, to which they
+     * cast every number, a bare {@code NULL} too; an {@code ORDER BY} has no
+     * effect on them, nor on {@code arg_min} and {@code arg_max}, but for
+     * which of equal keys comes first.
+     */
+    private AggregateCall binaryCall(SqlExpr.FunctionCall f, AggregateFunction function, String outputName,
+            ExpressionBinder binder, ToIntFunction<Expression> input, Supplier<Schema> schema, int filter) {
+        String name = SqlTrees.key(f.name());
+        Position p = f.position();
+        List<Expression> arguments = new ArrayList<>();
+        for (SqlExpr a : f.arguments()) {
+            ExpressionBinder.Bound bound = binder.bound(a);
+            arguments.add(bound.isNull() && function.isCovariance() ? new Expression.Literal(DataType.DOUBLE, null)
+                    : bound.expression());
+        }
+        String signature = name + "(" + String.join(", ", arguments.stream().map(e -> e.type().toString()).toList())
+                + ")";
+        if (arguments.size() != 2) {
+            throw new SqlException("No function matches " + signature, p);
+        }
+        List<Expression> numbers = new ArrayList<>(arguments);
+        if (function.isCovariance()) {
+            for (int i = 0; i < 2; i++) {
+                DataType t = arguments.get(i).type();
+                if (!t.isNumeric()) {
+                    throw new SqlException("No function matches " + signature, p);
+                }
+                if (t != DataType.DOUBLE) {
+                    arguments.set(i, new Expression.Cast(arguments.get(i), DataType.DOUBLE));
+                }
+            }
+        }
+        int column = input.applyAsInt(arguments.get(0));
+        int second = input.applyAsInt(arguments.get(1));
+        List<SortKey> order = new ArrayList<>();
+        for (OrderItem o : f.orderBy()) {
+            checkOrderLiteral(o.expression());
+            Expression key = binder.bind(o.expression());
+            // A number orders as its DOUBLE does.
+            int keyColumn = input.applyAsInt(key.equals(numbers.get(0)) ? arguments.get(0)
+                    : key.equals(numbers.get(1)) ? arguments.get(1) : key);
+            if (f.distinct() && keyColumn != column && keyColumn != second) {
+                throw new SqlException("In a DISTINCT aggregate, ORDER BY expressions must appear in the argument"
+                        + " list", p);
+            }
+            order.add(new SortKey(keyColumn, o.ascending(), o.nullsFirst()));
+        }
+        AggregateCall call = ExpressionBinder.check(() -> new AggregateCall(function, column, f.distinct(),
+                outputName, null, order, filter, second), p, null);
+        Schema columns = schema.get();
+        return ExpressionBinder.check(() -> {
+            call.check(columns);
+            return call;
+        }, p, "No function matches " + signature);
+    }
+
+    /**
+     * Binds a call of a quantile, {@code median} or the form
+     * {@code WITHIN GROUP (ORDER BY x)} of {@code percentile_cont},
+     * {@code percentile_disc} and {@code mode}, as DuckDB binds them: the
+     * fractions are constant numbers in [-1, 1], a negative one counting from
+     * the largest value, or in [0, 1] for a percentile, whose {@code DESC}
+     * counts from the largest; {@code median} is the continuous quantile at
+     * 0.5 of a type it interpolates, otherwise the discrete one; an
+     * {@code ORDER BY} has no effect on a quantile.
+     */
+    private AggregateCall quantileCall(SqlExpr.FunctionCall f, AggregateFunction function, String outputName,
+            ExpressionBinder binder, ToIntFunction<Expression> input, Supplier<Schema> schema, int filter) {
+        String name = SqlTrees.key(f.name());
+        Position p = f.position();
+        boolean percentile = name.equals("percentile_cont") || name.equals("percentile_disc");
+        boolean ordered = percentile || function == AggregateFunction.MODE;
+        if (ordered && (f.orderBy().size() != 1 || f.arguments().size() != (percentile ? 1 : 0))) {
+            throw new SqlException("Function with name " + name + " does not exist", p);
+        }
+        boolean median = name.equals("median");
+        if (!ordered && f.arguments().size() != (median ? 1 : 2)) {
+            List<String> types = new ArrayList<>();
+            for (SqlExpr a : f.arguments()) {
+                types.add(binder.bind(a).type().toString());
+            }
+            throw new SqlException("No function matches " + name + "(" + String.join(", ", types) + ")", p);
+        }
+        SqlExpr valueText = ordered ? f.orderBy().get(0).expression() : f.arguments().get(0);
+        ExpressionBinder.Bound bound = binder.bound(valueText);
+        Expression value = bound.isNull() ? new Expression.Literal(DataType.INTEGER, null) : bound.expression();
+        AggregateFunction resolved = median && !AggregateFunction.interpolates(value.type())
+                ? AggregateFunction.QUANTILE_DISC : function;
+        Fractions fractions = null;
+        if (median) {
+            fractions = Fractions.of(new Fraction(0.5, new java.math.BigDecimal("0.5")));
+        } else if (resolved.isQuantile()) {
+            SqlExpr text = percentile || ordered ? f.arguments().get(0) : f.arguments().get(1);
+            fractions = fractions(text, percentile, percentile && !f.orderBy().get(0).ascending(), name, value.type());
+        }
+        if (resolved == AggregateFunction.QUANTILE_CONT && !AggregateFunction.interpolates(value.type())) {
+            String fractionType = median ? "" : ", " + new ExpressionBinder(context, Scope.none(), Map.of(),
+                    "", null).bind(percentile ? f.arguments().get(0) : f.arguments().get(1)).type();
+            throw new SqlException("No function matches " + name + "(" + value.type() + fractionType + ")", p);
+        }
+        int column = input.applyAsInt(value);
+        List<SortKey> order = new ArrayList<>();
+        if (function == AggregateFunction.MODE) {
+            // The order of mode() WITHIN GROUP decides which of equally frequent values comes first.
+            OrderItem o = f.orderBy().get(0);
+            order.add(new SortKey(column, o.ascending(), o.nullsFirst()));
+        } else {
+            for (OrderItem o : f.orderBy()) {
+                // DuckDB takes the order of a quantile and ignores it.
+                checkOrderLiteral(o.expression());
+                binder.bind(o.expression());
+            }
+        }
+        Fractions taken = fractions;
+        AggregateCall call = ExpressionBinder.check(() -> new AggregateCall(resolved, column, f.distinct(), outputName,
+                null, order, filter, -1, taken), p, null);
+        Schema columns = schema.get();
+        return ExpressionBinder.check(() -> {
+            call.check(columns);
+            return call;
+        }, p, "No function matches " + name + "(" + value.type() + ")");
+    }
+
+    /**
+     * The fractions of a quantile: a constant number, or a list of them, of
+     * one sign; a negative one counts from the largest value.
+     *
+     * @param percentile whether they are those of {@code percentile_cont} or {@code percentile_disc}, in [0, 1]
+     * @param descending whether a percentile counts from the largest value, by {@code ORDER BY x DESC}
+     */
+    private Fractions fractions(SqlExpr e, boolean percentile, boolean descending, String name, DataType value) {
+        SqlTrees.noParameter(e, "as the fraction of " + name);
+        ExpressionBinder.Bound bound;
+        try {
+            bound = new ExpressionBinder(context, Scope.none(), Map.of(),
+                    "QUANTILE can only take constant parameters", null).bound(e);
+        } catch (SqlException x) {
+            throw new SqlException("QUANTILE can only take constant parameters", e.position());
+        }
+        if (bound.isNull()) {
+            throw new SqlException("QUANTILE argument must not be NULL", e.position());
+        }
+        DataType type = bound.type();
+        boolean list = type instanceof DataType.ListType;
+        DataType element = list ? ((DataType.ListType) type).element() : type;
+        if (!element.isNumeric()) {
+            throw new SqlException("No function matches " + name + "(" + value + ", " + type + ")", e.position());
+        }
+        Object constant = Literals.evaluate(bound.expression(), e.position());
+        List<Object> items = list ? new ArrayList<>((List<?>) constant) : java.util.Collections.singletonList(constant);
+        List<Fraction> values = new ArrayList<>();
+        boolean negative = false;
+        boolean positive = false;
+        for (Object item : items) {
+            if (item == null) {
+                throw new SqlException("QUANTILE parameter cannot be NULL", e.position());
+            }
+            java.math.BigDecimal decimal = element instanceof DataType.Decimal ? (java.math.BigDecimal) item : null;
+            double q = decimal != null ? decimal.unscaledValue().doubleValue() / Math.pow(10, decimal.scale())
+                    : ((Number) item).doubleValue();
+            if (Double.isNaN(q)) {
+                throw new SqlException("QUANTILE parameter cannot be NaN", e.position());
+            }
+            if (percentile ? q < 0 || q > 1 : q < -1 || q > 1) {
+                throw new SqlException(percentile ? "PERCENTILEs can only take parameters in the range [0, 1]"
+                        : "QUANTILE can only take parameters in the range [-1, 1]", e.position());
+            }
+            negative |= q < 0;
+            positive |= q > 0;
+            values.add(new Fraction(Math.abs(q), decimal == null ? null : decimal.abs()));
+        }
+        if (negative && positive) {
+            throw new SqlException("QUANTILE parameters must have consistent signs", e.position());
+        }
+        // DuckDB counts a percentile from the largest value by negating its fractions, which leaves a 0 at 0.
+        return new Fractions(values, list, negative || descending && positive);
     }
 
     /**

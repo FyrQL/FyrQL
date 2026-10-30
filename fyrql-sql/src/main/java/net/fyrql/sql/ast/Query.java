@@ -49,15 +49,24 @@ public record Query(List<CommonTable> with, QueryBody body, List<OrderItem> orde
         DEFAULT, ALWAYS, NEVER
     }
 
-    /** {@code name [(columns)] AS [[NOT] MATERIALIZED] (query)} in a {@code WITH}. */
+    /**
+     * {@code name [(columns)] AS [[NOT] MATERIALIZED] (query)} in a {@code WITH}, which may read itself in a
+     * {@code WITH RECURSIVE}.
+     */
     public record CommonTable(String name, List<String> columns, Query query, Materialized materialized,
-            Position position) {
+            boolean recursive, Position position) {
         public CommonTable {
             Objects.requireNonNull(name, "name");
             columns = List.copyOf(columns);
             Objects.requireNonNull(query, "query");
             Objects.requireNonNull(materialized, "materialized");
             Objects.requireNonNull(position, "position");
+        }
+
+        /** A common table that does not read itself. */
+        public CommonTable(String name, List<String> columns, Query query, Materialized materialized,
+                Position position) {
+            this(name, columns, query, materialized, false, position);
         }
 
         /** A common table without {@code MATERIALIZED} or {@code NOT MATERIALIZED}. */

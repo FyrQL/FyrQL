@@ -116,6 +116,10 @@ class SqlRendererTest {
                 + " mem_main_flags) t0", render(new PlanNode.Aggregate(PlanNode.Scan.all(TableRef.of("mem", "flags"),
                         flags), List.of(), List.of(new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "n")
                                 .withFilter(1)))));
+        // A function of two columns takes both.
+        assertEquals("SELECT arg_max(t0.c1, t0.c0) AS c0 FROM (SELECT \"id\" AS c0, \"ok\" AS c1 FROM mem_main_flags)"
+                + " t0", render(new PlanNode.Aggregate(PlanNode.Scan.all(TableRef.of("mem", "flags"), flags),
+                        List.of(), List.of(AggregateCall.of(AggregateFunction.ARG_MAX, 1, 0, false, "a")))));
         PlanNode values = new PlanNode.Values(customers, List.of(new Object[] {1, "x"}, new Object[] {null, null}));
         assertEquals("SELECT t0.c0 AS c0, t0.c1 AS c1 FROM (VALUES (CAST(1 AS INTEGER), 'x'), "
                 + "(CAST(NULL AS INTEGER), CAST(NULL AS VARCHAR))) t0(c0, c1)", render(values));

@@ -263,15 +263,8 @@ final class ColumnPruning {
                         need.set(g);
                     }
                     for (int i = kept.nextSetBit(groups); i >= 0; i = kept.nextSetBit(i + 1)) {
-                        AggregateCall call = a.aggregates().get(i - groups);
-                        if (call.column() >= 0) {
-                            need.set(call.column());
-                        }
-                        for (SortKey k : call.orderBy()) {
-                            need.set(k.column());
-                        }
-                        if (call.filter() >= 0) {
-                            need.set(call.filter());
+                        for (int c : a.aggregates().get(i - groups).inputColumns()) {
+                            need.set(c);
                         }
                     }
                     Pruned in = prune(a.input(), Need.whole(need));
@@ -332,6 +325,17 @@ final class ColumnPruning {
                 case PlanNode.Window w -> window(w, required);
                 case PlanNode.Values v -> new Pruned(v, identity(v.schema().size()));
                 case PlanNode.Remote r -> new Pruned(r, identity(r.schema().size()));
+                case PlanNode.RecursiveUnion r -> {
+                    // A round reads all columns of the round before, and UNION compares whole rows.
+                    BitSet all = new BitSet();
+                    all.set(0, r.schema().size());
+                    PlanNode anchor = exactly(prune(r.anchor(), Need.whole(all)), all, r.anchor().schema());
+                    PlanNode step = exactly(prune(r.step(), Need.whole(all)), all, r.step().schema());
+                    yield new Pruned(new PlanNode.RecursiveUnion(r.id(), r.name(), anchor, step, r.all()),
+                            identity(r.schema().size()));
+                }
+                case PlanNode.WorkingTableScan w -> new Pruned(w, identity(w.schema().size()));
+                case PlanNode.LateralJoin l -> lateral(l, required);
             };
         }
 
@@ -418,12 +422,8 @@ final class ColumnPruning {
                 if (call.filter() >= 0) {
                     need.whole(call.filter());
                 }
-                AggregateCall a = call.aggregate();
-                if (a != null && a.column() >= 0) {
-                    need.whole(a.column());
-                }
-                for (SortKey k : a == null ? List.<SortKey>of() : a.orderBy()) {
-                    need.whole(k.column());
+                for (int c : call.aggregate() == null ? List.<Integer>of() : call.aggregate().inputColumns()) {
+                    need.whole(c);
                 }
             }
             Pruned in = prune(w.input(), need);
@@ -495,6 +495,44 @@ final class ColumnPruning {
                 mapping[leftWidth] = newLeftWidth;
             }
             return new Pruned(join, mapping, left.fields());
+        }
+
+        /**
+         * A lateral join keeps the columns of its left input in use above it
+         * and those its right input reads of each row, whose places in the
+         * pruned left input the right input then reads.
+         */
+        private Pruned lateral(PlanNode.LateralJoin l, Need required) {
+            int leftWidth = l.left().schema().size();
+            Need needLeft = required.slice(0, leftWidth);
+            BitSet slots = Plans.outerSlots(l.right(), l.id());
+            for (int slot = slots.nextSetBit(0); slot >= 0; slot = slots.nextSetBit(slot + 1)) {
+                needLeft.whole(slot);
+            }
+            Pruned left = prune(l.left(), needLeft);
+            Pruned right = prune(l.right(), required.slice(leftWidth, l.schema().size()));
+            int[] m = left.mapping();
+            PlanNode rightNode = Plans.mapAllExpressions(right.node(), e -> Expressions.transform(e,
+                    x -> x instanceof Expression.Outer o && o.id() == l.id()
+                            ? new Expression.Outer(o.id(), m[o.slot()], o.type()) : x), (before, after) -> {
+                    });
+            int newLeftWidth = left.node().schema().size();
+            int[] pairs = new int[l.schema().size()];
+            for (int i = 0; i < pairs.length; i++) {
+                if (i < leftWidth) {
+                    pairs[i] = m[i];
+                } else {
+                    int r = right.mapping()[i - leftWidth];
+                    pairs[i] = r < 0 ? -1 : newLeftWidth + r;
+                }
+            }
+            Map<Integer, Map<List<String>, Integer>> fields = new HashMap<>(left.fields());
+            for (Map.Entry<Integer, Map<List<String>, Integer>> e : right.fields().entrySet()) {
+                Map<List<String>, Integer> shifted = new HashMap<>();
+                e.getValue().forEach((path, at) -> shifted.put(path, newLeftWidth + at));
+                fields.put(leftWidth + e.getKey(), shifted);
+            }
+            return new Pruned(new PlanNode.LateralJoin(l.id(), left.node(), rightNode, l.type()), pairs, fields);
         }
 
         /**

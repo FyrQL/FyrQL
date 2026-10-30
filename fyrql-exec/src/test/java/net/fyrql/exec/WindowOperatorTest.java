@@ -372,6 +372,15 @@ class WindowOperatorTest {
             for (AggregateFunction f : AggregateFunction.values()) {
                 if (f == AggregateFunction.COUNT_STAR) {
                     calls.add(filtered(new AggregateCall(f, -1, false, "c"), filter, frame));
+                } else if (f.isCovariance()) {
+                    // Over the small columns: sums of x near the ends of a long cancel out in any order.
+                    calls.add(filtered(AggregateCall.of(f, 1, 0, false, f.sqlName()), filter, frame));
+                } else if (f.isBinary()) {
+                    calls.add(filtered(AggregateCall.of(f, 3, 2, false, f.sqlName()), filter, frame));
+                } else if (f.isQuantile()) {
+                    PlanNode.Fractions fractions = new PlanNode.Fractions(List.of(new PlanNode.Fraction(0.25, null),
+                            new PlanNode.Fraction(0.5, new java.math.BigDecimal("0.5"))), true, random.nextBoolean());
+                    calls.add(filtered(AggregateCall.quantile(f, 2, fractions, false, f.sqlName()), filter, frame));
                 } else if (f != AggregateFunction.STRING_AGG && f != AggregateFunction.LIST) {
                     int column = f == AggregateFunction.BOOL_AND || f == AggregateFunction.BOOL_OR ? 3 : 2;
                     calls.add(filtered(new AggregateCall(f, column, false, f.sqlName()), filter, frame));
@@ -391,11 +400,13 @@ class WindowOperatorTest {
                 for (int c = 0; c < s.size() + calls.size(); c++) {
                     Object e = expected.get(r).get(c);
                     Object a = actual.get(r).get(c);
-                    // The trees combine the moments of the statistics in another order than row by row.
-                    if (e instanceof Double x && a instanceof Double y && c >= s.size()
-                            && calls.get(c - s.size()).aggregate().function().isStatistic()) {
-                        assertEquals(x, y, Math.max(Math.abs(x), Math.abs(y)) * 1e-9, what + " row " + r + " "
-                                + calls.get(c - s.size()).name());
+                    // The trees combine the moments of the statistics in another order than row by row; a
+                    // covariance of about 0 is what is left of a cancellation.
+                    AggregateFunction f = c < s.size() ? null : calls.get(c - s.size()).aggregate().function();
+                    if (e instanceof Double x && a instanceof Double y && f != null
+                            && (f.isStatistic() || f.isCovariance()) && !Double.isNaN(x) && !Double.isNaN(y)) {
+                        double delta = Math.max(Math.max(Math.abs(x), Math.abs(y)) * 1e-9, f.isCovariance() ? 1e-9 : 0);
+                        assertEquals(x, y, delta, what + " row " + r + " " + calls.get(c - s.size()).name());
                     } else {
                         assertEquals(e, a, what + " row " + r + " column " + c);
                     }

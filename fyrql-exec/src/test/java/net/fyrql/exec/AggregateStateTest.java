@@ -55,6 +55,11 @@ class AggregateStateTest {
             AggregateFunction.AVG, AggregateFunction.MIN, AggregateFunction.MAX, AggregateFunction.STDDEV_SAMP,
             AggregateFunction.STDDEV_POP, AggregateFunction.VAR_SAMP, AggregateFunction.VAR_POP);
 
+    private static final List<AggregateFunction> BINARY = List.of(AggregateFunction.CORR,
+            AggregateFunction.COVAR_POP, AggregateFunction.COVAR_SAMP, AggregateFunction.REGR_COUNT,
+            AggregateFunction.REGR_SLOPE, AggregateFunction.REGR_INTERCEPT, AggregateFunction.REGR_R2,
+            AggregateFunction.REGR_SXY, AggregateFunction.ARG_MIN, AggregateFunction.ARG_MAX);
+
     private static final Schema SCHEMA = schema();
 
     private static Schema schema() {
@@ -89,6 +94,23 @@ class AggregateStateTest {
                     if (random.nextInt(10) == 0) {
                         call = call.withOrderBy(List.of(SortKey.asc(orderBy)));
                     }
+                    call.check(SCHEMA);
+                } catch (IllegalArgumentException e) {
+                    continue;
+                }
+                calls.add(call);
+            }
+            for (int k = 0; k < 2; k++) {
+                // Functions of two columns: the covariances over the doubles mostly, arg_min and arg_max over any.
+                AggregateFunction function = BINARY.get(random.nextInt(BINARY.size()));
+                int column = 2 + random.nextInt(VALUE_TYPES.size());
+                int second = 2 + random.nextInt(VALUE_TYPES.size());
+                if (function.isCovariance() && random.nextBoolean()) {
+                    column = 2 + VALUE_TYPES.indexOf(random.nextBoolean() ? DataType.DOUBLE : DataType.FLOAT);
+                    second = 2 + VALUE_TYPES.indexOf(DataType.DOUBLE);
+                }
+                AggregateCall call = AggregateCall.of(function, column, second, random.nextInt(10) == 0, "b" + k);
+                try {
                     call.check(SCHEMA);
                 } catch (IllegalArgumentException e) {
                     continue;
@@ -208,6 +230,9 @@ class AggregateStateTest {
         int flt = 2 + VALUE_TYPES.indexOf(DataType.FLOAT);
         assertNotNull(AggregateState.of(new AggregateCall(AggregateFunction.VAR_POP, dbl, false, "x"), s));
         assertNotNull(AggregateState.of(new AggregateCall(AggregateFunction.STDDEV_SAMP, flt, false, "x"), s));
+        assertNotNull(AggregateState.of(AggregateCall.of(AggregateFunction.CORR, flt, dbl, false, "x"), s));
+        assertNotNull(AggregateState.of(AggregateCall.of(AggregateFunction.ARG_MIN, varchar, date, false, "x"), s));
+        assertNull(AggregateState.of(AggregateCall.of(AggregateFunction.REGR_SLOPE, dbl, bigint, false, "x"), s));
         // The binder casts the other numbers to DOUBLE; a plan without it takes the accumulators.
         assertNull(AggregateState.of(new AggregateCall(AggregateFunction.VAR_SAMP, bigint, false, "x"), s));
         assertNull(AggregateState.of(new AggregateCall(AggregateFunction.SUM, huge, false, "x"), s));

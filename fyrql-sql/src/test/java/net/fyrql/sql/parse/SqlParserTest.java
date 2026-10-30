@@ -184,6 +184,17 @@ class SqlParserTest {
 
     @Test
     void functionCalls() {
+        assertEquals("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT (n + 1) FROM r WHERE (n < 3)), s AS"
+                + " (SELECT * FROM r) SELECT * FROM s", print("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1"
+                        + " FROM r WHERE n < 3), s AS (SELECT * FROM r) SELECT * FROM s"));
+        assertTrue(SqlParser.parse("WITH RECURSIVE r AS (SELECT 1), s AS (SELECT 2) SELECT 3").with().stream()
+                .allMatch(net.fyrql.sql.ast.Query.CommonTable::recursive));
+        assertEquals("SELECT percentile_cont(0.25) WITHIN GROUP (ORDER BY a DESC NULLS LAST), percentile_disc("
+                + "list_value(0.5, 0.9)) WITHIN GROUP (ORDER BY b ASC NULLS LAST), mode() WITHIN GROUP (ORDER BY c"
+                + " ASC NULLS LAST), mode(c), median(a), quantile_cont(a, list_value(0.25, 0.75)) FROM t",
+                print("SELECT percentile_cont(0.25) WITHIN GROUP (ORDER BY a DESC), percentile_disc([0.5, 0.9])"
+                        + " WITHIN GROUP (ORDER BY b), mode() WITHIN GROUP (ORDER BY c), mode(c), median(a),"
+                        + " quantile_cont(a, [0.25, 0.75]) FROM t"));
         assertEquals("SELECT count(*), COUNT(DISTINCT a), string_agg(b, ', ' ORDER BY b DESC NULLS LAST, a ASC NULLS"
                 + " FIRST), coalesce(a, b, 1), Upper(x) FROM t",
                 print("SELECT count(*), COUNT(DISTINCT a), string_agg(b, ', ' ORDER BY b DESC, a NULLS FIRST),"
@@ -235,6 +246,8 @@ class SqlParserTest {
         assertEquals("SELECT unnest(l), unnest(list_value(1)) FROM t", print("SELECT unnest(l), unnest([1]) FROM t"));
         assertEquals("Not supported: LATERAL", assertThrows(SqlException.class,
                 () -> SqlParser.parse("SELECT * FROM t, LATERAL read_csv('x.csv')")).reason());
+        assertEquals("SELECT * FROM t CROSS JOIN (SELECT (t.a + 1)) AS q LEFT JOIN (SELECT 2) AS r ON true",
+                print("SELECT * FROM t CROSS JOIN LATERAL (SELECT t.a + 1) q LEFT JOIN (SELECT 2) r ON true"));
     }
 
     @Test
@@ -551,8 +564,12 @@ class SqlParserTest {
     @Test
     void unsupportedFormsAreRejectedWithTheirPosition() {
         Map<String, String> cases = Map.ofEntries(
-                Map.entry("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY a) FROM t",
-                        "Not supported: WITHIN GROUP@1:8"),
+                Map.entry("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY a) OVER () FROM t",
+                        "Not supported: WITHIN GROUP with OVER@1:8"),
+                Map.entry("SELECT sum(a) WITHIN GROUP (ORDER BY a) FROM t", "Unknown ordered aggregate \"sum\".@1:8"),
+                Map.entry("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY a, b) FROM t",
+                        "Cannot use multiple ORDER BY clauses with WITHIN GROUP@1:8"),
+                Map.entry("SELECT mode(a) WITHIN GROUP (ORDER BY a) FROM t", "Wrong number of arguments for MODE@1:8"),
                 Map.entry("SELECT position('a' IN a) OVER () FROM t",
                         "Not supported: this form of arguments of position@1:8"),
                 Map.entry("SELECT s.f(a) OVER () FROM t", "Not supported: qualified function names@1:8"),
@@ -578,8 +595,6 @@ class SqlParserTest {
                 Map.entry("SELECT f(a := 1)", "Not supported: named arguments@1:8"),
                 Map.entry("SELECT CAST(a AS INT[3])", "Arrays of a fixed size are not supported: INT[3]@1:8"),
                 Map.entry("SELECT * FROM a ASOF JOIN b ON a.t >= b.t", "Not supported: ASOF JOIN@1:17"),
-                Map.entry("SELECT * FROM t, LATERAL (SELECT 1)", "Not supported: LATERAL@1:18"),
-                Map.entry("WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r", "WITH RECURSIVE is not supported@1:21"),
                 Map.entry("SELECT 1 MINUS SELECT 1", "Not supported: MINUS@1:10"),
                 Map.entry("SELECT a LIKE 'x' ESCAPE '!'", "Not supported: ESCAPE@1:8"),
                 Map.entry("SELECT a SIMILAR TO 'x'", "Not supported: SIMILAR_TO@1:8"),

@@ -251,7 +251,7 @@ final class TwoEngines implements AutoCloseable {
             rows = other.rows(plan);
         } catch (QueryException e) {
             if (other == spilling && e.getMessage() != null && e.getMessage().startsWith("Memory budget")
-                    && !BudgetFailures.unexpected(plan, e)) {
+                    && !BudgetFailures.unexpected(other, plan, e)) {
                 outOfBudget++;
                 return null;
             }

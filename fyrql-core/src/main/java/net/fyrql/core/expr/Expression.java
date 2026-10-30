@@ -126,6 +126,30 @@ public sealed interface Expression {
     }
 
     /**
+     * A column of the row of the left input of the
+     * {@link net.fyrql.core.plan.PlanNode.LateralJoin} of the same id, in
+     * the plan of its right input. The join puts the value of the row in
+     * its place before that plan runs, so that nothing evaluates it.
+     *
+     * @param id the id of the lateral join
+     * @param slot the column of its left input
+     * @param type the type of the column
+     */
+    record Outer(int id, int slot, DataType type) implements Expression {
+        public Outer {
+            Objects.requireNonNull(type, "type");
+            if (slot < 0) {
+                throw new IllegalArgumentException("slot: " + slot);
+            }
+        }
+
+        @Override
+        public List<Expression> children() {
+            return List.of();
+        }
+    }
+
+    /**
      * {@code + - * / // %} on numeric operands; also a number of days added
      * to or subtracted from a {@code DATE}, and the days between two dates
      * ({@link TypeRules#add}, {@link TypeRules#subtract}).

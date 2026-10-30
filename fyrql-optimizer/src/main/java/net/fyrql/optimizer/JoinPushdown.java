@@ -49,7 +49,7 @@ final class JoinPushdown {
 
     static PlanNode push(PlanNode plan, Function<String, Connector> connectors) {
         String source = source(plan);
-        if (source != null && joins(plan)) {
+        if (source != null && joins(plan) && !Plans.readsOuter(plan)) {
             Connector connector = connectors.apply(source);
             Optional<RemotePlan> remote = connector.planRemote(plan);
             if (remote.isPresent()) {

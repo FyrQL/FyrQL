@@ -13,6 +13,7 @@ package net.fyrql.test.random;
 
 import net.fyrql.FyrQL;
 import net.fyrql.core.expr.Expression;
+import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.Schema;
 import net.fyrql.sql.ast.FromItem;
@@ -112,6 +113,9 @@ final class SqlGenerator {
     /** The standard deviations and variances with their aliases. */
     private static final List<String> STATISTICS = List.of("stddev", "stddev_samp", "stddev_pop", "variance",
             "var_samp", "var_pop");
+
+    private static final List<String> COVARIANCES = List.of("corr", "covar_pop", "covar_samp", "regr_slope",
+            "regr_intercept", "regr_r2", "regr_avgx", "regr_avgy", "regr_sxx", "regr_syy", "regr_sxy");
 
     private final SplittableRandom random;
     private final FyrQL engine;
@@ -258,6 +262,13 @@ final class SqlGenerator {
 
     private static SqlExpr number(long n) {
         return new SqlExpr.Literal(LiteralKind.NUMBER, Long.toString(n), P);
+    }
+
+    /** The fraction of a quantile as written, a decimal or an integer, negative with a minus. */
+    private static SqlExpr fraction(String text) {
+        boolean negative = text.startsWith("-");
+        SqlExpr n = new SqlExpr.Literal(LiteralKind.NUMBER, negative ? text.substring(1) : text, P);
+        return negative ? new SqlExpr.Unary(SqlExpr.UnaryOp.MINUS, n, P) : n;
     }
 
     /** The columns a query gives, learned by binding it in FyrQL, or {@code null} if it does not bind. */
@@ -934,7 +945,7 @@ final class SqlGenerator {
             boolean distinct = chance(20);
             SqlExpr x = text.of(argument);
             List<OrderItem> own = List.of(new OrderItem(x, chance(60), chance(30)));
-            switch (random.nextInt(13)) {
+            switch (random.nextInt(17)) {
                 case 0 -> {
                     return countStar();
                 }
@@ -975,6 +986,43 @@ final class SqlGenerator {
                 case 10 -> {
                     if (t.isNumeric()) {
                         return new SqlExpr.FunctionCall(pick(STATISTICS), List.of(x), distinct, false, List.of(), P);
+                    }
+                }
+                case 13 -> {
+                    Expression y = g.leaf();
+                    if (t.isNumeric() && y.type().isNumeric()) {
+                        return new SqlExpr.FunctionCall(pick(COVARIANCES), List.of(x, text.of(y)), false, false,
+                                List.of(), P);
+                    }
+                }
+                case 14 -> {
+                    // Of equal keys the first row, in both engines; but -0.0 and 0.0 are equal keys of other bits.
+                    Expression arg = g.leaf();
+                    if (plain && !floating && ExpressionGenerator.plain(arg.type())
+                            && !arg.type().isFloatingPoint()) {
+                        return new SqlExpr.FunctionCall(pick(List.of("arg_min", "arg_max", "min_by", "max_by")),
+                                List.of(text.of(arg), x), false, false, List.of(), P);
+                    }
+                }
+                case 15 -> {
+                    // DuckDB takes either of equal values, -0.0 or 0.0, as a quantile.
+                    if (plain && !floating) {
+                        SqlExpr fraction = fraction(pick(List.of("0.5", "0.25", "0.9", "-0.3", "0", "1")));
+                        boolean cont = PlanNode.AggregateFunction.interpolates(t);
+                        return switch (random.nextInt(cont ? 4 : 2)) {
+                            case 0 -> new SqlExpr.FunctionCall("median", List.of(x), distinct, false, List.of(), P);
+                            case 1 -> new SqlExpr.FunctionCall("quantile_disc", List.of(x, fraction), distinct, false,
+                                    List.of(), P);
+                            case 2 -> new SqlExpr.FunctionCall("quantile_cont", List.of(x, fraction), distinct, false,
+                                    List.of(), P);
+                            default -> new SqlExpr.FunctionCall("percentile_cont", List.of(fraction("0.75")),
+                                    false, false, List.of(new OrderItem(x, chance(50), false)), P);
+                        };
+                    }
+                }
+                case 16 -> {
+                    if (plain && !floating && !distinct) {
+                        return new SqlExpr.FunctionCall("mode", List.of(x), false, false, List.of(), P);
                     }
                 }
                 default -> {

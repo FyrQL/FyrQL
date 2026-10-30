@@ -359,6 +359,170 @@ public class SqlCorpusTest {
             "SELECT stddev(x), var_pop(x) FROM (VALUES (0.1), (0.2), (0.3)) v(x)",
             "SELECT a, stddev(a) OVER (ORDER BY a ROWS 1 PRECEDING), var_pop(c) OVER (PARTITION BY k),"
                     + " variance(e) OVER (ORDER BY a ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM t ORDER BY a",
+            // Covariances, correlations, regressions; DuckDB counts the pairs in a UINTEGER
+            "SELECT corr(c, a), covar_pop(c, a), covar_samp(c, e), regr_slope(c, a), regr_intercept(c, a),"
+                    + " regr_r2(c, a), regr_avgx(c, a), regr_avgy(c, a), regr_sxx(c, a), regr_syy(c, a),"
+                    + " regr_sxy(c, a), regr_count(c, a)::BIGINT FROM t",
+            "SELECT k, corr(c, a), covar_samp(a, e), regr_slope(e, a), regr_intercept(c, e), regr_r2(a, c),"
+                    + " regr_count(c, a)::BIGINT FROM t GROUP BY k ORDER BY k",
+            "SELECT corr(m, s), covar_pop(h, g), covar_samp(fl, m), regr_slope(g, s), regr_sxy(fl, h) FROM w",
+            "SELECT corr(c, a) FILTER (WHERE a > 1), round(covar_pop(DISTINCT c, e), 12), regr_avgx(c, a ORDER BY a)"
+                    + " FROM t",
+            "SELECT corr(NULL, a), covar_pop(c, NULL), regr_count(NULL, NULL)::BIGINT FROM t",
+            "SELECT corr(c, a), regr_slope(c, a), covar_samp(c, a), regr_intercept(c, a), regr_sxx(c, a) FROM t"
+                    + " WHERE a = 1",
+            "SELECT corr(x, y), regr_r2(x, y), regr_r2(y, x), regr_slope(y, x), regr_intercept(y, x)"
+                    + " FROM (VALUES (1.0, 2.0), (2.0, 2.0), (3.0, 2.0)) v(x, y)",
+            // DuckDB takes distinct pairs in the order of its hash table, which may change the last bit.
+            "SELECT round(covar_pop(DISTINCT x, y), 12), covar_pop(x, y), regr_count(DISTINCT x, y)::BIGINT"
+                    + " FROM (VALUES (1.0, 2.0), (1.0, 2.0), (2.0, 5.0), (1.0, 3.0)) v(x, y)",
+            "SELECT corr(range::DOUBLE, (range * range)::DOUBLE), covar_samp(range, range * 2) FROM range(1000)",
+            "SELECT a, corr(c, a) OVER (ORDER BY a ROWS 2 PRECEDING), covar_samp(c, e) OVER (PARTITION BY k),"
+                    + " regr_slope(c, a) OVER (ORDER BY a) FROM t ORDER BY a",
+            // arg_min and arg_max: of equal keys the first row, NULLs in either column skipped
+            "SELECT arg_min(b, a), arg_max(b, a), argmin(a, c), argmax(d, c), min_by(c, d), max_by(e, b) FROM t",
+            "SELECT arg_max(a, e), arg_min(a, k), arg_min(a, b), arg_max(c, d), arg_min(k, c) FROM t",
+            "SELECT k, arg_min(b, c), arg_max(a, e), arg_max(DISTINCT b, e) FROM t GROUP BY k ORDER BY k",
+            "SELECT arg_min(m, ts), arg_max(ts, h), arg_min(fl, s), arg_max(s, fl) FROM w",
+            "SELECT arg_min(x, y), arg_max(x, y) FROM (VALUES ('a', [2]), ('b', [1]), ('c', [2])) v(x, y)",
+            "SELECT arg_max(x, y), arg_min(x, y) FROM (VALUES ('a', -0.0), ('b', 0.0)) v(x, y)",
+            "SELECT arg_max(x, y), arg_min(x, y) FROM (VALUES ('a', -0.0), ('b', 'NaN'::DOUBLE), ('c', 1.0)) v(x, y)",
+            "SELECT a, arg_max(b, c) OVER (ORDER BY a), arg_min(a, e) OVER (PARTITION BY k) FROM t ORDER BY a",
+            // Quantiles, median and mode
+            "SELECT median(a), median(c), median(d), median(e), median(b), quantile_cont(c, 0.25),"
+                    + " quantile_disc(c, 0.25), quantile(b, 0.9) FROM t",
+            "SELECT median(m), median(s), median(h), median(g), median(fl), median(ts), quantile_cont(m, 0.333),"
+                    + " quantile_cont(ts, 0.1) FROM w",
+            "SELECT k, median(c), quantile_cont(a, [0.25, 0.5, 0.75]), quantile_disc(d, [0.1, 0.9]), mode(b)"
+                    + " FROM t GROUP BY k ORDER BY k",
+            "SELECT quantile_cont(a, -0.25), quantile_disc(a, -0.25), quantile_cont(c, 0), quantile_cont(c, 1),"
+                    + " quantile_disc(c, 1), quantile_disc(a, [-0.75, -0.25]) FROM t",
+            "SELECT quantile_disc(a, 0.3::DOUBLE), quantile_disc(a, 0.3), quantile_disc(a, 1 / 3),"
+                    + " quantile_cont(a, 0.5 + 0.25), quantile_cont(c, CAST(0.5 AS FLOAT)) FROM t",
+            "SELECT median(DISTINCT e), quantile_cont(DISTINCT e, 0.5), median(c) FILTER (WHERE a > 2),"
+                    + " median(a ORDER BY a DESC) FROM t",
+            "SELECT percentile_cont(0.25) WITHIN GROUP (ORDER BY c), percentile_disc(0.25) WITHIN GROUP"
+                    + " (ORDER BY c DESC), percentile_cont(0.5) WITHIN GROUP (ORDER BY d),"
+                    + " percentile_disc([0.25, 0.75]) WITHIN GROUP (ORDER BY a DESC),"
+                    + " percentile_disc(0) WITHIN GROUP (ORDER BY a DESC) FROM t",
+            "SELECT mode(b), mode(e), mode(k), mode() WITHIN GROUP (ORDER BY b), mode() WITHIN GROUP (ORDER BY b DESC),"
+                    + " mode(e ORDER BY e DESC) FROM t",
+            "SELECT a, median(c) OVER (PARTITION BY k), quantile_disc(b, 0.5) OVER (ORDER BY a ROWS 1 PRECEDING),"
+                    + " mode(e) OVER (ORDER BY a) FROM t ORDER BY a",
+            "SELECT median(x), quantile_cont(x, 0.5), quantile_disc(x, 0.5), mode(x)"
+                    + " FROM (VALUES (1.0), ('NaN'::DOUBLE), (2.0), (2.0)) v(x)",
+            "SELECT median(x), quantile_cont(x, [0.3, 0.7]), quantile_disc(x, [0.3, 0.7])"
+                    + " FROM (VALUES (10), (20), (30), (40)) v(x)",
+            "SELECT median(x) FROM (VALUES (TIMESTAMP '1960-01-01 00:00:00'), (TIMESTAMP '1960-01-01 00:00:00.000003'))"
+                    + " v(x)",
+            "SELECT median(x), median(y), quantile_cont(y, 0.3) FROM (VALUES (DATE '2026-01-01', TIME '10:00:00'),"
+                    + " (DATE '2026-01-04', TIME '11:00:00')) v(x, y)",
+            "SELECT median(x), quantile_cont(x, 0.5) FROM (VALUES (1::DECIMAL(38,0)), (2::DECIMAL(38,0))) v(x)",
+            "SELECT median(NULL), quantile_disc(NULL, 0.5), quantile_cont(c, []) FROM t",
+            "SELECT median(l), quantile_disc(s, 0.5), mode(l) FROM n",
+            // WITH RECURSIVE
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 5) SELECT * FROM r",
+            "WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r",
+            "WITH RECURSIVE r AS (SELECT 1 UNION ALL SELECT \"1\" + 1 FROM r WHERE \"1\" < 3) SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1::INTEGER UNION ALL SELECT n + 1::BIGINT FROM r WHERE n < 3)"
+                    + " SELECT n, typeof(n) FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1::BIGINT UNION ALL SELECT (n + 1)::INTEGER FROM r WHERE n < 3)"
+                    + " SELECT n, typeof(n) FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 0.5 FROM r WHERE n < 3) SELECT n, typeof(n) FROM r",
+            "WITH RECURSIVE r(s) AS (SELECT 'a' UNION ALL SELECT s || 'a' FROM r WHERE length(s) < 3)"
+                    + " SELECT s, typeof(s) FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT NULL UNION ALL SELECT 1 FROM r WHERE n IS NULL) SELECT n, typeof(n) FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT * FROM r LIMIT 5",
+            "WITH RECURSIVE r(a, b) AS (SELECT 0, 1 UNION ALL SELECT b, a + b FROM r WHERE b < 50) SELECT a FROM r",
+            "WITH RECURSIVE emp(id, boss, name) AS (VALUES (1, NULL, 'root'), (2, 1, 'a'), (3, 1, 'b'),"
+                    + " (4, 2, 'c'), (5, 4, 'd')), r(id, name, depth) AS (SELECT id, name, 0 FROM emp"
+                    + " WHERE boss IS NULL UNION ALL SELECT e.id, e.name, r.depth + 1 FROM emp e"
+                    + " JOIN r ON e.boss = r.id) SELECT * FROM r ORDER BY id",
+            "WITH RECURSIVE emp(id, boss, name) AS (VALUES (1, NULL, 'root'), (2, 1, 'a'), (3, 1, 'b'),"
+                    + " (4, 2, 'c'), (5, 4, 'd')), r(id, path) AS (SELECT id, [id] FROM emp WHERE boss IS NULL"
+                    + " UNION ALL"
+                    + " SELECT e.id, list_concat(r.path, [e.id]) FROM emp e, r WHERE e.boss = r.id) SELECT * FROM r"
+                    + " ORDER BY id",
+            "WITH RECURSIVE edge(src, dst) AS (VALUES (1, 2), (2, 3), (3, 1), (3, 4)), r(n) AS (SELECT 1 UNION"
+                    + " SELECT dst FROM edge JOIN r ON src = n) SELECT * FROM r ORDER BY n",
+            "WITH RECURSIVE edge(src, dst) AS (VALUES (1, 2), (2, 3), (3, 1), (3, 4)), r(n) AS (SELECT 1 UNION ALL"
+                    + " SELECT dst FROM edge JOIN r ON src = n) SELECT * FROM r LIMIT 7",
+            "WITH RECURSIVE r(n) AS (VALUES (1), (1) UNION SELECT n FROM r) SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (VALUES (1), (1) UNION ALL SELECT n + 1 FROM r WHERE n < 2) SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT a.n + b.n FROM r a, r b WHERE a.n < 4) SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL (SELECT n + 1 FROM r WHERE n < 3 ORDER BY n LIMIT 1))"
+                    + " SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < (SELECT max(n) FROM r))"
+                    + " SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT x FROM (SELECT n + 1 AS x FROM r) q WHERE x < 4)"
+                    + " SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r LEFT JOIN t ON t.a = r.n WHERE n < 3)"
+                    + " SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3 AND n NOT IN"
+                    + " (SELECT n FROM r)) SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT row_number() OVER () + n FROM r WHERE n < 3)"
+                    + " SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1) SELECT * FROM r",
+            "WITH RECURSIVE a(n) AS (SELECT 1), r(n) AS (SELECT n FROM a UNION ALL SELECT n + 1 FROM r WHERE n < 3)"
+                    + " SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r x"
+                    + " JOIN r y USING (n)",
+            "WITH RECURSIVE r(n, m) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1, 2 UNION ALL SELECT n + 1, 2 FROM r WHERE n < 3) SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3)"
+                    + " SELECT (SELECT sum(n) FROM r), (SELECT count(*) FROM r)",
+            "SELECT * FROM (WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3)"
+                    + " SELECT * FROM r) q",
+            "WITH RECURSIVE r(n) AS MATERIALIZED (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r",
+            "WITH RECURSIVE r(n) AS NOT MATERIALIZED (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3)"
+                    + " SELECT * FROM r x, r y",
+            "WITH RECURSIVE r(n) AS (SELECT a FROM t WHERE a < 3 UNION SELECT n + 2 FROM r WHERE n < 6)"
+                    + " SELECT n, count(*) FROM r GROUP BY n ORDER BY n",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 10000)"
+                    + " SELECT count(*), sum(n) FROM r",
+            // LATERAL, explicit and implicit
+            "SELECT u.a, q.v FROM u, LATERAL (SELECT u.a * 10 AS v) q ORDER BY u.a, q.v",
+            "SELECT u.a, v FROM u, (SELECT u.a * 10 AS v) ORDER BY 1, 2",
+            "SELECT f, v FROM u, (SELECT n + 1 AS v) ORDER BY 1, 2",
+            "SELECT * FROM u, LATERAL (SELECT n * 2 AS twice) ORDER BY ALL",
+            "SELECT u.f, q.b FROM u, LATERAL (SELECT b FROM t WHERE t.a = u.a) q ORDER BY 1, 2",
+            "SELECT u.f, q.a, q.c FROM u, LATERAL (SELECT a, c FROM t WHERE t.k >= u.n ORDER BY c DESC NULLS LAST"
+                    + " LIMIT 2) q ORDER BY 1, 2, 3",
+            "SELECT u.f, q.cnt, q.m FROM u, LATERAL (SELECT count(*) AS cnt, max(c) AS m FROM t WHERE t.a = u.a) q"
+                    + " ORDER BY 1, 2",
+            "SELECT u.f, q.b FROM u LEFT JOIN LATERAL (SELECT b FROM t WHERE t.a = u.a AND b IS NOT NULL ORDER BY b"
+                    + " LIMIT 1) q ON true ORDER BY 1, 2",
+            "SELECT u.f, q.b, q.e FROM u LEFT JOIN LATERAL (SELECT b, e FROM t WHERE t.a <= u.a) q ON q.e > 3"
+                    + " ORDER BY 1, 2, 3",
+            "SELECT u.f, q.b, q.e FROM u JOIN LATERAL (SELECT b, e FROM t WHERE t.a <= u.a) q ON q.e > 3"
+                    + " ORDER BY 1, 2, 3",
+            "SELECT u.f, q.b FROM u CROSS JOIN LATERAL (SELECT b FROM t WHERE t.a = u.a LIMIT 1) q ORDER BY 1, 2",
+            "SELECT u.a, q.v FROM u, LATERAL (SELECT sum(t.a) OVER () + u.n AS v FROM t WHERE t.k = 10 LIMIT 1) q"
+                    + " ORDER BY 1",
+            "SELECT x.a, y.v, z.w FROM u x, LATERAL (SELECT x.a + 1 AS v) y, LATERAL (SELECT y.v * 2 AS w) z"
+                    + " ORDER BY 1",
+            "SELECT x.a, y.v FROM u x, LATERAL (SELECT (SELECT x.a + 1) AS v) y ORDER BY 1",
+            "SELECT x.a, y.v FROM u x, LATERAL (SELECT * FROM (SELECT x.a + 1 AS v) z) y ORDER BY 1",
+            "SELECT x.a, y.v FROM u x, LATERAL (SELECT c AS v FROM t WHERE t.a = x.a UNION ALL SELECT x.n) y"
+                    + " ORDER BY 1, 2",
+            "SELECT x.f, y.b FROM u x, LATERAL (SELECT DISTINCT b FROM t WHERE t.a >= x.a) y ORDER BY 1, 2",
+            "SELECT x.a, y.r FROM u x, LATERAL (SELECT * FROM range(x.a) r(r)) y ORDER BY 1, 2",
+            "SELECT x.a, y.n FROM u x, LATERAL range(x.a) y(n) ORDER BY 1, 2",
+            "SELECT x.a, w.a, w.z FROM u x, LATERAL (SELECT y.a, q.z FROM t y, LATERAL (SELECT x.a + y.a AS z) q) w"
+                    + " ORDER BY 1, 2, 3",
+            "SELECT x.f, y.s FROM u x, LATERAL (SELECT t.b AS s FROM t WHERE t.a = x.a AND t.c = (SELECT max(c)"
+                    + " FROM t t2 WHERE t2.a = x.a)) y ORDER BY 1",
+            "SELECT x.a, count(*) FROM u x, LATERAL (SELECT * FROM t WHERE t.a >= x.a) y GROUP BY x.a ORDER BY 1",
+            "SELECT * FROM LATERAL (SELECT 1 AS x) q",
+            "SELECT a.g, v.x FROM (VALUES (1, [1, 2]), (2, []), (3, NULL)) a(g, l) LEFT JOIN unnest(a.l) v(x) ON true"
+                    + " ORDER BY 1, 2",
+            "SELECT a.g, v.x FROM (VALUES (1, [1, 2]), (2, []), (3, NULL)) a(g, l) LEFT JOIN LATERAL unnest(a.l) v(x)"
+                    + " ON true ORDER BY 1, 2",
+            "SELECT a.g, v.x FROM (VALUES (1, [1, 2]), (2, [])) a(g, l) LEFT JOIN unnest(a.l) v(x) ON v.x > 1"
+                    + " ORDER BY 1, 2",
+            "SELECT a.g, r.n FROM (VALUES (1), (0)) a(g) LEFT JOIN range(a.g) r(n) ON true ORDER BY 1, 2",
+            "SELECT * FROM n LEFT JOIN unnest(n.l) AS u(x) ON true",
+            "SELECT * FROM t LEFT JOIN range(t.a) ON true",
             "SELECT 1, count(*) FROM t GROUP BY ALL",
             "SELECT 1, count(*) FROM t WHERE false GROUP BY ALL",
             "SELECT 'x' AS k, count(*) FROM t WHERE false GROUP BY 1",
@@ -750,6 +914,54 @@ public class SqlCorpusTest {
             Map.entry("SELECT string_agg(b, b) FROM t", "Separator argument to StringAgg must be a constant"),
             Map.entry("SELECT string_agg(b, 1) FROM t", "No function matches string_agg(VARCHAR, INTEGER)"),
             Map.entry("SELECT stddev(b) FROM t", "No function matches stddev(VARCHAR)"),
+            Map.entry("SELECT corr(b, a) FROM t", "No function matches corr(VARCHAR, INTEGER)"),
+            Map.entry("SELECT covar_pop(d, c) FROM t", "No function matches covar_pop(DATE, DOUBLE)"),
+            Map.entry("SELECT corr(c) FROM t", "No function matches corr(DOUBLE)"),
+            Map.entry("SELECT regr_slope(c, a, e) FROM t", "No function matches regr_slope(DOUBLE, INTEGER, TINYINT)"),
+            Map.entry("SELECT arg_min(a) FROM t", "No function matches arg_min(INTEGER)"),
+            Map.entry("WITH RECURSIVE r(n) AS (SELECT 1 UNION SELECT n + 1 FROM r WHERE n < 3 UNION SELECT n + 10"
+                    + " FROM r WHERE n < 3) SELECT * FROM r", "Circular reference to CTE \"r\""),
+            Map.entry("WITH RECURSIVE r(n) AS (SELECT n FROM r UNION ALL SELECT 1) SELECT * FROM r",
+                    "Circular reference to CTE \"r\", use WITH RECURSIVE to use recursive CTEs."),
+            Map.entry("WITH RECURSIVE r(n) AS (SELECT 1 EXCEPT SELECT n + 1 FROM r) SELECT * FROM r",
+                    "Circular reference to CTE \"r\""),
+            Map.entry("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3 ORDER BY n LIMIT 1)"
+                    + " SELECT * FROM r", "LIMIT or OFFSET in a recursive query is not allowed"),
+            Map.entry("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1, 2 FROM r WHERE n < 3) SELECT * FROM r",
+                    "Set operations can only apply to expressions with the same number of result columns"),
+            Map.entry("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT 'x' FROM r WHERE n < 3) SELECT * FROM r",
+                    "Could not convert string 'x' to an integer"),
+            // Without RECURSIVE a common table does not see itself.
+            Map.entry("WITH r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r",
+                    "Table with name r does not exist"),
+            Map.entry("SELECT * FROM u RIGHT JOIN LATERAL (SELECT b FROM t WHERE t.a = u.a) q ON true",
+                    "The combining JOIN type must be INNER or LEFT for a LATERAL reference"),
+            Map.entry("SELECT * FROM u FULL JOIN LATERAL (SELECT b FROM t WHERE t.a = u.a) q ON true",
+                    "The combining JOIN type must be INNER or LEFT for a LATERAL reference"),
+            Map.entry("SELECT * FROM (SELECT q.a) r, (SELECT 1 AS a) q", "Referenced table \"q\" not found!"),
+            Map.entry("SELECT quantile_cont(c, 1.5) FROM t", "QUANTILE can only take parameters in the range [-1, 1]"),
+            Map.entry("SELECT quantile_cont(c, a) FROM t", "QUANTILE can only take constant parameters"),
+            Map.entry("SELECT quantile_cont(c, NULL) FROM t", "QUANTILE argument must not be NULL"),
+            Map.entry("SELECT quantile_cont(c, [0.5, NULL]) FROM t", "QUANTILE parameter cannot be NULL"),
+            Map.entry("SELECT quantile_cont(c, [0.75, -0.25]) FROM t",
+                    "QUANTILE parameters must have consistent signs"),
+            Map.entry("SELECT quantile_cont(c, 'NaN'::DOUBLE) FROM t", "QUANTILE parameter cannot be NaN"),
+            Map.entry("SELECT quantile_cont(b, 0.5) FROM t",
+                    "No function matches quantile_cont(VARCHAR, DECIMAL(2,1))"),
+            Map.entry("SELECT quantile_cont(c) FROM t", "No function matches quantile_cont(DOUBLE)"),
+            Map.entry("SELECT quantile_cont(c, '0.5') FROM t", "No function matches quantile_cont(DOUBLE, VARCHAR)"),
+            Map.entry("SELECT percentile_cont(1.5) WITHIN GROUP (ORDER BY c) FROM t",
+                    "PERCENTILEs can only take parameters in the range [0, 1]"),
+            Map.entry("SELECT percentile_cont(-0.5) WITHIN GROUP (ORDER BY c) FROM t",
+                    "PERCENTILEs can only take parameters in the range [0, 1]"),
+            Map.entry("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c, a) FROM t",
+                    "Cannot use multiple ORDER BY clauses with WITHIN GROUP"),
+            Map.entry("SELECT percentile_cont(0.5, 0.2) WITHIN GROUP (ORDER BY c) FROM t",
+                    "Wrong number of arguments for PERCENTILE_CONT"),
+            Map.entry("SELECT sum(1) WITHIN GROUP (ORDER BY c) FROM t", "Unknown ordered aggregate \"sum\"."),
+            Map.entry("SELECT percentile_cont(c, 0.5) FROM t", "Function with name percentile_cont does not exist"),
+            Map.entry("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c) OVER () FROM t",
+                    "Not supported: WITHIN GROUP with OVER"),
             Map.entry("SELECT var_pop(d) FROM t", "No function matches var_pop(DATE)"),
             Map.entry("SELECT variance('1') FROM t", "No function matches variance(VARCHAR)"),
             Map.entry("SELECT stddev_pop(x) FROM (VALUES (1e200), (2e200)) v(x)", "STDDEV_POP is out of range!"),
@@ -947,6 +1159,11 @@ public class SqlCorpusTest {
                     "For SELECT DISTINCT, ORDER BY expressions must appear in select list"),
             Map.entry("SELECT sqrt('4')", "No function matches sqrt(VARCHAR)"),
             Map.entry("SELECT avg(d) FROM t", "No function matches avg(DATE)"),
+            Map.entry("SELECT * FROM u x NATURAL JOIN LATERAL (SELECT x.a AS a) y",
+                    "Not supported: NATURAL or USING with a LATERAL reference"),
+            // JSqlParser does not read a filter after WITHIN GROUP; the filter goes into the call instead.
+            Map.entry("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c) FILTER (WHERE a > 1) FROM t",
+                    "Syntax error"),
             // A string does not convert to a nested type, a slice is no index, and a list has no fixed size.
             Map.entry("SELECT [1, 2] = '[1, 2]'", "Cannot cast VARCHAR to INTEGER[]"),
             Map.entry("SELECT '[1, 2]'::INTEGER[]", "Cannot cast VARCHAR to INTEGER[]"),
@@ -959,8 +1176,6 @@ public class SqlCorpusTest {
             // struct that an aggregate gives.
             Map.entry("SELECT unnest(l), unnest(ll) FROM n",
                     "Not supported: UNNEST of more than one list in a select list"),
-            Map.entry("SELECT * FROM n LEFT JOIN unnest(n.l) AS u(x) ON true",
-                    "Not supported: a LEFT JOIN with a lateral UNNEST"),
             Map.entry("SELECT unnest(any_value(s)) FROM n",
                     "UNNEST() on a struct column can only be applied as the root element"),
             Map.entry("SELECT unnest(l, recursive := true) FROM n", "Not supported: named arguments"),
@@ -1004,8 +1219,6 @@ public class SqlCorpusTest {
             // does for unnest.
             Map.entry("SELECT * FROM range(TIMESTAMPTZ '2024-01-01', TIMESTAMPTZ '2024-01-04', INTERVAL 1 DAY)",
                     "No function matches range(TIMESTAMP WITH TIME ZONE"),
-            Map.entry("SELECT * FROM t LEFT JOIN range(t.a) ON true",
-                    "Not supported: a LEFT JOIN with a lateral UNNEST"),
             Map.entry("SELECT (SELECT sum(range) FROM range(t.a)) FROM t", "Referenced table \"t\" not found!"),
             Map.entry("SELECT sum(a) OVER (w ORDER BY a) FROM t WINDOW w AS (PARTITION BY b)", "Syntax error"),
             // JSqlParser reads a partition in parentheses as the list of all; ((a % 2)), k it reads.

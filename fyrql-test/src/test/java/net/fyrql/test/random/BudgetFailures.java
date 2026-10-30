@@ -11,6 +11,7 @@
 
 package net.fyrql.test.random;
 
+import net.fyrql.FyrQL;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
 import net.fyrql.exec.Executor;
@@ -29,14 +30,17 @@ final class BudgetFailures {
     private BudgetFailures() {
     }
 
-    /** Tells whether an error is that a join with keys ran out of the budget without spilling. */
-    static boolean unexpected(PlanNode plan, RuntimeException e) {
+    /**
+     * Tells whether an error is that a join with keys ran out of the budget without spilling. The error names
+     * the operator by its place in the plan the engine ran, after optimizing the plan of the query.
+     */
+    static boolean unexpected(FyrQL engine, PlanNode plan, RuntimeException e) {
         if (!(e instanceof QueryException q) || q.getMessage() == null || !q.getMessage().startsWith("Memory budget")
                 || q.getMessage().contains(" after spilling ") || q.operator() == null
                 || !q.operator().startsWith("Join#")) {
             return false;
         }
-        Map<PlanNode, Integer> ids = Plans.ids(plan);
+        Map<PlanNode, Integer> ids = Plans.ids(engine.optimize(plan));
         for (PlanNode node : ids.keySet()) {
             if (node instanceof PlanNode.Join j && Executor.label(j, ids).equals(q.operator())) {
                 return !j.leftKeys().isEmpty();

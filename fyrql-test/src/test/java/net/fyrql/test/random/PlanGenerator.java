@@ -267,6 +267,18 @@ final class PlanGenerator {
             case BOOL_AND, BOOL_OR -> type == DataType.BOOLEAN ? new AggregateCall(f, column, distinct, name) : null;
             case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
                     type.isNumeric() ? new AggregateCall(f, column, distinct, name) : null;
+            case CORR, COVAR_POP, COVAR_SAMP, REGR_SLOPE, REGR_INTERCEPT, REGR_R2, REGR_AVGX, REGR_AVGY, REGR_SXX,
+                    REGR_SYY, REGR_SXY -> type.isNumeric() ? AggregateCall.of(f, column, column, false, name) : null;
+            // DuckDB counts the pairs in a UINTEGER.
+            case REGR_COUNT -> null;
+            case ARG_MIN, ARG_MAX, MODE -> scalar && !floating
+                    ? f == AggregateFunction.MODE ? new AggregateCall(f, column, false, name)
+                    : AggregateCall.of(f, column, column, distinct, name) : null;
+            case QUANTILE_DISC -> scalar && !floating ? AggregateCall.quantile(f, column, PlanNode.Fractions.of(
+                    new PlanNode.Fraction(0.25, new java.math.BigDecimal("0.25"))), distinct, name) : null;
+            case QUANTILE_CONT -> type.isIntegral() || type instanceof DataType.Decimal ? AggregateCall.quantile(f,
+                    column, PlanNode.Fractions.of(new PlanNode.Fraction(0.5, new java.math.BigDecimal("0.5"))),
+                    distinct, name) : null;
             case STRING_AGG, LIST, FIRST, LAST, ANY_VALUE -> {
                 // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.
                 if (floating || !scalar || f == AggregateFunction.LIST && type == DataType.INTERVAL) {
@@ -415,6 +427,8 @@ final class PlanGenerator {
             case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
                     type.isNumeric() ? new AggregateCall(f, column, distinct, name) : null;
             case FIRST, LAST -> total && scalar ? new AggregateCall(f, column, false, name) : null;
+            case CORR, COVAR_POP, COVAR_SAMP, REGR_COUNT, REGR_SLOPE, REGR_INTERCEPT, REGR_R2, REGR_AVGX, REGR_AVGY,
+                    REGR_SXX, REGR_SYY, REGR_SXY, ARG_MIN, ARG_MAX, QUANTILE_CONT, QUANTILE_DISC, MODE -> null;
             case STRING_AGG, LIST, ANY_VALUE -> {
                 // DuckDB's JDBC driver does not read a list of intervals, and may crash on a large one.
                 if (floating || !scalar || f == AggregateFunction.LIST && type == DataType.INTERVAL) {

@@ -17,6 +17,7 @@ import net.fyrql.core.type.DataType;
 import net.fyrql.core.type.DataType.Decimal;
 import net.fyrql.core.type.Schema;
 import net.fyrql.core.type.Values;
+import net.fyrql.core.value.Order;
 import net.fyrql.core.vector.BigIntVector;
 import net.fyrql.core.vector.Batch;
 import net.fyrql.core.vector.BooleanVector;
@@ -46,8 +47,10 @@ import java.util.Arrays;
  * {@code FLOAT} and {@code DOUBLE}, and for {@code min} and {@code max}
  * over these, except decimals of more than 18 digits, and over
  * {@code BOOLEAN}, {@code DATE}, {@code TIMESTAMP}, {@code TIME} and
- * {@code TIMESTAMP WITH TIME ZONE}, and for the standard deviations and
- * variances over {@code FLOAT} and {@code DOUBLE}. Its results are
+ * {@code TIMESTAMP WITH TIME ZONE}, for the standard deviations,
+ * variances, covariances, correlations and regressions over {@code FLOAT}
+ * and {@code DOUBLE}, and for {@code arg_min} and {@code arg_max}, which
+ * keep their values as objects. Its results are
  * those of the aggregation over objects in {@link HashAggregateOperator},
  * which covers the rest: exact sums that grow into a {@code BigInteger}
  * when a {@code long} overflows, the same conversion of a sum to a double
@@ -131,6 +134,11 @@ abstract class AggregateState {
             }
             case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
                     type.isFloatingPoint() ? new Variance(call.column(), function) : null;
+            case CORR, COVAR_POP, COVAR_SAMP, REGR_COUNT, REGR_SLOPE, REGR_INTERCEPT, REGR_R2, REGR_AVGX, REGR_AVGY,
+                    REGR_SXX, REGR_SYY, REGR_SXY -> type.isFloatingPoint()
+                    && input.type(call.second()).isFloatingPoint()
+                    ? new Covariance(call.column(), call.second(), function) : null;
+            case ARG_MIN, ARG_MAX -> new ArgExtreme(call, input);
             default -> null;
         };
     }
@@ -585,6 +593,192 @@ abstract class AggregateState {
         @Override
         Vector finishResult() {
             return DoubleVector.wrap(out, outNulls);
+        }
+    }
+
+    /**
+     * The covariances, correlations and regressions over pairs of
+     * {@code FLOAT}s or {@code DOUBLE}s: a count and the {@link CoMoments}
+     * per group.
+     */
+    private static final class Covariance extends AggregateState {
+        private final int column;
+        private final int second;
+        private final AggregateFunction function;
+        private long[] counts = new long[16];
+        private double[] state = new double[16 * CoMoments.SIZE];
+        private double[] ys = new double[0];
+        private double[] xs = new double[0];
+        private boolean[] yNulls = new boolean[0];
+        private boolean[] xNulls = new boolean[0];
+        private Vector.Builder out;
+
+        Covariance(int column, int second, AggregateFunction function) {
+            this.column = column;
+            this.second = second;
+            this.function = function;
+        }
+
+        @Override
+        void add(Batch b, int[] groupOf, int rows, int groups) {
+            counts = grow(counts, groups);
+            state = grow(state, CoMoments.SIZE * groups);
+            if (ys.length < rows) {
+                ys = new double[rows];
+                xs = new double[rows];
+                yNulls = new boolean[rows];
+                xNulls = new boolean[rows];
+            }
+            readDoubles(b.column(column), rows, ys, yNulls);
+            readDoubles(b.column(second), rows, xs, xNulls);
+            for (int r = 0; r < rows; r++) {
+                if (!yNulls[r] && !xNulls[r]) {
+                    int g = groupOf[r];
+                    CoMoments.add(state, g, ++counts[g], ys[r], xs[r]);
+                }
+            }
+        }
+
+        @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            Covariance o = (Covariance) other;
+            if (o.counts[otherGroup] == 0) {
+                return;
+            }
+            counts = grow(counts, group + 1);
+            state = grow(state, CoMoments.SIZE * (group + 1));
+            CoMoments.combine(state, group, counts[group], o.state, otherGroup, o.counts[otherGroup]);
+            counts[group] += o.counts[otherGroup];
+        }
+
+        @Override
+        void startResult(int groups) {
+            counts = grow(counts, groups);
+            state = grow(state, CoMoments.SIZE * groups);
+            out = Vectors.builder(function == AggregateFunction.REGR_COUNT ? DataType.BIGINT : DataType.DOUBLE,
+                    groups);
+        }
+
+        @Override
+        void result(int group) {
+            out.append(CoMoments.value(function, state, group, counts[group]));
+        }
+
+        @Override
+        Vector finishResult() {
+            return out.build();
+        }
+    }
+
+    /**
+     * {@code arg_min} and {@code arg_max}: per group the value and the key
+     * of the row with the smallest or largest key, as objects; of equal keys
+     * the first, given the places of the rows also over rows that come in
+     * another order.
+     */
+    private static final class ArgExtreme extends AggregateState {
+        private final int column;
+        private final int second;
+        private final DataType type;
+        private final DataType keyType;
+        private final boolean max;
+        private Object[] values = new Object[16];
+        private Object[] keys = new Object[16];
+        private boolean[] has = new boolean[16];
+        /** The place of the row of the value of each group, once rows come with places. */
+        private long[] at;
+        private Vector.Builder out;
+
+        ArgExtreme(AggregateCall call, Schema input) {
+            this.column = call.column();
+            this.second = call.second();
+            this.type = input.type(column);
+            this.keyType = input.type(second);
+            this.max = call.function() == AggregateFunction.ARG_MAX;
+        }
+
+        private void room(int groups) {
+            if (groups > has.length) {
+                int n = Math.max(groups, has.length * 2);
+                values = Arrays.copyOf(values, n);
+                keys = Arrays.copyOf(keys, n);
+                has = Arrays.copyOf(has, n);
+            }
+        }
+
+        @Override
+        void add(Batch b, int[] groupOf, int rows, int groups) {
+            add(b, groupOf, rows, groups, null, 0);
+        }
+
+        @Override
+        void add(Batch b, int[] groupOf, int rows, int groups, long[] places, int from) {
+            room(groups);
+            if (places != null) {
+                at = grow(at == null ? new long[0] : at, has.length);
+            }
+            Vector v = b.column(column);
+            Vector k = b.column(second);
+            for (int r = 0; r < rows; r++) {
+                if (v.isNull(r) || k.isNull(r)) {
+                    continue;
+                }
+                int g = groupOf[r];
+                Object key = k.get(r);
+                int c = has[g] ? Order.compare(key, keys[g], keyType) : 0;
+                long place = places == null ? 0 : places[from + r];
+                if (!has[g] || (max ? c > 0 : c < 0) || c == 0 && places != null && place < at[g]) {
+                    values[g] = v.get(r);
+                    keys[g] = key;
+                    has[g] = true;
+                    if (places != null) {
+                        at[g] = place;
+                    }
+                }
+            }
+        }
+
+        @Override
+        boolean keepsPlaces() {
+            return true;
+        }
+
+        @Override
+        void combine(int group, AggregateState other, int otherGroup) {
+            ArgExtreme o = (ArgExtreme) other;
+            if (!o.has[otherGroup]) {
+                return;
+            }
+            room(group + 1);
+            boolean placed = o.at != null;
+            if (placed) {
+                at = grow(at == null ? new long[0] : at, has.length);
+            }
+            int c = has[group] ? Order.compare(o.keys[otherGroup], keys[group], keyType) : 0;
+            if (!has[group] || (max ? c > 0 : c < 0) || c == 0 && placed && o.at[otherGroup] < at[group]) {
+                values[group] = o.values[otherGroup];
+                keys[group] = o.keys[otherGroup];
+                has[group] = true;
+                if (placed) {
+                    at[group] = o.at[otherGroup];
+                }
+            }
+        }
+
+        @Override
+        void startResult(int groups) {
+            room(groups);
+            out = Vectors.builder(type, groups);
+        }
+
+        @Override
+        void result(int group) {
+            out.append(has[group] ? values[group] : null);
+        }
+
+        @Override
+        Vector finishResult() {
+            return out.build();
         }
     }
 

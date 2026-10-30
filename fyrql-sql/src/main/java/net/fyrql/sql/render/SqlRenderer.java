@@ -137,6 +137,11 @@ public final class SqlRenderer {
             case PlanNode.CommonTable t -> throw new IllegalArgumentException("A common table as SQL: " + t.name());
             case PlanNode.CommonTableScan s -> throw new IllegalArgumentException("A common table as SQL: "
                     + s.name());
+            case PlanNode.RecursiveUnion r -> throw new IllegalArgumentException("A common table as SQL: "
+                    + r.name());
+            case PlanNode.WorkingTableScan w -> throw new IllegalArgumentException("A common table as SQL: "
+                    + w.name());
+            case PlanNode.LateralJoin l -> throw new IllegalArgumentException("A lateral join as SQL");
         };
     }
 
@@ -353,7 +358,8 @@ public final class SqlRenderer {
         }
         for (PlanNode.AggregateCall call : a.calls()) {
             String argument = call.function() == PlanNode.AggregateFunction.COUNT_STAR ? "*"
-                    : columns.apply(call.column());
+                    : columns.apply(call.column()) + (call.second() < 0 ? "" : ", " + columns.apply(call.second()))
+                            + fractions(call);
             String separator = call.function() == PlanNode.AggregateFunction.STRING_AGG
                     ? dialect.literal(call.separator(), DataType.VARCHAR) : null;
             List<String> orderKeys = new ArrayList<>();
@@ -370,6 +376,11 @@ public final class SqlRenderer {
             items.add(rendered);
         }
         return String.join(", ", items);
+    }
+
+    /** The fractions of a quantile after its column, as DuckDB takes them; nothing for another call. */
+    private static String fractions(PlanNode.AggregateCall call) {
+        return call.fractions() == null ? "" : ", " + call.fractions().sql();
     }
 
     private String join(PlanNode.Join j) {
@@ -426,7 +437,8 @@ public final class SqlRenderer {
         }
         for (PlanNode.AggregateCall call : a.aggregates()) {
             String argument = call.function() == PlanNode.AggregateFunction.COUNT_STAR ? "*"
-                    : t + "." + column(call.column());
+                    : t + "." + column(call.column())
+                            + (call.second() < 0 ? "" : ", " + t + "." + column(call.second())) + fractions(call);
             String separator = call.function() == PlanNode.AggregateFunction.STRING_AGG
                     ? dialect.literal(call.separator(), DataType.VARCHAR) : null;
             List<String> orderKeys = new ArrayList<>();
@@ -479,7 +491,8 @@ public final class SqlRenderer {
                     orderKeys.add(orderKey(k, t));
                 }
                 rendered = dialect.aggregate(a.function(), a.distinct(),
-                        a.function() == PlanNode.AggregateFunction.COUNT_STAR ? "*" : t + "." + column(a.column()),
+                        a.function() == PlanNode.AggregateFunction.COUNT_STAR ? "*" : t + "." + column(a.column())
+                                + (a.second() < 0 ? "" : ", " + t + "." + column(a.second())) + fractions(a),
                         a.function() == PlanNode.AggregateFunction.STRING_AGG
                                 ? dialect.literal(a.separator(), DataType.VARCHAR) : null, orderKeys);
             } else {
@@ -521,6 +534,8 @@ public final class SqlRenderer {
             }
             case Expression.Literal l -> dialect.literal(l.value(), l.type());
             case Expression.Column c -> columns.apply(c.index());
+            // Only a plan that is shown has one: the plans of sources have no lateral joins.
+            case Expression.Outer o -> "outer#" + o.slot();
             case Expression.Arithmetic a -> dialect.arithmetic(a.op(), expression(a.left(), columns),
                     expression(a.right(), columns));
             case Expression.Negate n -> "(-" + expression(n.operand(), columns) + ")";

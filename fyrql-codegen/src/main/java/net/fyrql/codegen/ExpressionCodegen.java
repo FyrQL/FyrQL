@@ -400,6 +400,8 @@ final class ExpressionCodegen {
         return switch (e) {
             case Expression.Column c -> column(c);
             case Expression.Literal l -> literal(l);
+            case Expression.Outer o -> throw new IllegalStateException("The value of the left row of lateral join #"
+                    + o.id() + " is not in place");
             case Expression.Arithmetic a -> arithmetic(a);
             case Expression.Negate n -> negate(n);
             case Expression.Comparison c -> comparison(c);

@@ -59,6 +59,7 @@ final class SqlText {
         return switch (e) {
             case Expression.Literal l -> literal(l.type(), l.value());
             case Expression.Column c -> columns.get(c.index());
+            case Expression.Outer o -> throw new IllegalArgumentException("The generated plans have no lateral joins");
             case Expression.Arithmetic a -> new SqlExpr.Binary(switch (a.op()) {
                 case ADD -> BinaryOp.ADD;
                 case SUBTRACT -> BinaryOp.SUBTRACT;

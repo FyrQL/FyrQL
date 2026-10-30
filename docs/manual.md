@@ -1828,6 +1828,17 @@ queries](#observing-queries), and `SET`, `RESET`, `SHOW` and
   [file access](#file-access) of the engine allows; `INNER`, `LEFT`,
   `RIGHT`, `FULL` and `CROSS JOIN` with `ON` and any condition without a subquery,
   `USING` or `NATURAL`; `SELECT` without `FROM`.
+- Lateral joins: a subquery in `FROM` may read the items before it, with `LATERAL` or,
+  as in DuckDB, without, as in `FROM c, LATERAL (SELECT ... FROM o WHERE o.cid = c.id
+  ORDER BY o.amount DESC LIMIT 3) AS top`, also in its select list, its subqueries and
+  its own lateral joins. Such a join is `INNER` (also as a comma or `CROSS JOIN`) or
+  `LEFT`, which keeps a row of the left side without a match with `NULL`s, as in
+  `LEFT JOIN LATERAL (...) AS x ON true`; `RIGHT` and `FULL` fail as in DuckDB. A
+  subquery of projections and filters, whose conditions over the left row are the only
+  references to it, joins as any join, its equalities as the keys of a hash join;
+  any other runs once per distinct value of the left columns it reads, with these values
+  as constants. `LEFT JOIN unnest(t.l) AS u(x) ON true`, and the same with `range` and
+  `generate_series`, keeps a row whose list is empty or `NULL`.
 - `WHERE`, `GROUP BY` with expressions, positions, aliases and `ALL`, `HAVING`, `ORDER BY`
   with expressions, positions, aliases and `ALL`, `ASC`/`DESC`, `NULLS FIRST`/`LAST`,
   `LIMIT` and `OFFSET`.
@@ -1851,6 +1862,25 @@ queries](#observing-queries), and `SET`, `RESET`, `SHOW` and
 - `UNION [ALL]`, `EXCEPT [ALL]`, `INTERSECT [ALL]`, `WITH`, also with `AS MATERIALIZED`
   and `AS NOT MATERIALIZED`; a common table read more than once runs once, see
   [Optimizer](#optimizer).
+- `WITH RECURSIVE r AS (anchor UNION [ALL] step)`: the rows of the anchor, then round by
+  round the rows the step gives over the rows of the round before, until a round gives
+  none, as in DuckDB. The step may read `r` more than once, also in subqueries; the anchor
+  may not. The columns have the names of the column list or of the anchor and its types,
+  to which the step is cast. `UNION` leaves out every row seen before, also of the anchor,
+  and only new rows go to the next round. The rows come out as they come, so that a
+  `LIMIT` above ends a recursion that would not end by itself; each round is canceled
+  with the query, and its rows take the memory budget and spill like those of a common
+  table. Over the rows of `emp(id, boss)`,
+
+  ```sql
+  WITH RECURSIVE chain(id, depth) AS (
+      SELECT id, 0 FROM emp WHERE boss IS NULL
+      UNION ALL
+      SELECT e.id, c.depth + 1 FROM emp e JOIN chain c ON e.boss = c.id)
+  SELECT * FROM chain
+  ```
+
+  gives each employee with the depth below the top.
 - Expressions: arithmetic with `+ - * / % //`, comparisons, `AND`, `OR`, `NOT`, `BETWEEN`,
   `IN (...)`, also of rows as in `(a, b) IN ((1, 'x'), (2, 'y'))`, which compares them as
   structs with `NULL` equal to `NULL`, as DuckDB does, `LIKE`, `ILIKE`, `IS [NOT] NULL`,
@@ -1916,6 +1946,25 @@ queries](#observing-queries), and `SET`, `RESET`, `SHOW` and
   computed in the order of DuckDB: `NULL` without a value; for one value `NULL` as a
   sample and 0 as a population; a result that is not finite, as over NaN or over values
   whose squares overflow, is an error.
+- Statistics of pairs: `corr(y, x)`, `covar_pop`, `covar_samp`, `regr_slope`,
+  `regr_intercept`, `regr_r2`, `regr_avgx`, `regr_avgy`, `regr_sxx`, `regr_syy`,
+  `regr_sxy` and `regr_count`, over the rows where neither is `NULL`, with numbers as
+  `DOUBLE`s, computed as DuckDB computes them, to the bit on one thread; a pair without
+  a spread gives NaN or `NULL` as in DuckDB, `regr_count` a `BIGINT` (DuckDB: `UINTEGER`).
+  `arg_min(arg, key)` and `arg_max` (aliases `argmin`, `argmax`, `min_by`, `max_by`) give
+  `arg` of the row with the smallest or largest `key`, of equal keys the first row, also
+  on several threads; rows where either is `NULL` are left out.
+- Quantiles: `median(x)`, `quantile_cont(x, q)`, `quantile_disc(x, q)` (alias
+  `quantile`) with a constant fraction `q` in [-1, 1], a negative one counting from the
+  largest value, or a list of them, as in `quantile_cont(x, [0.25, 0.5, 0.75])`, which
+  gives a list; and `percentile_cont(q) WITHIN GROUP (ORDER BY x [DESC])` and
+  `percentile_disc`, with `q` in [0, 1]. The continuous quantile interpolates between the
+  two values next to it as DuckDB does, over numbers (integers as `DOUBLE`s, decimals in
+  their type), dates (as a `TIMESTAMP`), times and timestamps; `median` of any other type
+  is the discrete one, a value of the column. `mode(x)` and `mode() WITHIN GROUP
+  (ORDER BY x)` give the most frequent value, of equally frequent ones the first in the
+  order of the rows or of the `ORDER BY`. The quantiles keep their values in the memory
+  budget; workers join them, `mode` runs on one thread.
 - Window functions: `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`,
   `ntile`, `lag` and `lead` with an offset and a default, `first_value`, `last_value`,
   `nth_value`, and the aggregates above, also with `DISTINCT`, `ORDER BY` and
@@ -1961,8 +2010,9 @@ A `Window` node appends one column per call to the rows of its input, for all ca
 the same partition and order; `NULL`s come last in both directions, as in DuckDB. It reads
 its whole input and sorts it, gives each row its frame, and computes an aggregate over a
 moving frame from a segment tree, in logarithmic time per row, which may change the last
-binary digits of the standard deviations and variances, as in DuckDB; `string_agg`,
-`list`, and aggregates with `DISTINCT` or `ORDER BY` in the call go over each frame anew.
+binary digits of the standard deviations, variances and statistics of pairs, as in
+DuckDB; `string_agg`, `list`, the quantiles, `mode`, and aggregates with `DISTINCT` or
+`ORDER BY` in the call go over each frame anew.
 With `QUALIFY`, the largest order of each region is
 
 ```sql
@@ -1980,7 +2030,12 @@ frame over a `TIME`, and one of days, months or years over a `TIMESTAMPTZ`, `PIV
 `SEMI JOIN` and `ANTI JOIN` in SQL, lambdas, slices such as `l[1:2]`, structs without
 names (`row(1, 'a')`), a row outside `IN`, as in `(a, b) = (SELECT ...)` or
 `(a, b) = ANY (...)`, `x = ANY ([1, 2])` over a list, arrays of a fixed size
-(`INTEGER[3]`), series of `TIMESTAMPTZ`s, and `WITH RECURSIVE`. Of `GROUP BY`: items
+(`INTEGER[3]`), series of `TIMESTAMPTZ`s, `approx_count_distinct`, `arg_min(arg, key, n)`
+with a count, `arg_min_null`, `FILTER` after `WITHIN GROUP`, which JSqlParser does not
+read, and of `WITH RECURSIVE`: `SEARCH`, `CYCLE`, `USING KEY` and `CREATE RECURSIVE VIEW`.
+Of the lateral joins: `NATURAL` and `USING`, and a reference out of a join in parentheses
+after a comma, as in `FROM t, LATERAL (...) q LEFT JOIN u ON ...`, which JSqlParser reads
+as `t, (q LEFT JOIN u)`. Of `GROUP BY`: items
 before `GROUPING SETS`, as in `GROUP BY a, GROUPING SETS ((b), ())`, which JSqlParser
 does not read, and `ROLLUP ((a, b))` with a single item in parentheses, which it reads as
 `ROLLUP (a, b)`. `FILTER (x > 1)` without `WHERE` is a syntax error. Of the subqueries:
@@ -1991,10 +2046,10 @@ one level out; a condition that references the outer query and holds a subquery,
 equality; `EXISTS` and `IN` over a subquery that aggregates without `GROUP BY`; `LIMIT`,
 `OFFSET`, and `HAVING` without `GROUP BY`; `DISTINCT` in a scalar subquery; `DISTINCT ON`,
 grouping sets and `grouping`; a row with `IN`, which DuckDB does not take either. Of the
-window functions: `WITHIN GROUP`, a window that adds to a named one, as in
-`OVER (w ORDER BY a)`, offsets of a frame that are no constants or `NULL`, an order in
-the arguments of a function that is no aggregate, as in `lag(a ORDER BY b)`, window
-functions in a correlated subquery, and subqueries or `unnest` inside window
+window functions: `WITHIN GROUP` with `OVER`, as in DuckDB, a window that adds to a named
+one, as in `OVER (w ORDER BY a)`, offsets of a frame that are no constants or `NULL`, an
+order in the arguments of a function that is no aggregate, as in `lag(a ORDER BY b)`,
+window functions in a correlated subquery, and subqueries or `unnest` inside window
 functions.
 
 ### Time zone
@@ -2114,9 +2169,15 @@ here; the random tests explain such differences by a ledger of their own, see
   as `a OR EXISTS (SELECT * FROM u WHERE u.k = t.k AND u.d <> t.d)`, where `t.d` is
   `NULL`, unlike for the same `EXISTS` as a condition of `WHERE`; FyrQL finds none.
 - A select list unnests one list, which may appear in several items; DuckDB unnests
-  several lists side by side. `unnest` in a `LEFT JOIN`, with named arguments such as
-  `recursive := true`, and of a struct that only an aggregate gives are not taken, and
-  neither are `range` and `generate_series` in a `LEFT JOIN`.
+  several lists side by side. `unnest` with named arguments such as `recursive := true`,
+  and of a struct that only an aggregate gives are not taken.
+- With `DISTINCT`, a statistic of pairs may differ from DuckDB in the last binary digit,
+  and `mode` may give another of equally frequent values: DuckDB takes the distinct values
+  in the order of its hash table, FyrQL in the order of the rows.
+- `regr_count` is a `BIGINT`; DuckDB 1.5.6 counts in a `UINTEGER`, which FyrQL does not
+  have.
+- Without `RECURSIVE`, a common table that reads itself fails with `Table with name r
+  does not exist`; DuckDB names the circular reference.
 - A series of `range` or `generate_series` in `FROM` is computed as one list before its
   rows come, of at most 2,147,483,631 values; DuckDB gives them as they come.
 - A parameter `?` gets its type from its context when the query is prepared, as a bare

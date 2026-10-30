@@ -552,10 +552,26 @@ public sealed interface PlanNode {
      * {@code var_samp} and {@code var_pop} take numbers and give a
      * {@code DOUBLE}; the sample forms give {@code NULL} over one value, and
      * a result that is not finite is an error.
+     * <p>
+     * The functions of two columns skip the rows where either is
+     * {@code NULL}. {@code corr}, {@code covar_pop}, {@code covar_samp} and
+     * the {@code regr_} functions take the pair (y, x) of {@code DOUBLE}s and
+     * give a {@code DOUBLE}, {@code regr_count} the count of the pairs as a
+     * {@code BIGINT}. {@code arg_min} and {@code arg_max} give the first
+     * column of the row with the smallest or largest second one, of equal
+     * second columns the first row.
+     * <p>
+     * {@code quantile_cont} and {@code quantile_disc} take the
+     * {@link Fractions} of their call: the continuous quantile interpolates
+     * between the two values next to it, the discrete one is a value of the
+     * column. {@code mode} gives the most frequent value, of equally frequent
+     * ones the first in the order of the values.
      */
     enum AggregateFunction {
         COUNT_STAR, COUNT, SUM, AVG, MIN, MAX, STRING_AGG, LIST, FIRST, LAST, ANY_VALUE, BOOL_AND, BOOL_OR,
-        STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP;
+        STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP,
+        CORR, COVAR_POP, COVAR_SAMP, REGR_COUNT, REGR_SLOPE, REGR_INTERCEPT, REGR_R2, REGR_AVGX, REGR_AVGY,
+        REGR_SXX, REGR_SYY, REGR_SXY, ARG_MIN, ARG_MAX, QUANTILE_CONT, QUANTILE_DISC, MODE;
 
         /** Returns the name as DuckDB spells it. */
         public String sqlName() {
@@ -572,11 +588,40 @@ public sealed interface PlanNode {
             return this == STDDEV_SAMP || this == STDDEV_POP || this == VAR_SAMP || this == VAR_POP;
         }
 
+        /** Tells whether the function is a covariance, a correlation or a regression over pairs of doubles. */
+        public boolean isCovariance() {
+            return ordinal() >= CORR.ordinal() && ordinal() <= REGR_SXY.ordinal();
+        }
+
+        /** Tells whether the function reads two columns, see {@link AggregateCall#second()}. */
+        public boolean isBinary() {
+            return isCovariance() || this == ARG_MIN || this == ARG_MAX;
+        }
+
+        /** Tells whether the function is a quantile, which takes {@link AggregateCall#fractions()}. */
+        public boolean isQuantile() {
+            return this == QUANTILE_CONT || this == QUANTILE_DISC;
+        }
+
+        /**
+         * Tells whether {@code quantile_cont} interpolates between values of
+         * a type, as DuckDB does: the numbers, {@code DATE}, {@code TIME},
+         * {@code TIMESTAMP} and {@code TIMESTAMP WITH TIME ZONE}; DuckDB's
+         * {@code median} of another type is its discrete quantile.
+         */
+        public static boolean interpolates(DataType type) {
+            return type.isNumeric() || type == DataType.DATE || type == DataType.TIME || type == DataType.TIMESTAMP
+                    || type == DataType.TIMESTAMPTZ;
+        }
+
         /**
          * Returns the function with a name or an alias of DuckDB
          * ({@code array_agg}, {@code listagg}, {@code group_concat},
-         * {@code arbitrary}, {@code stddev}, {@code variance}), in any case;
-         * {@code count} is the count of values.
+         * {@code arbitrary}, {@code stddev}, {@code variance}, {@code argmin},
+         * {@code min_by}, {@code argmax}, {@code max_by}, {@code quantile}),
+         * in any case; {@code count} is the count of values; {@code median},
+         * {@code percentile_cont} and {@code percentile_disc} are quantiles
+         * that the binder gives their fractions.
          *
          * @throws IllegalArgumentException if there is none
          */
@@ -588,6 +633,10 @@ public sealed interface PlanNode {
                 case "arbitrary" -> FIRST;
                 case "stddev" -> STDDEV_SAMP;
                 case "variance" -> VAR_SAMP;
+                case "argmin", "min_by" -> ARG_MIN;
+                case "argmax", "max_by" -> ARG_MAX;
+                case "median", "percentile_cont" -> QUANTILE_CONT;
+                case "quantile", "percentile_disc" -> QUANTILE_DISC;
                 case "count_star" -> throw new IllegalArgumentException("Unknown aggregate " + name);
                 default -> {
                     try {
@@ -619,15 +668,27 @@ public sealed interface PlanNode {
      *        call takes, those where it is true, or -1 for all rows; as in
      *        DuckDB, {@code count(*)} of no row is 0 and the other functions
      *        give {@code NULL}
+     * @param second the second column of a function that {@link AggregateFunction#isBinary reads two}, the x of
+     *        {@code corr(y, x)} or the value of {@code arg_min(arg, value)}; -1 for every other function. With
+     *        {@code DISTINCT} only distinct pairs count
+     * @param fractions the fractions of a {@link AggregateFunction#isQuantile quantile}, {@code null} for every other
+     *        function
      */
     record AggregateCall(AggregateFunction function, int column, boolean distinct, String name, String separator,
-            List<SortKey> orderBy, int filter) {
+            List<SortKey> orderBy, int filter, int second, Fractions fractions) {
         public AggregateCall {
             Objects.requireNonNull(function, "function");
             Objects.requireNonNull(name, "name");
             orderBy = List.copyOf(orderBy);
             if ((function == AggregateFunction.COUNT_STAR) != (column < 0)) {
                 throw new IllegalArgumentException(function + " with column " + column);
+            }
+            if (function.isBinary() != (second >= 0) || second < -1) {
+                throw new IllegalArgumentException(function + " with second column " + second);
+            }
+            if (function.isQuantile() != (fractions != null)) {
+                throw new IllegalArgumentException(function + (fractions == null ? " without" : " with")
+                        + " fractions");
             }
             if (function == AggregateFunction.COUNT_STAR && (distinct || !orderBy.isEmpty())) {
                 throw new IllegalArgumentException("count(*) with DISTINCT or ORDER BY");
@@ -636,7 +697,8 @@ public sealed interface PlanNode {
                 throw new IllegalArgumentException("A separator for " + function);
             }
             for (SortKey k : orderBy) {
-                if (distinct && k.column() != column && function != AggregateFunction.STRING_AGG) {
+                if (distinct && k.column() != column && k.column() != second
+                        && function != AggregateFunction.STRING_AGG) {
                     throw new IllegalArgumentException(
                             "In a DISTINCT aggregate, ORDER BY expressions must appear in the argument list");
                 }
@@ -644,6 +706,18 @@ public sealed interface PlanNode {
             if (filter < -1) {
                 throw new IllegalArgumentException("Filter column " + filter);
             }
+        }
+
+        /** An aggregate without fractions. */
+        public AggregateCall(AggregateFunction function, int column, boolean distinct, String name, String separator,
+                List<SortKey> orderBy, int filter, int second) {
+            this(function, column, distinct, name, separator, orderBy, filter, second, null);
+        }
+
+        /** An aggregate of one column or none. */
+        public AggregateCall(AggregateFunction function, int column, boolean distinct, String name, String separator,
+                List<SortKey> orderBy, int filter) {
+            this(function, column, distinct, name, separator, orderBy, filter, -1);
         }
 
         /** An aggregate over all rows. */
@@ -657,19 +731,33 @@ public sealed interface PlanNode {
             this(function, column, distinct, name, function == AggregateFunction.STRING_AGG ? "," : null, List.of());
         }
 
+        /** An aggregate of two columns over all rows, in the order of the input. */
+        public static AggregateCall of(AggregateFunction function, int column, int second, boolean distinct,
+                String name) {
+            return new AggregateCall(function, column, distinct, name, null, List.of(), -1, second);
+        }
+
+        /** A quantile of a column over all rows. */
+        public static AggregateCall quantile(AggregateFunction function, int column, Fractions fractions,
+                boolean distinct, String name) {
+            return new AggregateCall(function, column, distinct, name, null, List.of(), -1, -1, fractions);
+        }
+
         /** Returns the same aggregate with another separator. */
         public AggregateCall withSeparator(String newSeparator) {
-            return new AggregateCall(function, column, distinct, name, newSeparator, orderBy, filter);
+            return new AggregateCall(function, column, distinct, name, newSeparator, orderBy, filter, second,
+                    fractions);
         }
 
         /** Returns the same aggregate with the values in another order. */
         public AggregateCall withOrderBy(List<SortKey> keys) {
-            return new AggregateCall(function, column, distinct, name, separator, keys, filter);
+            return new AggregateCall(function, column, distinct, name, separator, keys, filter, second, fractions);
         }
 
         /** Returns the same aggregate taking the rows where a column is true, or all rows for -1. */
         public AggregateCall withFilter(int newFilter) {
-            return new AggregateCall(function, column, distinct, name, separator, orderBy, newFilter);
+            return new AggregateCall(function, column, distinct, name, separator, orderBy, newFilter, second,
+                    fractions);
         }
 
         /** Returns the same aggregate over other columns: each column it reads, also in order and filter, mapped. */
@@ -679,17 +767,42 @@ public sealed interface PlanNode {
                 keys.add(new SortKey(mapping.applyAsInt(k.column()), k.ascending(), k.nullsFirst()));
             }
             return new AggregateCall(function, column < 0 ? -1 : mapping.applyAsInt(column), distinct, name,
-                    separator, keys, filter < 0 ? -1 : mapping.applyAsInt(filter));
+                    separator, keys, filter < 0 ? -1 : mapping.applyAsInt(filter),
+                    second < 0 ? -1 : mapping.applyAsInt(second), fractions);
+        }
+
+        /** Returns the columns of the input the call reads: its arguments, its order and its filter. */
+        public List<Integer> inputColumns() {
+            List<Integer> columns = new ArrayList<>();
+            if (column >= 0) {
+                columns.add(column);
+            }
+            if (second >= 0) {
+                columns.add(second);
+            }
+            for (SortKey k : orderBy) {
+                columns.add(k.column());
+            }
+            if (filter >= 0) {
+                columns.add(filter);
+            }
+            return columns;
         }
 
         /** Returns the type of the result, as DuckDB types it. */
         public DataType type(Schema input) {
-            if (function == AggregateFunction.COUNT_STAR || function == AggregateFunction.COUNT) {
+            if (function == AggregateFunction.COUNT_STAR || function == AggregateFunction.COUNT
+                    || function == AggregateFunction.REGR_COUNT) {
                 return DataType.BIGINT;
             }
             DataType t = input.type(column);
-            if (function.isStatistic()) {
+            if (function.isStatistic() || function.isCovariance()) {
                 return DataType.DOUBLE;
+            }
+            if (function.isQuantile()) {
+                DataType value = function == AggregateFunction.QUANTILE_DISC ? t
+                        : t.isIntegral() ? DataType.DOUBLE : t == DataType.DATE ? DataType.TIMESTAMP : t;
+                return fractions.list() ? DataType.listOf(value) : value;
             }
             return switch (function) {
                 case SUM -> t.isIntegral() ? DataType.HUGEINT
@@ -709,8 +822,15 @@ public sealed interface PlanNode {
          * @throws IllegalArgumentException if a column does not exist or the function does not apply to it
          */
         public void check(Schema input) {
-            if (column >= input.size()) {
-                throw new IllegalArgumentException("No column " + column + " for " + function);
+            if (column >= input.size() || second >= input.size()) {
+                throw new IllegalArgumentException("No column " + Math.max(column, second) + " for " + function);
+            }
+            if (function.isCovariance()
+                    && (!input.type(column).isNumeric() || !input.type(second).isNumeric())) {
+                throw new IllegalArgumentException(function + " of " + input.type(column) + ", " + input.type(second));
+            }
+            if (function == AggregateFunction.QUANTILE_CONT && !AggregateFunction.interpolates(input.type(column))) {
+                throw new IllegalArgumentException(function + " of " + input.type(column));
             }
             if ((function == AggregateFunction.SUM || function == AggregateFunction.AVG || function.isStatistic())
                     && !input.type(column).isNumeric() && !(function == AggregateFunction.AVG
@@ -727,6 +847,55 @@ public sealed interface PlanNode {
             if (filter >= 0) {
                 checkColumn(input, filter);
                 TypeRules.require(DataType.BOOLEAN, input.type(filter), "The filter of " + function);
+            }
+        }
+    }
+
+    /**
+     * The fractions of a quantile, each in [0, 1], as DuckDB 1.5.6 takes
+     * them: a negative fraction of its call counts from the largest value,
+     * which {@code descending} keeps, as does {@code WITHIN GROUP} with
+     * {@code ORDER BY ... DESC}.
+     *
+     * @param values the fractions
+     * @param list whether the call gives a list, one value per fraction, or the value of its one fraction
+     * @param descending whether the fractions count from the largest value
+     */
+    record Fractions(List<Fraction> values, boolean list, boolean descending) {
+        public Fractions {
+            values = List.copyOf(values);
+            if (!list && values.size() != 1) {
+                throw new IllegalArgumentException("A quantile without a list takes one fraction, not " + values);
+            }
+        }
+
+        /** One fraction in ascending order. */
+        public static Fractions of(Fraction fraction) {
+            return new Fractions(List.of(fraction), false, false);
+        }
+
+        /** Renders the fractions as DuckDB takes them, negative when they count from the largest value. */
+        public String sql() {
+            List<String> texts = new ArrayList<>();
+            for (Fraction f : values) {
+                String text = f.decimal() != null ? f.decimal().toPlainString() : "CAST(" + f.value() + " AS DOUBLE)";
+                texts.add(descending ? "-" + text : text);
+            }
+            return list ? "[" + String.join(", ", texts) + "]" : texts.get(0);
+        }
+    }
+
+    /**
+     * A fraction of a quantile.
+     *
+     * @param value the fraction as a double, in [0, 1]
+     * @param decimal the fraction as the decimal it was written as, from which DuckDB computes the index of a discrete
+     *        quantile exactly; {@code null} for a fraction of another type
+     */
+    record Fraction(double value, java.math.BigDecimal decimal) {
+        public Fraction {
+            if (!(value >= 0 && value <= 1) || decimal != null && decimal.signum() < 0) {
+                throw new IllegalArgumentException("A fraction of " + value);
             }
         }
     }
@@ -1422,6 +1591,99 @@ public sealed interface PlanNode {
         @Override
         public Schema schema() {
             return definition.schema().select(columns);
+        }
+
+        @Override
+        public List<PlanNode> children() {
+            return List.of();
+        }
+    }
+
+    /**
+     * A recursive common table, {@code WITH RECURSIVE}: the rows of the
+     * anchor, then round by round the rows the step gives over the rows of
+     * the round before, which each {@link WorkingTableScan} of the same id in
+     * the step reads, until a round gives none. With {@code UNION ALL} every
+     * row comes out; with {@code UNION} only the rows not seen before, of
+     * the anchor too, and only these go to the next round. The output has
+     * the columns of the anchor, to whose types the step is cast.
+     *
+     * @param id the id of the rows of a round, unique in the plan
+     * @param name the name of the common table, for showing the plan
+     * @param anchor the plan of the first rows
+     * @param step the plan of the rows of a round, over those of the round before
+     * @param all whether duplicate rows stay, as with {@code UNION ALL}
+     */
+    record RecursiveUnion(int id, String name, PlanNode anchor, PlanNode step, boolean all) implements PlanNode {
+        public RecursiveUnion {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(anchor, "anchor");
+            Objects.requireNonNull(step, "step");
+            if (!anchor.schema().types().equals(step.schema().types())) {
+                throw new IllegalArgumentException("The step of " + name + " gives " + step.schema().types()
+                        + ", the anchor " + anchor.schema().types());
+            }
+        }
+
+        @Override
+        public Schema schema() {
+            return anchor.schema();
+        }
+
+        @Override
+        public List<PlanNode> children() {
+            return List.of(anchor, step);
+        }
+    }
+
+    /**
+     * A lateral join: for each row of the left input, the rows of the right
+     * input with the values of the row in place of the {@link Expression.Outer}s
+     * of the same id, joined to the row; {@code LEFT} keeps a row without
+     * any with {@code NULL}s. The output has the columns of the left input,
+     * then those of the right one.
+     *
+     * @param id the id of the join, unique in the plan, which its {@link Expression.Outer}s name
+     * @param left the rows the right input reads
+     * @param right the plan of the rows for each row of the left input
+     * @param type {@code INNER} or {@code LEFT}
+     */
+    record LateralJoin(int id, PlanNode left, PlanNode right, JoinType type) implements PlanNode {
+        public LateralJoin {
+            Objects.requireNonNull(left, "left");
+            Objects.requireNonNull(right, "right");
+            if (type != JoinType.INNER && type != JoinType.LEFT) {
+                throw new IllegalArgumentException("A lateral join is INNER or LEFT, not " + type);
+            }
+        }
+
+        @Override
+        public Schema schema() {
+            List<Schema.Field> fields = new ArrayList<>(left.schema().fields());
+            for (Schema.Field f : right.schema().fields()) {
+                fields.add(type == JoinType.LEFT ? new Schema.Field(f.name(), f.type(), true) : f);
+            }
+            return new Schema(fields);
+        }
+
+        @Override
+        public List<PlanNode> children() {
+            return List.of(left, right);
+        }
+    }
+
+    /**
+     * Reads the rows of the round before of the {@link RecursiveUnion} of the
+     * same id above it, in its step. The node is a leaf.
+     *
+     * @param id the id of the recursive common table
+     * @param name the name of the common table
+     * @param schema the columns of its rows
+     */
+    record WorkingTableScan(int id, String name, Schema schema) implements PlanNode {
+        public WorkingTableScan {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(schema, "schema");
         }
 
         @Override

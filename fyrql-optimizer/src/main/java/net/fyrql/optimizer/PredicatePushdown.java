@@ -156,6 +156,22 @@ final class PredicatePushdown {
             case PlanNode.CommonTable t -> new PlanNode.CommonTable(t.id(), t.name(), push(t.definition(), List.of()),
                     push(t.input(), conjuncts));
             case PlanNode.CommonTableScan s -> filter(s, conjuncts);
+            // A filter of the result of a recursion is no filter of each round: the conjuncts stay above.
+            case PlanNode.RecursiveUnion r -> filter(new PlanNode.RecursiveUnion(r.id(), r.name(),
+                    push(r.anchor(), List.of()), push(r.step(), List.of()), r.all()), conjuncts);
+            case PlanNode.WorkingTableScan w -> filter(w, conjuncts);
+            case PlanNode.LateralJoin l -> {
+                // A conjunct over the left columns only goes into the left input; the right input stays as it is.
+                int width = l.left().schema().size();
+                List<Expression> down = new ArrayList<>();
+                List<Expression> stay = new ArrayList<>();
+                for (Expression c : conjuncts) {
+                    BitSet columns = Expressions.columns(c);
+                    (columns.nextSetBit(width) < 0 ? down : stay).add(c);
+                }
+                yield filter(new PlanNode.LateralJoin(l.id(), push(l.left(), down), push(l.right(), List.of()),
+                        l.type()), stay);
+            }
         };
     }
 

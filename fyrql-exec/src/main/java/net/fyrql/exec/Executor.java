@@ -11,6 +11,7 @@
 
 package net.fyrql.exec;
 
+import net.fyrql.core.expr.Expression;
 import net.fyrql.core.plan.PlanNode;
 import net.fyrql.core.plan.Plans;
 import net.fyrql.core.vector.Batch;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.ToDoubleFunction;
+import java.util.function.UnaryOperator;
 
 /**
  * Turns a logical plan into a tree of operators and runs it. Every node
@@ -237,6 +239,8 @@ public final class Executor {
         private final Map<PlanNode, Operator> substitutes = new IdentityHashMap<>();
         /** The buffers of the common tables around the node that is being opened, by their ids. */
         private final Map<Integer, CommonTableBuffer> commonTables = new HashMap<>();
+        /** The recursive common tables around the node that is being opened, by their ids. */
+        private final Map<Integer, RecursiveUnionOperator> recursions = new HashMap<>();
 
         Opening(PlanNode plan, ToDoubleFunction<PlanNode> estimate, QueryContext context) {
             this.ids = Plans.ids(plan);
@@ -427,7 +431,50 @@ public final class Executor {
                         open(s.right()), budget, batchSize);
                 case PlanNode.CommonTable t -> commonTable(label, t);
                 case PlanNode.CommonTableScan s -> new CommonTableScanOperator(label, s, commonTables.get(s.id()));
+                case PlanNode.RecursiveUnion r -> recursiveUnion(label, r);
+                case PlanNode.WorkingTableScan w -> new WorkingTableScanOperator(label, w, recursions.get(w.id()));
+                case PlanNode.LateralJoin l -> new LateralJoinOperator(label, l, open(l.left()),
+                        values -> rights(l.right(), values), budget, batchSize);
             };
+        }
+
+        /**
+         * Runs the plan of the right input of a lateral join with the values
+         * of a left row in place, to its end: the nodes of the plan that the
+         * values change take the ids of the nodes they come from, so that the
+         * statistics of each node add up over all runs.
+         */
+        private List<Batch> rights(PlanNode right, UnaryOperator<Expression> values) {
+            List<PlanNode> added = new ArrayList<>();
+            PlanNode bound = Plans.mapAllExpressions(right, values, (before, after) -> {
+                if (after != before && !ids.containsKey(after)) {
+                    ids.put(after, ids.get(before));
+                    added.add(after);
+                }
+            });
+            List<Batch> rows = new ArrayList<>();
+            try (Operator op = open(bound)) {
+                for (Batch b = op.next(); b != null; b = op.next()) {
+                    rows.add(b);
+                }
+            } finally {
+                for (PlanNode n : added) {
+                    ids.remove(n);
+                }
+            }
+            return rows;
+        }
+
+        /**
+         * Opens the anchor of a recursive common table; the recursion opens
+         * its step anew for each round, whose scans of the working table find
+         * the recursion by its id.
+         */
+        private AbstractOperator recursiveUnion(String label, PlanNode.RecursiveUnion r) {
+            RecursiveUnionOperator recursion = new RecursiveUnionOperator(label, r, open(r.anchor()),
+                    () -> open(r.step()), budget, spill, context);
+            recursions.put(r.id(), recursion);
+            return recursion;
         }
 
         /**

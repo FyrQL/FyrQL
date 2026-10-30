@@ -74,7 +74,7 @@ public final class SqlPrinter {
 
     private static void query(StringBuilder b, Query q) {
         if (!q.with().isEmpty()) {
-            b.append("WITH ");
+            b.append(q.with().stream().anyMatch(Query.CommonTable::recursive) ? "WITH RECURSIVE " : "WITH ");
             for (int i = 0; i < q.with().size(); i++) {
                 Query.CommonTable t = q.with().get(i);
                 b.append(i > 0 ? ", " : "").append(identifier(t.name()));
@@ -270,6 +270,7 @@ public final class SqlPrinter {
                 b.append(string(f.path()));
                 alias(b, f.alias());
             }
+            // A subquery reads the items before it with LATERAL or without, which JSqlParser does not read after JOIN.
             case FromItem.Subquery s -> {
                 b.append('(');
                 query(b, s.query());
@@ -497,7 +498,11 @@ public final class SqlPrinter {
         }
     }
 
-    /** Writes {@code f(args)}; {@code IGNORE NULLS} goes inside the parentheses, where DuckDB reads it. */
+    /**
+     * Writes {@code f(args)}; {@code IGNORE NULLS} goes inside the parentheses, where DuckDB reads it. The ordered
+     * aggregates {@code percentile_cont(f)}, {@code percentile_disc(f)} and {@code mode()} take their one key in
+     * {@code WITHIN GROUP (ORDER BY ...)}.
+     */
     private static void call(StringBuilder b, SqlExpr.FunctionCall f, boolean ignoreNulls) {
         b.append(PLAIN_IDENTIFIER.matcher(f.name()).matches() ? f.name() : identifier(f.name())).append('(');
         if (f.star()) {
@@ -506,8 +511,25 @@ public final class SqlPrinter {
         b.append(f.distinct() ? "DISTINCT " : "");
         list(b, f.arguments());
         b.append(ignoreNulls ? " IGNORE NULLS" : "");
-        orderBy(b, f.orderBy());
+        if (withinGroup(f)) {
+            b.append(") WITHIN GROUP (");
+            int start = b.length();
+            orderBy(b, f.orderBy());
+            // The keys follow the parenthesis without the space before ORDER BY.
+            if (b.charAt(start) == ' ') {
+                b.deleteCharAt(start);
+            }
+        } else {
+            orderBy(b, f.orderBy());
+        }
         b.append(')');
+    }
+
+    private static boolean withinGroup(SqlExpr.FunctionCall f) {
+        String name = f.name().toLowerCase(Locale.ROOT);
+        return f.orderBy().size() == 1 && !f.star() && !f.distinct()
+                && ((name.equals("percentile_cont") || name.equals("percentile_disc")) && f.arguments().size() == 1
+                || name.equals("mode") && f.arguments().isEmpty());
     }
 
     private static void filter(StringBuilder b, SqlExpr filter) {

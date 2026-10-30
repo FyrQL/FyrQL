@@ -594,14 +594,14 @@ final class JSqlParserAdapter {
         checkQuery(s);
         List<Query.CommonTable> with = new ArrayList<>();
         if (s.getWithItemsList() != null) {
+            // RECURSIVE belongs to the WITH, which JSqlParser notes on its first item.
+            boolean recursive = s.getWithItemsList().stream().anyMatch(WithItem::isRecursive);
             for (WithItem<?> item : s.getWithItemsList()) {
-                with.add(commonTable(item, s));
+                with.add(commonTable(item, s, recursive));
             }
         }
         QueryBody body;
-        if (s instanceof LateralSubSelect) {
-            throw unsupported("LATERAL", s);
-        } else if (s instanceof ParenthesedSelect p) {
+        if (s instanceof ParenthesedSelect p) {
             body = operand(p.getSelect());
         } else if (s instanceof PlainSelect p) {
             body = select(p);
@@ -657,13 +657,10 @@ final class JSqlParserAdapter {
         reject(s.getUnPivot(), "UNPIVOT", s);
     }
 
-    private Query.CommonTable commonTable(WithItem<?> item, Select owner) {
+    private Query.CommonTable commonTable(WithItem<?> item, Select owner, boolean recursive) {
         Position position = position(item.getParenthesedStatement());
         if (!position.isKnown()) {
             position = position(owner);
-        }
-        if (item.isRecursive()) {
-            throw new SqlException("WITH RECURSIVE is not supported", position);
         }
         if (item.getWithFunctionDeclaration() != null || item.getSearchClause() != null
                 || item.getCycleClause() != null) {
@@ -681,7 +678,7 @@ final class JSqlParserAdapter {
         Query.Materialized materialized = !item.isMaterialized() ? Query.Materialized.DEFAULT
                 : item.isUsingNot() ? Query.Materialized.NEVER : Query.Materialized.ALWAYS;
         return new Query.CommonTable(aliasName(item.getAlias()), columns, parenthesized(select), materialized,
-                position);
+                recursive, position);
     }
 
     /** A query in parentheses, with the {@code ORDER BY} and {@code LIMIT} that may follow the parentheses. */
@@ -1133,8 +1130,9 @@ final class JSqlParserAdapter {
             reject(f.getSampleClause(), "TABLESAMPLE", f);
             return tableFunction(f.getFunction(), alias(f.getAlias(), f), position);
         }
-        if (item instanceof LateralSubSelect) {
-            throw unsupported("LATERAL", item);
+        if (item instanceof LateralSubSelect l) {
+            reject(l.getSampleClause(), "TABLESAMPLE", l);
+            return new FromItem.Subquery(parenthesized(l), alias(l.getAlias(), l), true, position);
         }
         if (item instanceof ParenthesedSelect p) {
             reject(p.getSampleClause(), "TABLESAMPLE", p);
@@ -1160,7 +1158,8 @@ final class JSqlParserAdapter {
         return switch (item) {
             case FromItem.TableName t when t.alias() == null -> new FromItem.TableName(t.name(), alias, t.position());
             case FromItem.FileName f when f.alias() == null -> new FromItem.FileName(f.path(), alias, f.position());
-            case FromItem.Subquery s when s.alias() == null -> new FromItem.Subquery(s.query(), alias, s.position());
+            case FromItem.Subquery s when s.alias() == null -> new FromItem.Subquery(s.query(), alias, s.lateral(),
+                    s.position());
             case FromItem.TableFunctionCall f when f.alias() == null -> new FromItem.TableFunctionCall(f.name(),
                     f.arguments(), f.namedArguments(), alias, f.position());
             default -> throw unsupported("an alias for a join or an aliased item in parentheses", node);
@@ -1678,8 +1677,11 @@ final class JSqlParserAdapter {
      */
     private SqlExpr window(AnalyticExpression a, Position position) {
         boolean filterOnly = a.getType() == AnalyticType.FILTER_ONLY;
+        if (a.getType() == AnalyticType.WITHIN_GROUP) {
+            return withinGroup(a, position);
+        }
         if (!filterOnly && a.getType() != AnalyticType.OVER) {
-            throw unsupported("WITHIN GROUP", a);
+            throw unsupported("WITHIN GROUP with OVER", a);
         }
         reject(a.getKeep(), "KEEP", a);
         reject(a.isUnique(), "UNIQUE in a function", a);
@@ -1729,6 +1731,35 @@ final class JSqlParserAdapter {
         WindowSpec over = a.getWindowName() != null ? WindowSpec.named(unquote(a.getWindowName(), a))
                 : windowSpec(a.getWindowDefinition(), a);
         return new SqlExpr.Window(call, over, ignoreNulls, exprOrNull(a.getFilterExpression()), position);
+    }
+
+    /**
+     * {@code percentile_cont(f) WITHIN GROUP (ORDER BY x)}, the same with
+     * {@code percentile_disc}, and {@code mode() WITHIN GROUP (ORDER BY x)}:
+     * the call of the function with its fraction as the argument and the one
+     * key as its order, which the binder takes as the column.
+     */
+    private SqlExpr withinGroup(AnalyticExpression a, Position position) {
+        Token first = nameToken(firstToken(a), a);
+        String name = first != null ? unquote(first.image, a) : unquote(a.getName(), a);
+        String key = name.toLowerCase(Locale.ROOT);
+        if (!key.equals("percentile_cont") && !key.equals("percentile_disc") && !key.equals("mode")) {
+            throw new SqlException("Unknown ordered aggregate \"" + name + "\".", position);
+        }
+        reject(a.isDistinct(), "DISTINCT with WITHIN GROUP", a);
+        if (a.getOrderByElements() == null || a.getOrderByElements().size() != 1) {
+            throw new SqlException("Cannot use multiple ORDER BY clauses with WITHIN GROUP", position);
+        }
+        Expression x = a.getExpression();
+        while (x instanceof ExpressionList<?> l && l.size() == 1) {
+            x = l.get(0);
+        }
+        if (x instanceof ExpressionList<?> || (x == null) != key.equals("mode") || a.getOffset() != null) {
+            throw new SqlException("Wrong number of arguments for " + name.toUpperCase(Locale.ROOT), position);
+        }
+        List<SqlExpr> arguments = x == null ? List.of() : List.of(expr(x));
+        return new SqlExpr.FunctionCall(name, arguments, false, false, orderItems(a.getOrderByElements(), false),
+                exprOrNull(a.getFilterExpression()), position);
     }
 
     private WindowSpec windowSpec(WindowDefinition d, Object node) {

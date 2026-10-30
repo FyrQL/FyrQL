@@ -127,11 +127,19 @@ final class Correlation implements Scope.Outer {
 
     /**
      * Resolves the names of the clauses of the subquery other than
-     * {@code WHERE}, which may not reference the query around it.
+     * {@code WHERE}, which may not reference the query around it; a name
+     * beyond it, of the left row of a lateral join around it, is a constant
+     * of the subquery and resolves as there.
      */
     Scope.Outer outsideWhere() {
         return (name, position) -> {
-            if (outer.scope().lookup(name, position) != null) {
+            Scope.Resolved beyond = outer.scope().lookupLocal(name, position) == null
+                    ? outer.scope().lookup(name, position) : null;
+            if (beyond != null && Expressions.allMatch(beyond.column().expression(),
+                    x -> !(x instanceof Expression.Column))) {
+                return beyond;
+            }
+            if (beyond != null || outer.scope().lookupLocal(name, position) != null) {
                 throw new SqlException("Not supported: a reference to the outer query outside the WHERE clause of a"
                         + " subquery", position);
             }

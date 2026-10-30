@@ -61,6 +61,12 @@ class SpillingAggregateTest {
     private static final int DEC = 5;
     private static final int B = 6;
 
+    /** The median, and the quartiles counted from the largest value. */
+    private static final PlanNode.Fractions MEDIAN = PlanNode.Fractions.of(new PlanNode.Fraction(0.5,
+            new BigDecimal("0.5")));
+    private static final PlanNode.Fractions QUARTILES = new PlanNode.Fractions(List.of(new PlanNode.Fraction(0.25,
+            null), new PlanNode.Fraction(0.75, null)), true, true);
+
     @TempDir
     Path temp;
 
@@ -112,7 +118,11 @@ class SpillingAggregateTest {
                 new AggregateCall(AggregateFunction.BOOL_AND, B, false, "band"),
                 new AggregateCall(AggregateFunction.BOOL_OR, B, false, "bor"),
                 new AggregateCall(AggregateFunction.COUNT_STAR, -1, false, "nb").withFilter(B),
-                new AggregateCall(AggregateFunction.SUM, V, false, "svb").withFilter(B));
+                new AggregateCall(AggregateFunction.SUM, V, false, "svb").withFilter(B),
+                AggregateCall.of(AggregateFunction.ARG_MIN, S, D, false, "amin"),
+                AggregateCall.of(AggregateFunction.ARG_MAX, V, S, false, "amax").withFilter(B),
+                AggregateCall.quantile(AggregateFunction.QUANTILE_CONT, D, MEDIAN, false, "medd"),
+                AggregateCall.quantile(AggregateFunction.QUANTILE_DISC, S, QUARTILES, false, "qs"));
     }
 
     /**
@@ -139,6 +149,12 @@ class SpillingAggregateTest {
                 .withFilter(B));
         calls.add(new AggregateCall(AggregateFunction.VAR_SAMP, V, false, "varv"));
         calls.add(new AggregateCall(AggregateFunction.STDDEV_POP, DEC, false, "sddecb").withFilter(B));
+        calls.add(AggregateCall.of(AggregateFunction.COVAR_SAMP, D, V, false, "covdv"));
+        calls.add(AggregateCall.of(AggregateFunction.REGR_SLOPE, D, V, false, "slopedv"));
+        calls.add(AggregateCall.of(AggregateFunction.ARG_MAX, DEC, D, true, "amaxd"));
+        calls.add(new AggregateCall(AggregateFunction.MODE, S, false, "modes"));
+        calls.add(new AggregateCall(AggregateFunction.MODE, D, false, "moded", null, List.of(SortKey.asc(V))));
+        calls.add(AggregateCall.quantile(AggregateFunction.QUANTILE_CONT, DEC, MEDIAN, true, "meddec"));
         return calls;
     }
 

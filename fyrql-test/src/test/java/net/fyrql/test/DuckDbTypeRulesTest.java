@@ -183,7 +183,8 @@ class DuckDbTypeRulesTest {
             Schema schema = new Schema(types.stream().map(t -> new Schema.Field(t.sqlName(), t)).toList());
             for (int i = 0; i < types.size(); i++) {
                 for (PlanNode.AggregateFunction f : PlanNode.AggregateFunction.values()) {
-                    if (f == PlanNode.AggregateFunction.COUNT_STAR) {
+                    // The functions of two columns and the quantiles are in the SQL corpus.
+                    if (f == PlanNode.AggregateFunction.COUNT_STAR || f.isBinary() || f.isQuantile()) {
                         continue;
                     }
                     // DuckDB also offers avg(DATE) as a TIMESTAMP, avg(TIMESTAMPTZ) and sum(BOOLEAN) as a

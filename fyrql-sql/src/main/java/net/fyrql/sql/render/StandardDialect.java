@@ -209,14 +209,16 @@ abstract class StandardDialect implements Dialect {
     /**
      * The name of an aggregate function, with the spelling of
      * {@code string_agg} left to {@link #aggregate}; a list, first, last,
-     * boolean or statistic aggregate has no exact counterpart in the
-     * dialects.
+     * boolean, statistic, covariance, regression, {@code arg_min}, quantile
+     * or {@code mode} aggregate has no exact counterpart in the dialects.
      */
     String aggregateName(AggregateFunction function) {
         return switch (function) {
             case COUNT_STAR, COUNT, SUM, AVG, MIN, MAX, STRING_AGG -> function.sqlName();
             case ANY_VALUE -> "any_value";
-            case LIST, FIRST, LAST, BOOL_AND, BOOL_OR, STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP ->
+            case LIST, FIRST, LAST, BOOL_AND, BOOL_OR, STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP, CORR, COVAR_POP,
+                    COVAR_SAMP, REGR_COUNT, REGR_SLOPE, REGR_INTERCEPT, REGR_R2, REGR_AVGX, REGR_AVGY, REGR_SXX,
+                    REGR_SYY, REGR_SXY, ARG_MIN, ARG_MAX, QUANTILE_CONT, QUANTILE_DISC, MODE ->
                 throw new IllegalArgumentException(name() + " has no " + function.sqlName() + " aggregate");
         };
     }

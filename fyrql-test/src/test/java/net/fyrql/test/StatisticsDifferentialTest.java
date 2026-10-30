@@ -49,7 +49,15 @@ class StatisticsDifferentialTest {
             "SELECT g % 7 AS h, stddev(x), var_pop(i) FROM data WHERE id % 1000 = 0 GROUP BY h",
             "SELECT id, stddev(x) OVER (PARTITION BY g ORDER BY id ROWS BETWEEN 20 PRECEDING AND 20 FOLLOWING),"
                     + " var_pop(i) OVER (PARTITION BY g ORDER BY id), variance(m) OVER (PARTITION BY g)"
-                    + " FROM data WHERE g < 20 ORDER BY id");
+                    + " FROM data WHERE g < 20 ORDER BY id",
+            "SELECT g, corr(x, i), covar_pop(m, f), covar_samp(x, id), regr_slope(i, x), regr_intercept(f, m),"
+                    + " regr_r2(x, f), regr_sxy(i, m), regr_avgx(x, i) FILTER (WHERE id % 3 = 0) FROM data GROUP BY g",
+            // Keys without ties, as DuckDB takes either of equal keys on several threads.
+            "SELECT corr(x, f), regr_count(i, x)::BIGINT, regr_syy(m, x), regr_sxx(id, f), arg_min(id, x),"
+                    + " arg_max(i, x), min_by(m, id) FROM data",
+            "SELECT g, arg_min(x, id), arg_max(m, x), regr_slope(DISTINCT x, i % 100) FROM data GROUP BY g",
+            "SELECT id, corr(x, i) OVER (PARTITION BY g ORDER BY id ROWS BETWEEN 20 PRECEDING AND 20 FOLLOWING),"
+                    + " arg_max(id, x) OVER (PARTITION BY g ORDER BY id) FROM data WHERE g < 20 ORDER BY id");
 
     private static FyrQL engine() {
         SplittableRandom random = new SplittableRandom(20261026);
@@ -74,6 +82,25 @@ class StatisticsDifferentialTest {
                 PlanNode plan = engine.plan(sql);
                 assertTrue(ResultComparison.tolerance(plan) > 0, sql);
                 assertFalse(differential.check(plan, 4).isEmpty(), sql);
+            }
+        }
+    }
+
+    /** Quantiles merge the values of the workers and give exactly what DuckDB gives. */
+    @Test
+    void quantilesOnSeveralThreadsAgreeWithDuckDb() {
+        List<String> queries = List.of(
+                "SELECT g, median(x), quantile_cont(i, [0.1, 0.9]), quantile_disc(m, 0.25),"
+                        + " percentile_cont(0.75) WITHIN GROUP (ORDER BY f DESC) FROM data GROUP BY g",
+                "SELECT median(i), median(m), quantile_disc(x, 0.5), quantile_cont(f, -0.3), mode(g % 7) FROM data",
+                "SELECT g % 10 AS h, quantile_disc(id, [0.5, 0.99]), median(DISTINCT i % 1000) FROM data GROUP BY h",
+                "SELECT id, median(x) OVER (PARTITION BY g ORDER BY id ROWS BETWEEN 20 PRECEDING AND 20 FOLLOWING),"
+                        + " quantile_disc(i, 0.9) OVER (PARTITION BY g) FROM data WHERE g < 20 ORDER BY id");
+        try (Differential differential = new Differential(engine())) {
+            FyrQL engine = differential.engine();
+            assertTrue(engine.explain(queries.get(0)).contains("[parallel]"), engine.explain(queries.get(0)));
+            for (String sql : queries) {
+                assertFalse(differential.check(engine.plan(sql)).isEmpty(), sql);
             }
         }
     }

@@ -58,10 +58,18 @@ public sealed interface FromItem {
     }
 
     /** {@code (query) [AS alias]}, also {@code (VALUES ...) alias(columns)}. */
-    record Subquery(Query query, Alias alias, Position position) implements FromItem {
+    record Subquery(Query query, Alias alias, boolean lateral, Position position) implements FromItem {
         public Subquery {
             Objects.requireNonNull(query, "query");
             Objects.requireNonNull(position, "position");
+        }
+
+        /**
+         * A subquery without {@code LATERAL}, which as in DuckDB may read
+         * the items before it all the same.
+         */
+        public Subquery(Query query, Alias alias, Position position) {
+            this(query, alias, false, position);
         }
     }
 

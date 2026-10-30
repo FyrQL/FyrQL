@@ -208,6 +208,11 @@ class DialectsTest {
             // The databases compute the statistics, if at all, in other bits than DuckDB.
             assertThrows(IllegalArgumentException.class, () -> r.render(new PlanNode.Aggregate(scan, List.of(),
                     List.of(new AggregateCall(AggregateFunction.STDDEV_SAMP, 0, false, "sd")))), d.name() + " stddev");
+            for (AggregateFunction f : List.of(AggregateFunction.CORR, AggregateFunction.REGR_SLOPE,
+                    AggregateFunction.ARG_MIN)) {
+                assertThrows(IllegalArgumentException.class, () -> r.render(new PlanNode.Aggregate(scan, List.of(),
+                        List.of(AggregateCall.of(f, 0, 0, false, "two")))), d.name() + " " + f);
+            }
             assertEquals("CAST(t.c1 AS " + (d == MySqlDialect.INSTANCE ? "SIGNED"
                     : d == SqliteDialect.INSTANCE ? "INT4" : "INTEGER") + ")",
                     r.expression(cast(col(s, 1), DataType.INTEGER), "t"), d.name());

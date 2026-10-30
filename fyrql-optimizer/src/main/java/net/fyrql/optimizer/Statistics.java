@@ -52,6 +52,12 @@ final class Statistics {
     /** The rows an unnest gives per input row. */
     static final int UNNEST_FACTOR = 4;
 
+    /** The rows of a recursive common table per row of its anchor, a guess. */
+    static final int RECURSION_FACTOR = 10;
+
+    /** The rows of a round of a recursive common table, a guess. */
+    static final int WORKING_TABLE_ROWS = 100;
+
     private final Function<String, Connector> connectors;
     private final Map<TableRef, Long> tableRows = new HashMap<>();
 
@@ -79,6 +85,10 @@ final class Statistics {
             case PlanNode.Values v -> v.rows().size();
             case PlanNode.CommonTable t -> rows(t.input());
             case PlanNode.CommonTableScan s -> rows(s.definition());
+            case PlanNode.RecursiveUnion r -> rows(r.anchor()) * RECURSION_FACTOR;
+            case PlanNode.WorkingTableScan w -> WORKING_TABLE_ROWS;
+            case PlanNode.LateralJoin l -> rows(l.left())
+                    * Math.max(l.type() == JoinType.LEFT ? 1 : 0, rows(l.right()));
         };
     }
 

@@ -64,7 +64,8 @@ final class ScanPushdown {
 
     static PlanNode push(PlanNode plan, Function<String, Connector> connectors) {
         Chain chain = Chain.match(plan);
-        if (chain != null) {
+        // The values of the left row of a lateral join only come when the plan runs.
+        if (chain != null && !Plans.readsOuter(plan)) {
             return chain.negotiate(connectors.apply(chain.scan().table().source()));
         }
         if (plan.children().isEmpty()) {

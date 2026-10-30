@@ -65,6 +65,8 @@ public final class Evaluator {
         return switch (e) {
             case Expression.Column c -> in.column(c.index());
             case Expression.Literal l -> constant(l.type(), l.value(), in.rowCount());
+            case Expression.Outer o -> throw new IllegalStateException("The value of the left row of lateral join #"
+                    + o.id() + " is not in place");
             case Expression.Arithmetic a -> arithmetic(a, in);
             case Expression.Negate n -> negate(n, in);
             case Expression.Comparison c -> comparison(c, in);

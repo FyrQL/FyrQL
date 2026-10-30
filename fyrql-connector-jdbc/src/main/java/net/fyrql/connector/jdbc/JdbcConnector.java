@@ -327,8 +327,10 @@ public final class JdbcConnector implements Connector {
             }
         }
         for (PlanNode.AggregateCall call : aggregation.calls()) {
-            if (call.column() >= 0 && columns.get(call.column()) || call.filter() >= 0 && columns.get(call.filter())) {
-                return true;
+            for (int c : call.inputColumns()) {
+                if (columns.get(c)) {
+                    return true;
+                }
             }
         }
         return false;

@@ -329,7 +329,7 @@ final class Metamorphic {
                 return new Run(plan.schema(), rows, null, ResultComparison.tolerance(plan));
             }
         } catch (RuntimeException e) {
-            if (plan != null && BudgetFailures.unexpected(plan, e)) {
+            if (plan != null && BudgetFailures.unexpected(engine, plan, e)) {
                 // A crash rather than a query out of the budget.
                 return new Run(null, null, new IllegalStateException("A join with keys did not spill: "
                         + e.getMessage(), e));

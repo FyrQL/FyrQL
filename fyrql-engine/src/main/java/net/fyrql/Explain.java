@@ -409,6 +409,16 @@ final class Explain {
                 }
                 yield "CommonTableScan " + name(s.name()) + " #" + s.id() + " (" + String.join(", ", columns) + ")";
             }
+            case PlanNode.RecursiveUnion r -> "RecursiveUnion " + name(r.name()) + " #" + r.id()
+                    + (r.all() ? " ALL" : "");
+            case PlanNode.WorkingTableScan w -> {
+                List<String> columns = new ArrayList<>();
+                for (Schema.Field f : w.schema().fields()) {
+                    columns.add(name(f.name()) + " " + f.type().sqlName());
+                }
+                yield "WorkingTableScan " + name(w.name()) + " #" + w.id() + " (" + String.join(", ", columns) + ")";
+            }
+            case PlanNode.LateralJoin l -> "LateralJoin " + l.type() + " #" + l.id();
         };
     }
 
@@ -500,6 +510,12 @@ final class Explain {
             sb.append("DISTINCT ");
         }
         sb.append('#').append(call.column());
+        if (call.second() >= 0) {
+            sb.append(", #").append(call.second());
+        }
+        if (call.fractions() != null) {
+            sb.append(", ").append(call.fractions().sql());
+        }
         if (call.function() == PlanNode.AggregateFunction.STRING_AGG) {
             sb.append(", ").append(call.separator() == null ? "NULL"
                     : DuckDbDialect.INSTANCE.literal(call.separator(), DataType.VARCHAR));
