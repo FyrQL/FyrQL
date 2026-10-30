@@ -310,8 +310,9 @@ QUALIFY row_number() OVER w = 1
 ORDER BY c.region
 ```
 
-with the rows `[north, 1]` and `[south, 2]`. A lateral join reads the row before it, so
-that the two largest orders of each region are
+with the rows `[north, 1]` and `[south, 2]`. A lateral join reads the row before it and
+runs once for each, so that `LIMIT 2` takes the two largest orders of each region: two
+of north, whose third order has no amount, and the only order of south:
 
 ```sql
 SELECT c.region, top.id, top.amount
